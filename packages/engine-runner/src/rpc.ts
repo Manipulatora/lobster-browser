@@ -2,10 +2,12 @@ import type {
   LaunchParams,
   SidecarRequest,
   SidecarResponse,
+  StartProfileParams,
   StatusParams,
   StopParams,
 } from '@lobster/shared-types';
 import type { EngineRunner } from './runner.js';
+import { startProfile } from './start-profile.js';
 
 /** Dispatch one sidecar request to the runner and produce a response. Never throws. */
 export async function dispatch(
@@ -16,6 +18,12 @@ export async function dispatch(
     switch (req.method) {
       case 'ping':
         return { id: req.id, ok: true, result: { pong: true } };
+      case 'startProfile':
+        return {
+          id: req.id,
+          ok: true,
+          result: await startProfile(runner, req.params as StartProfileParams),
+        };
       case 'launch':
         return { id: req.id, ok: true, result: await runner.launch(req.params as LaunchParams) };
       case 'stop':

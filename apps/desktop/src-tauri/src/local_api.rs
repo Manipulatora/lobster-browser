@@ -1,31 +1,42 @@
 //! Local automation API (Axum 0.7), bound to 127.0.0.1 only.
 //!
-//! This is the programmatic surface external tools drive (Playwright/Puppeteer via
-//! `connectOverCDP`, Selenium via `debuggerAddress`). The response envelope mirrors
-//! `@lobster/shared-types` `ApiResponse` (`{ code, data, msg }`, `code == 0` = success)
-//! and the AdsPower/Octo contract developers already integrate against.
+//! The programmatic surface external tools drive (Playwright/Puppeteer via `connectOverCDP`,
+//! Selenium via `debuggerAddress`). `start`/`stop`/`status` are delegated to the engine-runner
+//! sidecar; `list` reads the local profile store. Envelope mirrors `@lobster/shared-types`
+//! `ApiResponse` (`{ code, data, msg }`, `code == 0` = success) — the AdsPower/Octo contract.
 //!
-//! SECURITY (added Day 4): Bearer API-key auth (keys minted per team, see
-//! shared-types `ApiKey`) + per-key rate limiting via a tower middleware layer. Until
-//! then the server is loopback-only and every route is a stub.
+//! Auth: a Bearer API key (`LOBSTER_API_KEY`). When unset the loopback-only server allows local
+//! dev. Per-key rate limiting is a follow-up.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use axum::{
-    extract::Query,
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode},
     routing::{get, post},
     Json, Router,
 };
+use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// Success code for the shared `{ code, data, msg }` envelope.
+use crate::profile_store;
+use crate::sidecar::SidecarClient;
+
 const API_OK: i32 = 0;
-/// Generic error code (matches shared-types `API_ERR`).
 const API_ERR: i32 = 1;
 
-/// Wire envelope matching shared-types `ApiResponse`. `data` is kept as a
-/// `serde_json::Value` so each route can return its own shape without a generic.
+/// Shared state for the local API: the profile store, the sidecar client, the per-profile
+/// user-data-dir root, and the optional Bearer key.
+pub struct LocalApiState {
+    pub db: Arc<Mutex<Connection>>,
+    pub sidecar: Arc<SidecarClient>,
+    pub profiles_dir: PathBuf,
+    pub api_key: Option<String>,
+}
+
 #[derive(serde::Serialize)]
 struct ApiResponse {
     code: i32,
@@ -34,7 +45,6 @@ struct ApiResponse {
 }
 
 impl ApiResponse {
-    /// A successful response with the default "success" message.
     fn ok(data: Value) -> Json<Self> {
         Json(Self {
             code: API_OK,
@@ -43,84 +53,188 @@ impl ApiResponse {
         })
     }
 
-    /// An error response (`code != 0`, `data: null`). Used for not-yet-implemented routes so SDK
-    /// clients — which treat `code == 0` as success — never mistake a stub for a real result.
-    fn err(msg: &str) -> Json<Self> {
+    fn err(msg: impl Into<String>) -> Json<Self> {
         Json(Self {
             code: API_ERR,
             data: Value::Null,
-            msg: msg.to_string(),
+            msg: msg.into(),
         })
     }
 }
 
-/// Body for `POST /api/v1/profile/start` and `/stop`.
+/// True when the request carries the configured Bearer key (or no key is configured — dev).
+fn authorized(state: &LocalApiState, headers: &HeaderMap) -> bool {
+    match &state.api_key {
+        None => true,
+        Some(key) => headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .map(|token| token == key)
+            .unwrap_or(false),
+    }
+}
+
 #[derive(Deserialize)]
 struct ProfileIdBody {
     #[serde(rename = "profileId")]
     profile_id: String,
 }
 
-/// Query params for `GET /api/v1/profile/status?profileId=...`.
 #[derive(Deserialize)]
 struct StatusQuery {
     #[serde(rename = "profileId")]
-    profile_id: String,
+    profile_id: Option<String>,
 }
 
-/// Build the router. Split out from `serve` so it can be exercised in tests later.
-fn router() -> Router {
-    Router::new()
+pub async fn serve(port: u16, state: Arc<LocalApiState>) -> anyhow::Result<()> {
+    let app = Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/profile/start", post(profile_start))
         .route("/api/v1/profile/stop", post(profile_stop))
         .route("/api/v1/profile/list", get(profile_list))
         .route("/api/v1/profile/status", get(profile_status))
-}
+        .with_state(state);
 
-/// Bind the local API to 127.0.0.1:`port` and serve until the process exits.
-pub async fn serve(port: u16) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("local automation API listening on http://{addr}");
-    axum::serve(listener, router()).await?;
+    axum::serve(listener, app).await?;
     Ok(())
 }
 
-/// Liveness probe.
 async fn health() -> Json<ApiResponse> {
     ApiResponse::ok(json!({ "status": "ok" }))
 }
 
-/// Launch a profile and return both connection styles. Stubbed until Day 4, when the
-/// engine-runner sidecar actually starts the browser and reports its CDP endpoint.
-async fn profile_start(Json(body): Json<ProfileIdBody>) -> Json<ApiResponse> {
-    // Not implemented until Day 4. Return an error envelope (not code 0) so SDK clients don't treat
-    // an empty CDP endpoint as a successful launch.
-    ApiResponse::err(&format!(
-        "profile/start ({}) not implemented until Day 4",
-        body.profile_id
-    ))
+/// Launch a profile: look it up, ask the sidecar to derive its fingerprint + launch, return the
+/// CDP endpoints for `connectOverCDP` / Selenium `debuggerAddress`.
+async fn profile_start(
+    State(state): State<Arc<LocalApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<ProfileIdBody>,
+) -> (StatusCode, Json<ApiResponse>) {
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, ApiResponse::err("unauthorized"));
+    }
+
+    let profile = {
+        let conn = match state.db.lock() {
+            Ok(conn) => conn,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ApiResponse::err("db lock"),
+                )
+            }
+        };
+        match profile_store::get(&conn, &body.profile_id) {
+            Ok(Some(profile)) => profile,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    ApiResponse::err(format!("profile {} not found", body.profile_id)),
+                )
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ApiResponse::err(e.to_string()),
+                )
+            }
+        }
+    };
+
+    let user_data_dir = state.profiles_dir.join(&profile.id);
+    let params = json!({
+        "profileId": profile.id,
+        "engine": profile.engine,
+        "os": profile.os,
+        "fingerprintSeed": profile.fingerprint_seed,
+        "fingerprintOverrides": profile.fingerprint_overrides,
+        "proxy": profile.proxy,
+        "userDataDir": user_data_dir.to_string_lossy(),
+        "headless": false,
+    });
+
+    match state.sidecar.call("startProfile", params).await {
+        Ok(result) => (StatusCode::OK, ApiResponse::ok(result)),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiResponse::err(e.to_string()),
+        ),
+    }
 }
 
-/// Stop a running profile. Stubbed until Day 4.
-async fn profile_stop(Json(body): Json<ProfileIdBody>) -> Json<ApiResponse> {
-    ApiResponse::err(&format!(
-        "profile/stop ({}) not implemented until Day 4",
-        body.profile_id
-    ))
+async fn profile_stop(
+    State(state): State<Arc<LocalApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<ProfileIdBody>,
+) -> (StatusCode, Json<ApiResponse>) {
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, ApiResponse::err("unauthorized"));
+    }
+    match state
+        .sidecar
+        .call("stop", json!({ "profileId": body.profile_id }))
+        .await
+    {
+        Ok(_) => (
+            StatusCode::OK,
+            ApiResponse::ok(json!({ "profileId": body.profile_id, "stopped": true })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiResponse::err(e.to_string()),
+        ),
+    }
 }
 
-/// List profiles known to the local store. Empty until the store is wired in (Day 4).
-async fn profile_list() -> Json<ApiResponse> {
-    ApiResponse::ok(json!([]))
+async fn profile_list(
+    State(state): State<Arc<LocalApiState>>,
+    headers: HeaderMap,
+) -> (StatusCode, Json<ApiResponse>) {
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, ApiResponse::err("unauthorized"));
+    }
+    let conn = match state.db.lock() {
+        Ok(conn) => conn,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiResponse::err("db lock"),
+            )
+        }
+    };
+    match profile_store::list(&conn) {
+        Ok(profiles) => (
+            StatusCode::OK,
+            ApiResponse::ok(serde_json::to_value(profiles).unwrap_or(Value::Null)),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiResponse::err(e.to_string()),
+        ),
+    }
 }
 
-/// Report whether a profile is currently running. Always `false` for now.
-async fn profile_status(Query(q): Query<StatusQuery>) -> Json<ApiResponse> {
-    // Shape matches shared-types `ProfileStatusResult`.
-    ApiResponse::ok(json!({
-        "profileId": q.profile_id,
-        "running": false,
-    }))
+async fn profile_status(
+    State(state): State<Arc<LocalApiState>>,
+    headers: HeaderMap,
+    Query(q): Query<StatusQuery>,
+) -> (StatusCode, Json<ApiResponse>) {
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, ApiResponse::err("unauthorized"));
+    }
+    let params = match q.profile_id {
+        Some(id) => json!({ "profileId": id }),
+        None => json!({}),
+    };
+    match state.sidecar.call("status", params).await {
+        Ok(result) => (StatusCode::OK, ApiResponse::ok(result)),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiResponse::err(e.to_string()),
+        ),
+    }
 }

@@ -75,9 +75,11 @@ export class ProfilesController {
   }
 
   /**
-   * Push/pull the encrypted profile blob. Body: `{ direction?: 'push' | 'pull' }` (defaults to
-   * `'push'`); any other `direction` is rejected with a 400 by the validation pipe.
-   * STUB — see ProfilesService.sync for the real S3 wiring planned for Day 2.
+   * Push/pull the CLIENT-encrypted profile blob. Body:
+   *   `{ direction?: 'push' | 'pull', payload?: base64, baseVersion?: int }`
+   * `direction` defaults to `'push'`; any other value is a 400 from the validation pipe. On push,
+   * `payload` (the encrypted blob) is stored opaquely and the version bumps; supplying `baseVersion`
+   * turns on conflict detection (a mismatch is a 409). On pull, the latest blob is returned base64.
    */
   @Post(':id/sync')
   async sync(
@@ -86,6 +88,13 @@ export class ProfilesController {
     @Body() dto: SyncProfileDto,
     @Query('teamId') teamId?: string,
   ): Promise<ApiResponse<SyncResult>> {
-    return ok(await this.profilesService.sync(user.id, id, dto.direction ?? 'push', teamId));
+    return ok(
+      await this.profilesService.sync(
+        user.id,
+        id,
+        { direction: dto.direction ?? 'push', payload: dto.payload, baseVersion: dto.baseVersion },
+        teamId,
+      ),
+    );
   }
 }

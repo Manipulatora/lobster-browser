@@ -30,8 +30,15 @@ the source of truth; this doc is the human-readable spec.
 ### `ping`
 - params: `{}` → result: `{ "pong": true }`. Health/handshake.
 
+### `startProfile`
+- params (`StartProfileParams`): `{ profileId, engine, os, fingerprintSeed, fingerprintOverrides?, proxy?, userDataDir, headless? }`
+- result: `LaunchResult` (`{ profileId, pid, ws, debuggerAddress }`).
+- The high-level launch the Rust local API uses: the sidecar **derives** the fingerprint from the seed
+  (+ overrides + best-effort proxy-exit geo via `deriveGeoFromExitIp`), then launches. The Rust core
+  never computes fingerprints — it only forwards the profile's stored fields.
+
 ### `launch`
-- params (`LaunchParams`):
+- params (`LaunchParams`): the low-level form, carrying an already-resolved `fingerprint`.
   ```jsonc
   {
     "profileId": "string",

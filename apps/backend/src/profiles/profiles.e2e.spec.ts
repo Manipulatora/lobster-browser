@@ -177,15 +177,60 @@ test('update can edit engine, os, and fingerprintOverrides and they persist', as
   assert.equal(seedChange.status, 400);
 });
 
-test('sync accepts push/pull and rejects an invalid direction with 400', async () => {
-  const token = await registerToken('profiles-sync@example.com');
-  const auth = { Authorization: `Bearer ${token}` };
-
+/** Create a profile and return its id. */
+async function createProfile(auth: { Authorization: string }, name: string): Promise<string> {
   const create = await request(app.getHttpServer())
     .post('/profiles')
     .set(auth)
-    .send({ name: 'Syncable', engine: 'chromium', os: 'windows' });
-  const id: string = create.body.data.id;
+    .send({ name, engine: 'chromium', os: 'windows' });
+  assert.ok([200, 201].includes(create.status), `create status ${create.status}`);
+  return create.body.data.id as string;
+}
+
+/** Base64 of an opaque "ciphertext" — the server treats the bytes as opaque, so any base64 works. */
+function encryptedBlob(text: string): string {
+  return Buffer.from(text).toString('base64');
+}
+
+test('sync rejects an invalid direction with 400', async () => {
+  const token = await registerToken('profiles-sync@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+  const id = await createProfile(auth, 'Syncable');
+
+  const bad = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'sideways' });
+  assert.equal(bad.status, 400);
+
+  // A non-base64 payload is rejected at the boundary too.
+  const badPayload = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'push', payload: 'not base64!!!' });
+  assert.equal(badPayload.status, 400);
+});
+
+test('push then pull round-trips the exact encrypted payload (server stores opaque bytes)', async () => {
+  const token = await registerToken('profiles-roundtrip@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+  const id = await createProfile(auth, 'Roundtrip');
+
+  const payload = encryptedBlob('cipher-v1-🔒-опаковый-blob');
+
+  // Omitting direction falls back to the 'push' default.
+  const push = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ payload });
+  assert.ok([200, 201].includes(push.status), `push status ${push.status}`);
+  assert.equal(push.body.code, 0);
+  assert.equal(push.body.data.direction, 'push');
+  assert.equal(push.body.data.version, 1);
+  // The blobRef is an S3-style, team-scoped key ending in <version>.enc (never a plaintext leak).
+  assert.match(push.body.data.blobRef, /^s3:\/\/lobster-profiles\/.+\/.+\/1\.enc$/);
+  // A push does not echo the payload back.
+  assert.ok(push.body.data.payload === undefined || push.body.data.payload === null);
 
   const pull = await request(app.getHttpServer())
     .post(`/profiles/${id}/sync`)
@@ -193,19 +238,96 @@ test('sync accepts push/pull and rejects an invalid direction with 400', async (
     .send({ direction: 'pull' });
   assert.ok([200, 201].includes(pull.status), `pull status ${pull.status}`);
   assert.equal(pull.body.data.direction, 'pull');
-  assert.match(pull.body.data.blobRef, /latest\.enc$/);
+  assert.equal(pull.body.data.version, 1);
+  // The pulled payload is byte-for-byte what was pushed.
+  assert.equal(pull.body.data.payload, payload);
+  assert.equal(
+    Buffer.from(pull.body.data.payload, 'base64').toString(),
+    'cipher-v1-🔒-опаковый-blob',
+  );
+});
 
-  // Omitting direction falls back to the 'push' default.
-  const dflt = await request(app.getHttpServer()).post(`/profiles/${id}/sync`).set(auth).send({});
-  assert.ok([200, 201].includes(dflt.status), `default status ${dflt.status}`);
-  assert.equal(dflt.body.data.direction, 'push');
+test('version increments across pushes and pull returns the latest', async () => {
+  const token = await registerToken('profiles-versioning@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+  const id = await createProfile(auth, 'Versioned');
 
-  // Any other direction is rejected at the boundary.
-  const bad = await request(app.getHttpServer())
+  const first = await request(app.getHttpServer())
     .post(`/profiles/${id}/sync`)
     .set(auth)
-    .send({ direction: 'sideways' });
-  assert.equal(bad.status, 400);
+    .send({ direction: 'push', payload: encryptedBlob('v1') });
+  assert.equal(first.body.data.version, 1);
+
+  const second = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'push', payload: encryptedBlob('v2') });
+  assert.equal(second.body.data.version, 2);
+  assert.match(second.body.data.blobRef, /\/2\.enc$/);
+
+  const pull = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'pull' });
+  assert.equal(pull.body.data.version, 2);
+  assert.equal(Buffer.from(pull.body.data.payload, 'base64').toString(), 'v2');
+});
+
+test('a push with a stale baseVersion is rejected with 409 Conflict', async () => {
+  const token = await registerToken('profiles-conflict@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+  const id = await createProfile(auth, 'Conflicting');
+
+  // First push from a fresh profile: baseVersion 0 matches the stored version (0).
+  const push = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'push', payload: encryptedBlob('base'), baseVersion: 0 });
+  assert.equal(push.body.data.version, 1);
+
+  // A second push claiming baseVersion 0 is stale (stored version is now 1) → 409.
+  const stale = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'push', payload: encryptedBlob('racy'), baseVersion: 0 });
+  assert.equal(stale.status, 409);
+
+  // The store was not mutated by the rejected write: it is still version 1.
+  const pull = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'pull' });
+  assert.equal(pull.body.data.version, 1);
+  assert.equal(Buffer.from(pull.body.data.payload, 'base64').toString(), 'base');
+
+  // Supplying the correct baseVersion (1) lets the client win the retry.
+  const retry = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'push', payload: encryptedBlob('racy'), baseVersion: 1 });
+  assert.equal(retry.body.data.version, 2);
+});
+
+test('pull on a never-synced profile returns version 0 and a null payload', async () => {
+  const token = await registerToken('profiles-empty-pull@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+  const id = await createProfile(auth, 'Never synced');
+
+  const pull = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'pull' });
+  assert.ok([200, 201].includes(pull.status), `pull status ${pull.status}`);
+  assert.equal(pull.body.data.version, 0);
+  assert.equal(pull.body.data.payload, null);
+  assert.equal(pull.body.data.blobRef, null);
+});
+
+test('unauthenticated sync is 401', async () => {
+  const res = await request(app.getHttpServer())
+    .post('/profiles/some-id/sync')
+    .send({ direction: 'pull' });
+  assert.equal(res.status, 401);
 });
 
 test('free-tier profile limit matches the schema default (5) and is enforced', async () => {

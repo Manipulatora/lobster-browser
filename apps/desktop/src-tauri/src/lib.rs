@@ -11,8 +11,9 @@
 
 mod local_api;
 mod profile_store;
+mod sidecar;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::{Manager, State};
 
@@ -23,15 +24,7 @@ const LOCAL_API_PORT: u16 = 53211;
 
 /// Shared desktop state: the open connection to the local SQLite profile store.
 struct AppState {
-    db: Mutex<rusqlite::Connection>,
-}
-
-/// Endpoints an automation client connects to after a profile launches (mirrors the TS `LaunchInfo`).
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LaunchInfo {
-    ws: String,
-    debugger_address: String,
+    db: Arc<Mutex<rusqlite::Connection>>,
 }
 
 /// Returns the desktop agent version, sourced from Cargo at compile time.
@@ -86,17 +79,14 @@ fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), String> 
 }
 
 #[tauri::command]
-fn launch_profile(state: State<'_, AppState>, id: String) -> Result<LaunchInfo, String> {
-    // Confirm the profile exists before reporting on launch capability.
+fn launch_profile(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    // The actual launch goes through the local automation API, which owns the engine-runner sidecar.
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     profile_store::get(&conn, &id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("profile {id} not found"))?;
-    // Engine-runner sidecar wiring lands in T-002c; until an engine binary is provisioned
-    // (engines/download-engines.mjs or the Lobium build) we error clearly rather than
-    // hand back a dead CDP endpoint.
     Err(format!(
-        "cannot launch profile {id}: no engine provisioned yet (run engines/download-engines.mjs or build the Lobium; sidecar wiring is T-002c)"
+        "launch profile {id} via the local automation API: POST http://127.0.0.1:{LOCAL_API_PORT}/api/v1/profile/start"
     ))
 }
 
@@ -107,7 +97,7 @@ fn stop_profile(state: State<'_, AppState>, id: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("profile {id} not found"))?;
     Err(format!(
-        "cannot stop profile {id}: engine lifecycle not wired yet (T-002c)"
+        "stop profile {id} via the local automation API: POST http://127.0.0.1:{LOCAL_API_PORT}/api/v1/profile/stop"
     ))
 }
 
@@ -117,21 +107,6 @@ pub fn run() {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    // Run the Axum local API on a dedicated OS thread with its own Tokio runtime so it never
-    // contends with Tauri's event loop.
-    std::thread::Builder::new()
-        .name("lobster-local-api".into())
-        .spawn(|| {
-            let runtime = tokio::runtime::Runtime::new()
-                .expect("failed to start Tokio runtime for the local automation API");
-            runtime.block_on(async {
-                if let Err(err) = local_api::serve(LOCAL_API_PORT).await {
-                    tracing::error!(%err, "local automation API terminated");
-                }
-            });
-        })
-        .expect("failed to spawn local automation API thread");
-
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
@@ -140,9 +115,42 @@ pub fn run() {
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let conn =
                 profile_store::init(dir.join("profiles.sqlite")).map_err(|e| e.to_string())?;
-            app.manage(AppState {
-                db: Mutex::new(conn),
-            });
+            let db = Arc::new(Mutex::new(conn));
+            app.manage(AppState { db: db.clone() });
+
+            // Start the local automation API on a dedicated OS thread (its own Tokio runtime), sharing
+            // the store and an engine-runner sidecar. It never contends with Tauri's event loop.
+            let profiles_dir = dir.join("profiles");
+            std::fs::create_dir_all(&profiles_dir).map_err(|e| e.to_string())?;
+            let api_key = std::env::var("LOBSTER_API_KEY").ok();
+            std::thread::Builder::new()
+                .name("lobster-local-api".into())
+                .spawn(move || {
+                    let runtime = tokio::runtime::Runtime::new()
+                        .expect("failed to start Tokio runtime for the local automation API");
+                    runtime.block_on(async move {
+                        let sidecar_js = std::env::var("LOBSTER_SIDECAR")
+                            .unwrap_or_else(|_| "engine-runner/index.js".to_string());
+                        match sidecar::SidecarClient::spawn("node", &sidecar_js).await {
+                            Ok(sidecar) => {
+                                let state = Arc::new(local_api::LocalApiState {
+                                    db,
+                                    sidecar,
+                                    profiles_dir,
+                                    api_key,
+                                });
+                                if let Err(err) = local_api::serve(LOCAL_API_PORT, state).await {
+                                    tracing::error!(%err, "local automation API terminated");
+                                }
+                            }
+                            Err(err) => {
+                                tracing::error!(%err, "failed to spawn engine-runner sidecar");
+                            }
+                        }
+                    });
+                })
+                .expect("failed to spawn local automation API thread");
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

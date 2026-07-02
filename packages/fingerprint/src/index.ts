@@ -13,4 +13,5 @@ export { SeededRandom, hashStringToUint32, mulberry32 } from './prng.js';
 export { generateSeed, isValidSeed } from './seed.js';
 export { deriveFingerprint } from './derive.js';
 export { applyGeoToFingerprint, validateFingerprintCoherence } from './coherence.js';
+export { applyOverrides } from './overrides.js';
 export type { DeriveOptions } from './derive.js';

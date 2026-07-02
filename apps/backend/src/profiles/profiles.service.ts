@@ -1,9 +1,17 @@
 import { randomBytes } from 'node:crypto';
 
-import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import type { Profile } from '@lobster/shared-types';
 
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
+import { BLOB_STORE, type BlobStore } from './blob/blob-store';
 import type { CreateProfileDto } from './dto/create-profile.dto';
 import type { UpdateProfileDto } from './dto/update-profile.dto';
 import { PROFILES_REPOSITORY, type ProfilesRepository } from './profiles.repository';
@@ -11,12 +19,30 @@ import { PROFILES_REPOSITORY, type ProfilesRepository } from './profiles.reposit
 /** Direction of an encrypted-blob sync. */
 export type SyncDirection = 'push' | 'pull';
 
-/** Result of a profile sync. On `pull` the client fetches the blob from `blobRef` (S3). */
+/** Arguments for {@link ProfilesService.sync}, parsed from the validated request DTO. */
+export interface SyncProfileInput {
+  direction: SyncDirection;
+  /** base64 CLIENT-encrypted blob to store. Required on push; ignored on pull. */
+  payload?: string;
+  /** Version the client believes is current; a mismatch on push is a conflict (409). */
+  baseVersion?: number;
+}
+
+/**
+ * Result of a profile sync.
+ *
+ * `version` is the current stored version (0 when a profile has never been synced). `blobRef` is
+ * the S3-style object key / URI for the CLIENT-encrypted blob at that version (null when none
+ * exists). On `pull`, `payload` carries the latest blob base64-encoded (null when never synced);
+ * it is omitted on `push`. The server never sees plaintext — the desktop agent holds the AES key.
+ */
 export interface SyncResult {
   profileId: string;
   direction: SyncDirection;
-  /** S3 object key / URI for the CLIENT-encrypted blob (server never sees plaintext). */
-  blobRef: string;
+  blobRef: string | null;
+  version: number;
+  /** base64 CLIENT-encrypted blob (pull only; null when never synced). */
+  payload?: string | null;
   syncedAt: string;
 }
 
@@ -42,6 +68,7 @@ export class ProfilesService {
   constructor(
     @Inject(PROFILES_REPOSITORY) private readonly profiles: ProfilesRepository,
     @Inject(TEAMS_REPOSITORY) private readonly teams: TeamsRepository,
+    @Inject(BLOB_STORE) private readonly blobs: BlobStore,
   ) {}
 
   async create(userId: string, dto: CreateProfileDto, teamId?: string): Promise<Profile> {
@@ -107,30 +134,91 @@ export class ProfilesService {
   }
 
   /**
-   * Push (upload new encrypted blob) or pull (get a reference to the latest blob).
-   * The desktop agent encrypts/decrypts locally; the server only brokers the reference.
+   * Push (upload a new CLIENT-encrypted blob) or pull (fetch the latest). The desktop agent
+   * encrypts/decrypts locally with its own AES key; the server only stores opaque bytes + a
+   * per-profile version. Every sync is team-scoped: the profile must belong to the caller's team.
    *
-   * STUB — see the blob-ref returned below. Day 2: on push accept a multipart/presigned upload
-   * and store the returned object key on Profile.encryptedBlobRef; on pull return a presigned GET.
+   * Push is optimistic-concurrency-checked: when the caller supplies `baseVersion` it must equal
+   * the currently-stored version, otherwise the write is rejected with a 409 (the caller must pull,
+   * re-apply, and retry). Each successful push bumps the version by one.
    */
   async sync(
     userId: string,
     id: string,
-    direction: SyncDirection,
+    input: SyncProfileInput,
     teamId?: string,
   ): Promise<SyncResult> {
     const ownerTeamId = await this.resolveTeamId(userId, teamId);
-    // Confirm the profile exists and belongs to the caller's team before handing back a blob ref.
+    // Confirm the profile exists and belongs to the caller's team before touching the blob store.
     const profile = await this.profiles.findById(ownerTeamId, id);
     if (!profile) {
       throw new NotFoundException('profile not found');
     }
+    const key = this.blobKey(ownerTeamId, id);
+    return input.direction === 'pull'
+      ? this.pull(id, ownerTeamId, key)
+      : this.push(id, ownerTeamId, key, input);
+  }
+
+  /** Store a new encrypted blob, enforcing the optimistic-concurrency check when requested. */
+  private async push(
+    profileId: string,
+    teamId: string,
+    key: string,
+    input: SyncProfileInput,
+  ): Promise<SyncResult> {
+    if (input.payload === undefined) {
+      throw new BadRequestException('push requires a base64 payload');
+    }
+    if (input.baseVersion !== undefined) {
+      const currentVersion = (await this.blobs.head(key))?.version ?? 0;
+      if (input.baseVersion !== currentVersion) {
+        throw new ConflictException('stale base version');
+      }
+    }
+    // `payload` is validated as base64 at the DTO boundary; store the decoded bytes opaquely.
+    const bytes = Buffer.from(input.payload, 'base64');
+    const { version } = await this.blobs.put(key, bytes, { teamId, profileId });
     return {
-      profileId: id,
-      direction,
-      blobRef: `s3://lobster-profiles/${id}/latest.enc`,
+      profileId,
+      direction: 'push',
+      blobRef: this.blobRef(teamId, profileId, version),
+      version,
       syncedAt: new Date().toISOString(),
     };
+  }
+
+  /** Return the latest encrypted blob (base64), or a version-0/null result when never synced. */
+  private async pull(profileId: string, teamId: string, key: string): Promise<SyncResult> {
+    const latest = await this.blobs.getLatest(key);
+    if (!latest) {
+      return {
+        profileId,
+        direction: 'pull',
+        blobRef: null,
+        version: 0,
+        payload: null,
+        syncedAt: new Date().toISOString(),
+      };
+    }
+    return {
+      profileId,
+      direction: 'pull',
+      blobRef: this.blobRef(teamId, profileId, latest.version),
+      version: latest.version,
+      payload: latest.bytes.toString('base64'),
+      syncedAt: latest.updatedAt,
+    };
+  }
+
+  /** Logical blob-store key for a profile's encrypted-blob stream (the store owns versioning). */
+  private blobKey(teamId: string, profileId: string): string {
+    return `${teamId}/${profileId}`;
+  }
+
+  /** S3-style object URI for a specific stored version of a profile's encrypted blob. */
+  private blobRef(teamId: string, profileId: string, version: number): string {
+    return `s3://lobster-profiles/${teamId}/${profileId}/${version}.enc`;
   }
 
   /**

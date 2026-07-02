@@ -4,10 +4,5 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "references": [
-    { "path": "../shared-types" },
-    { "path": "../proxy" },
-    { "path": "../fingerprint" }
-  ],
   "include": ["src/**/*.ts"]
 }

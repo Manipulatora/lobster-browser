@@ -11,6 +11,7 @@
     "packages/shared-types",
     "packages/fingerprint",
     "packages/proxy",
+    "packages/cookies",
     "packages/engine-runner",
     "packages/local-api-sdk/js",
     "apps/desktop",

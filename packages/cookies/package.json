@@ -1,9 +1,9 @@
 {
-  "name": "@lobster/proxy",
+  "name": "@lobster/cookies",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Proxy parsing, formatting, and exit-IP geo derivation for Lobster profiles.",
+  "description": "Cookie import/export (JSON + Netscape cookies.txt) for Lobster profiles.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -20,9 +20,5 @@
     "typecheck": "tsc -b",
     "test": "tsc -b && node --test \"dist/**/*.test.js\"",
     "clean": "rm -rf dist *.tsbuildinfo"
-  },
-  "dependencies": {
-    "@lobster/shared-types": "*",
-    "undici": "^6.21.0"
   }
 }

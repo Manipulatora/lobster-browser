@@ -1,5 +1,5 @@
-import type { EngineKind } from './engine.js';
-import type { Fingerprint } from './fingerprint.js';
+import type { EngineKind, OsFamily } from './engine.js';
+import type { Fingerprint, FingerprintOverrides, FingerprintSeed } from './fingerprint.js';
 import type { ProxyConfig } from './proxy.js';
 
 /**
@@ -10,7 +10,7 @@ import type { ProxyConfig } from './proxy.js';
  * See docs/contracts/sidecar-ipc.md for the full spec.
  */
 
-export type SidecarMethod = 'launch' | 'stop' | 'status' | 'ping';
+export type SidecarMethod = 'startProfile' | 'launch' | 'stop' | 'status' | 'ping';
 
 export interface SidecarRequest<M extends SidecarMethod = SidecarMethod, P = unknown> {
   /** Correlation id echoed back in the response. */
@@ -34,6 +34,23 @@ export interface LaunchParams {
   /** Fully-resolved coherent fingerprint (deep surfaces handled natively by the engine). */
   fingerprint: Fingerprint;
   proxy?: ProxyConfig;
+  headless?: boolean;
+}
+
+/**
+ * High-level launch from a profile's stored fields: the sidecar derives the fingerprint from the
+ * seed (+ overrides + best-effort proxy-exit geo) and launches. This is what the Rust local API
+ * sends, so the Rust core only forwards profile data — it never computes fingerprints.
+ */
+export interface StartProfileParams {
+  profileId: string;
+  engine: EngineKind;
+  os: OsFamily;
+  fingerprintSeed: FingerprintSeed;
+  fingerprintOverrides?: FingerprintOverrides;
+  proxy?: ProxyConfig;
+  /** Absolute path to the per-profile persistent user-data-dir. */
+  userDataDir: string;
   headless?: boolean;
 }
 

@@ -16,6 +16,10 @@ tickets; the assigned agent implements; the other agent reviews. Keep this table
 | T-008 | Fingerprint editor UI (JS-safe surfaces) | A · Desktop | Codex | done |
 | T-009 | Unit tests: fingerprint determinism/coherence + proxy parse | tests | Claude | done |
 | T-013 | Backend Teams + Profiles (real, JWT-scoped, plan limit) | C · Backend | Codex | done · repos (Prisma+in-memory), @CurrentUser, team scoping, e2e |
+| T-014 | Proxy: exit-IP geo derivation + proxy test (coherence auto-sync) | Proxy | Codex | done · `deriveGeoFromExitIp` (undici ProxyAgent, HTTP/HTTPS; SOCKS follow-up), `parseGeoResponse`, `testProxy`; applied to fingerprint at launch |
+| T-015 | Cookie import/export (JSON + Netscape) — `@lobster/cookies` | Fingerprint | Codex | done · canonical `Cookie` + parse/serialize both formats, 8 tests |
+| T-016 | Backend cloud sync (client-encrypted blob push/pull + versioning) | C · Backend | Codex | done · BlobStore (in-memory + S3 stub), push/pull, version bump, stale-baseVersion conflict, e2e |
+| T-017 | Local automation API: Rust core → sidecar → real launch | A/B · Desktop | Claude | done · `SidecarClient` (spawn node, JSON-RPC, reader task), `POST /profile/start` → store → sidecar `startProfile` (derive fp from seed+overrides+geo) → CDP endpoint; Bearer auth; cargo ping/status test + Node startProfile live-launch test |
 | T-010 | Lobium: build environment + first Chromium build | F · Lobium | Claude | ready |
 | T-011 | Lobium: quilt series + first native patch + config channel POC | F · Lobium | Claude | ready |
 | T-012 | Fingerprint: 50+ param model + Android/mobile profiles | Fingerprint | Codex | draft |

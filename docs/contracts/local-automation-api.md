@@ -59,6 +59,10 @@ driver = webdriver.Chrome(options=opts)
 
 ## Notes
 
-- Day 0 ships the routes as stubs (envelope + shapes correct, `msg: "not implemented until Day 4"`).
-- Day 4 wires them to the profile store + sidecar and adds Bearer auth + rate limits.
+- **Live (T-017).** `start`/`stop`/`status` are delegated to the engine-runner sidecar (the Rust core
+  spawns it and speaks JSON-RPC over stdio); `start` looks the profile up in the local store and sends
+  the sidecar a `startProfile` request, which derives the fingerprint from the profile's seed
+  (+ overrides + best-effort proxy-exit geo) and launches — returning the real CDP `ws` + `debuggerAddress`.
+- **Auth:** `Authorization: Bearer <LOBSTER_API_KEY>` is enforced when the key env is set; the
+  loopback-only server allows local dev when it is unset. Per-key rate limiting is a follow-up.
 - An MCP server wrapper over these endpoints is a Phase 2 item.

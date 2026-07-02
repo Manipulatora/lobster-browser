@@ -3,6 +3,7 @@
  * (The sidecar process entry point lives in `index.ts`, exposed as the package `bin`.)
  */
 export { CompositeRunner } from './runners/composite.js';
+export { startProfile } from './start-profile.js';
 export {
   buildLaunchers,
   defaultLaunchers,
