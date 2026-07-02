@@ -92,10 +92,8 @@ jobs:
       - run: npm test --workspace @lobster/engine-runner
 
   fingerprint-gate:
-    name: Fingerprint validation gate
+    name: Fingerprint validation gate (live detector)
     runs-on: ubuntu-latest
-    # Non-blocking until T-005 wires the real detector harness; runs the stub for now.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -103,4 +101,9 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm install --no-audit --no-fund
-      - run: node ci/validation/run.mjs --stub
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
+      - run: npx patchright install --with-deps chromium
+      # Build the packages the harness imports (its dist output).
+      - run: npx tsc -b packages/shared-types packages/proxy packages/fingerprint packages/engine-runner
+      # Real run: derive a fingerprint, launch it headful under Xvfb, validate against bot.sannysoft.com.
+      - run: xvfb-run -a node ci/validation/run.mjs

@@ -1,10 +1,12 @@
-import type { EngineKind } from '@lobster/shared-types';
+import type { EngineKind, Fingerprint } from '@lobster/shared-types';
 import type { CdpEmulation, PersistentLaunchOptions } from '../launch.js';
 
 /** Everything a concrete engine launcher needs — prepared by the CompositeRunner from a profile. */
 export interface LaunchContext {
   profileId: string;
   engine: EngineKind;
+  /** The fully-resolved fingerprint — used to apply CDP overrides on each page. */
+  fingerprint: Fingerprint;
   options: PersistentLaunchOptions;
   emulation: CdpEmulation;
   initScript: string;

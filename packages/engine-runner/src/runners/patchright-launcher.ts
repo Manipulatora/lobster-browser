@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { applyCdpFingerprint, type CdpSession } from '../cdp-fingerprint.js';
 import type { Launcher, LaunchContext, LaunchHandle } from './types.js';
 
 /**
@@ -33,8 +34,12 @@ interface PersistentContextOptions {
   timezoneId?: string;
   geolocation?: PwGeolocation;
 }
+type PwPage = object;
 interface PwContext {
-  addInitScript(script: string): Promise<void>;
+  newCDPSession(page: PwPage): Promise<CdpSession>;
+  pages(): PwPage[];
+  newPage(): Promise<PwPage>;
+  on(event: 'page', handler: (page: PwPage) => void): void;
   close(): Promise<void>;
 }
 interface PwChromium {
@@ -99,8 +104,19 @@ export function createPatchrightLauncher(opts: PatchrightLauncherOptions = {}): 
     if (ctx.emulation.geolocation) options.geolocation = ctx.emulation.geolocation;
 
     const context = await chromium.launchPersistentContext(ctx.options.userDataDir, options);
-    // Apply the remaining JS-safe navigator surfaces to every page in this context.
-    await context.addInitScript(ctx.initScript);
+
+    // Apply the JS-safe fingerprint to every page via CDP (main world) — reliable under patchright,
+    // whose addInitScript runs in an isolated world the page's navigator can't see.
+    const applyToPage = async (page: PwPage): Promise<void> => {
+      const cdp = await context.newCDPSession(page);
+      await applyCdpFingerprint(cdp, ctx.fingerprint);
+    };
+    for (const page of context.pages()) {
+      await applyToPage(page);
+    }
+    context.on('page', (page) => {
+      void applyToPage(page);
+    });
 
     const { port, ws } = await readCdpEndpoint(ctx.options.userDataDir);
     return {

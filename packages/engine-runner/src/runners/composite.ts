@@ -38,6 +38,7 @@ export class CompositeRunner implements EngineRunner {
     const ctx: LaunchContext = {
       profileId: params.profileId,
       engine: params.engine,
+      fingerprint: params.fingerprint,
       options: buildLaunchOptions(params),
       emulation: buildCdpEmulation(params.fingerprint),
       initScript: buildFingerprintInitScript(params.fingerprint),
