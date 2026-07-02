@@ -6,6 +6,7 @@
 > **License posture:** Lobster ships **open source**, so we **freely fork, import, and adapt** any open-source code (any license). Donut Browser and other projects are used as **reference/inspiration only** — we own our full codebase. Legal & licensing are maintained by the owner separately.
 > **Timeline:** a complete, demoable product **v1 in 10 days** on our orchestrated engines, with **Lobium** — our dedicated Chromium-based engine — built on a parallel track that matures into the flagship engine.
 > **Status of this doc:** authoritative — the single source of truth for both agents. Any change to scope, stack, or the working rules is edited here first.
+> **Depth:** this plan is the strategy and shape; the **production-depth detail** lives in [`docs/specs/`](specs/) (§14). For an honest, current read of what's built vs. the target, see [`docs/GAP-ANALYSIS.md`](GAP-ANALYSIS.md) and the risk/gap register (§16).
 
 ---
 
@@ -347,3 +348,76 @@ Full native coverage of all 50+ params, TLS/JA3/JA4 + HTTP/2 matching, audio/Web
 7. **Packaging:** clean install on a fresh Windows machine → engine download → launch works.
 
 **v1 is accepted** when 1–5 + 7 pass and every §4 pillar has a working end-to-end path; the Lobium POC (6) proves the flagship track is real and on course.
+
+---
+
+## 14. Detailed specifications (`docs/specs/`)
+
+This plan is deliberately the strategy and shape. The **production-depth detail** — every parameter,
+every table, every endpoint, every patch — lives in [`docs/specs/`](specs/) so ticket bodies stay short
+and both agents build to one reference. Each spec is written to the full Octo-class target and tags each
+item **done · partial · planned** against today's code, closing with a *Status vs target* note. Index:
+[`docs/specs/README.md`](specs/README.md).
+
+| Spec | What it locks down |
+|---|---|
+| [`specs/feature-catalog.md`](specs/feature-catalog.md) | Every feature (11 areas + Lobium) with priority + competitor-parity + status; billing plan/tier matrix; screen inventory + key flows; the phased Phase 1→2→3 roadmap |
+| [`specs/fingerprint-parameters.md`](specs/fingerprint-parameters.md) | The **~90-param** catalog (18 surfaces) — the concrete "50+"; the 29-rule coherence engine; seed→config pipeline; native-vs-interim mapping; the editor UI grouping |
+| [`specs/data-model.md`](specs/data-model.md) | Cloud Postgres schema (6 built + 9 planned tables, DDL-level) + local SQLite; encryption boundaries; data lifecycle (retention/export/erasure); migration strategy |
+| [`specs/api-reference.md`](specs/api-reference.md) | Local automation API + cloud REST API (per-endpoint schemas, error codes, connect recipes) + webhooks + SDKs + MCP server + versioning policy |
+| [`specs/security.md`](specs/security.md) | 3-tier key hierarchy + AES-GCM blob envelope + zero-knowledge; auth upgrade path (refresh rotation, 2FA, SSO, API-key scoping); RBAC matrix; threat model; supply-chain |
+| [`specs/lobium-build.md`](specs/lobium-build.md) | Build pipeline (toolchain/pinned-ref/rebase); the ordered native **patch series** (incl. TLS/JA4 + HTTP/2); the config-channel wire protocol; multi-OS signing + auto-update; Android variant |
+| [`specs/proxy.md`](specs/proxy.md) | Proxy type matrix; chaining + rotation + pools; providers; testing + IP-quality; geo-coherence pipeline; leak protection; the SOCKS-in-launcher fix |
+| [`specs/qa-testing.md`](specs/qa-testing.md) | 7-layer testing pyramid; detector matrix + `thresholds.json` schema; live anti-bot testing; the coherence validator rule set; **the NFR / SLO targets** (source for §15); release-gate → CI mapping |
+| [`specs/observability-ops.md`](specs/observability-ops.md) | Logging/metrics/tracing/error-tracking; backend deployment; backups/DR; rate limiting + queues; desktop signing + auto-update; release process; monitoring/alerting; billing ops |
+
+---
+
+## 15. Non-functional requirements & SLO targets
+
+The quality bar the product is held to, beyond features. Full detail + how each is measured is in
+[`specs/qa-testing.md`](specs/qa-testing.md) §6–§7 and [`specs/observability-ops.md`](specs/observability-ops.md).
+
+| Dimension | Target (v1 → mature) |
+|---|---|
+| **Profile launch time** | ≤ 3s p50, ≤ 6s p95 (cold engine cache excluded) |
+| **Local density** | ≥ 25 concurrent profiles on a 16 GB machine; ≤ 250 MB desktop idle RSS |
+| **Local automation API latency** | `start` ≤ 3s p95; `status`/`list` ≤ 50ms p95 |
+| **Cloud API latency** | ≤ 200ms p95 for CRUD; sync push/pull ≤ 1s p95 for a typical profile blob |
+| **Cloud availability** | 99.9% monthly uptime (SLO) with an error-budget + burn-rate policy |
+| **Durability / DR** | Postgres PITR; **RPO ≤ 5 min, RTO ≤ 1 h**; quarterly restore drills; versioned + replicated blob store |
+| **Anti-detect quality** | Sannysoft all-pass; CreepJS "trust" high / no lies; Pixelscan "consistent"; no WebRTC/DNS leak — enforced as a **blocking CI gate** |
+| **Coherence** | 100% of the coherence validator rules pass for every generated profile |
+| **Security** | Zero-knowledge profile blobs (server never sees plaintext); no secrets in repo (gitleaks gate); JWT hard-fail in prod; dependency + secret scans green |
+| **Scale (cloud)** | Horizontal stateless backend behind autoscaling; per-key + per-IP rate limits; async queues for sync/metering/webhooks |
+
+These are **acceptance-relevant**: fingerprint quality, coherence, security, and the launch/latency
+budgets are gated in CI or the validation harness; the availability/DR/scale targets govern the cloud
+deployment (Phase-graded — see §16).
+
+---
+
+## 16. Risk & gap register
+
+An honest, prioritized view of the distance to a *perfect* product. This is the condensed register;
+the narrative is in [`docs/GAP-ANALYSIS.md`](GAP-ANALYSIS.md), and each *planned* line is enumerated in
+the spec named. **G-priority:** G0 = blocks Octo-class parity · G1 = needed for a complete v1 · G2 = depth/scale.
+
+| # | Gap (today's reality) | Impact | Mitigation / where specified | G |
+|---|---|---|---|---|
+| R1 | **Lobium not built** — interim Chromium can't match Chrome TLS/JA4+HTTP2 or native canvas/WebGL/audio (harness shows 2 WebGL fails) | The core moat + hardest-target stealth | Track F pipeline + ordered patch series → [`specs/lobium-build.md`](specs/lobium-build.md) | G0 |
+| R2 | **Fingerprint breadth** — ~10–12 params applied vs. the ~90 cataloged; deep surfaces best-effort | Detector coherence on strict targets | Full param model + native enforcement → [`specs/fingerprint-parameters.md`](specs/fingerprint-parameters.md), T-012 | G1 |
+| R3 | **Security depth** — client-side crypto, key hierarchy, 2FA, SSO, session/device mgmt, API-key hashing not yet built | Enterprise trust; true zero-knowledge | Key hierarchy + auth upgrade path → [`specs/security.md`](specs/security.md); proxy-credential plaintext gap flagged in [`specs/data-model.md`](specs/data-model.md) | G1 |
+| R4 | **Proxy depth** — SOCKS5-in-launcher, chaining, rotation, providers, leak-suite not built; geo-sync not live-tested | Real-world proxy coverage + no leaks | Type matrix + SOCKS fix + leak suite → [`specs/proxy.md`](specs/proxy.md), T-014 follow-up | G1 |
+| R5 | **Cloud runtime unexercised** — Postgres path wired but unrun; billing metering minimal; RBAC coarse (admin/member) | Revenue + team/enterprise readiness | Data model + billing ops + RBAC matrix → [`specs/data-model.md`](specs/data-model.md), [`specs/security.md`](specs/security.md), [`specs/observability-ops.md`](specs/observability-ops.md) | G1 |
+| R6 | **Desktop lifecycle** — no packaging/signing/notarization/auto-update/onboarding/i18n | Shippable installed product | Delivery + signing + updater → [`specs/observability-ops.md`](specs/observability-ops.md) §5 | G1 |
+| R7 | **Observability / ops / deploy** — no logging/metrics/tracing/error-tracking/deploy pipeline/backups | Operable, reliable SaaS | Full stack → [`specs/observability-ops.md`](specs/observability-ops.md) | G1 |
+| R8 | **Testing breadth** — strong unit/integration + one detector (Sannysoft); no CreepJS/live-anti-bot/load/perf/security tests | Confidence the quality bar holds | 7-layer pyramid + detector matrix + NFRs → [`specs/qa-testing.md`](specs/qa-testing.md) | G1 |
+| R9 | **Browser data breadth** — cookies done; localStorage/IndexedDB, extensions, bookmarks, history, autofill not | Profile realism + parity | Enumerated in [`specs/feature-catalog.md`](specs/feature-catalog.md) §2 | G2 |
+| R10 | **Mobile/Android fingerprints** — not started | Mobile multi-accounting segment | Config model now; mobile Lobium variant → [`specs/lobium-build.md`](specs/lobium-build.md) §8 | G2 |
+| R11 | **Automation breadth** — local API done; official SDKs (Py/JS/C#), MCP, cloud-run, human-like input not | Developer + enterprise reach | SDK + MCP surface → [`specs/api-reference.md`](specs/api-reference.md) §4–§5 | G2 |
+
+**Priority read:** **R1 (Lobium)** is the one true moat and the largest single effort — it runs on the
+parallel Track F starting now. **R2–R8 (G1)** are the "complete v1" surface finished across Days 5–10.
+**R9–R11 (G2)** are depth/scale for Phase 3. This register is the backlog source for new tickets, and it
+is reviewed at each mid-sprint checkpoint (§10 Day 5) and updated as items land.
