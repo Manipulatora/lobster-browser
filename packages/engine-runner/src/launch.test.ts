@@ -69,6 +69,29 @@ test('buildLaunchOptions honors headless flag and omits proxy when absent', () =
   assert.equal(o.proxy, undefined);
 });
 
+test('buildLaunchOptions applies a proxy-aware WebRTC IP-handling policy (leak protection)', () => {
+  // With a proxy: force all WebRTC through it so the real public IP can never leak via STUN.
+  const withProxy = buildLaunchOptions({
+    profileId: 'p',
+    engine: 'chromium',
+    userDataDir: '/d',
+    fingerprint: sampleFingerprint(),
+    proxy: { id: 'x', type: 'socks5', host: 'h', port: 1080 },
+  });
+  assert.ok(withProxy.args.includes('--force-webrtc-ip-handling-policy=disable_non_proxied_udp'));
+
+  // Without a proxy: still restrict to the default public interface (no multi-interface enumeration).
+  const noProxy = buildLaunchOptions({
+    profileId: 'p',
+    engine: 'chromium',
+    userDataDir: '/d',
+    fingerprint: sampleFingerprint(),
+  });
+  assert.ok(
+    noProxy.args.includes('--force-webrtc-ip-handling-policy=default_public_interface_only'),
+  );
+});
+
 test('buildCdpEmulation carries UA, UA-CH metadata, timezone/locale, and geolocation', () => {
   const e = buildCdpEmulation(sampleFingerprint());
   assert.match(e.userAgent, /Chrome\//);

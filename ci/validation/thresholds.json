@@ -5,6 +5,10 @@
     "note": "WebGL Vendor/Renderer are native (deep) surfaces handled by Lobium; they read the host GPU until the Lobium build ships, so up to 2 WebGL fails are expected/allowed here."
   },
   "creepjs": { "minTrustScore": 60, "maxLies": 0 },
-  "webrtc": { "requireIcePublicIpEqualsProxyIp": true },
+  "webrtc": {
+    "forbidLocalIpLeak": true,
+    "forbidPublicIpLeakUnderPolicy": true,
+    "note": "Gated by the harness webrtcLeakProtected check: (1) the profile's own host candidates are all mDNS .local (no raw private IPv4 / no global IPv6), and (2) with disable_non_proxied_udp + a live STUN server the browser emits NO public-IP srflx (proves the policy suppresses the leak; the control WOULD leak). requireIcePublicIpEqualsProxyIp — asserting a srflx equals the PROXY egress IP — needs a live test proxy and is a follow-up (T-019a)."
+  },
   "coherence": { "maxIssues": 0 }
 }

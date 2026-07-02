@@ -25,6 +25,8 @@ tickets; the assigned agent implements; the other agent reviews. Keep this table
 | T-012 | Fingerprint: 50+ param model + Android/mobile profiles | Fingerprint | Codex | draft |
 | T-018 | Fingerprint coherence & geolocation-application hardening | Fingerprint | Claude | done · [`setGeolocationOverride`](T-018-fingerprint-coherence-geolocation.md) applied (was computed but never sent) + launcher grants geo permission; clean `navigator.languages` (q-value leak fixed); init-script abort bug fixed; coherence rules incl. Win-NT↔Chrome floor, **HeadlessChrome-brand + 256 MB-desktop tells** (found by adversarial review); 94 unit tests + live gate green |
 | T-018a | q-weighted `Accept-Language` HTTP header (keep clean `navigator.languages`) | Fingerprint | Claude | draft · follow-up from T-018 |
+| T-019 | WebRTC leak protection + validation-gate integration | Proxy | Claude | done · [proxy-aware `--force-webrtc-ip-handling-policy`](T-019-webrtc-leak-protection.md) (`disable_non_proxied_udp` when proxied); non-vacuous gate proves the policy suppresses the STUN public-IP srflx (v4+v6) + mDNS local masking; hardened after adversarial review; 95 tests + live gate green |
+| T-019a | Assert `srflx == proxy egress IP` against a live test proxy (CI secret) | Proxy · QA | Claude | draft · follow-up from T-019 |
 
 **Status legend:** `draft` (spec not final) · `ready` (spec final, unassigned work can start) ·
 `in-progress` · `in-review` · `done`.

@@ -22,6 +22,15 @@ export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOption
     '--disable-blink-features=AutomationControlled',
     `--lang=${fingerprint.locale.locale}`,
     `--window-size=${fingerprint.screen.width},${fingerprint.screen.height}`,
+    // WebRTC leak protection. Chrome already hides the private IP behind mDNS (.local candidates);
+    // the real risk is the PUBLIC IP leaking via a STUN/srflx candidate that bypasses the proxy.
+    // With a proxy we force `disable_non_proxied_udp`: WebRTC may only use paths it can route through
+    // the proxy, so it can never reach a STUN server directly and the real public IP cannot leak
+    // (WebRTC IP == proxy IP — the §6 coherence bar). Without a proxy we still restrict enumeration
+    // to the default public interface so multi-homed hosts don't expose extra interfaces.
+    `--force-webrtc-ip-handling-policy=${
+      params.proxy ? 'disable_non_proxied_udp' : 'default_public_interface_only'
+    }`,
   ];
   const options: PersistentLaunchOptions = {
     userDataDir: params.userDataDir,

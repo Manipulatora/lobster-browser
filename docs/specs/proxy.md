@@ -35,7 +35,7 @@ Grounded in `packages/proxy/src` + `packages/shared-types/src/proxy.ts` + the la
 | Chaining, rotation, pools, health monitor | — | **planned** |
 | Provider APIs / reseller | — | **planned** |
 | ASN reputation / blacklist / datacenter deep checks | `isDatacenter` only (from ip-api `hosting`) | **partial** |
-| WebRTC / DNS / kill-switch leak enforcement | `--disable-blink-features=AutomationControlled` only | **planned** |
+| WebRTC leak enforcement | **done (T-019)** — proxy-aware `--force-webrtc-ip-handling-policy` (`disable_non_proxied_udp` when proxied); gate proves STUN public-IP srflx suppression + mDNS local masking | DNS / kill-switch still **planned** |
 
 The two known code-level gaps are already flagged in-source: `deriveGeoFromExitIp` throws on
 `type === 'socks5'` (`"SOCKS geo lookup not yet supported"`), and undici's `ProxyAgent` tunnels
@@ -298,7 +298,7 @@ Chromium does best-effort, Lobium enforces natively):
 
 | Leak vector | Target behavior | v1 (interim Chromium) | Lobium (native) |
 |---|---|---|---|
-| **WebRTC** (STUN reveals local/real IP via ICE candidates) | ICE candidates == proxy exit IP only; no host/srflx local candidates | **planned** — policy args `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` + `--webrtc-ip-handling-policy`; verify ICE == exit | **native** — force all UDP through proxy or return only the exit srflx |
+| **WebRTC** (STUN reveals local/real IP via ICE candidates) | ICE candidates == proxy exit IP only; no host/srflx local candidates | **done (T-019)** — proxy-aware `--force-webrtc-ip-handling-policy` (`disable_non_proxied_udp` when proxied); gate proves STUN public-IP srflx suppression (v4+v6) + mDNS local masking. `srflx == exit IP` assertion = T-019a (needs a live proxy) | **native** — force all UDP through proxy or return only the exit srflx |
 | **DNS** | resolve at the exit (remote DNS), never the local resolver | **planned** — SOCKS5h + `socks5h://`; for HTTP the proxy resolves; block Chromium async DNS bypass | **native** remote DNS |
 | **Local-IP enumeration** (mDNS `.local` candidate hides real IP but still enumerable) | no local candidates leaked | **planned** — obfuscate/disable mDNS host candidates | **native** |
 | **Kill-switch** (proxy dies mid-session → traffic falls back to direct) | on proxy failure, block all egress / freeze the profile, never leak direct | **planned** — health monitor (§8) detects, forces context offline / kills tabs | **native** hard-fail closed |
@@ -309,9 +309,9 @@ Chromium does best-effort, Lobium enforces natively):
 behind a proxy and asserts every ICE candidate IP equals `geo.ip`. This is the acceptance gate for
 "WebRTC leak check" (MASTER_PLAN Day 5).
 
-**Current reality:** the only stealth-adjacent launch arg today is
-`--disable-blink-features=AutomationControlled` (`launch.ts`). No WebRTC/DNS/kill-switch args are set
-yet — this section is the plan of record.
+**Current reality:** launch args today are `--disable-blink-features=AutomationControlled` and the
+proxy-aware `--force-webrtc-ip-handling-policy` (T-019, `launch.ts`). DNS/kill-switch/IPv6 enforcement
+are not set yet — the rest of this section is the plan of record.
 
 ---
 
