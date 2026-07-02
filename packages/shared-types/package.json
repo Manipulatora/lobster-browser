@@ -1,0 +1,23 @@
+{
+  "name": "@lobster/shared-types",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Domain types shared across the Lobster desktop UI, backend, local API, and engine-runner sidecar.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  }
+}

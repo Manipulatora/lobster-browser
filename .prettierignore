@@ -1,0 +1,10 @@
+node_modules
+dist
+build
+target
+coverage
+engines/bin
+engines/cache
+*.md
+pnpm-lock.yaml
+package-lock.json

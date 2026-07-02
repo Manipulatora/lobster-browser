@@ -1,0 +1,165 @@
+// Lobster Browser — cloud data model.
+//
+// This schema mirrors the domain contracts in `@lobster/shared-types`
+// (User, Team, Membership, Profile, ApiKey, Subscription) so the Postgres tables
+// never drift from the TypeScript wire types.
+//
+// IMPORTANT — encrypted profile blobs:
+//   A profile's sensitive payload (cookies, storage, the full user-data-dir snapshot)
+//   is encrypted CLIENT-SIDE and stored in S3-compatible object storage. Postgres holds
+//   ONLY a reference to that blob (`encryptedBlobRef`) plus non-secret metadata and the
+//   deterministic `fingerprintSeed`. The server never sees plaintext profile contents.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Enums -----------------------------------------------------------------
+
+// Mirrors shared-types `Role`.
+enum Role {
+  admin
+  member
+}
+
+// Mirrors shared-types `PlanTier`.
+enum PlanTier {
+  free
+  pro
+  team
+  enterprise
+}
+
+// Mirrors shared-types `Subscription.status`.
+enum SubscriptionStatus {
+  active
+  past_due
+  canceled
+  trialing
+}
+
+// --- Models ----------------------------------------------------------------
+
+// Mirrors shared-types `User`. `passwordHash` is backend-only (never leaves the server);
+// real hashing (argon2/bcrypt) lands Day 2.
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  displayName  String?
+  passwordHash String?
+  createdAt    DateTime @default(now())
+
+  // Relations
+  ownedTeams  Team[]       @relation("TeamOwner")
+  memberships Membership[]
+
+  @@map("users")
+}
+
+// Mirrors shared-types `Team`.
+model Team {
+  id          String   @id @default(uuid())
+  name        String
+  ownerUserId String
+  createdAt   DateTime @default(now())
+
+  // Relations
+  owner        User          @relation("TeamOwner", fields: [ownerUserId], references: [id])
+  memberships  Membership[]
+  profiles     Profile[]
+  apiKeys      ApiKey[]
+  subscription Subscription?
+
+  @@index([ownerUserId])
+  @@map("teams")
+}
+
+// Mirrors shared-types `Membership`. Composite primary key (userId, teamId).
+model Membership {
+  userId    String
+  teamId    String
+  role      Role     @default(member)
+  createdAt DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@id([userId, teamId])
+  @@index([teamId])
+  @@map("memberships")
+}
+
+// Mirrors shared-types `Profile`.
+//
+// Only metadata + the deterministic seed + a reference to the encrypted blob live here.
+// `metadata` is a JSON grab-bag for the non-secret shared-types fields we don't index on
+// (engine, os, tags, folder, notes, proxy reference, sharing, fingerprintOverrides).
+model Profile {
+  id     String @id @default(uuid())
+  name   String
+
+  // Deterministic seed → stable coherent fingerprint (see shared-types `FingerprintSeed`).
+  fingerprintSeed  String
+
+  // Reference (S3 object key / URI) to the CLIENT-encrypted profile blob. Nullable until
+  // the desktop agent performs its first sync push. The plaintext never touches the server.
+  encryptedBlobRef String?
+
+  // Non-secret, non-indexed profile fields (engine, os, tags, folder, notes, sharing, …).
+  metadata         Json    @default("{}")
+
+  // Team that owns the profile (maps to shared-types `Profile.ownerTeamId`).
+  ownerTeamId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  ownerTeam Team @relation(fields: [ownerTeamId], references: [id], onDelete: Cascade)
+
+  @@index([ownerTeamId])
+  @@map("profiles")
+}
+
+// Mirrors shared-types `ApiKey`. Only the prefix is persisted for display; the secret
+// is shown once at creation and stored as a hash (real hashing lands Day 2).
+model ApiKey {
+  id         String    @id @default(uuid())
+  // Human-visible prefix, e.g. "lb_live_ab12" — safe to display in the UI.
+  prefix     String
+  // Hash of the full secret. The plaintext secret is returned exactly once, at creation.
+  hashedKey  String
+  name       String
+  teamId     String
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+
+  // Relations
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId])
+  @@map("api_keys")
+}
+
+// Mirrors shared-types `Subscription`. One per team.
+model Subscription {
+  teamId           String             @id
+  tier             PlanTier           @default(free)
+  // Metered limit — number of profiles allowed on this plan (see ProfilesService).
+  profileLimit     Int                @default(5)
+  status           SubscriptionStatus @default(trialing)
+  stripeCustomerId String?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  // Relations
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}

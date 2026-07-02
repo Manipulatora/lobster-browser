@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Engines come from engines/download-engines.mjs, never from npm postinstall.
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+  PUPPETEER_SKIP_DOWNLOAD: '1'
+
+jobs:
+  web:
+    name: Web (typecheck / build / test / format)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: npm run format:check
+      # Generate the Prisma client so the backend typechecks (no DB connection needed to generate).
+      - run: npx prisma generate --schema=apps/backend/prisma/schema.prisma
+      - run: npm run typecheck --workspaces --if-present
+      - run: npm run build --if-present
+      - run: npm run test --workspaces --if-present
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  rust:
+    name: Desktop (Rust fmt / clippy)
+    runs-on: ubuntu-latest
+    # Non-blocking until T-001 makes the desktop crate build in CI (needs a frontend dist + tauri deps).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: cargo fmt
+        working-directory: apps/desktop/src-tauri
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+  fingerprint-gate:
+    name: Fingerprint validation gate
+    runs-on: ubuntu-latest
+    # Non-blocking until T-005 wires the real detector harness; runs the stub for now.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: node ci/validation/run.mjs --stub

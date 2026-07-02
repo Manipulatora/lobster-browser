@@ -1,0 +1,73 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { ConflictException, UnauthorizedException } from '@nestjs/common';
+import type { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
+
+import { AuthService, type JwtPayload } from './auth.service';
+import { DEV_JWT_SECRET } from './jwt-secret';
+import { InMemoryUsersRepository } from './in-memory-users.repository';
+
+/**
+ * Unit tests for AuthService against the in-memory repo + a real JwtService — no Nest app
+ * boot and no database. A stub ConfigService returns undefined so the service falls back to
+ * DEV_JWT_SECRET, which the JwtService below is configured with, so tokens round-trip.
+ */
+function makeService(): { service: AuthService; jwt: JwtService } {
+  const users = new InMemoryUsersRepository();
+  const jwt = new JwtService({ secret: DEV_JWT_SECRET });
+  const config = { get: () => undefined } as unknown as ConfigService;
+  return { service: new AuthService(users, jwt, config), jwt };
+}
+
+test('register hashes the password, stores the user, and returns a token', async () => {
+  const { service } = makeService();
+
+  const result = await service.register({ email: 'alice@example.com', password: 'password123' });
+
+  assert.equal(result.user.email, 'alice@example.com');
+  assert.ok(result.token.length > 0, 'expected a non-empty token');
+  // The public user must never carry the password hash.
+  assert.equal((result.user as { passwordHash?: string }).passwordHash, undefined);
+});
+
+test('register rejects a duplicate email', async () => {
+  const { service } = makeService();
+  await service.register({ email: 'dup@example.com', password: 'password123' });
+
+  await assert.rejects(
+    () => service.register({ email: 'dup@example.com', password: 'password123' }),
+    ConflictException,
+  );
+});
+
+test('login with the correct password returns a token decoding to the user id', async () => {
+  const { service, jwt } = makeService();
+  const registered = await service.register({ email: 'bob@example.com', password: 'password123' });
+
+  const result = await service.login({ email: 'bob@example.com', password: 'password123' });
+
+  const payload = jwt.verify<JwtPayload>(result.token, { secret: DEV_JWT_SECRET });
+  assert.equal(payload.sub, registered.user.id);
+  assert.equal(payload.email, 'bob@example.com');
+});
+
+test('login with a wrong password throws UnauthorizedException', async () => {
+  const { service } = makeService();
+  await service.register({ email: 'carol@example.com', password: 'password123' });
+
+  await assert.rejects(
+    () => service.login({ email: 'carol@example.com', password: 'wrong-password' }),
+    UnauthorizedException,
+  );
+});
+
+test('login with an unknown email throws UnauthorizedException', async () => {
+  const { service } = makeService();
+
+  await assert.rejects(
+    () => service.login({ email: 'nobody@example.com', password: 'password123' }),
+    UnauthorizedException,
+  );
+});

@@ -1,0 +1,25 @@
+# Local Postgres for the Lobster backend. Bring it up, then run migrations:
+#   docker compose up -d
+#   DATABASE_URL=postgresql://lobster:lobster@localhost:5432/lobster?schema=public \
+#     npx prisma migrate deploy
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lobster-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lobster
+      POSTGRES_PASSWORD: lobster
+      POSTGRES_DB: lobster
+    ports:
+      - '5432:5432'
+    volumes:
+      - lobster_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U lobster -d lobster']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  lobster_pg:

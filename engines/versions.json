@@ -1,0 +1,12 @@
+{
+  "//": "Pinned engine versions. Engines are downloaded on first run into engines/bin/ and are NEVER committed. Confirm exact version strings, asset names, and sha256 hashes in the engine-integration ticket (T-002) before relying on them.",
+  "camoufox": {
+    "version": "CONFIRM_IN_T-002",
+    "repo": "daijro/camoufox",
+    "note": "High-Stealth engine (native-patched Firefox). Pin a specific release; vendor/cache the binary + fonts. Rebrand before redistribution."
+  },
+  "ungoogled-chromium": {
+    "version": "CONFIRM_IN_T-002",
+    "note": "Default engine base (clean, permissive). Driven via patchright. Strip Chromium/Google branding before distribution."
+  }
+}

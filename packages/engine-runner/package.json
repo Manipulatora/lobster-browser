@@ -1,0 +1,32 @@
+{
+  "name": "@lobster/engine-runner",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Node/TS sidecar: launches and controls Camoufox + Chromium engines for the Rust desktop core.",
+  "bin": {
+    "lobster-engine-runner": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "test": "tsc -b && node --test \"dist/**/*.test.js\"",
+    "start": "node dist/index.js",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@lobster/proxy": "*",
+    "@lobster/shared-types": "*"
+  }
+}

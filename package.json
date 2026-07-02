@@ -1,0 +1,33 @@
+{
+  "name": "lobster-browser",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Lobster Browser — anti-detect browser + SaaS (monorepo root)",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "workspaces": [
+    "packages/shared-types",
+    "packages/fingerprint",
+    "packages/proxy",
+    "packages/engine-runner",
+    "packages/local-api-sdk/js",
+    "apps/desktop",
+    "apps/backend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,json}\"",
+    "typecheck:core": "tsc -b packages/shared-types packages/fingerprint packages/proxy"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "//note": "Standalone (does NOT extend ../../tsconfig.base.json): the base is tuned for Node-side ESM libraries (NodeNext + composite + declarations). The browser UI needs DOM libs, JSX, and bundler resolution instead. Node-side helpers, if any, still follow the base.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+
+    /* Vite transpiles each file in isolation and never emits from tsc here. */
+    "noEmit": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "useDefineForClassFields": true,
+    "resolveJsonModule": true,
+
+    /* Strictness — mirrors the repo's base config where it applies to app code. */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true
+  },
+  "include": ["src"]
+}

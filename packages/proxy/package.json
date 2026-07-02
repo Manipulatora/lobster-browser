@@ -1,0 +1,27 @@
+{
+  "name": "@lobster/proxy",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Proxy parsing, formatting, and exit-IP geo derivation for Lobster profiles.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "test": "tsc -b && node --test \"dist/**/*.test.js\"",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@lobster/shared-types": "*"
+  }
+}

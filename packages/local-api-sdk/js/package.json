@@ -1,0 +1,14 @@
+{
+  "name": "@lobster/local-api-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Tiny JS client for the Lobster local automation API (start/stop/list/status).",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js"
+  ]
+}

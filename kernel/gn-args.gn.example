@@ -1,0 +1,13 @@
+# Example GN build args for the Lobster Kernel. Tune in T-010.
+is_debug = false
+is_official_build = true
+symbol_level = 0
+blink_symbol_level = 0
+enable_nacl = false
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+# Speed:
+# cc_wrapper = "ccache"
+# use_remoteexec = true
+# Branding (rebrand for distribution):
+# chrome_pgo_phase = 0

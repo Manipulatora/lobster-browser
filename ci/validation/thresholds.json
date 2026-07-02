@@ -1,0 +1,16 @@
+{
+  "//": "Objective anti-detect pass/fail thresholds enforced by the fingerprint validation gate. Tuned in T-005/Day 7.",
+  "creepjs": {
+    "minTrustScore": 60,
+    "maxLies": 0
+  },
+  "sannysoft": {
+    "requireAllPass": true
+  },
+  "webrtc": {
+    "requireIcePublicIpEqualsProxyIp": true
+  },
+  "coherence": {
+    "maxIssues": 0
+  }
+}

@@ -1,0 +1,62 @@
+# Dependencies
+node_modules/
+.pnp.*
+.yarn/
+
+# Build output
+dist/
+build/
+out/
+*.tsbuildinfo
+target/            # Rust
+apps/desktop/src-tauri/target/
+apps/desktop/dist/
+
+# Engines (downloaded on first run, never committed)
+engines/bin/
+engines/cache/
+*.dmg
+*.exe
+*.AppImage
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Local data / profiles
+.lobster/
+profiles/
+*.sqlite
+*.sqlite-*
+*.db
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Test / coverage
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+
+# Python (Camoufox fallback sidecar)
+__pycache__/
+*.pyc
+.venv/
+venv/

@@ -1,0 +1,49 @@
+[package]
+name = "lobster-desktop"
+version = "0.0.0"
+description = "Lobster Browser desktop agent (Tauri 2 core + Axum local automation API)."
+authors = ["Lobster Browser"]
+edition = "2021"
+# Pinned to match rust-toolchain.toml at the repo root.
+rust-version = "1.83"
+
+# The Tauri app is compiled as a library so it can be linked into the platform binary
+# (and, on mobile, into the generated shells). `main.rs` is a thin shim over `run()`.
+[lib]
+name = "lobster_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+# Generates the Tauri context (parses tauri.conf.json, embeds assets/capabilities).
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# Lets the Rust core spawn/attach engine sidecars and helper processes.
+tauri-plugin-shell = "2"
+
+# Serialization for IPC + the local automation API envelope.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime for the background local-API server (spawned off the UI thread).
+tokio = { version = "1", features = ["full"] }
+# Local automation API (127.0.0.1 only). Auth + rate limiting land on Day 4.
+axum = "0.7"
+
+# Local encrypted-at-rest profile store. `bundled` compiles SQLite in — no system dep.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Stable profile / session identifiers.
+uuid = { version = "1", features = ["v4"] }
+
+# Ergonomic error handling across the core.
+anyhow = "1"
+
+# Structured logging.
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[features]
+# Enabled by tauri-cli in production builds; keeps custom-protocol assets embedded.
+custom-protocol = ["tauri/custom-protocol"]
