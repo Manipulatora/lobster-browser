@@ -5,7 +5,7 @@ import type { Launcher, LaunchContext, LaunchHandle } from './types.js';
 
 /**
  * Real engine launcher backed by **patchright** (a stealth-hardened Playwright fork) driving a
- * patched Chromium. Used for the `chromium` and `kernel` (interim) engines.
+ * patched Chromium. Used for the `chromium` and `lobium` engines.
  *
  * We launch a persistent context (per-profile user-data-dir) with the JS-safe fingerprint surfaces
  * applied via context options (UA/locale/timezone/geo) + an init script for the remaining navigator

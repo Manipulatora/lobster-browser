@@ -59,7 +59,7 @@ test('buildLaunchOptions maps userDataDir, headless default, proxy, and coherent
 test('buildLaunchOptions honors headless flag and omits proxy when absent', () => {
   const params: LaunchParams = {
     profileId: 'p2',
-    engine: 'camoufox',
+    engine: 'lobium',
     userDataDir: '/d',
     fingerprint: sampleFingerprint(),
     headless: true,

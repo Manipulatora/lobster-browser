@@ -54,7 +54,9 @@ export function ProfileList({
             <div className="badge-row">
               <span className="badge badge--engine">{engineLabel(profile.engine)}</span>
               <span className="badge">{osLabel(profile.os)}</span>
-              {profile.folder ? <span className="badge badge--muted">📁 {profile.folder}</span> : null}
+              {profile.folder ? (
+                <span className="badge badge--muted">📁 {profile.folder}</span>
+              ) : null}
             </div>
 
             {profile.tags.length > 0 ? (

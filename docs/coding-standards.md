@@ -27,11 +27,6 @@ Shared conventions so code from Claude and Codex reads as one hand. Enforced by 
   API; it talks to the engine-runner sidecar only over the documented stdio JSON-RPC contract.
 - Keep `unsafe` out unless justified with a comment and reviewed by Claude.
 
-## Python (Camoufox fallback sidecar only)
-
-- Target 3.12, type hints required, `ruff` + `black` clean. Kept minimal and behind the same IPC
-  contract as the Node sidecar.
-
 ## Tests
 
 - Node packages use the built-in `node:test` runner. Co-locate as `*.test.ts`.

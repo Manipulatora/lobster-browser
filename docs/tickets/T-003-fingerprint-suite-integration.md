@@ -34,4 +34,5 @@ keeping the existing `@lobster/fingerprint` public API and determinism.
 ## Test requirements
 
 - Determinism test (100 seeds, re-derive, deep-equal).
-- Coherence test across `{windows,macos,linux} × {chromium,camoufox}`.
+- Coherence test across `{windows,macos,linux} ×` Chrome-family engines (`{chromium, lobium}`) — no
+  Firefox surfaces.

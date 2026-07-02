@@ -13,19 +13,23 @@ import type {
  *
  * `engine`/`os` validate against the runtime `ENGINE_KINDS`/`OS_FAMILIES` arrays from
  * @lobster/shared-types — the single source of truth — so the accepted set never drifts
- * (notably `kernel` is a first-class engine, not a 400).
+ * (notably `lobium` is a first-class engine, not a 400).
  *
  * NOTE: `fingerprintOverrides` and `proxy` are part of `CreateProfileInput` but are
  * accepted as opaque JSON here (deep validation lives in `@lobster/fingerprint` /
  * `@lobster/proxy`); we `Pick` the flat, class-validator-friendly fields for now.
  */
-export class CreateProfileDto
-  implements
-    Pick<
-      CreateProfileInput,
-      'name' | 'engine' | 'os' | 'fingerprintSeed' | 'fingerprintOverrides' | 'tags' | 'folder' | 'notes'
-    >
-{
+export class CreateProfileDto implements Pick<
+  CreateProfileInput,
+  | 'name'
+  | 'engine'
+  | 'os'
+  | 'fingerprintSeed'
+  | 'fingerprintOverrides'
+  | 'tags'
+  | 'folder'
+  | 'notes'
+> {
   @IsString()
   @MaxLength(120)
   name!: string;

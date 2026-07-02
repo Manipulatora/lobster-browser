@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lobster Kernel build driver (SCAFFOLD).
+# Lobium build driver (SCAFFOLD).
 #
 # Drives a Chromium build: fetch -> sync -> apply patches -> gn gen -> ninja.
 # Default is a DRY RUN that prints the steps. Pass --run to execute (needs depot_tools, disk, hours).
@@ -10,12 +10,12 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHROMIUM_REF="${CHROMIUM_REF:-CONFIRM_IN_T-010}"   # pin an exact Chromium ref in T-010
-OUT_DIR="${OUT_DIR:-out/Lobster}"
+OUT_DIR="${OUT_DIR:-out/Lobium}"
 RUN="${1:-}"
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
-step "Lobster Kernel build (ref: ${CHROMIUM_REF}, out: ${OUT_DIR})"
+step "Lobium build (ref: ${CHROMIUM_REF}, out: ${OUT_DIR})"
 if [[ "${RUN}" != "--run" ]]; then
   echo "DRY RUN — pass --run to execute. Planned steps:"
   echo "  1. ensure depot_tools on PATH; fetch chromium (first time)"

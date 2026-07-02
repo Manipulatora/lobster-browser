@@ -17,10 +17,11 @@ systems. It ships as:
 - a **desktop agent** (Rust + Tauri) that manages profiles/proxies and launches engines, and
 - a **cloud SaaS** (TypeScript/NestJS) for auth, teams, encrypted profile sync, and billing.
 
-The flagship engine is the **Lobster Kernel** — our own Chromium-based build with native
-fingerprinting (50+ configurable params, canvas/WebGL/audio/TLS-JA4) — built on a parallel track. Until
-it's the default, the product runs on two interim engines: **ungoogled-Chromium** (default, via
-patchright) and **Camoufox** (High-Stealth mode). The UI/UX is our own custom design system.
+The flagship engine is **Lobium** — our own Chromium-based build with native fingerprinting (50+
+configurable params, canvas/WebGL/audio/TLS-JA4) — built on a parallel track. Until the custom build
+ships, Lobium is served by a patched Chromium via patchright. Alongside it, the product runs on a
+prebuilt (ungoogled) **Chromium** driven via patchright as the interim/everyday engine. The UI/UX is
+our own custom design system.
 
 Lobster ships **open source**, so we freely import any OSS; Donut Browser and others are reference only.
 
@@ -34,10 +35,10 @@ packages/
   shared-types/       TS types shared across front/back/api/sidecar
   fingerprint/        Seed -> coherent fingerprint model + coherence rules
   proxy/              Proxy testing + exit-IP geo derivation
-  engine-runner/      Node/TS sidecar: launch/control Kernel + Camoufox + Chromium
+  engine-runner/      Node/TS sidecar: launch/control Lobium + Chromium
   local-api-sdk/      Client SDK examples (js/ + python/) for the local automation API
-kernel/               Lobster Kernel: Chromium build scripts, GN args, quilt patch series, config channel
-engines/              Download-on-first-run scripts for interim engines (binaries NOT committed)
+lobium/               Lobium: Chromium build scripts, GN args, quilt patch series, config channel
+engines/              Download-on-first-run scripts for the interim Chromium (binaries NOT committed)
 docs/                 Master plan, ADRs, agent protocol, API/IPC contracts, tickets
 ci/                   Fingerprint validation harness
 tests/                e2e / integration / detector validation suite
@@ -50,7 +51,6 @@ tests/                e2e / integration / detector validation suite
 | Node | `>=22 <25` (see `.nvmrc`) | all TS packages, backend, sidecar |
 | npm | `>=10` | workspace manager |
 | Rust | pinned in `rust-toolchain.toml` (currently `1.96.1`) | desktop agent (Tauri) — install via `rustup` |
-| Python | `3.12` | Camoufox fallback sidecar only |
 
 > The Rust toolchain is **not** required to work on the TS packages/backend/sidecar. Install it
 > (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`) when working on `apps/desktop`.
@@ -67,7 +67,7 @@ npm run typecheck:core
 # Build everything that can build
 npm run build
 
-# Download the pinned browser engines (Camoufox + ungoogled-chromium)
+# Download the pinned interim browser engine (ungoogled-chromium)
 node engines/download-engines.mjs
 ```
 

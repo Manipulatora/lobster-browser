@@ -60,7 +60,7 @@ coverage/
 test-results/
 playwright-report/
 
-# Python (Camoufox fallback sidecar)
+# Python (tooling / scripts)
 __pycache__/
 *.pyc
 .venv/

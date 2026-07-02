@@ -93,10 +93,10 @@ fn launch_profile(state: State<'_, AppState>, id: String) -> Result<LaunchInfo, 
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("profile {id} not found"))?;
     // Engine-runner sidecar wiring lands in T-002c; until an engine binary is provisioned
-    // (engines/download-engines.mjs or the Lobster Kernel build) we error clearly rather than
+    // (engines/download-engines.mjs or the Lobium build) we error clearly rather than
     // hand back a dead CDP endpoint.
     Err(format!(
-        "cannot launch profile {id}: no engine provisioned yet (run engines/download-engines.mjs or build the Lobster Kernel; sidecar wiring is T-002c)"
+        "cannot launch profile {id}: no engine provisioned yet (run engines/download-engines.mjs or build the Lobium; sidecar wiring is T-002c)"
     ))
 }
 

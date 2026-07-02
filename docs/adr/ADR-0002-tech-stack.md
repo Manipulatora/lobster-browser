@@ -11,15 +11,15 @@
 | Desktop shell | **Rust + Tauri 2**, React + TypeScript + Vite, **our own design system (custom UI/UX)** |
 | Local store | **SQLite** (rusqlite), AES-encrypted blobs |
 | Local automation API | **Rust Axum** HTTP+WS on a fixed loopback port (default 53211) |
-| Engine runner (sidecar) | **Node/TS**, patchright (Chromium) + camoufox-js (Camoufox), Playwright base. Python fallback for Camoufox behind the same IPC contract. |
+| Engine runner (sidecar) | **Node/TS**, patchright driving Chromium (and Lobium's interim patched Chromium), Playwright base. |
 | Fingerprint generation | **Apify fingerprint-suite** (`fingerprint-generator` + `fingerprint-injector`) |
-| **Lobster Kernel** (flagship) | **Chromium fork** via `depot_tools` + GN/ninja + quilt patch series; native fingerprinting + BoringSSL TLS/JA4 + per-profile config channel (see ADR-0004) |
-| Interim engines | **Camoufox** (High-Stealth) + **ungoogled-chromium** (default), pinned & vendored |
+| **Lobium** (flagship) | **Chromium fork** via `depot_tools` + GN/ninja + quilt patch series; native fingerprinting + BoringSSL TLS/JA4 + per-profile config channel (see ADR-0004) |
+| Interim engine | **Chromium** — prebuilt ungoogled-chromium (default, driven via patchright), pinned & vendored |
 | Proxy tooling | Per-profile HTTP/SOCKS5; **mitmproxy** for header/geo canonicalization |
 | Backend | **TypeScript + NestJS**, Postgres (Prisma), S3-compatible object storage |
 | Billing | **Stripe**, metered on profile count |
 
-**Languages total: Rust + TypeScript** (Python only as a contained Camoufox fallback).
+**Languages total: Rust + TypeScript** (Lobium itself is C++/GN Chromium).
 
 ## Rationale
 
@@ -32,6 +32,7 @@
 
 ## Consequences
 
-- The desktop app requires the Rust toolchain (`rust-toolchain.toml` pins 1.83.0); the TS packages,
+- The desktop app requires the Rust toolchain (`rust-toolchain.toml` pins 1.96.1); the TS packages,
   backend, and sidecar do not.
-- Three runtimes coexist; discipline on the IPC/API contracts is essential (see `docs/contracts/`).
+- Two runtimes coexist (Rust + Node/TS); discipline on the IPC/API contracts is essential (see
+  `docs/contracts/`).

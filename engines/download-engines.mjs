@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Download & cache the pinned browser engines (Camoufox + ungoogled-chromium) for this platform.
+// Download & cache the pinned interim Chromium (ungoogled) for this platform.
 //
 // Engines are large and are NEVER committed — this script fetches them into engines/bin/ on first run.
 // Default is a DRY RUN (prints what it would fetch); pass --download to actually download.
@@ -27,8 +27,8 @@ function resolveAssetUrl(engine, version, { platform, arch }) {
         `Confirm the release, asset name, and sha256 in ticket T-002 and update engines/versions.json.`,
     );
   }
-  // Confirmed patterns are filled in during T-002, e.g.:
-  //   camoufox: https://github.com/daijro/camoufox/releases/download/v<version>/camoufox-<version>-<os>.<ext>
+  // Confirmed patterns are filled in when the self-hosted interim engine is wired, e.g.:
+  //   ungoogled-chromium: https://github.com/.../releases/download/<version>/ungoogled-chromium_<version>_<os>.<ext>
   throw new Error(
     `[engines] asset URL resolver for ${engine} on ${platform}/${arch} is pending T-002.`,
   );
@@ -40,7 +40,7 @@ async function main() {
   const plat = detectPlatform();
   await mkdir(BIN, { recursive: true });
 
-  for (const engine of ['camoufox', 'ungoogled-chromium']) {
+  for (const engine of ['ungoogled-chromium']) {
     const spec = versions[engine];
     const version = spec?.version ?? 'unknown';
     process.stdout.write(`\n=== ${engine} @ ${version} (${plat.platform}/${plat.arch}) ===\n`);

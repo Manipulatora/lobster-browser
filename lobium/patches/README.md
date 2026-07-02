@@ -1,4 +1,4 @@
-# Lobster Kernel patch series
+# Lobium patch series
 
 Quilt-style patch series (the ungoogled-chromium model) applied on top of the pinned Chromium ref.
 `series` lists patch files in apply order. Group by domain, e.g.:

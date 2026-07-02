@@ -35,13 +35,13 @@ Both agents write tests. Every PR is cross-reviewed by the **other** agent.
 3. `npm run typecheck`, `npm run lint`, `npm run build` green for every affected package (and `cargo build`/`clippy`/`fmt` for `apps/desktop`).
 4. Anything touching a fingerprint surface or engine: **fingerprint validation gate green** (see [`ci/`](../ci/) and `MASTER_PLAN.md` §5–§6).
 5. Cross-reviewed and approved by the other agent (Claude blocking on P0/security/engine).
-6. No secrets committed. The Lobster Kernel is a parallel track (MASTER_PLAN §10 Track F) — protect the v1 product milestone; the product stays usable on interim engines throughout.
+6. No secrets committed. Lobium is a parallel track (MASTER_PLAN §10 Track F) — protect the v1 product milestone; the product stays usable on the interim Chromium throughout.
 
 ## 5. Working rules
 
-- **Import freely.** Lobster ships open source, so fork/import/adapt any OSS that helps (patchright, fingerprint-suite, Camoufox, ungoogled-chromium, mitmproxy; reference from Donut/others). Keep attribution files.
-- **Own the kernel & the UI.** The engine is our own **Lobster Kernel** (Donut = reference only); the UI/UX is our own **design system**.
-- **Deep surfaces (Canvas/WebGL/Audio/TLS) go through the native engine; JS-safe surfaces go through clean CDP** via patchright isolated contexts. Never enable global `Runtime`/`Console`. Never spoof deep surfaces from JS.
+- **Import freely.** Lobster ships open source, so fork/import/adapt any OSS that helps (patchright, fingerprint-suite, ungoogled-chromium, mitmproxy; reference from Donut/others). Keep attribution files.
+- **Own Lobium & the UI.** The engine is our own **Lobium** build (Donut = reference only); the UI/UX is our own **design system**.
+- **Deep surfaces (Canvas/WebGL/Audio/TLS) are handled natively by Lobium; JS-safe surfaces go through clean CDP** via patchright isolated contexts. Never enable global `Runtime`/`Console`. Never spoof deep surfaces from JS.
 - Fingerprints are **per-profile stable, coherent, and derived from proxy geo**.
 - **No secrets in the repo.** Use env / secret store; the CI secret-scan will fail the build otherwise.
 - **Respect the contracts.** The wire formats in [`docs/contracts/`](contracts/) and the types in

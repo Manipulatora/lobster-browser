@@ -5,16 +5,16 @@ import type { LaunchContext, LaunchHandle, LauncherRegistry } from './types.js';
 export class EngineNotProvisionedError extends Error {
   constructor(engine: string) {
     super(
-      `engine "${engine}" is not provisioned — run engines/download-engines.mjs (interim engines) ` +
-        `or build the Lobster Kernel, then register a real launcher (T-002c).`,
+      `engine "${engine}" is not provisioned — run engines/download-engines.mjs (interim Chromium) ` +
+        `or build Lobium, then register a real launcher.`,
     );
     this.name = 'EngineNotProvisionedError';
   }
 }
 
 /**
- * Default launchers. The real adapters (patchright for chromium/kernel, camoufox-js for camoufox)
- * are wired in once engine binaries are available; until then they fail with a clear, actionable
+ * Default launchers. The real adapter (patchright driving a patched Chromium) is wired in by
+ * {@link buildLaunchers} once a browser is installed; until then these fail with a clear, actionable
  * error rather than pretending to launch. The CompositeRunner is fully exercised in tests by
  * injecting fake launchers instead.
  */
@@ -24,9 +24,8 @@ const notProvisioned =
     Promise.reject(new EngineNotProvisionedError(engine));
 
 export const defaultLaunchers: LauncherRegistry = {
-  kernel: notProvisioned('kernel'),
+  lobium: notProvisioned('lobium'),
   chromium: notProvisioned('chromium'),
-  camoufox: notProvisioned('camoufox'),
 };
 
 export interface BuildLaunchersOptions {
@@ -37,17 +36,15 @@ export interface BuildLaunchersOptions {
 
 /**
  * Build the live launcher registry. When a patched Chromium is installed (via
- * `patchright install chromium`), the `chromium` and interim `kernel` engines get the real
- * patchright launcher; otherwise they report "engine not provisioned". Camoufox is wired in a
- * later ticket. This is what the sidecar uses at startup.
+ * `patchright install chromium`), both `chromium` and `lobium` get the real patchright launcher;
+ * otherwise they report "engine not provisioned". This is what the sidecar uses at startup.
  */
 export async function buildLaunchers(opts: BuildLaunchersOptions = {}): Promise<LauncherRegistry> {
   const chromiumReady = await isChromiumAvailable();
   return {
-    // The Lobster Kernel is the flagship Chromium build; until it exists, the patched interim
-    // Chromium serves `kernel` launches too.
-    kernel: chromiumReady ? createPatchrightLauncher(opts) : notProvisioned('kernel'),
+    // Lobium is the flagship custom Chromium build; until it ships, the patched interim Chromium
+    // serves `lobium` launches too.
+    lobium: chromiumReady ? createPatchrightLauncher(opts) : notProvisioned('lobium'),
     chromium: chromiumReady ? createPatchrightLauncher(opts) : notProvisioned('chromium'),
-    camoufox: notProvisioned('camoufox'),
   };
 }

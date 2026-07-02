@@ -117,16 +117,14 @@ export function ProfilesView(): JSX.Element {
     <div className="profiles-view">
       <div className="view-toolbar">
         <div className="view-toolbar__meta">
-          <span className="count">{profiles.length} profile{profiles.length === 1 ? '' : 's'}</span>
+          <span className="count">
+            {profiles.length} profile{profiles.length === 1 ? '' : 's'}
+          </span>
           {!isDesktopRuntime() ? (
             <span className="pill pill--muted">mock data (browser dev)</span>
           ) : null}
         </div>
-        <button
-          type="button"
-          className="btn btn--primary"
-          onClick={() => setShowForm((v) => !v)}
-        >
+        <button type="button" className="btn btn--primary" onClick={() => setShowForm((v) => !v)}>
           {showForm ? 'Close' : '+ New profile'}
         </button>
       </div>
@@ -137,9 +135,7 @@ export function ProfilesView(): JSX.Element {
         </p>
       ) : null}
 
-      {error ? (
-        <p className="notice notice--error">Could not load profiles: {error}</p>
-      ) : null}
+      {error ? <p className="notice notice--error">Could not load profiles: {error}</p> : null}
 
       {showForm ? (
         <NewProfileForm onCreate={handleCreate} onCancel={() => setShowForm(false)} />

@@ -11,16 +11,12 @@ import type {
 import { hashStringToUint32, mulberry32 } from './prng.js';
 import { languagesToAcceptLanguage, validateFingerprintCoherence } from './coherence.js';
 
-/** The browsers the Apify generator understands that we map our engines onto. */
-export type BrowserName = 'chrome' | 'firefox';
-
 /**
  * How many fingerprints we draw from the generator's real-device distribution per derive.
  * The Bayesian network occasionally emits an internally-incoherent sample (e.g. a macOS UA
  * with a "Linux x86_64" platform), so we generate a small seeded pool and deterministically
  * take the first coherent one. Empirically a pool of 24 already yields a coherent candidate
- * for 100% of seeds across every OS/engine; 32 leaves comfortable margin. Draws are cheap
- * (~1ms each) and the loop almost always exits on the first or second candidate.
+ * for 100% of seeds across every OS; 32 leaves comfortable margin.
  */
 const CANDIDATE_POOL_SIZE = 32;
 
@@ -54,47 +50,28 @@ function withSeededMathRandom<T>(seed: string, fn: () => T): T {
   }
 }
 
-/** Extract the Firefox version (e.g. "133.0") from its User-Agent; "" if absent. */
-function firefoxVersionFromUserAgent(userAgent: string): string {
-  return /Firefox\/([\d.]+)/.exec(userAgent)?.[1] ?? '';
-}
-
-/** Map one raw generator fingerprint into our stable `Fingerprint` wire shape. */
-function toFingerprint(
-  raw: GeneratedFingerprint,
-  os: OsFamily,
-  browser: BrowserName,
-  arch: CpuArch,
-): Fingerprint {
+/** Map one raw generator fingerprint into our stable `Fingerprint` wire shape (Chrome only). */
+function toFingerprint(raw: GeneratedFingerprint, os: OsFamily, arch: CpuArch): Fingerprint {
   const nav = raw.navigator;
   const languages = nav.languages.length > 0 ? [...nav.languages] : ['en-US'];
   const primaryLocale = languages[0] ?? 'en-US';
 
-  // Firefox emits `userAgentData: null` at runtime (Client Hints are Chromium-only), despite
-  // the library typing it as always-present — hence the runtime `uad` guard below.
+  // Both engines are Chromium-based, so User-Agent Client Hints are always present. Guard defensively
+  // (the library types `userAgentData` as non-null but can emit null for non-Chromium samples).
   const uad = nav.userAgentData;
-  const isChrome = browser === 'chrome';
-
-  const uaBrands: NavigatorFingerprint['uaBrands'] =
-    isChrome && uad ? uad.brands.map((b) => ({ brand: b.brand, version: b.version })) : [];
-  const uaFullVersion =
-    isChrome && uad ? uad.uaFullVersion : firefoxVersionFromUserAgent(nav.userAgent);
-  const uaPlatformVersion = isChrome && uad ? uad.platformVersion : '';
-  const uaMobile = isChrome && uad ? uad.mobile : false;
 
   const navigator: NavigatorFingerprint = {
     userAgent: nav.userAgent,
     platform: nav.platform,
     languages,
     hardwareConcurrency: nav.hardwareConcurrency,
-    // Firefox does not expose navigator.deviceMemory; default to a common value.
     deviceMemory: nav.deviceMemory ?? 8,
     maxTouchPoints: nav.maxTouchPoints ?? 0,
-    uaBrands,
+    uaBrands: uad ? uad.brands.map((b) => ({ brand: b.brand, version: b.version })) : [],
     uaPlatform: OS_TO_UA_PLATFORM[os],
-    uaPlatformVersion,
-    uaMobile,
-    uaFullVersion,
+    uaPlatformVersion: uad ? uad.platformVersion : '',
+    uaMobile: uad ? uad.mobile : false,
+    uaFullVersion: uad ? uad.uaFullVersion : '',
   };
 
   const screen: ScreenFingerprint = {
@@ -106,8 +83,8 @@ function toFingerprint(
     devicePixelRatio: raw.screen.devicePixelRatio,
   };
 
-  // The generator exposes a single vendor/renderer pair; the masked and unmasked WebGL
-  // strings are the same real GPU (the engine layer owns any further masking).
+  // The generator exposes a single vendor/renderer pair; the masked and unmasked WebGL strings are
+  // the same real GPU (the engine layer owns any further masking).
   const webgl: WebGlFingerprint = {
     vendor: raw.videoCard.vendor,
     renderer: raw.videoCard.renderer,
@@ -142,52 +119,42 @@ const MIN_DESKTOP_SCREEN_WIDTH = 1024;
 const MIN_DESKTOP_SCREEN_HEIGHT = 600;
 
 /**
- * A candidate is usable only if it is fully coherent, describes a realistic desktop screen, AND
- * matches the engine's brand contract: Chromium engines (kernel/chromium) must advertise
- * Sec-CH-UA brands and a full version, while Firefox (camoufox) must advertise none.
+ * A candidate is usable only if it is fully coherent, describes a realistic desktop screen, exposes
+ * fonts, and advertises the Chromium Sec-CH-UA brand contract (non-empty brands + full version).
  * `validateFingerprintCoherence` is engine-agnostic, so the brand contract is enforced here.
  */
-function isSelectable(fp: Fingerprint, browser: BrowserName): boolean {
+function isSelectable(fp: Fingerprint): boolean {
   if (validateFingerprintCoherence(fp).length !== 0) {
     return false;
   }
   if (fp.screen.width < MIN_DESKTOP_SCREEN_WIDTH || fp.screen.height < MIN_DESKTOP_SCREEN_HEIGHT) {
     return false;
   }
-  // A real device always exposes fonts; the generator occasionally emits an empty list.
   if (fp.fonts.length === 0) {
     return false;
   }
-  if (browser === 'chrome') {
-    return fp.navigator.uaBrands.length > 0 && fp.navigator.uaFullVersion.length > 0;
-  }
-  return fp.navigator.uaBrands.length === 0;
+  return fp.navigator.uaBrands.length > 0 && fp.navigator.uaFullVersion.length > 0;
 }
 
 /**
- * Deterministically derive a real-device fingerprint from `seed` using the Apify generator.
- * Returns the first coherent+selectable candidate from a seeded pool, or `null` if the whole
- * pool is unusable (astronomically unlikely) so the caller can fall back to the built-in pools.
+ * Deterministically derive a real-device (Chrome) fingerprint from `seed` using the Apify
+ * generator. Returns the first coherent+selectable candidate from a seeded pool, or `null` if the
+ * whole pool is unusable (astronomically unlikely) so the caller can fall back to the built-in pools.
  *
  * OsFamily values ('windows' | 'macos' | 'linux') are exactly the generator's operatingSystems
  * tokens, so `os` is passed through directly; devices are 'desktop' for now.
  */
-export function generateFingerprint(
-  seed: string,
-  os: OsFamily,
-  browser: BrowserName,
-  arch: CpuArch,
-): Fingerprint | null {
+export function generateFingerprint(seed: string, os: OsFamily, arch: CpuArch): Fingerprint | null {
   return withSeededMathRandom(seed, () => {
     for (let i = 0; i < CANDIDATE_POOL_SIZE; i++) {
       const raw = generator.getFingerprint({
         operatingSystems: [os],
-        browsers: [browser],
+        browsers: ['chrome'],
         devices: ['desktop'],
         locales: ['en-US'],
       }).fingerprint;
-      const fp = toFingerprint(raw, os, browser, arch);
-      if (isSelectable(fp, browser)) {
+      const fp = toFingerprint(raw, os, arch);
+      if (isSelectable(fp)) {
         return fp;
       }
     }

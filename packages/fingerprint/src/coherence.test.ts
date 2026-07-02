@@ -24,7 +24,7 @@ test('applyGeoToFingerprint aligns timezone/locale/languages with the proxy geo'
 });
 
 test('unknown country keeps a coherent fallback locale and applies the timezone', () => {
-  const fp = deriveFingerprint('seed-xx', { os: 'linux', engine: 'camoufox' });
+  const fp = deriveFingerprint('seed-xx', { os: 'linux', engine: 'lobium' });
   const geo: GeoInfo = { ip: '9.9.9.9', countryCode: 'ZZ', timezone: 'Etc/UTC' };
   const out = applyGeoToFingerprint(fp, geo);
 

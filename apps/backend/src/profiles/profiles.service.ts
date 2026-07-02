@@ -92,7 +92,11 @@ export class ProfilesService {
     return updated;
   }
 
-  async remove(userId: string, id: string, teamId?: string): Promise<{ id: string; deleted: true }> {
+  async remove(
+    userId: string,
+    id: string,
+    teamId?: string,
+  ): Promise<{ id: string; deleted: true }> {
     const ownerTeamId = await this.resolveTeamId(userId, teamId);
     const deleted = await this.profiles.remove(ownerTeamId, id);
     if (!deleted) {

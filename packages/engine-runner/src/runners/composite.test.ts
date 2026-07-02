@@ -55,7 +55,7 @@ function fakeRegistry(recorded: LaunchContext[]): LauncherRegistry {
         close: () => Promise.resolve(),
       };
     };
-  return { kernel: make(), chromium: make(), camoufox: make() };
+  return { lobium: make(), chromium: make() };
 }
 
 test('launch prepares coherent options + returns endpoints from the launcher', async () => {
@@ -85,7 +85,7 @@ test('single-active-instance: launching the same profile twice throws', async ()
 test('status lists running instances; stop removes them', async () => {
   const runner = new CompositeRunner(fakeRegistry([]));
   await runner.launch(params('a'));
-  await runner.launch(params('b', 'camoufox'));
+  await runner.launch(params('b', 'lobium'));
 
   let status = await runner.status({});
   assert.equal(status.running.length, 2);
@@ -108,5 +108,5 @@ test('unknown engine (no launcher registered) throws', async () => {
 
 test('default launchers report engine-not-provisioned (no binaries here)', async () => {
   const runner = new CompositeRunner(defaultLaunchers);
-  await assert.rejects(() => runner.launch(params('np', 'kernel')), /not provisioned/);
+  await assert.rejects(() => runner.launch(params('np', 'lobium')), /not provisioned/);
 });

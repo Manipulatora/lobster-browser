@@ -24,8 +24,8 @@ against them, scrape the scores, and expose a pass/fail result that CI can enfor
 
 ## Acceptance criteria
 
-- `node ci/validation/run.mjs --engine camoufox` produces a JSON report with a CreepJS trust score and
-  a Sannysoft matrix, and a `pass`/`fail` verdict.
+- `node ci/validation/run.mjs --engine chromium` (or `--engine lobium`) produces a JSON report with a
+  CreepJS trust score and a Sannysoft matrix, and a `pass`/`fail` verdict.
 - Runs headful under Xvfb on Linux CI with a real GPU where available (document the SwiftShader caveat).
 
 ## Test requirements

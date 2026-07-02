@@ -6,7 +6,7 @@ import { deriveFingerprint } from './derive.js';
 import { generateSeed } from './seed.js';
 
 const OSES: OsFamily[] = ['windows', 'macos', 'linux'];
-const ENGINES: EngineKind[] = ['kernel', 'chromium', 'camoufox'];
+const ENGINES: EngineKind[] = ['lobium', 'chromium'];
 
 test('deriveFingerprint is deterministic across 50 seeds x OS x engine', () => {
   for (let i = 0; i < 50; i++) {
@@ -43,20 +43,16 @@ test('generated fingerprints are internally coherent across 50 seeds x OS x engi
   }
 });
 
-test('kernel + chromium present Chrome UA & Sec-CH-UA brands; camoufox presents Firefox & none', () => {
+test('every engine presents a Chrome UA + Sec-CH-UA brands (both engines are Chromium-based)', () => {
   for (let i = 0; i < 25; i++) {
     const seed = generateSeed();
     for (const os of OSES) {
-      const kernel = deriveFingerprint(seed, { os, engine: 'kernel' });
-      const chromium = deriveFingerprint(seed, { os, engine: 'chromium' });
-      const camoufox = deriveFingerprint(seed, { os, engine: 'camoufox' });
-
-      assert.match(kernel.navigator.userAgent, /Chrome\//, `kernel UA ${os} seed=${seed}`);
-      assert.ok(kernel.navigator.uaBrands.length > 0, `kernel brands ${os} seed=${seed}`);
-      assert.match(chromium.navigator.userAgent, /Chrome\//, `chromium UA ${os} seed=${seed}`);
-      assert.ok(chromium.navigator.uaBrands.length > 0, `chromium brands ${os} seed=${seed}`);
-      assert.match(camoufox.navigator.userAgent, /Firefox\//, `camoufox UA ${os} seed=${seed}`);
-      assert.equal(camoufox.navigator.uaBrands.length, 0, `camoufox brands ${os} seed=${seed}`);
+      for (const engine of ENGINES) {
+        const fp = deriveFingerprint(seed, { os, engine });
+        assert.match(fp.navigator.userAgent, /Chrome\//, `${engine} UA ${os} seed=${seed}`);
+        assert.ok(fp.navigator.uaBrands.length > 0, `${engine} brands ${os} seed=${seed}`);
+        assert.ok(fp.navigator.uaFullVersion.length > 0, `${engine} version ${os} seed=${seed}`);
+      }
     }
   }
 });
@@ -71,7 +67,6 @@ test('derives real-device data (rich fonts, real GPU, plausible screen) from the
       assert.ok(fp.webgl.renderer.length > 0, `webgl renderer empty ${os} seed=${seed}`);
       assert.ok(fp.webgl.vendor.length > 0, `webgl vendor empty ${os} seed=${seed}`);
       assert.equal(fp.webgl.unmaskedRenderer, fp.webgl.renderer);
-      // Plausible desktop screen; also guards against the generator's 800x600 placeholder.
       assert.ok(fp.screen.width >= 1024, `screen width ${fp.screen.width} ${os} seed=${seed}`);
       assert.ok(fp.screen.height >= 600, `screen height ${fp.screen.height} ${os} seed=${seed}`);
       assert.ok(fp.screen.availWidth <= fp.screen.width);

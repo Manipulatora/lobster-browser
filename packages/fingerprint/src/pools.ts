@@ -123,4 +123,3 @@ export const DEVICE_TEMPLATES: Record<OsFamily, DeviceTemplate> = {
 };
 
 export const CHROME_VERSIONS = ['131.0.0.0', '130.0.0.0'] as const;
-export const FIREFOX_VERSIONS = ['133.0', '132.0'] as const;

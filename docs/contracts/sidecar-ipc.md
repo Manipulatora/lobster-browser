@@ -35,7 +35,7 @@ the source of truth; this doc is the human-readable spec.
   ```jsonc
   {
     "profileId": "string",
-    "engine": "chromium" | "camoufox",
+    "engine": "lobium" | "chromium",
     "userDataDir": "/abs/path/to/profile",   // persistent per-profile dir
     "fingerprint": { /* fully-resolved coherent Fingerprint (post-geo) */ },
     "proxy": { "type": "http|https|socks5", "host": "...", "port": 8080, "username?": "", "password?": "" },
@@ -47,8 +47,9 @@ the source of truth; this doc is the human-readable spec.
   { "profileId": "string", "pid": 12345, "ws": "ws://127.0.0.1:PORT/devtools/browser/...", "debuggerAddress": "127.0.0.1:PORT" }
   ```
 - Behavior: launch the engine with the per-profile `userDataDir` + proxy; apply the **JS-safe**
-  fingerprint surfaces via patchright isolated init scripts (Chromium) or Camoufox config; deep
-  surfaces are native. Return the CDP endpoints. Enforce single-active-instance per `profileId`.
+  fingerprint surfaces via patchright isolated init scripts; deep surfaces are native on **Lobium**
+  (best-effort on the interim Chromium until Lobium ships). Return the CDP endpoints. Enforce
+  single-active-instance per `profileId`.
 
 ### `stop`
 - params (`StopParams`): `{ "profileId": "string" }` → result: `{}` (ok). Gracefully close the engine.
@@ -65,5 +66,5 @@ the source of truth; this doc is the human-readable spec.
 ## Notes
 
 - Day 0 ships the loop + `ping`; `launch`/`stop`/`status` return `not implemented` until Day 1.
-- The sidecar language is an implementation detail behind this contract — the Python Camoufox
-  fallback speaks the exact same protocol.
+- Both engines speak this one contract: `chromium` is the interim prebuilt engine; `lobium` is our
+  flagship custom build (served by a patched Chromium via patchright until the native build ships).

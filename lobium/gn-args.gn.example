@@ -1,4 +1,4 @@
-# Example GN build args for the Lobster Kernel. Tune in T-010.
+# Example GN build args for Lobium. Tune in T-010.
 is_debug = false
 is_official_build = true
 symbol_level = 0

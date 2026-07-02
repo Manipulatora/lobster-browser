@@ -12,7 +12,7 @@ export interface PersistentLaunchOptions {
 /**
  * Build the persistent-context launch options for an engine launch. Pure & deterministic so it can
  * be unit-tested without a real browser. The live runner (T-002b) passes the result to
- * patchright/camoufox `launchPersistentContext`.
+ * patchright `launchPersistentContext`.
  */
 export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOptions {
   const { fingerprint } = params;
@@ -46,7 +46,7 @@ export interface UserAgentMetadata {
 /**
  * JS-safe emulation applied via CDP. Deliberately limited to value-substitution surfaces
  * (UA/UA-CH, timezone, locale, geolocation). It NEVER includes canvas/WebGL/audio/TLS — those deep
- * surfaces are handled natively by the engine (Camoufox / Lobster Kernel).
+ * surfaces are handled natively by Lobium (best-effort on the interim Chromium).
  */
 export interface CdpEmulation {
   userAgent: string;

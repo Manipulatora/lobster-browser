@@ -2,9 +2,8 @@ import type { EngineKind, OsFamily, ProfileStatus } from '@lobster/shared-types'
 
 /** Selectable engines with human labels, shared by the create form and fingerprint editor. */
 export const ENGINE_OPTIONS: ReadonlyArray<{ value: EngineKind; label: string }> = [
-  { value: 'kernel', label: 'Kernel (Lobster Chromium)' },
+  { value: 'lobium', label: 'Lobium (custom Chromium)' },
   { value: 'chromium', label: 'Chromium (ungoogled)' },
-  { value: 'camoufox', label: 'Camoufox (high-stealth)' },
 ];
 
 /** Selectable OS families with human labels. */

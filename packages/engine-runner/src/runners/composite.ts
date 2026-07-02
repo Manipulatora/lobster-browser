@@ -16,7 +16,7 @@ import type { LaunchContext, LaunchHandle, LauncherRegistry } from './types.js';
  * launcher, and tracks running instances (single-active-instance per profile).
  *
  * The launcher registry is injected, so this orchestration is fully unit-tested with a fake; the
- * real patchright/camoufox adapters (which need engine binaries) drop in via {@link defaultLaunchers}.
+ * real patchright adapter (which needs a browser binary) drops in via {@link defaultLaunchers}.
  */
 export class CompositeRunner implements EngineRunner {
   private readonly launchers: LauncherRegistry;

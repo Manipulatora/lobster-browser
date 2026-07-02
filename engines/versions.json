@@ -1,12 +1,7 @@
 {
-  "//": "Pinned engine versions. Engines are downloaded on first run into engines/bin/ and are NEVER committed. Confirm exact version strings, asset names, and sha256 hashes in the engine-integration ticket (T-002) before relying on them.",
-  "camoufox": {
-    "version": "CONFIRM_IN_T-002",
-    "repo": "daijro/camoufox",
-    "note": "High-Stealth engine (native-patched Firefox). Pin a specific release; vendor/cache the binary + fonts. Rebrand before redistribution."
-  },
+  "//": "Pinned interim-engine versions. The interim Chromium is currently provisioned via `patchright install chromium`; ungoogled-chromium is here for a future self-hosted interim. Engines are downloaded into engines/bin/ and are NEVER committed. Lobium is BUILT from source (see /lobium), never downloaded.",
   "ungoogled-chromium": {
-    "version": "CONFIRM_IN_T-002",
-    "note": "Default engine base (clean, permissive). Driven via patchright. Strip Chromium/Google branding before distribution."
+    "version": "CONFIRM_LATER",
+    "note": "Interim engine base (clean, permissive). Driven via patchright. Strip Chromium/Google branding before distribution."
   }
 }

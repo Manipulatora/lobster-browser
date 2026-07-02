@@ -287,7 +287,7 @@ mod tests {
         let created = create(&conn, input("C")).unwrap();
         let patch = UpdateProfilePatch {
             name: None,
-            engine: Some("kernel".to_string()),
+            engine: Some("lobium".to_string()),
             os: Some("macos".to_string()),
             fingerprint_overrides: Some(
                 serde_json::json!({ "locale": { "timezone": "Europe/Berlin" } }),
@@ -298,7 +298,7 @@ mod tests {
             notes: None,
         };
         let updated = update(&conn, &created.id, patch).unwrap().unwrap();
-        assert_eq!(updated.engine, "kernel");
+        assert_eq!(updated.engine, "lobium");
         assert_eq!(updated.os, "macos");
         assert!(updated.fingerprint_overrides.is_some());
         assert_eq!(

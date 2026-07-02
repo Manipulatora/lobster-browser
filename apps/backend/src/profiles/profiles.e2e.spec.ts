@@ -66,11 +66,7 @@ test('create -> list -> get -> update -> delete, all team-scoped with a unique s
   const profile = create.body.data;
   assert.equal(profile.name, 'Profile A');
   assert.ok(profile.ownerTeamId, 'profile must be scoped to a team');
-  assert.match(
-    profile.fingerprintSeed,
-    /^[0-9a-f]{32}$/,
-    'seed must be a fresh 128-bit hex value',
-  );
+  assert.match(profile.fingerprintSeed, /^[0-9a-f]{32}$/, 'seed must be a fresh 128-bit hex value');
 
   // a second profile must get a DIFFERENT seed (never a constant)
   const create2 = await request(app.getHttpServer())
@@ -115,7 +111,7 @@ test('create -> list -> get -> update -> delete, all team-scoped with a unique s
   assert.equal(missing.status, 404);
 });
 
-test('profiles are isolated per team: one user never sees another user\'s profiles', async () => {
+test("profiles are isolated per team: one user never sees another user's profiles", async () => {
   const tokenA = await registerToken('isolation-a@example.com');
   const tokenB = await registerToken('isolation-b@example.com');
 
@@ -131,15 +127,15 @@ test('profiles are isolated per team: one user never sees another user\'s profil
   assert.equal(listB.body.data.length, 0, "user B must not see user A's profiles");
 });
 
-test('create accepts the kernel engine (no longer a contract-drift 400)', async () => {
-  const token = await registerToken('profiles-kernel@example.com');
+test('create accepts the lobium engine (no longer a contract-drift 400)', async () => {
+  const token = await registerToken('profiles-lobium@example.com');
   const res = await request(app.getHttpServer())
     .post('/profiles')
     .set({ Authorization: `Bearer ${token}` })
-    .send({ name: 'Kernel Profile', engine: 'kernel', os: 'linux' });
+    .send({ name: 'Lobium Profile', engine: 'lobium', os: 'linux' });
   assert.ok([200, 201].includes(res.status), `create status ${res.status}`);
   assert.equal(res.body.code, 0);
-  assert.equal(res.body.data.engine, 'kernel');
+  assert.equal(res.body.data.engine, 'lobium');
 });
 
 test('update can edit engine, os, and fingerprintOverrides and they persist', async () => {
@@ -158,9 +154,9 @@ test('update can edit engine, os, and fingerprintOverrides and they persist', as
   const update = await request(app.getHttpServer())
     .patch(`/profiles/${id}`)
     .set(auth)
-    .send({ engine: 'kernel', os: 'macos', fingerprintOverrides: overrides });
+    .send({ engine: 'lobium', os: 'macos', fingerprintOverrides: overrides });
   assert.equal(update.status, 200);
-  assert.equal(update.body.data.engine, 'kernel');
+  assert.equal(update.body.data.engine, 'lobium');
   assert.equal(update.body.data.os, 'macos');
   assert.deepEqual(update.body.data.fingerprintOverrides, overrides);
   // Identity is immutable via update: the seed is untouched.
@@ -169,7 +165,7 @@ test('update can edit engine, os, and fingerprintOverrides and they persist', as
   // Re-read to prove the edits were persisted, not just echoed back.
   const getOne = await request(app.getHttpServer()).get(`/profiles/${id}`).set(auth);
   assert.equal(getOne.status, 200);
-  assert.equal(getOne.body.data.engine, 'kernel');
+  assert.equal(getOne.body.data.engine, 'lobium');
   assert.equal(getOne.body.data.os, 'macos');
   assert.deepEqual(getOne.body.data.fingerprintOverrides, overrides);
 

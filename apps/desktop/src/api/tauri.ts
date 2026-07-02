@@ -115,8 +115,8 @@ function seedMockStore(): void {
       tags: ['retail', 'us'],
       folder: 'Shopping',
     },
-    { name: 'EU Social — Stealth', engine: 'camoufox', os: 'macos', tags: ['social', 'eu'] },
-    { name: 'Kernel QA', engine: 'kernel', os: 'linux', tags: ['qa'], folder: 'Internal' },
+    { name: 'EU Social — Lobium', engine: 'lobium', os: 'macos', tags: ['social', 'eu'] },
+    { name: 'Lobium QA', engine: 'lobium', os: 'linux', tags: ['qa'], folder: 'Internal' },
   ];
   for (const sample of samples) {
     const profile = buildProfile(sample);

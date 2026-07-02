@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Node/TS sidecar: launches and controls Camoufox + Chromium engines for the Rust desktop core.",
+  "description": "Node/TS sidecar: launches and controls the Lobium + Chromium engines for the Rust desktop core.",
   "bin": {
     "lobster-engine-runner": "./dist/index.js"
   },

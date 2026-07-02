@@ -1,11 +1,15 @@
 # Engines
 
-Lobster orchestrates two **pinned, prebuilt** browser engines. They are large and are **never
-committed** — `download-engines.mjs` fetches them into `engines/bin/` on first run (git-ignored).
+Lobster runs on two engines: the flagship **Lobium** (our own Chromium build) and an interim
+**Chromium**. Only the interim Chromium is downloaded here — **Lobium is BUILT from source** (see
+[`../lobium/`](../lobium/)), never fetched. Until the native Lobium build ships, `lobium` is served by
+this same prebuilt Chromium (patched, via patchright).
 
-- **Camoufox** — High-Stealth engine (native-patched Firefox). Recommended for the hardest anti-bot
-  targets; genuine Gecko network + render stack.
-- **ungoogled-chromium** — the default engine base, driven via patchright.
+The interim engine is large and is **never committed** — `download-engines.mjs` fetches it into
+`engines/bin/` on first run (git-ignored).
+
+- **ungoogled-chromium** — the interim/everyday engine: a pinned, prebuilt Chromium driven via
+  patchright.
 
 ## Usage
 

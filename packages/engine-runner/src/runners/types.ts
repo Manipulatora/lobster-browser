@@ -21,8 +21,8 @@ export interface LaunchHandle {
 }
 
 /**
- * Launches one engine family. The real implementations wrap patchright (chromium/kernel) and
- * camoufox-js (camoufox); they are injected so the orchestration is fully testable with a fake.
+ * Launches one engine family. The real implementation wraps patchright driving a patched Chromium
+ * (chromium/lobium); it is injected so the orchestration is fully testable with a fake.
  */
 export type Launcher = (ctx: LaunchContext) => Promise<LaunchHandle>;
 
