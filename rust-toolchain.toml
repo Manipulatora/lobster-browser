@@ -1,6 +1,7 @@
 # Pinned Rust toolchain for the Lobster desktop agent (Tauri 2).
-# Tauri 2 requires Rust >= 1.77. Pinned for reproducible builds across agents/CI.
+# Pinned to current stable for reproducible builds. Must be >= 1.85 (some transitive deps, e.g.
+# `time`, require the edition2024 feature stabilized in 1.85).
 [toolchain]
-channel = "1.83.0"
+channel = "1.96.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

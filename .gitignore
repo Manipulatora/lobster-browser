@@ -8,8 +8,11 @@ dist/
 build/
 out/
 *.tsbuildinfo
-target/            # Rust
+# Rust
+target/
 apps/desktop/src-tauri/target/
+# Tauri-generated schemas/capabilities
+apps/desktop/src-tauri/gen/
 apps/desktop/dist/
 
 # Engines (downloaded on first run, never committed)
@@ -30,9 +33,11 @@ engines/cache/
 *.key
 secrets/
 
-# Local data / profiles
+# Local runtime data (desktop stores profiles under the OS app-data dir / .lobster).
+# NOTE: do NOT add a bare `profiles/` here — it would ignore source dirs like
+# apps/backend/src/profiles and apps/desktop/src/features/profiles.
 .lobster/
-profiles/
+/profiles/
 *.sqlite
 *.sqlite-*
 *.db

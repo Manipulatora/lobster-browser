@@ -3,6 +3,9 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { InMemoryTeamsRepository } from '../teams/in-memory-teams.repository';
+import { PrismaTeamsRepository } from '../teams/prisma-teams.repository';
+import { TEAMS_REPOSITORY } from '../teams/teams.repository';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { InMemoryUsersRepository } from './in-memory-users.repository';
@@ -27,8 +30,12 @@ import { USERS_REPOSITORY } from './users.repository';
   providers: [
     AuthService,
     JwtAuthGuard,
-    // The real data layer: persist to Postgres (PrismaUsersRepository) when DATABASE_URL is set;
+    // The real data layer: persist to Postgres (Prisma*Repository) when DATABASE_URL is set;
     // otherwise fall back to the in-memory store for local dev / tests (no DB required to boot).
+    //
+    // Users AND teams live here (and are exported) so they are single shared singletons: the
+    // personal team AuthService creates at register time is the SAME store TeamsModule and
+    // ProfilesModule read from.
     {
       provide: USERS_REPOSITORY,
       inject: [ConfigService, PrismaService],
@@ -37,7 +44,17 @@ import { USERS_REPOSITORY } from './users.repository';
           ? new PrismaUsersRepository(prisma)
           : new InMemoryUsersRepository(),
     },
+    {
+      provide: TEAMS_REPOSITORY,
+      inject: [ConfigService, PrismaService],
+      useFactory: (config: ConfigService, prisma: PrismaService) =>
+        config.get<string>('DATABASE_URL')
+          ? new PrismaTeamsRepository(prisma)
+          : new InMemoryTeamsRepository(),
+    },
   ],
-  exports: [AuthService, JwtAuthGuard],
+  // Re-export JwtModule so modules that import AuthModule to reuse JwtAuthGuard (Teams, Profiles)
+  // can resolve the guard's JwtService dependency in their own context.
+  exports: [AuthService, JwtAuthGuard, JwtModule, USERS_REPOSITORY, TEAMS_REPOSITORY],
 })
 export class AuthModule {}

@@ -27,6 +27,7 @@
   },
   "dependencies": {
     "@lobster/proxy": "*",
-    "@lobster/shared-types": "*"
+    "@lobster/shared-types": "*",
+    "patchright": "^1.61.1"
   }
 }

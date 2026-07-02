@@ -49,7 +49,7 @@ tests/                e2e / integration / detector validation suite
 |------|---------|---------|
 | Node | `>=22 <25` (see `.nvmrc`) | all TS packages, backend, sidecar |
 | npm | `>=10` | workspace manager |
-| Rust | `1.83.0` (see `rust-toolchain.toml`) | desktop agent (Tauri) — install via `rustup` |
+| Rust | pinned in `rust-toolchain.toml` (currently `1.96.1`) | desktop agent (Tauri) — install via `rustup` |
 | Python | `3.12` | Camoufox fallback sidecar only |
 
 > The Rust toolchain is **not** required to work on the TS packages/backend/sidecar. Install it

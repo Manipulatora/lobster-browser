@@ -1,13 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
 import { useEffect, useState } from 'react';
 
-import type { Profile } from '@lobster/shared-types';
+import { isDesktopRuntime } from './api/tauri';
+import { ProfilesView } from './features/profiles/ProfilesView';
 
 /**
- * Day 0 dashboard shell. This is the structural skeleton only — each section (Profiles grid,
- * Proxy manager, Automation/local-API panel, Team sharing, Settings) is fleshed out on later
- * days (see docs/MASTER_PLAN.md). For now the main pane proves the React <-> Rust bridge works
- * by reading the app version through a Tauri command.
+ * Dashboard shell. The sidebar switches between top-level sections; the Profiles section is
+ * live (list + fingerprint editor, see src/features/profiles). The remaining sections are
+ * scaffolding fleshed out on later days (see docs/MASTER_PLAN.md). In a plain dev browser the
+ * UI runs against an in-memory mock (see src/api/tauri.ts); inside Tauri it uses the Rust core.
  */
 
 // Sidebar sections. `key` doubles as the active-view discriminator.
@@ -23,20 +24,14 @@ type NavKey = (typeof NAV_ITEMS)[number]['key'];
 
 export function App(): JSX.Element {
   const [active, setActive] = useState<NavKey>('profiles');
-  const [version, setVersion] = useState<string>('…');
-  // Typed against the shared domain model so the UI never drifts from the wire contract.
-  const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [version, setVersion] = useState<string>(isDesktopRuntime() ? '…' : 'dev');
 
   useEffect(() => {
-    // `app_version` and `list_profiles` are Tauri commands registered in src-tauri/src/lib.rs.
+    // `app_version` is a Tauri command; it only exists inside the desktop webview.
+    if (!isDesktopRuntime()) return;
     invoke<string>('app_version')
       .then(setVersion)
-      .catch((e: unknown) => setError(String(e)));
-
-    invoke<Profile[]>('list_profiles')
-      .then(setProfiles)
-      .catch((e: unknown) => setError(String(e)));
+      .catch(() => setVersion('unknown'));
   }, []);
 
   const activeItem = NAV_ITEMS.find((item) => item.key === active);
@@ -69,28 +64,21 @@ export function App(): JSX.Element {
       <main className="main">
         <header className="main-header">
           <h1>{activeItem?.label}</h1>
-          <span className="pill">Day 0 · scaffold</span>
+          <span className="pill">{isDesktopRuntime() ? 'desktop' : 'dev · mock data'}</span>
         </header>
 
         <section className="content">
-          {error ? (
-            <p className="notice notice--error">
-              Tauri bridge unavailable: {error}. Run inside <code>npm run tauri dev</code>.
-            </p>
+          {active === 'profiles' ? (
+            <ProfilesView />
           ) : (
-            <p className="notice">
-              Connected to the Lobster desktop core (v{version}). {profiles.length} profile(s)
-              loaded.
-            </p>
+            <div className="placeholder-card">
+              <h2>{activeItem?.label}</h2>
+              <p>
+                This section is scaffolding. Its real UI ships on a later day of the plan — see{' '}
+                <code>docs/MASTER_PLAN.md</code>.
+              </p>
+            </div>
           )}
-
-          <div className="placeholder-card">
-            <h2>{activeItem?.label}</h2>
-            <p>
-              This section is scaffolding. Its real UI ships on a later day of the plan — see{' '}
-              <code>docs/MASTER_PLAN.md</code>.
-            </p>
-          </div>
         </section>
       </main>
     </div>

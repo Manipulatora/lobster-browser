@@ -7,6 +7,7 @@ import type { User } from '@lobster/shared-types';
 import type { LoginDto } from './dto/login.dto';
 import type { RegisterDto } from './dto/register.dto';
 import { USERS_REPOSITORY, type StoredUser, type UsersRepository } from './users.repository';
+import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 import { resolveJwtSecret } from './jwt-secret';
 
 /** bcrypt work factor. 10 is the common default: strong enough, ~tens of ms per hash. */
@@ -38,26 +39,35 @@ export interface JwtPayload {
 export class AuthService {
   constructor(
     @Inject(USERS_REPOSITORY) private readonly users: UsersRepository,
+    @Inject(TEAMS_REPOSITORY) private readonly teams: TeamsRepository,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthResult> {
-    const existing = await this.users.findByEmail(dto.email);
+    // Normalize the email centrally so BOTH the in-memory and Prisma stores behave identically
+    // (Postgres lookups are case-sensitive; the in-memory map is not). One canonical form avoids
+    // duplicate accounts and login mismatches across backends.
+    const email = this.normalizeEmail(dto.email);
+    const existing = await this.users.findByEmail(email);
     if (existing) {
       throw new ConflictException('email already registered');
     }
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_COST);
     const user = await this.users.create({
-      email: dto.email,
+      email,
       passwordHash,
       displayName: dto.displayName,
     });
+    // Every user gets a personal team + an admin membership so they always have a place to own
+    // profiles the moment they register (no separate "create your first team" step).
+    const team = await this.teams.createTeam(user.id, this.personalTeamName(user));
+    await this.teams.addMember(team.id, user.id, 'admin');
     return { user: this.toPublicUser(user), token: this.signToken(user) };
   }
 
   async login(dto: LoginDto): Promise<AuthResult> {
-    const user = await this.users.findByEmail(dto.email);
+    const user = await this.users.findByEmail(this.normalizeEmail(dto.email));
     // Verify even when the user is missing? bcrypt.compare against a real hash only runs
     // when we found a user; the generic message avoids leaking which half was wrong.
     if (!user || !(await bcrypt.compare(dto.password, user.passwordHash))) {
@@ -85,9 +95,19 @@ export class AuthService {
     return this.jwt.sign(payload, { secret: this.jwtSecret, expiresIn: TOKEN_TTL });
   }
 
+  /** Canonical email form: trimmed + lowercased. The single normalization point for auth. */
+  private normalizeEmail(email: string): string {
+    return email.trim().toLowerCase();
+  }
+
   /** Drop the password hash so it never crosses the wire. */
   private toPublicUser(user: StoredUser): User {
     const { passwordHash: _passwordHash, ...publicUser } = user;
     return publicUser;
+  }
+
+  /** Friendly default name for the auto-created personal team. */
+  private personalTeamName(user: StoredUser): string {
+    return `${user.displayName ?? user.email}'s Team`;
   }
 }

@@ -1,8 +1,10 @@
-import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { IsEmail, IsIn, IsString, MaxLength } from 'class-validator';
-import type { Membership, Role, Team } from '@lobster/shared-types';
+import type { Membership, Role, Team, User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
+import { CurrentUser } from '../auth/current-user.decorator';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { TeamsService } from './teams.service';
 
 // --- Inline DTOs (kept next to the controller since they are small) ---
@@ -11,10 +13,6 @@ class CreateTeamDto {
   @IsString()
   @MaxLength(80)
   name!: string;
-
-  // TODO(Day 2): derive ownerUserId from the authenticated JWT instead of the body.
-  @IsString()
-  ownerUserId!: string;
 }
 
 class InviteMemberDto {
@@ -31,37 +29,57 @@ class SetRoleDto {
 }
 
 /**
- * Team management endpoints. All responses use the shared `{ code, data, msg }` envelope.
- * TODO(Day 2): protect every route with the JwtAuthGuard + an admin-role check.
+ * Team management endpoints. All routes require a valid JWT; identity comes from the token
+ * (`@CurrentUser()`), never the body. Membership/role are enforced in TeamsService. All
+ * responses use the shared `{ code, data, msg }` envelope.
  */
 @Controller('teams')
+@UseGuards(JwtAuthGuard)
 export class TeamsController {
   constructor(private readonly teamsService: TeamsService) {}
 
+  /** Create a team; the caller becomes its admin. */
   @Post()
-  async createTeam(@Body() dto: CreateTeamDto): Promise<ApiResponse<Team>> {
-    return ok(await this.teamsService.createTeam(dto.name, dto.ownerUserId));
+  async createTeam(
+    @CurrentUser() user: User,
+    @Body() dto: CreateTeamDto,
+  ): Promise<ApiResponse<Team>> {
+    return ok(await this.teamsService.createTeam(user.id, dto.name));
   }
 
+  /** Teams the caller belongs to. */
+  @Get()
+  async listTeams(@CurrentUser() user: User): Promise<ApiResponse<Team[]>> {
+    return ok(await this.teamsService.listTeams(user.id));
+  }
+
+  /** Invite an existing user by email (admin-only). */
   @Post(':teamId/members')
   async inviteMember(
+    @CurrentUser() user: User,
     @Param('teamId') teamId: string,
     @Body() dto: InviteMemberDto,
   ): Promise<ApiResponse<Membership>> {
-    return ok(await this.teamsService.inviteMember(teamId, dto.email, dto.role));
+    return ok(await this.teamsService.inviteMember(teamId, user.id, dto.email, dto.role));
   }
 
+  /** List members (members-only). */
   @Get(':teamId/members')
-  async listMembers(@Param('teamId') teamId: string): Promise<ApiResponse<Membership[]>> {
-    return ok(await this.teamsService.listMembers(teamId));
+  async listMembers(
+    @CurrentUser() user: User,
+    @Param('teamId') teamId: string,
+  ): Promise<ApiResponse<Membership[]>> {
+    return ok(await this.teamsService.listMembers(teamId, user.id));
   }
 
+  /** Change a member's role (admin-only). */
   @Patch(':teamId/members/:userId/role')
   async setRole(
+    @CurrentUser() user: User,
     @Param('teamId') teamId: string,
     @Param('userId') userId: string,
     @Body() dto: SetRoleDto,
   ): Promise<ApiResponse<Membership>> {
-    return ok(await this.teamsService.setRole(teamId, userId, dto.role));
+    return ok(await this.teamsService.setRole(teamId, user.id, userId, dto.role));
   }
 }

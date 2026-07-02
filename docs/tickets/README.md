@@ -5,15 +5,16 @@ tickets; the assigned agent implements; the other agent reviews. Keep this table
 
 | ID | Title | Pillar / Track | Assignee | Status |
 |----|-------|----------------|----------|--------|
-| T-001 | Tauri shell boots + loads React UI shell | A · Desktop | Codex | in-progress · frontend type-clean; needs `rustup` to build/boot |
-| T-002 | Sidecar: real engine launch (patchright + camoufox-js) | B · Engine | Claude | in-progress · launch/CDP/init builders done+tested (T-002a); live launch needs browser binaries |
+| T-001 | Tauri shell boots + loads React UI shell | A · Desktop | Codex | done · desktop crate builds (Rust 1.96.1 + webkit2gtk); SQLite store + Axum local API + IPC commands cargo-tested; GUI window needs a display |
+| T-002 | Sidecar: real engine launch (patchright + camoufox-js) | B · Engine | Claude | done (Chromium) · T-002a builders + T-002b orchestration + **T-002c real patchright launch verified**: live Chromium, `connectOverCDP`, `navigator.webdriver` stealth, status/stop; CI `engine-launch` job. Camoufox launcher = follow-up |
 | T-003 | Fingerprint: integrate Apify fingerprint-suite behind `deriveFingerprint` | Fingerprint | Codex | done |
 | T-004 | Backend: JWT auth + real data layer | C · Backend | Codex | done · bcrypt+JWT, guard, `/auth/me`, e2e; Prisma repo/module + `0001_init` migration + docker-compose (Postgres path via CI/infra), JWT hard-fails in prod |
 | T-005 | Validation harness: host CreepJS/Sannysoft + score scraper | E · QA | Claude | ready · needs a real browser+GPU |
 | T-006 | Add `apps/desktop` + `apps/backend` to root workspaces | infra | Claude | done |
-| T-007 | Profile CRUD Tauri commands + single-instance lock | A · Desktop | Codex | draft |
-| T-008 | Fingerprint editor UI (JS-safe surfaces) | A · Desktop | Codex | draft |
+| T-007 | Profile CRUD Tauri commands + single-instance lock | A · Desktop | Claude | done · real SQLite-backed create/get/update/delete/list commands (cargo-tested); single-instance launch lock lands with T-002c engine wiring |
+| T-008 | Fingerprint editor UI (JS-safe surfaces) | A · Desktop | Codex | done |
 | T-009 | Unit tests: fingerprint determinism/coherence + proxy parse | tests | Claude | done |
+| T-013 | Backend Teams + Profiles (real, JWT-scoped, plan limit) | C · Backend | Codex | done · repos (Prisma+in-memory), @CurrentUser, team scoping, e2e |
 | T-010 | Lobster Kernel: build environment + first Chromium build | F · Kernel | Claude | ready |
 | T-011 | Lobster Kernel: quilt series + first native patch + config channel POC | F · Kernel | Claude | ready |
 | T-012 | Fingerprint: 50+ param model + Android/mobile profiles | Fingerprint | Codex | draft |

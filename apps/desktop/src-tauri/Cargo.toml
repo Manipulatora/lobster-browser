@@ -4,8 +4,8 @@ version = "0.0.0"
 description = "Lobster Browser desktop agent (Tauri 2 core + Axum local automation API)."
 authors = ["Lobster Browser"]
 edition = "2021"
-# Pinned to match rust-toolchain.toml at the repo root.
-rust-version = "1.83"
+# Minimum supported Rust (edition2024 deps require >= 1.85). Toolchain pinned in rust-toolchain.toml.
+rust-version = "1.85"
 
 # The Tauri app is compiled as a library so it can be linked into the platform binary
 # (and, on mobile, into the generated shells). `main.rs` is a thin shim over `run()`.
@@ -36,6 +36,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Stable profile / session identifiers.
 uuid = { version = "1", features = ["v4"] }
+
+# ISO-8601 / RFC3339 timestamps for profile rows.
+chrono = "0.4"
 
 # Ergonomic error handling across the core.
 anyhow = "1"

@@ -8,17 +8,23 @@ import { JwtService } from '@nestjs/jwt';
 import { AuthService, type JwtPayload } from './auth.service';
 import { DEV_JWT_SECRET } from './jwt-secret';
 import { InMemoryUsersRepository } from './in-memory-users.repository';
+import { InMemoryTeamsRepository } from '../teams/in-memory-teams.repository';
 
 /**
- * Unit tests for AuthService against the in-memory repo + a real JwtService — no Nest app
+ * Unit tests for AuthService against the in-memory repos + a real JwtService — no Nest app
  * boot and no database. A stub ConfigService returns undefined so the service falls back to
  * DEV_JWT_SECRET, which the JwtService below is configured with, so tokens round-trip.
  */
-function makeService(): { service: AuthService; jwt: JwtService } {
+function makeService(): {
+  service: AuthService;
+  jwt: JwtService;
+  teams: InMemoryTeamsRepository;
+} {
   const users = new InMemoryUsersRepository();
+  const teams = new InMemoryTeamsRepository();
   const jwt = new JwtService({ secret: DEV_JWT_SECRET });
   const config = { get: () => undefined } as unknown as ConfigService;
-  return { service: new AuthService(users, jwt, config), jwt };
+  return { service: new AuthService(users, teams, jwt, config), jwt, teams };
 }
 
 test('register hashes the password, stores the user, and returns a token', async () => {
@@ -30,6 +36,36 @@ test('register hashes the password, stores the user, and returns a token', async
   assert.ok(result.token.length > 0, 'expected a non-empty token');
   // The public user must never carry the password hash.
   assert.equal((result.user as { passwordHash?: string }).passwordHash, undefined);
+});
+
+test('register auto-creates a personal team with the new user as admin', async () => {
+  const { service, teams } = makeService();
+
+  const result = await service.register({ email: 'owner@example.com', password: 'password123' });
+
+  const userTeams = await teams.findTeamsForUser(result.user.id);
+  assert.equal(userTeams.length, 1, 'expected exactly one auto-created personal team');
+  const team = userTeams[0];
+  assert.ok(team, 'expected a personal team');
+  assert.equal(team.ownerUserId, result.user.id);
+
+  const membership = await teams.getMembership(team.id, result.user.id);
+  assert.equal(membership?.role, 'admin', 'the new user must be an admin of their personal team');
+});
+
+test('email is normalized: register mixed-case, then login lower-case succeeds', async () => {
+  const { service } = makeService();
+
+  const registered = await service.register({
+    email: 'Alice@Example.com',
+    password: 'password123',
+  });
+  // The canonical (trimmed + lower-cased) email is what gets stored/returned.
+  assert.equal(registered.user.email, 'alice@example.com');
+
+  // Logging in with a different case must resolve to the same account (identical across backends).
+  const result = await service.login({ email: 'alice@example.com', password: 'password123' });
+  assert.equal(result.user.id, registered.user.id);
 });
 
 test('register rejects a duplicate email', async () => {
