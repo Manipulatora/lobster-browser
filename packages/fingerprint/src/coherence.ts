@@ -69,6 +69,54 @@ const OS_UA_TOKEN: Record<OsFamily, string> = {
   linux: 'Linux',
 };
 
+/** Sec-CH-UA-Platform value coherent with each claimed OS. */
+const OS_UA_PLATFORM: Record<OsFamily, string> = {
+  windows: 'Windows',
+  macos: 'macOS',
+  linux: 'Linux',
+};
+
+/**
+ * The only values `navigator.deviceMemory` is allowed to report. The HTML spec quantizes it and
+ * **caps it at 8** (a machine with 32 GB still reports 8), so anything above 8 — or off this ladder —
+ * is an instant tell. {@link normalizeDeviceMemory} snaps generator data onto this ladder.
+ */
+export const DEVICE_MEMORY_VALUES: readonly number[] = [0.25, 0.5, 1, 2, 4, 8];
+
+/** A real desktop reports ≥ 4 GB via `navigator.deviceMemory`; 0.25/0.5/1/2 on a desktop UA is a tell. */
+export const DESKTOP_MIN_DEVICE_MEMORY = 4;
+
+/** Highest plausible logical-core count per OS. macOS tops out at the 28-core/56-thread Mac Pro. */
+const MAX_HW_CONCURRENCY: Record<OsFamily, number> = { windows: 128, linux: 128, macos: 56 };
+
+/** The only real brand names a genuine Chrome build advertises in Sec-CH-UA (plus the GREASE entry). */
+const CHROME_UA_BRANDS = new Set(['Google Chrome', 'Chromium']);
+
+/** A greased "Not A;Brand" placeholder — Chromium varies its punctuation/spacing every release. */
+function isGreaseBrand(brand: string): boolean {
+  return /not.{0,4}a.{0,4}brand/i.test(brand);
+}
+
+/** Snap an arbitrary RAM figure (GB) to the nearest spec-legal `navigator.deviceMemory` value (≤ 8). */
+export function normalizeDeviceMemory(gb: number): number {
+  let best = DEVICE_MEMORY_VALUES[0] as number;
+  for (const v of DEVICE_MEMORY_VALUES) {
+    if (v <= gb) best = v;
+  }
+  return best;
+}
+
+/** Real Chrome reports a 24-bit color depth on effectively every desktop (30 on a few wide-gamut). */
+export function normalizeColorDepth(depth: number): number {
+  return depth === 30 ? 30 : 24;
+}
+
+/** Extract the Chrome major version from a UA string, or null if it isn't a Chrome UA. */
+function chromeMajorFromUserAgent(ua: string): string | null {
+  const m = /Chrome\/(\d+)\./.exec(ua);
+  return m ? (m[1] ?? null) : null;
+}
+
 /**
  * navigator.platform values that are coherent with each claimed OS. Windows always reports
  * "Win32" (even on 64-bit), Intel + Apple-Silicon Macs both report "MacIntel", and Linux
@@ -121,5 +169,105 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
       `WebGL renderer uses the Windows-only Direct3D backend on OS "${fp.os}": ${fp.webgl.renderer}`,
     );
   }
+
+  // --- User-Agent Client Hints must agree with the User-Agent string ------------------------------
+  const nav = fp.navigator;
+  const chromeMajor = chromeMajorFromUserAgent(ua);
+  if (chromeMajor) {
+    // The Sec-CH-UA "Google Chrome"/"Chromium" brand major must equal the UA Chrome major.
+    const chromeBrand = nav.uaBrands.find(
+      (b) => b.brand === 'Google Chrome' || b.brand === 'Chromium',
+    );
+    if (chromeBrand && chromeBrand.version !== chromeMajor) {
+      issues.push(
+        `Sec-CH-UA brand version (${chromeBrand.version}) does not match the UA Chrome major (${chromeMajor})`,
+      );
+    }
+    // Every advertised brand must be a real Chrome brand or the GREASE placeholder. A foreign or
+    // automation brand — most importantly "HeadlessChrome" — is a definitive bot tell, and the
+    // generator's real-device data occasionally ships one behind an otherwise-clean Chrome UA.
+    const foreign = nav.uaBrands.find(
+      (b) => !CHROME_UA_BRANDS.has(b.brand) && !isGreaseBrand(b.brand),
+    );
+    if (foreign) {
+      issues.push(
+        `Sec-CH-UA advertises a non-Chrome brand "${foreign.brand}" (automation/foreign tell)`,
+      );
+    }
+    // A Chrome UA must advertise a real Chrome/Chromium brand — not just a GREASE placeholder or an
+    // empty brand list. (We deliberately do NOT require the "Google Chrome" brand specifically: many
+    // real Linux Chromium samples ship only "Chromium", and requiring it would starve the candidate
+    // pool and cluster Linux profiles onto the fallback — a worse tell than the omission.)
+    if (!nav.uaBrands.some((b) => CHROME_UA_BRANDS.has(b.brand))) {
+      issues.push('Sec-CH-UA has no "Google Chrome"/"Chromium" brand for a Chrome UA');
+    }
+    // uaFullVersion (e.g. "131.0.6778.86") must be present and share the UA major.
+    const fullMajor = nav.uaFullVersion.split('.')[0] ?? '';
+    if (!nav.uaFullVersion) {
+      issues.push('uaFullVersion is empty for a Chrome UA');
+    } else if (fullMajor !== chromeMajor) {
+      issues.push(
+        `uaFullVersion (${nav.uaFullVersion}) major does not match the UA Chrome major (${chromeMajor})`,
+      );
+    }
+  }
+  // Sec-CH-UA-Platform must match the claimed OS.
+  if (nav.uaPlatform !== OS_UA_PLATFORM[fp.os]) {
+    issues.push(`Sec-CH-UA-Platform "${nav.uaPlatform}" does not match claimed OS "${fp.os}"`);
+  }
+  // Chrome 110+ dropped Windows 7/8/8.1 (NT 6.x). A modern Chrome on "Windows NT 6.1" is impossible —
+  // the generator's real-device data occasionally pairs an old OS with a new browser, a hard tell.
+  if (fp.os === 'windows' && chromeMajor) {
+    const nt = /Windows NT (\d+)\.\d+/.exec(ua);
+    if (nt && Number(nt[1]) < 10 && Number(chromeMajor) >= 110) {
+      issues.push(
+        `Windows NT ${nt[1]}.x cannot run Chrome ${chromeMajor} (Chrome 110+ requires Windows 10+)`,
+      );
+    }
+  }
+
+  // --- Form factor ---------------------------------------------------------------------------------
+  // A desktop profile must not advertise itself as mobile, and touch points must match the form factor.
+  if (nav.uaMobile) {
+    issues.push(`uaMobile is true for desktop OS "${fp.os}"`);
+  }
+  if (!nav.uaMobile && nav.maxTouchPoints !== 0) {
+    issues.push(`maxTouchPoints (${nav.maxTouchPoints}) must be 0 for a non-mobile profile`);
+  }
+
+  // --- Hardware realism ----------------------------------------------------------------------------
+  // navigator.deviceMemory is a spec-quantized value capped at 8 — 16/32 is an instant tell, and a
+  // desktop reporting < 4 GB (e.g. the 0.25 GB a raw generator 0 would snap to) is equally implausible.
+  if (!DEVICE_MEMORY_VALUES.includes(nav.deviceMemory)) {
+    issues.push(
+      `navigator.deviceMemory (${nav.deviceMemory}) is not a spec value (one of ${DEVICE_MEMORY_VALUES.join('/')})`,
+    );
+  } else if (!nav.uaMobile && nav.deviceMemory < DESKTOP_MIN_DEVICE_MEMORY) {
+    issues.push(
+      `navigator.deviceMemory (${nav.deviceMemory}) is implausibly low for a desktop (min ${DESKTOP_MIN_DEVICE_MEMORY})`,
+    );
+  }
+  const maxHw = MAX_HW_CONCURRENCY[fp.os];
+  if (
+    !Number.isInteger(nav.hardwareConcurrency) ||
+    nav.hardwareConcurrency < 1 ||
+    nav.hardwareConcurrency > maxHw
+  ) {
+    issues.push(
+      `hardwareConcurrency (${nav.hardwareConcurrency}) is outside the plausible 1–${maxHw} range for "${fp.os}"`,
+    );
+  }
+
+  // --- Display realism -----------------------------------------------------------------------------
+  if (fp.screen.colorDepth !== 24 && fp.screen.colorDepth !== 30) {
+    issues.push(`screen.colorDepth (${fp.screen.colorDepth}) is not a realistic value (24 or 30)`);
+  }
+  // devicePixelRatio: allow genuine fractional-scaling / zoomed displays (< 1) but reject nonsense.
+  if (fp.screen.devicePixelRatio <= 0 || fp.screen.devicePixelRatio > 4) {
+    issues.push(
+      `devicePixelRatio (${fp.screen.devicePixelRatio}) is outside the plausible (0, 4] range`,
+    );
+  }
+
   return issues;
 }

@@ -24,9 +24,9 @@ export interface DeriveOptions {
  * produces the same fingerprint, so a profile's identity is stable across restarts.
  *
  * The primary source is Apify's fingerprint-generator, driven by a seed-derived PRNG so its
- * real-device distributions stay reproducible. If generation throws or (astronomically unlikely)
- * yields no coherent candidate, we fall back to the built-in device pools so the function never
- * fails and always returns a coherent fingerprint.
+ * real-device distributions stay reproducible. If generation throws or (rarely — mainly a fraction of
+ * Linux seeds) yields no coherent candidate, we fall back to the built-in device pools so the function
+ * never fails and always returns a coherent fingerprint.
  *
  * Locale/timezone default to en-US and are meant to be overwritten by {@link applyGeoToFingerprint}
  * once the proxy exit IP is known.
@@ -62,9 +62,10 @@ function buildBrands(version: string): NavigatorFingerprint['uaBrands'] {
 
 /**
  * Deterministic fallback using the small built-in device pools. Kept as a safety net for the rare
- * case the real-device generator is unavailable; every pool entry is itself coherent.
+ * case the real-device generator is unavailable or exhausts its candidate pool; every pool entry is
+ * itself coherent. Exported so tests can assert that guarantee directly.
  */
-function deriveFromPools(seed: FingerprintSeed, os: OsFamily, arch: CpuArch): Fingerprint {
+export function deriveFromPools(seed: FingerprintSeed, os: OsFamily, arch: CpuArch): Fingerprint {
   const rng = new SeededRandom(seed);
   const tpl = DEVICE_TEMPLATES[os];
 

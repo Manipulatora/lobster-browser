@@ -9,14 +9,20 @@ import type {
   WebGlFingerprint,
 } from '@lobster/shared-types';
 import { hashStringToUint32, mulberry32 } from './prng.js';
-import { languagesToAcceptLanguage, validateFingerprintCoherence } from './coherence.js';
+import {
+  DESKTOP_MIN_DEVICE_MEMORY,
+  languagesToAcceptLanguage,
+  normalizeColorDepth,
+  normalizeDeviceMemory,
+  validateFingerprintCoherence,
+} from './coherence.js';
 
 /**
  * How many fingerprints we draw from the generator's real-device distribution per derive.
  * The Bayesian network occasionally emits an internally-incoherent sample (e.g. a macOS UA
- * with a "Linux x86_64" platform), so we generate a small seeded pool and deterministically
- * take the first coherent one. Empirically a pool of 24 already yields a coherent candidate
- * for 100% of seeds across every OS; 32 leaves comfortable margin.
+ * with a "Linux x86_64" platform, a HeadlessChrome brand, or an end-of-life OS), so we generate a
+ * small seeded pool and deterministically take the first coherent one. A pool of 32 finds a coherent
+ * candidate for the vast majority of seeds; the rare exhausted seed falls back to the built-in pools.
  */
 const CANDIDATE_POOL_SIZE = 32;
 
@@ -65,8 +71,16 @@ function toFingerprint(raw: GeneratedFingerprint, os: OsFamily, arch: CpuArch): 
     platform: nav.platform,
     languages,
     hardwareConcurrency: nav.hardwareConcurrency,
-    deviceMemory: nav.deviceMemory ?? 8,
-    maxTouchPoints: nav.maxTouchPoints ?? 0,
+    // navigator.deviceMemory is spec-quantized and capped at 8; snap the raw figure onto that ladder.
+    // The generator emits 0 as a placeholder for a non-trivial slice of desktop samples — treat any
+    // non-positive value as "unknown" (→ 8) and floor desktops at 4 GB so we never manufacture a
+    // 0.25 GB (256 MB) desktop, which `0 ?? 8` would have let through (0 is not nullish).
+    deviceMemory: Math.max(
+      DESKTOP_MIN_DEVICE_MEMORY,
+      normalizeDeviceMemory(nav.deviceMemory && nav.deviceMemory > 0 ? nav.deviceMemory : 8),
+    ),
+    // Desktop generation: the launched engine has no touch input, so 0 is both honest and coherent.
+    maxTouchPoints: 0,
     uaBrands: uad ? uad.brands.map((b) => ({ brand: b.brand, version: b.version })) : [],
     uaPlatform: OS_TO_UA_PLATFORM[os],
     uaPlatformVersion: uad ? uad.platformVersion : '',
@@ -79,7 +93,7 @@ function toFingerprint(raw: GeneratedFingerprint, os: OsFamily, arch: CpuArch): 
     height: raw.screen.height,
     availWidth: raw.screen.availWidth,
     availHeight: raw.screen.availHeight,
-    colorDepth: raw.screen.colorDepth,
+    colorDepth: normalizeColorDepth(raw.screen.colorDepth),
     devicePixelRatio: raw.screen.devicePixelRatio,
   };
 

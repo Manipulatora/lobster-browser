@@ -81,28 +81,40 @@ export function buildCdpEmulation(fp: Fingerprint): CdpEmulation {
 }
 
 /**
- * Build the init script for the JS-safe navigator surfaces. IMPORTANT: this deliberately does NOT
- * touch canvas/WebGL/AudioContext/TLS — those deep surfaces are handled natively by the engine.
- * Overriding them from JS is detectable, so we never do it here (see MASTER_PLAN §5).
+ * Build the main-world init script for the JS-only navigator surfaces that **no CDP override owns**:
+ * `deviceMemory` and `maxTouchPoints`.
+ *
+ * The UA string, platform, UA-CH, hardwareConcurrency, timezone, locale, languages and geolocation
+ * are all applied authoritatively by `applyCdpFingerprint` via dedicated CDP overrides — and CDP
+ * pins some of those as **non-configurable** own properties. Redefining a non-configurable property
+ * throws, so we (a) never touch the CDP-owned surfaces here and (b) wrap each `def` in try/catch so
+ * one failure can't abort the rest (the bug that used to leave `deviceMemory` undefined).
+ *
+ * IMPORTANT: this deliberately does NOT touch canvas/WebGL/AudioContext/TLS — those deep surfaces are
+ * native (Lobium). Overriding them from JS is detectable, so we never do it here (see MASTER_PLAN §5).
+ *
+ * Interim-engine caveat: patchright neutralizes main-world script injection for stealth, so these two
+ * surfaces are effectively best-effort on the interim Chromium and become authoritative on Lobium
+ * (which sets them natively). The CDP `Emulation.*` overrides in `applyCdpFingerprint` are global and
+ * apply regardless; only these JS-injection surfaces carry the caveat.
  */
 export function buildFingerprintInitScript(fp: Fingerprint): string {
   const nav = fp.navigator;
   const spec = {
-    languages: nav.languages,
-    hardwareConcurrency: nav.hardwareConcurrency,
     deviceMemory: nav.deviceMemory,
-    platform: nav.platform,
     maxTouchPoints: nav.maxTouchPoints,
   };
   return [
     '(() => {',
     `  const s = ${JSON.stringify(spec)};`,
-    '  const def = (obj, prop, value) =>',
-    '    Object.defineProperty(obj, prop, { get: () => value, configurable: true });',
-    '  def(navigator, "languages", Object.freeze([...s.languages]));',
-    '  def(navigator, "hardwareConcurrency", s.hardwareConcurrency);',
+    '  const def = (obj, prop, value) => {',
+    '    try {',
+    '      Object.defineProperty(obj, prop, { get: () => value, configurable: true });',
+    '    } catch (_) {',
+    '      /* CDP already owns this surface as a non-configurable property — leave it. */',
+    '    }',
+    '  };',
     '  def(navigator, "deviceMemory", s.deviceMemory);',
-    '  def(navigator, "platform", s.platform);',
     '  def(navigator, "maxTouchPoints", s.maxTouchPoints);',
     '})();',
   ].join('\n');

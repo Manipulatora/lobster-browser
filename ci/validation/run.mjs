@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { deriveFingerprint, generateSeed } from '@lobster/fingerprint';
+import { applyGeoToFingerprint, deriveFingerprint, generateSeed } from '@lobster/fingerprint';
 import {
   applyCdpFingerprint,
   buildCdpEmulation,
@@ -47,8 +47,20 @@ async function runStub() {
 async function runReal() {
   const thresholds = await loadThresholds();
 
-  // 1. Derive a coherent real-device fingerprint (the same path the sidecar uses).
-  const fingerprint = deriveFingerprint(generateSeed(), { os: 'windows', engine: 'chromium' });
+  // 1. Derive a coherent real-device fingerprint, then apply a proxy geo (Berlin) exactly as the
+  //    sidecar does at launch. This exercises the full geo-coherence cluster — timezone, locale,
+  //    languages AND geolocation — so the gate proves they all actually apply together.
+  const GEO = {
+    ip: '0.0.0.0',
+    countryCode: 'DE',
+    timezone: 'Europe/Berlin',
+    latitude: 52.52,
+    longitude: 13.405,
+  };
+  const fingerprint = applyGeoToFingerprint(
+    deriveFingerprint(generateSeed(), { os: 'windows', engine: 'chromium' }),
+    GEO,
+  );
 
   // 2. Build the launch exactly as the launcher does (canonical fingerprint -> browser mapping).
   const userDataDir = await mkdtemp(join(tmpdir(), 'lobster-validation-'));
@@ -69,6 +81,8 @@ async function runReal() {
     locale: emulation.locale,
     timezoneId: emulation.timezoneId,
   });
+  // Grant geolocation so a page that asks actually reads our override (the runtime user consent).
+  await context.grantPermissions(['geolocation']);
 
   try {
     const page = context.pages()[0] ?? (await context.newPage());
@@ -78,21 +92,45 @@ async function runReal() {
     await page.goto(DETECTOR_URL, { waitUntil: 'networkidle', timeout: 60_000 });
 
     // 3a. Did our fingerprint actually apply, with no automation tell? (robust, engine-agnostic)
-    const applied = await page.evaluate(() => ({
-      userAgent: navigator.userAgent,
-      hardwareConcurrency: navigator.hardwareConcurrency,
-      languages: Array.from(navigator.languages),
-      webdriver: navigator.webdriver === true,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    }));
+    const applied = await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          const base = {
+            userAgent: navigator.userAgent,
+            hardwareConcurrency: navigator.hardwareConcurrency,
+            deviceMemory: navigator.deviceMemory,
+            languages: Array.from(navigator.languages),
+            webdriver: navigator.webdriver === true,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          };
+          navigator.geolocation.getCurrentPosition(
+            (p) =>
+              resolve({
+                ...base,
+                geo: { latitude: p.coords.latitude, longitude: p.coords.longitude },
+              }),
+            () => resolve({ ...base, geo: null }),
+            { timeout: 5000 },
+          );
+        }),
+    );
 
+    const geo = fingerprint.locale.geolocation;
     const checks = {
       webdriverAbsent: applied.webdriver === false,
       userAgentApplied: applied.userAgent === fingerprint.navigator.userAgent,
       hardwareConcurrencyApplied:
         applied.hardwareConcurrency === fingerprint.navigator.hardwareConcurrency,
+      // NOTE: deviceMemory/maxTouchPoints are JS-injection surfaces (no CDP global override exists).
+      // The interim patchright engine neutralizes main-world injection, so these are native-on-Lobium
+      // and reported for visibility but not gated here. `applied.deviceMemory` shows the current value.
       languagesApplied: applied.languages.join(',') === fingerprint.navigator.languages.join(','),
       timezoneApplied: applied.timezone === fingerprint.locale.timezone,
+      geolocationApplied:
+        !geo ||
+        (applied.geo !== null &&
+          Math.abs(applied.geo.latitude - geo.latitude) < 0.01 &&
+          Math.abs(applied.geo.longitude - geo.longitude) < 0.01),
     };
 
     // 3b. Scrape the Sannysoft detector matrix (each result cell is class passed/failed).
@@ -123,12 +161,19 @@ async function runReal() {
       fingerprint: {
         userAgent: fingerprint.navigator.userAgent,
         hardwareConcurrency: fingerprint.navigator.hardwareConcurrency,
+        deviceMemory: fingerprint.navigator.deviceMemory,
         timezone: fingerprint.locale.timezone,
+        locale: fingerprint.locale.locale,
+        geolocation: fingerprint.locale.geolocation,
         webgl: fingerprint.webgl.renderer,
       },
       applied,
       checks,
-      sannysoft: { total: rows.length, failed: failed.length, failedTests: failed.map((r) => r.name) },
+      sannysoft: {
+        total: rows.length,
+        failed: failed.length,
+        failedTests: failed.map((r) => r.name),
+      },
       thresholds,
       verdict,
     });

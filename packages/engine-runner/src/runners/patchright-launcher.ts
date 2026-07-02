@@ -40,6 +40,7 @@ interface PwContext {
   pages(): PwPage[];
   newPage(): Promise<PwPage>;
   on(event: 'page', handler: (page: PwPage) => void): void;
+  grantPermissions(permissions: string[], options?: { origin?: string }): Promise<void>;
   close(): Promise<void>;
 }
 interface PwChromium {
@@ -104,6 +105,12 @@ export function createPatchrightLauncher(opts: PatchrightLauncherOptions = {}): 
     if (ctx.emulation.geolocation) options.geolocation = ctx.emulation.geolocation;
 
     const context = await chromium.launchPersistentContext(ctx.options.userDataDir, options);
+
+    // Grant geolocation so a page that asks actually reads the proxy-derived coordinates. Without this
+    // the override is set but `getCurrentPosition` is denied — geo would silently not apply in production.
+    if (ctx.emulation.geolocation) {
+      await context.grantPermissions(['geolocation']);
+    }
 
     // Apply the JS-safe fingerprint to every page via CDP (main world) — reliable under patchright,
     // whose addInitScript runs in an isolated world the page's navigator can't see.

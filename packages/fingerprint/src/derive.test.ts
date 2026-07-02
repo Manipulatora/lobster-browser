@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { EngineKind, OsFamily } from '@lobster/shared-types';
-import { validateFingerprintCoherence } from './coherence.js';
-import { deriveFingerprint } from './derive.js';
+import type { CpuArch, EngineKind, OsFamily } from '@lobster/shared-types';
+import { DESKTOP_MIN_DEVICE_MEMORY, validateFingerprintCoherence } from './coherence.js';
+import { deriveFingerprint, deriveFromPools } from './derive.js';
 import { generateSeed } from './seed.js';
 
 const OSES: OsFamily[] = ['windows', 'macos', 'linux'];
@@ -73,6 +73,36 @@ test('derives real-device data (rich fonts, real GPU, plausible screen) from the
       assert.ok(fp.screen.availHeight <= fp.screen.height);
       assert.ok(fp.navigator.hardwareConcurrency > 0);
       assert.equal(fp.locale.locale, fp.navigator.languages[0]);
+    }
+  }
+});
+
+test('no desktop profile advertises an implausibly low deviceMemory (>= 4 GB, capped at 8)', () => {
+  for (let i = 0; i < 200; i++) {
+    const seed = generateSeed();
+    for (const os of OSES) {
+      const fp = deriveFingerprint(seed, { os, engine: 'chromium' });
+      assert.ok(
+        fp.navigator.deviceMemory >= DESKTOP_MIN_DEVICE_MEMORY && fp.navigator.deviceMemory <= 8,
+        `deviceMemory ${fp.navigator.deviceMemory} out of [${DESKTOP_MIN_DEVICE_MEMORY},8] for ${os} seed=${seed}`,
+      );
+    }
+  }
+});
+
+test('the built-in pool fallback is itself coherent for every OS/arch', () => {
+  const ARCHES: CpuArch[] = ['x86_64', 'arm64'];
+  for (let i = 0; i < 25; i++) {
+    const seed = generateSeed();
+    for (const os of OSES) {
+      for (const arch of ARCHES) {
+        const fp = deriveFromPools(seed, os, arch);
+        assert.deepEqual(
+          validateFingerprintCoherence(fp),
+          [],
+          `incoherent pool fallback ${os}/${arch} seed=${seed}`,
+        );
+      }
     }
   }
 });

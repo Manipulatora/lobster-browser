@@ -56,7 +56,7 @@ const WINDOWS: DeviceTemplate = {
     { width: 2560, height: 1440, dpr: 1 },
   ],
   hardwareConcurrency: [8, 12, 16],
-  deviceMemory: [8, 16],
+  deviceMemory: [4, 8],
 };
 
 const MACOS: DeviceTemplate = {
@@ -87,7 +87,7 @@ const MACOS: DeviceTemplate = {
     { width: 1728, height: 1117, dpr: 2 },
   ],
   hardwareConcurrency: [8, 10],
-  deviceMemory: [8, 16],
+  deviceMemory: [4, 8],
 };
 
 const LINUX: DeviceTemplate = {
@@ -113,7 +113,7 @@ const LINUX: DeviceTemplate = {
   ],
   screens: [{ width: 1920, height: 1080, dpr: 1 }],
   hardwareConcurrency: [4, 8],
-  deviceMemory: [8, 16],
+  deviceMemory: [4, 8],
 };
 
 export const DEVICE_TEMPLATES: Record<OsFamily, DeviceTemplate> = {

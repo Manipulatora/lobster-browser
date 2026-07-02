@@ -23,6 +23,8 @@ tickets; the assigned agent implements; the other agent reviews. Keep this table
 | T-010 | Lobium: build environment + first Chromium build | F · Lobium | Claude | ready |
 | T-011 | Lobium: quilt series + first native patch + config channel POC | F · Lobium | Claude | ready |
 | T-012 | Fingerprint: 50+ param model + Android/mobile profiles | Fingerprint | Codex | draft |
+| T-018 | Fingerprint coherence & geolocation-application hardening | Fingerprint | Claude | done · [`setGeolocationOverride`](T-018-fingerprint-coherence-geolocation.md) applied (was computed but never sent) + launcher grants geo permission; clean `navigator.languages` (q-value leak fixed); init-script abort bug fixed; coherence rules incl. Win-NT↔Chrome floor, **HeadlessChrome-brand + 256 MB-desktop tells** (found by adversarial review); 94 unit tests + live gate green |
+| T-018a | q-weighted `Accept-Language` HTTP header (keep clean `navigator.languages`) | Fingerprint | Claude | draft · follow-up from T-018 |
 
 **Status legend:** `draft` (spec not final) · `ready` (spec final, unassigned work can start) ·
 `in-progress` · `in-review` · `done`.

@@ -11,7 +11,14 @@
  */
 export { SeededRandom, hashStringToUint32, mulberry32 } from './prng.js';
 export { generateSeed, isValidSeed } from './seed.js';
-export { deriveFingerprint } from './derive.js';
-export { applyGeoToFingerprint, validateFingerprintCoherence } from './coherence.js';
+export { deriveFingerprint, deriveFromPools } from './derive.js';
+export {
+  applyGeoToFingerprint,
+  validateFingerprintCoherence,
+  normalizeDeviceMemory,
+  normalizeColorDepth,
+  DEVICE_MEMORY_VALUES,
+  DESKTOP_MIN_DEVICE_MEMORY,
+} from './coherence.js';
 export { applyOverrides } from './overrides.js';
 export type { DeriveOptions } from './derive.js';

@@ -13,7 +13,7 @@ function sampleFingerprint(): Fingerprint {
       platform: 'Win32',
       languages: ['de-DE', 'de'],
       hardwareConcurrency: 12,
-      deviceMemory: 16,
+      deviceMemory: 8,
       maxTouchPoints: 0,
       uaBrands: [{ brand: 'Chromium', version: '131' }],
       uaPlatform: 'Windows',
@@ -78,11 +78,36 @@ test('buildCdpEmulation carries UA, UA-CH metadata, timezone/locale, and geoloca
   assert.deepEqual(e.geolocation, { latitude: 52.5, longitude: 13.4, accuracy: 100 });
 });
 
-test('init script sets JS-safe navigator surfaces and NEVER touches deep surfaces', () => {
+test('init script owns only the residual JS-only surfaces (deviceMemory, maxTouchPoints)', () => {
   const s = buildFingerprintInitScript(sampleFingerprint());
-  assert.match(s, /navigator, "languages"/);
-  assert.match(s, /hardwareConcurrency/);
   assert.match(s, /deviceMemory/);
+  assert.match(s, /maxTouchPoints/);
+  // languages/hardwareConcurrency/platform are CDP-owned; touching them from JS throws (they're
+  // pinned non-configurable) so they must NOT appear in the init script.
+  assert.doesNotMatch(s, /navigator, "languages"/);
+  assert.doesNotMatch(s, /hardwareConcurrency/);
+  // Each override is wrapped so one failure can't abort the rest.
+  assert.match(s, /try \{/);
   // Deep surfaces must never be spoofed from JS (detectable) — assert they're absent.
   assert.doesNotMatch(s, /canvas|webgl|audiocontext|toDataURL|getImageData/i);
+});
+
+test('init script isolates each override: a throwing def cannot abort the rest', () => {
+  const s = buildFingerprintInitScript(sampleFingerprint());
+  // Mock navigator whose `deviceMemory` is non-configurable, so the first def() THROWS — exactly the
+  // condition (a CDP-pinned property) that used to abort the whole IIFE and leave maxTouchPoints unset.
+  const nav: Record<string, unknown> = {};
+  Object.defineProperty(nav, 'deviceMemory', { value: 99, configurable: false });
+  // Run the produced script with our mock in place of the global `navigator`.
+  new Function('navigator', s)(nav);
+  assert.equal(
+    nav.deviceMemory,
+    99,
+    'the throwing def must be caught, leaving the pinned value intact',
+  );
+  assert.equal(
+    nav.maxTouchPoints,
+    0,
+    'the second override must still apply despite the first throwing',
+  );
 });
