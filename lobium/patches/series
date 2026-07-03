@@ -1,1 +1,27 @@
-# Lobium patch apply order (empty until T-011). One patch path per line.
+# Lobium patch apply order (quilt). One patch path per line; grouped by domain.
+#
+# STRATEGY: nearly all Lobium logic lives in ADDED files under //third_party/lobium-fp/ (staged by
+# build.sh, see ../src/) which never conflict on rebase. The patches below are the MINIMAL hook points
+# into existing Chromium files — each just routes a surface through lobium::LobiumFpConfig::Current().
+# Keeping them tiny is what makes tracking Chrome stable within days feasible (see rebase.sh).
+#
+# Status: authored against the pinned ref (build.sh CHROMIUM_REF); each is refreshed + compiled on the
+# build machine (T-010/T-011). See hooks.md for the hook point + code of each.
+#
+# --- Core: config channel + navigator/UA-CH (T-011 POC — first native surface) ---
+core/build-gn.patch                 # register //third_party/lobium-fp in the build graph
+core/config-channel.patch           # allow the --lobium-fp-config switch; call sites read Current()
+core/navigator-ua-ch.patch          # navigator.* + Sec-CH-UA from config (userAgent/platform/langs/hw)
+#
+# --- Fingerprint deep surfaces (Phase 2 — the native moat) ---
+# fingerprint/screen-dpr.patch        # screen/window/DPR/colorDepth from config
+# fingerprint/canvas-farbling.patch   # seeded 2D canvas noise (toDataURL/getImageData + workers)
+# fingerprint/webgl-vendor-renderer.patch  # UNMASKED_* + params + seeded pixel farbling
+# fingerprint/audio-context.patch     # seeded AudioContext DSP farbling
+# fingerprint/fonts.patch             # OS-accurate font enumeration
+# fingerprint/webgpu-adapter.patch    # coherent WebGPU adapter
+#
+# --- Network (Phase 2 — TLS/JA4 parity) ---
+# net/webrtc-ip-policy.patch          # WebRTC IP handling from config.net
+# net/tls-ja3-ja4.patch               # BoringSSL ClientHello order → match claimed Chrome
+# net/http2-settings-order.patch      # HTTP/2 SETTINGS + pseudo-header order

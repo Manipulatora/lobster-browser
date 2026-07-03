@@ -32,5 +32,18 @@ export type {
   HumanMoveOptions,
   Sleep,
 } from './humanize.js';
+export {
+  buildLobiumConfig,
+  writeLobiumConfig,
+  lobiumConfigArg,
+  LOBIUM_CONFIG_VERSION,
+  LOBIUM_CONFIG_FILENAME,
+} from './lobium-config.js';
+export type {
+  LobiumConfig,
+  LobiumNetConfig,
+  LobiumFarblingSeeds,
+  BuildLobiumConfigOptions,
+} from './lobium-config.js';
 export type { EngineRunner } from './runner.js';
 export type { Launcher, LaunchContext, LaunchHandle, LauncherRegistry } from './runners/types.js';

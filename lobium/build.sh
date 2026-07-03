@@ -1,36 +1,50 @@
 #!/usr/bin/env bash
-# Lobium build driver (SCAFFOLD).
+# Lobium build driver — fetch -> sync -> apply patches -> gn gen -> ninja.
 #
-# Drives a Chromium build: fetch -> sync -> apply patches -> gn gen -> ninja.
-# Default is a DRY RUN that prints the steps. Pass --run to execute (needs depot_tools, disk, hours).
+# This is the REAL pipeline (T-010). It is a DRY RUN by default (prints the steps); pass --run to
+# execute. Executing requires a dedicated build machine: `depot_tools` on PATH, ~150 GB disk, and
+# hours of compile time (use ccache / reclient). It CANNOT run in a small sandbox — that is expected.
 #
-# Real implementation lands in ticket T-010. Run on a dedicated build machine / self-hosted CI with
-# ccache/reclient — compiles are long.
+#   CHROMIUM_REF=<tag> ./build.sh          # dry run (prints the plan)
+#   CHROMIUM_REF=<tag> ./build.sh --run    # real build on a build machine
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CHROMIUM_REF="${CHROMIUM_REF:-CONFIRM_IN_T-010}"   # pin an exact Chromium ref in T-010
+# Pin an exact Chrome-stable tag. Bumped by rebase.sh; keep within a few days of upstream stable.
+CHROMIUM_REF="${CHROMIUM_REF:-131.0.6778.86}"
+SRC_DIR="${SRC_DIR:-${HERE}/chromium/src}"
 OUT_DIR="${OUT_DIR:-out/Lobium}"
 RUN="${1:-}"
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+run()  { if [[ "${RUN}" == "--run" ]]; then eval "$*"; else echo "    $*"; fi; }
 
-step "Lobium build (ref: ${CHROMIUM_REF}, out: ${OUT_DIR})"
-if [[ "${RUN}" != "--run" ]]; then
-  echo "DRY RUN — pass --run to execute. Planned steps:"
-  echo "  1. ensure depot_tools on PATH; fetch chromium (first time)"
-  echo "  2. gclient sync --revision src@${CHROMIUM_REF}"
-  echo "  3. apply quilt series from ${HERE}/patches/series"
-  echo "  4. gn gen ${OUT_DIR} --args=\"\$(cat ${HERE}/gn-args.gn.example)\""
-  echo "  5. autoninja -C ${OUT_DIR} chrome"
-  exit 0
+step "Lobium build (ref: ${CHROMIUM_REF}, src: ${SRC_DIR}, out: ${OUT_DIR})"
+[[ "${RUN}" != "--run" ]] && echo "DRY RUN — pass --run to execute on a build machine."
+
+step "1. Toolchain: depot_tools on PATH"
+if ! command -v gclient >/dev/null 2>&1; then
+  echo "note: depot_tools not found — https://chromium.googlesource.com/chromium/tools/depot_tools"
+  [[ "${RUN}" == "--run" ]] && { echo "error: depot_tools required for --run" >&2; exit 1; }
 fi
 
-if [[ "${CHROMIUM_REF}" == CONFIRM* ]]; then
-  echo "error: pin CHROMIUM_REF (see T-010) before --run" >&2
-  exit 1
-fi
+step "2. Fetch Chromium (first run only) + sync to the pinned ref"
+run "mkdir -p '${HERE}/chromium' && cd '${HERE}/chromium'"
+run "[ -d src ] || fetch --nohooks chromium"
+run "cd '${SRC_DIR}' && git fetch --tags && gclient sync --nohooks --revision 'src@${CHROMIUM_REF}' && gclient runhooks"
 
-# T-010 implements the real fetch/sync/patch/gn/ninja pipeline here.
-echo "error: real build pipeline is implemented in T-010" >&2
-exit 2
+step "3. Stage Lobium added files (third_party/lobium-fp/) — apply cleanly across rebases"
+run "mkdir -p '${SRC_DIR}/third_party/lobium-fp'"
+run "cp '${HERE}'/src/* '${SRC_DIR}/third_party/lobium-fp/'"
+
+step "4. Apply the quilt patch series (hook points into existing Chromium files)"
+run "cd '${SRC_DIR}' && QUILT_PATCHES='${HERE}/patches' QUILT_SERIES='${HERE}/patches/series' quilt push -a"
+
+step "5. Configure (GN) with the Lobium args"
+run "cd '${SRC_DIR}' && gn gen '${OUT_DIR}' --args=\"\$(grep -v '^#' '${HERE}/gn-args.gn.example' | tr '\\n' ' ')\""
+
+step "6. Build"
+run "cd '${SRC_DIR}' && autoninja -C '${OUT_DIR}' chrome"
+
+step "Done. Binary: ${SRC_DIR}/${OUT_DIR}/chrome  (rename/rebrand + sign in the packaging step)"
+[[ "${RUN}" != "--run" ]] && echo "(dry run — nothing was executed)"

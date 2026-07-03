@@ -1,0 +1,13 @@
+# Copyright 2026 The Lobster Browser Authors.
+#
+# Build target for the Lobium fingerprint config channel — the ADDED module staged by build.sh into
+# //third_party/lobium-fp. Consumers (Blink navigator, UA-CH provider, WebGL/canvas, net) depend on
+# ":lobium_fp" (wired by core/build-gn.patch). Kept as an added file so upstream rebases never reject it.
+
+source_set("lobium_fp") {
+  sources = [
+    "lobium_fp_config.cc",
+    "lobium_fp_config.h",
+  ]
+  deps = [ "//base" ]
+}

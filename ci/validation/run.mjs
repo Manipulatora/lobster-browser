@@ -85,6 +85,45 @@ async function probeIceCandidates(chromium, extraArgs, useStun) {
   }
 }
 
+/**
+ * Best-effort CreepJS measurement (env-gated: `LOBSTER_CREEPJS=1`). Launches a throwaway profile with
+ * our fingerprint applied, loads CreepJS, and scrapes the trust score + lies count. Deliberately
+ * defensive — CreepJS is a research page whose DOM shifts — so it returns `{available:false}` rather
+ * than throwing. NOTE: CreepJS specifically detects JS-based deep-surface spoofing, so on the interim
+ * engine the trust score is expected to be LOW; it becomes meaningful once Lobium's native patches land.
+ */
+async function measureCreepjs(chromium, fingerprint, emulation, options) {
+  const dir = await mkdtemp(join(tmpdir(), 'lobster-creepjs-'));
+  const context = await chromium.launchPersistentContext(dir, {
+    headless: false,
+    args: [...options.args, '--no-sandbox', '--disable-dev-shm-usage'],
+    userAgent: emulation.userAgent,
+    locale: emulation.locale,
+    timezoneId: emulation.timezoneId,
+  });
+  try {
+    const page = context.pages()[0] ?? (await context.newPage());
+    const cdp = await context.newCDPSession(page);
+    await applyCdpFingerprint(cdp, fingerprint);
+    await page.goto('https://abrahamjuliot.github.io/creepjs/', {
+      waitUntil: 'networkidle',
+      timeout: 60_000,
+    });
+    // CreepJS computes asynchronously — give it time to render the trust score.
+    await new Promise((r) => setTimeout(r, 15_000));
+    const parsed = await page.evaluate(() => {
+      const text = document.body.innerText || '';
+      const trust = /trust score[:\s]*([\d.]+)\s*%/i.exec(text);
+      const lies = /(\d+)\s*lies?/i.exec(text);
+      return { trustScore: trust ? Number(trust[1]) : null, lies: lies ? Number(lies[1]) : null };
+    });
+    return { available: parsed.trustScore !== null || parsed.lies !== null, ...parsed };
+  } finally {
+    await context.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function loadThresholds() {
   return JSON.parse(await readFile(join(here, 'thresholds.json'), 'utf8'));
 }
@@ -226,6 +265,101 @@ async function runReal() {
         webrtcPolicyApplied && localLeaks.length === 0 && suppressionLeaks.length === 0,
     };
 
+    // 3a-ter. Deep-surface MEASUREMENT (canvas / WebGL / audio) — measured, NOT gated. These are the
+    // surfaces Lobium spoofs natively; the interim engine structurally cannot (JS spoofing is itself a
+    // tell, and patchright neutralizes it — see MASTER_PLAN §5). We measure and report the gap so the
+    // detector matrix is complete and Lobium's arrival is objectively verifiable, without failing the
+    // interim gate for something it cannot fix. On Lobium, `webgl.matchesClaim` becomes true and the
+    // canvas/audio hashes become the per-profile farbled values from the config channel.
+    const deep = await page.evaluate(async () => {
+      const fnv = (s) => {
+        let h = 2166136261 >>> 0;
+        for (let i = 0; i < s.length; i += 1) {
+          h ^= s.charCodeAt(i);
+          h = Math.imul(h, 16777619);
+        }
+        return (h >>> 0).toString(16);
+      };
+      let canvasHash = null;
+      try {
+        const c = document.createElement('canvas');
+        c.width = 220;
+        c.height = 40;
+        const ctx = c.getContext('2d');
+        ctx.textBaseline = 'top';
+        ctx.font = "14px 'Arial'";
+        ctx.fillStyle = '#f60';
+        ctx.fillRect(0, 0, 110, 20);
+        ctx.fillStyle = '#069';
+        ctx.fillText('Lobster 🦞 12345', 2, 15);
+        canvasHash = fnv(c.toDataURL());
+      } catch {
+        /* no 2d context */
+      }
+      let webgl = { vendor: null, renderer: null };
+      try {
+        const gl =
+          document.createElement('canvas').getContext('webgl') ||
+          document.createElement('canvas').getContext('experimental-webgl');
+        if (gl) {
+          const ext = gl.getExtension('WEBGL_debug_renderer_info');
+          webgl = {
+            vendor: ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+            renderer: ext
+              ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)
+              : gl.getParameter(gl.RENDERER),
+          };
+        }
+      } catch {
+        /* no WebGL */
+      }
+      let audioHash = null;
+      try {
+        const Ctx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+        const octx = new Ctx(1, 5000, 44100);
+        const osc = octx.createOscillator();
+        osc.type = 'triangle';
+        osc.frequency.value = 1000;
+        const comp = octx.createDynamicsCompressor();
+        osc.connect(comp);
+        comp.connect(octx.destination);
+        osc.start(0);
+        const buf = await octx.startRendering();
+        const ch = buf.getChannelData(0);
+        let sum = 0;
+        for (let i = 0; i < ch.length; i += 1) sum += Math.abs(ch[i]);
+        audioHash = sum.toFixed(6);
+      } catch {
+        /* no AudioContext */
+      }
+      return { canvasHash, webgl, audioHash };
+    });
+    const deepSurfaces = {
+      note: 'MEASUREMENT ONLY — native on Lobium; the interim engine leaks the host and is not gated here.',
+      webgl: {
+        claimed: fingerprint.webgl.unmaskedRenderer,
+        actual: deep.webgl.renderer,
+        matchesClaim: deep.webgl.renderer === fingerprint.webgl.unmaskedRenderer,
+      },
+      canvasHash: deep.canvasHash,
+      audioHash: deep.audioHash,
+    };
+
+    // The full detector matrix: which detectors gate the build vs. which are measurements that only
+    // become green once Lobium's native patches land (canvas/WebGL/audio/TLS). Keeps the plan honest.
+    const detectorMatrix = {
+      sannysoft: 'blocking (JS-safe surfaces + automation tells)',
+      webrtc: 'blocking (leak protection)',
+      coherence: 'blocking (fingerprint model)',
+      deepSurfaces: 'measurement — needs Lobium (canvas/WebGL/audio native farbling)',
+      creepjs: process.env.LOBSTER_CREEPJS
+        ? await measureCreepjs(chromium, fingerprint, emulation, options).catch((e) => ({
+            available: false,
+            error: String(e).slice(0, 120),
+          }))
+        : 'measurement — set LOBSTER_CREEPJS=1 to run (trust is low until Lobium; JS deep-surface spoofing is what CreepJS detects)',
+    };
+
     // 3b. Scrape the Sannysoft detector matrix (each result cell is class passed/failed).
     const rows = await page.$$eval('table tr', (trs) =>
       trs
@@ -275,6 +409,8 @@ async function runReal() {
         failed: failed.length,
         failedTests: failed.map((r) => r.name),
       },
+      deepSurfaces,
+      detectorMatrix,
       thresholds,
       verdict,
     });
