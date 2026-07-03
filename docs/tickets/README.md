@@ -27,6 +27,10 @@ tickets; the assigned agent implements; the other agent reviews. Keep this table
 | T-018a | q-weighted `Accept-Language` HTTP header (keep clean `navigator.languages`) | Fingerprint | Claude | draft · follow-up from T-018 |
 | T-019 | WebRTC leak protection + validation-gate integration | Proxy | Claude | done · [proxy-aware `--force-webrtc-ip-handling-policy`](T-019-webrtc-leak-protection.md) (`disable_non_proxied_udp` when proxied); non-vacuous gate proves the policy suppresses the STUN public-IP srflx (v4+v6) + mDNS local masking; hardened after adversarial review; 95 tests + live gate green |
 | T-019a | Assert `srflx == proxy egress IP` against a live test proxy (CI secret) | Proxy · QA | Claude | draft · follow-up from T-019 |
+| T-020 | Profile bulk-create + import/export/transfer | A · Profiles | Claude | done · [`/profiles/bulk`, `/export`, `/import`](T-020-profile-bulk-import-export.md); secret-free portable bundle; import preserves seed identity (transfer); batch plan-limit; e2e |
+| T-021 | API-key management (issue/list/revoke + verify) | C · Backend | Claude | done · [`/api-keys`](T-021-api-key-management.md); one-time `lb_live_` secret, only prefix+sha256 stored; `verify()` for the automation API; team-scoped; 9 e2e |
+| T-022 | Action logs / audit trail | C · Backend | Claude | done · [`AuditService.record` (fail-safe) + `GET /audit`](T-022-audit-log.md) team-scoped **keyset**-cursor feed (lossless across same-ms ties, hardened after review); instrumented into profiles + api-keys; 7 e2e |
+| T-020a | Atomic plan-limit enforcement (serializable txn / advisory lock) | C · Backend | Claude | draft · follow-up from T-020 (TOCTOU under concurrent bulk/import) |
 
 **Status legend:** `draft` (spec not final) · `ready` (spec final, unassigned work can start) ·
 `in-progress` · `in-review` · `done`.

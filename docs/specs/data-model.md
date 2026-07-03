@@ -359,7 +359,7 @@ support conflict UX, and expire old versions, promote them to a table:
 pull → merge → retry). *(done in `ProfilesService.push`)* **Retention:** keep the latest N (e.g. 10)
 versions; prune older via lifecycle job (§5).
 
-### 2.11 `audit_logs` — action trail *(planned; "action-log skeleton" per MASTER_PLAN Day 4)*
+### 2.11 `audit_logs` — action trail *(done — T-022; model + team-scoped cursor feed + instrumented events)*
 
 Append-only record of profile / team / API / billing actions.
 

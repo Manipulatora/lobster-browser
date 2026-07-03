@@ -74,6 +74,7 @@ model Team {
   profiles     Profile[]
   apiKeys      ApiKey[]
   subscription Subscription?
+  auditLogs    AuditLog[]
 
   @@index([ownerUserId])
   @@map("teams")
@@ -145,6 +146,32 @@ model ApiKey {
 
   @@index([teamId])
   @@map("api_keys")
+}
+
+// Mirrors shared-types `AuditLog`. An append-only, immutable action/audit log: rows are only
+// ever inserted and read (never updated or deleted in the ordinary flow) so a team keeps a
+// durable history of what happened. `metadata` is a non-secret JSON grab-bag for event context.
+// The `(teamId, createdAt)` index backs the newest-first, cursor-paginated team feed.
+model AuditLog {
+  id          String   @id @default(uuid())
+  teamId      String
+  // The user who performed the action; null for system-originated events.
+  actorUserId String?
+  // Machine-readable action name, e.g. "profile.created".
+  action      String
+  // The kind of thing the action targeted, e.g. "profile".
+  targetType  String
+  // Id of the specific target, when the action concerns one.
+  targetId    String?
+  // Free-form, non-secret context for the event.
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now())
+
+  // Relations
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, createdAt])
+  @@map("audit_logs")
 }
 
 // Mirrors shared-types `Subscription`. One per team.

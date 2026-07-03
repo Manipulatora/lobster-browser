@@ -8,11 +8,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import type { Profile } from '@lobster/shared-types';
+import type { Profile, ProfileExport, ProfileExportBundle } from '@lobster/shared-types';
 
+import { AuditService } from '../audit/audit.service';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 import { BLOB_STORE, type BlobStore } from './blob/blob-store';
+import type { BulkCreateProfilesDto } from './dto/bulk-create-profiles.dto';
 import type { CreateProfileDto } from './dto/create-profile.dto';
+import type { ImportProfilesDto } from './dto/import-profiles.dto';
 import type { UpdateProfileDto } from './dto/update-profile.dto';
 import { PROFILES_REPOSITORY, type ProfilesRepository } from './profiles.repository';
 
@@ -69,16 +72,17 @@ export class ProfilesService {
     @Inject(PROFILES_REPOSITORY) private readonly profiles: ProfilesRepository,
     @Inject(TEAMS_REPOSITORY) private readonly teams: TeamsRepository,
     @Inject(BLOB_STORE) private readonly blobs: BlobStore,
+    private readonly audit: AuditService,
   ) {}
 
   async create(userId: string, dto: CreateProfileDto, teamId?: string): Promise<Profile> {
     const ownerTeamId = await this.resolveTeamId(userId, teamId);
-    await this.assertUnderPlanLimit(ownerTeamId);
+    await this.assertCanAddProfiles(ownerTeamId, 1);
 
     // Every profile MUST get a unique seed — a shared/constant seed would give many profiles the
     // same fingerprint identity. Generate a fresh random 128-bit seed when the caller omits one.
     const fingerprintSeed = dto.fingerprintSeed ?? randomBytes(16).toString('hex');
-    return this.profiles.create({
+    const created = await this.profiles.create({
       ownerTeamId,
       name: dto.name,
       engine: dto.engine,
@@ -89,6 +93,116 @@ export class ProfilesService {
       folder: dto.folder,
       notes: dto.notes,
     });
+    await this.audit.record({
+      teamId: ownerTeamId,
+      actorUserId: userId,
+      action: 'profile.create',
+      targetType: 'profile',
+      targetId: created.id,
+      metadata: { name: created.name, engine: created.engine, os: created.os },
+    });
+    return created;
+  }
+
+  /**
+   * Create `count` profiles in one call, each with its OWN fresh unique seed (never a shared
+   * identity). The whole batch is plan-limit-checked up front, so a batch that would exceed the
+   * team's limit is rejected wholesale (no partial creation).
+   */
+  async bulkCreate(
+    userId: string,
+    dto: BulkCreateProfilesDto,
+    teamId?: string,
+  ): Promise<Profile[]> {
+    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    await this.assertCanAddProfiles(ownerTeamId, dto.count);
+
+    const created: Profile[] = [];
+    for (let i = 0; i < dto.count; i += 1) {
+      created.push(
+        await this.profiles.create({
+          ownerTeamId,
+          name: `${dto.namePrefix} ${i + 1}`,
+          engine: dto.engine,
+          os: dto.os,
+          fingerprintSeed: randomBytes(16).toString('hex'),
+          tags: dto.tags ?? [],
+          folder: dto.folder,
+        }),
+      );
+    }
+    await this.audit.record({
+      teamId: ownerTeamId,
+      actorUserId: userId,
+      action: 'profile.bulk_create',
+      targetType: 'profile',
+      metadata: { count: created.length, namePrefix: dto.namePrefix },
+    });
+    return created;
+  }
+
+  /**
+   * Export every profile in the caller's team as a portable, SECRET-FREE bundle: only the
+   * deterministic `fingerprintSeed` + non-secret metadata — never the encrypted blob or any ids.
+   * This is the export/transfer wire format ({@link ProfileExportBundle}).
+   */
+  async exportAll(userId: string, teamId?: string): Promise<ProfileExportBundle> {
+    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const profiles = await this.profiles.findAllByTeam(ownerTeamId);
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      profiles: profiles.map((p) => this.toExport(p)),
+    };
+  }
+
+  /**
+   * Import a bundle: re-create each exported profile under the caller's team, PRESERVING its
+   * `fingerprintSeed` so the same coherent fingerprint identity transfers across teams/accounts.
+   * The full batch is plan-limit-checked before anything is created.
+   */
+  async importBundle(userId: string, dto: ImportProfilesDto, teamId?: string): Promise<Profile[]> {
+    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    await this.assertCanAddProfiles(ownerTeamId, dto.profiles.length);
+
+    const imported: Profile[] = [];
+    for (const item of dto.profiles) {
+      imported.push(
+        await this.profiles.create({
+          ownerTeamId,
+          name: item.name,
+          engine: item.engine,
+          os: item.os,
+          fingerprintSeed: item.fingerprintSeed,
+          fingerprintOverrides: item.fingerprintOverrides,
+          tags: item.tags ?? [],
+          folder: item.folder,
+          notes: item.notes,
+        }),
+      );
+    }
+    await this.audit.record({
+      teamId: ownerTeamId,
+      actorUserId: userId,
+      action: 'profile.import',
+      targetType: 'profile',
+      metadata: { count: imported.length },
+    });
+    return imported;
+  }
+
+  /** Project a stored profile down to the SECRET-FREE portable export shape. */
+  private toExport(p: Profile): ProfileExport {
+    return {
+      name: p.name,
+      engine: p.engine,
+      os: p.os,
+      fingerprintSeed: p.fingerprintSeed,
+      ...(p.fingerprintOverrides ? { fingerprintOverrides: p.fingerprintOverrides } : {}),
+      tags: p.tags,
+      ...(p.folder ? { folder: p.folder } : {}),
+      ...(p.notes ? { notes: p.notes } : {}),
+    };
   }
 
   async findAll(userId: string, teamId?: string): Promise<Profile[]> {
@@ -116,6 +230,15 @@ export class ProfilesService {
     if (!updated) {
       throw new NotFoundException('profile not found');
     }
+    await this.audit.record({
+      teamId: ownerTeamId,
+      actorUserId: userId,
+      action: 'profile.update',
+      targetType: 'profile',
+      targetId: id,
+      // Record WHICH fields changed, never their values (values can be large/derived config).
+      metadata: { fields: Object.keys(dto) },
+    });
     return updated;
   }
 
@@ -129,6 +252,13 @@ export class ProfilesService {
     if (!deleted) {
       throw new NotFoundException('profile not found');
     }
+    await this.audit.record({
+      teamId: ownerTeamId,
+      actorUserId: userId,
+      action: 'profile.delete',
+      targetType: 'profile',
+      targetId: id,
+    });
     // TODO(Day 2): also delete the encrypted blob from S3.
     return { id, deleted: true };
   }
@@ -155,9 +285,22 @@ export class ProfilesService {
       throw new NotFoundException('profile not found');
     }
     const key = this.blobKey(ownerTeamId, id);
-    return input.direction === 'pull'
-      ? this.pull(id, ownerTeamId, key)
-      : this.push(id, ownerTeamId, key, input);
+    const result =
+      input.direction === 'pull'
+        ? await this.pull(id, ownerTeamId, key)
+        : await this.push(id, ownerTeamId, key, input);
+    // Record the mutation (push), not reads (pull), to keep the audit trail action-focused.
+    if (result.direction === 'push') {
+      await this.audit.record({
+        teamId: ownerTeamId,
+        actorUserId: userId,
+        action: 'profile.sync',
+        targetType: 'profile',
+        targetId: id,
+        metadata: { version: result.version },
+      });
+    }
+    return result;
   }
 
   /** Store a new encrypted blob, enforcing the optimistic-concurrency check when requested. */
@@ -243,15 +386,17 @@ export class ProfilesService {
   }
 
   /**
-   * Per-plan profile-limit gate. Reads the team's Subscription.profileLimit when present, else
-   * applies the default free-tier limit; throws `ForbiddenException` when the team is at capacity.
+   * Per-plan profile-limit gate for adding `count` profiles. Reads the team's
+   * Subscription.profileLimit when present, else the default free-tier limit; throws
+   * `ForbiddenException` when the batch would push the team over its limit (checked as a whole, so
+   * bulk/import never partially create).
    */
-  private async assertUnderPlanLimit(teamId: string): Promise<void> {
+  private async assertCanAddProfiles(teamId: string, count: number): Promise<void> {
     const limit = (await this.profiles.getProfileLimit(teamId)) ?? DEFAULT_FREE_PROFILE_LIMIT;
     const currentCount = (await this.profiles.findAllByTeam(teamId)).length;
-    if (currentCount >= limit) {
+    if (currentCount + count > limit) {
       throw new ForbiddenException(
-        `profile limit (${limit}) reached for this team; upgrade the plan to add more`,
+        `profile limit (${limit}) reached for this team: ${currentCount} in use, cannot add ${count} more — upgrade the plan`,
       );
     }
   }

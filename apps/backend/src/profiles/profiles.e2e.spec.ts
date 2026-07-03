@@ -358,3 +358,115 @@ test('unauthenticated create is 401', async () => {
     .send({ name: 'nope', engine: 'chromium', os: 'windows' });
   assert.equal(res.status, 401);
 });
+
+test('bulk create makes N profiles each with a unique seed, batch-checked against the plan limit', async () => {
+  const token = await registerToken('profiles-bulk@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+
+  const bulk = await request(app.getHttpServer())
+    .post('/profiles/bulk')
+    .set(auth)
+    .send({ count: 3, namePrefix: 'Batch', engine: 'chromium', os: 'windows', tags: ['ecom'] });
+  assert.ok([200, 201].includes(bulk.status), `bulk status ${bulk.status}`);
+  assert.equal(bulk.body.code, 0);
+  assert.equal(bulk.body.data.length, 3);
+  assert.equal(
+    new Set(bulk.body.data.map((p: { fingerprintSeed: string }) => p.fingerprintSeed)).size,
+    3,
+  );
+  assert.equal(bulk.body.data[0].name, 'Batch 1');
+  assert.deepEqual(bulk.body.data[2].tags, ['ecom']);
+
+  // A batch that would exceed the free limit (5) is rejected wholesale (3 exist, +3 > 5).
+  const overflow = await request(app.getHttpServer())
+    .post('/profiles/bulk')
+    .set(auth)
+    .send({ count: 3, namePrefix: 'Over', engine: 'chromium', os: 'windows' });
+  assert.equal(overflow.status, 403);
+  const list = await request(app.getHttpServer()).get('/profiles').set(auth);
+  assert.equal(list.body.data.length, 3, 'nothing partial was created on the rejected batch');
+});
+
+test('export is secret-free; import transfers profiles (preserving seed identity) to another team', async () => {
+  const tokenA = await registerToken('export-a@example.com');
+  const authA = { Authorization: `Bearer ${tokenA}` };
+  const tokenB = await registerToken('import-b@example.com');
+  const authB = { Authorization: `Bearer ${tokenB}` };
+
+  const p1 = await request(app.getHttpServer())
+    .post('/profiles')
+    .set(authA)
+    .send({ name: 'Alpha', engine: 'lobium', os: 'macos', tags: ['t'], notes: 'n' });
+  await request(app.getHttpServer())
+    .post('/profiles')
+    .set(authA)
+    .send({ name: 'Beta', engine: 'chromium', os: 'linux' });
+  // Sync a secret blob into Alpha to prove export never carries it.
+  await request(app.getHttpServer())
+    .post(`/profiles/${p1.body.data.id}/sync`)
+    .set(authA)
+    .send({ payload: Buffer.from('SECRET').toString('base64') });
+
+  const exp = await request(app.getHttpServer()).get('/profiles/export').set(authA);
+  assert.equal(exp.status, 200);
+  assert.equal(exp.body.data.version, 1);
+  assert.equal(exp.body.data.profiles.length, 2);
+  for (const p of exp.body.data.profiles) {
+    assert.equal(p.id, undefined, 'export carries no server id');
+    assert.equal(p.ownerTeamId, undefined, 'export carries no team id');
+    assert.equal(p.status, undefined, 'export carries no runtime status');
+  }
+  assert.ok(
+    !JSON.stringify(exp.body.data).includes('U0VDUkVU'),
+    'export must not carry the encrypted blob',
+  );
+  const alpha = exp.body.data.profiles.find((p: { name: string }) => p.name === 'Alpha');
+  assert.equal(alpha.engine, 'lobium');
+
+  // B imports A's bundle; seeds (identity) transfer and B owns the copies.
+  const imp = await request(app.getHttpServer())
+    .post('/profiles/import')
+    .set(authB)
+    .send(exp.body.data);
+  assert.ok([200, 201].includes(imp.status), `import status ${imp.status}`);
+  assert.equal(imp.body.data.length, 2);
+  const bAlpha = imp.body.data.find((p: { name: string }) => p.name === 'Alpha');
+  assert.equal(bAlpha.fingerprintSeed, alpha.fingerprintSeed, 'seed identity transfers');
+  assert.ok(bAlpha.ownerTeamId, "imported under B's team");
+
+  const listB = await request(app.getHttpServer()).get('/profiles').set(authB);
+  assert.equal(listB.body.data.length, 2, 'B sees exactly the imported profiles (isolation holds)');
+});
+
+test('profile actions are recorded to the team audit log (newest first, with metadata)', async () => {
+  const token = await registerToken('audit-integration@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+
+  const create = await request(app.getHttpServer())
+    .post('/profiles')
+    .set(auth)
+    .send({ name: 'Audited', engine: 'chromium', os: 'windows' });
+  assert.equal(create.body.code, 0);
+  await request(app.getHttpServer())
+    .post('/profiles/bulk')
+    .set(auth)
+    .send({ count: 2, namePrefix: 'B', engine: 'chromium', os: 'windows' });
+
+  // AuditController (GET /audit) is mounted transitively via ProfilesModule -> AuditModule.
+  const audit = await request(app.getHttpServer()).get('/audit').set(auth);
+  assert.equal(audit.status, 200);
+  assert.equal(audit.body.code, 0);
+  const actions: string[] = audit.body.data.map((e: { action: string }) => e.action);
+  assert.ok(actions.includes('profile.create'), 'profile.create audited');
+  assert.ok(actions.includes('profile.bulk_create'), 'profile.bulk_create audited');
+  // Newest-first: the later bulk_create precedes the earlier create.
+  assert.ok(
+    actions.indexOf('profile.bulk_create') < actions.indexOf('profile.create'),
+    'audit feed is newest-first',
+  );
+  const createEntry = audit.body.data.find(
+    (e: { action: string }) => e.action === 'profile.create',
+  );
+  assert.equal(createEntry.targetType, 'profile');
+  assert.equal(createEntry.metadata.name, 'Audited');
+});

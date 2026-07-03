@@ -165,7 +165,7 @@ Multi-seat orgs with shared profiles, roles, and auditability.
 | Per-profile sharing | `ProfileSharing { visibleToRoles }`; extend to explicit per-user/per-role grants + per-profile passwords. | P0/P1 | Octo, ML, ADS | **partial** (`sharing` field on `Profile`; explicit grants/password **planned**) |
 | Profile transfer (org) | Move profile ownership between teams/members. | P1 | Octo, ML | **planned** |
 | Seats | Plan-bounded member count; seat enforcement on invite. | P1 | all | **planned** (tie to Subscription) |
-| Activity / audit log | Immutable log of profile/team/API actions (who, what, when, from where); filter + export. | P0/P1 | Octo, ML, ADS | **planned** (skeleton per MASTER_PLAN Day 4) |
+| Activity / audit log | Immutable log of profile/team/API actions (who, what, when, from where); filter + export. | P0/P1 | Octo, ML, ADS | **done (T-022)** — team-scoped cursor feed + instrumented profile/api-key events; filter/export + teams/auth events still planned |
 
 **Parity note:** admin/member + shared profiles is in place. The enterprise wedge — **granular RBAC,
 tag-scoped access, per-profile passwords, and immutable audit export** — is the P1 build that unlocks

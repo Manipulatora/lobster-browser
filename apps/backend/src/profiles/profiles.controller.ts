@@ -9,12 +9,14 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import type { Profile, User } from '@lobster/shared-types';
+import type { Profile, ProfileExportBundle, User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { BulkCreateProfilesDto } from './dto/bulk-create-profiles.dto';
 import { CreateProfileDto } from './dto/create-profile.dto';
+import { ImportProfilesDto } from './dto/import-profiles.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { SyncProfileDto } from './dto/sync-profile.dto';
 import { ProfilesService, type SyncResult } from './profiles.service';
@@ -44,6 +46,36 @@ export class ProfilesController {
     @Query('teamId') teamId?: string,
   ): Promise<ApiResponse<Profile[]>> {
     return ok(await this.profilesService.findAll(user.id, teamId));
+  }
+
+  /** Create many profiles at once (each with its own unique seed). Batch plan-limit-checked. */
+  @Post('bulk')
+  async bulkCreate(
+    @CurrentUser() user: User,
+    @Body() dto: BulkCreateProfilesDto,
+    @Query('teamId') teamId?: string,
+  ): Promise<ApiResponse<Profile[]>> {
+    return ok(await this.profilesService.bulkCreate(user.id, dto, teamId));
+  }
+
+  // NOTE: declared BEFORE `@Get(':id')` so the literal path is not captured as an :id.
+  /** Export every team profile as a portable, secret-free bundle (the transfer format). */
+  @Get('export')
+  async exportAll(
+    @CurrentUser() user: User,
+    @Query('teamId') teamId?: string,
+  ): Promise<ApiResponse<ProfileExportBundle>> {
+    return ok(await this.profilesService.exportAll(user.id, teamId));
+  }
+
+  /** Import a bundle: re-create each profile under the caller's team, preserving its seed identity. */
+  @Post('import')
+  async importBundle(
+    @CurrentUser() user: User,
+    @Body() dto: ImportProfilesDto,
+    @Query('teamId') teamId?: string,
+  ): Promise<ApiResponse<Profile[]>> {
+    return ok(await this.profilesService.importBundle(user.id, dto, teamId));
   }
 
   @Get(':id')

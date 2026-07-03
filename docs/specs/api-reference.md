@@ -480,7 +480,7 @@ A proxy store + test endpoint at the cloud tier (the desktop agent already tests
 `{ ip, countryCode, region?, city?, timezone, latitude?, longitude?, asn?, isDatacenter? }` —
 the coherence source of truth for timezone/locale auto-sync.
 
-### 2.9 API keys (⬜ planned; model exists)
+### 2.9 API keys (✅ done — T-021; scopes/rotation/rate-limit still planned)
 
 Programmatic keys for the local + cloud APIs. Prisma `ApiKey` + `shared-types.ApiKey` exist; the
 secret is shown **once** at creation and stored only as a hash; only the `prefix` is displayable.
@@ -539,7 +539,7 @@ profiles it can hold. Tiers (`PlanTier`): `free` | `pro` | `team` | `enterprise`
 **5**, matching `schema.prisma`) and rejects creates at capacity with
 `403 profile limit (N) reached for this team; upgrade the plan to add more`.
 
-### 2.12 Audit / action logs (⬜ planned)
+### 2.12 Audit / action logs (✅ done — T-022; `GET /audit` cursor feed; `/audit/:id` still planned)
 
 Immutable trail of profile/team/API/billing actions.
 

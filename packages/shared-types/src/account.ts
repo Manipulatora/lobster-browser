@@ -32,6 +32,28 @@ export interface ApiKey {
   lastUsedAt?: string;
 }
 
+/**
+ * An immutable action/audit-log entry. Written by the backend whenever a meaningful action
+ * happens (profile created, member invited, subscription changed, …) so a team has a durable,
+ * append-only history. Rows are never updated or deleted in the ordinary flow — they are the
+ * record of what happened. Every entry is scoped to exactly one team.
+ */
+export interface AuditLog {
+  id: string;
+  teamId: string;
+  /** The user who performed the action; absent for system-originated events. */
+  actorUserId?: string;
+  /** Machine-readable action name, e.g. `profile.created` / `member.invited`. */
+  action: string;
+  /** The kind of thing the action targeted, e.g. `profile` / `membership`. */
+  targetType: string;
+  /** Id of the specific target, when the action concerns one. */
+  targetId?: string;
+  /** Free-form, non-secret context for the event (opaque JSON grab-bag). */
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
 export type PlanTier = 'free' | 'pro' | 'team' | 'enterprise';
 
 export interface Subscription {

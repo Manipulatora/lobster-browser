@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { AuditModule } from '../audit/audit.module';
 import { AuthModule } from '../auth/auth.module';
 import { PrismaService } from '../prisma/prisma.service';
 import { BLOB_STORE } from './blob/blob-store';
@@ -19,7 +20,7 @@ import { ProfilesService } from './profiles.service';
  * (so the service boots and is tested without a database or object store).
  */
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, AuditModule],
   controllers: [ProfilesController],
   providers: [
     ProfilesService,
