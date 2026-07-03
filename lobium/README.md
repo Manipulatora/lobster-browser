@@ -47,6 +47,12 @@ lobium/
 
 Compiles are long — run on a dedicated build machine / self-hosted CI with `ccache`/reclient.
 
+**Full, reproducible instructions:** [REPRODUCIBLE_BUILD.md](REPRODUCIBLE_BUILD.md) — clone → fetch the
+pinned Chromium ref → apply `patches/` → build the exact binary, with a step to **verify** the native
+override took effect. The `patches/core/hardware-concurrency-poc.patch` in this repo is verified to
+apply cleanly to a pristine `152.0.7928.0` tree, so `lobium/` alone reconstructs the fork (the 37 GB
+base Chromium is fetched, never committed — as with every Chromium fork).
+
 ## Native patch domains (target)
 
 navigator/UA-CH · screen/DPR · timezone/locale · fonts · hardwareConcurrency/deviceMemory ·

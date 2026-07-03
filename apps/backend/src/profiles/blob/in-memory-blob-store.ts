@@ -1,6 +1,13 @@
 import { Injectable } from '@nestjs/common';
 
-import type { BlobHead, BlobPutMeta, BlobPutResult, BlobRecord, BlobStore } from './blob-store';
+import {
+  BlobVersionConflictError,
+  type BlobHead,
+  type BlobPutMeta,
+  type BlobPutResult,
+  type BlobRecord,
+  type BlobStore,
+} from './blob-store';
 
 /** A single versioned entry in the in-memory store. */
 interface StoredBlob {
@@ -19,8 +26,15 @@ interface StoredBlob {
 export class InMemoryBlobStore implements BlobStore {
   private readonly byKey = new Map<string, StoredBlob>();
 
-  async put(key: string, bytes: Buffer, _meta: BlobPutMeta): Promise<BlobPutResult> {
-    const nextVersion = (this.byKey.get(key)?.version ?? 0) + 1;
+  async put(key: string, bytes: Buffer, meta: BlobPutMeta): Promise<BlobPutResult> {
+    const currentVersion = this.byKey.get(key)?.version ?? 0;
+    // Compare-and-set: the read of the current version and the write below run with no await
+    // between them, so this whole block is atomic on the single-threaded event loop. Two racing
+    // pushes at the same `expectedVersion` can therefore never both pass the check.
+    if (meta.expectedVersion !== undefined && meta.expectedVersion !== currentVersion) {
+      throw new BlobVersionConflictError(key, meta.expectedVersion, currentVersion);
+    }
+    const nextVersion = currentVersion + 1;
     // Copy the buffer so a later mutation of the caller's array can't rewrite stored bytes.
     this.byKey.set(key, {
       bytes: Buffer.from(bytes),

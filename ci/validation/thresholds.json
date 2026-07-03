@@ -1,14 +1,25 @@
 {
-  "//": "Objective anti-detect pass/fail thresholds enforced by the validation harness (T-005).",
+  "//": "Anti-detect thresholds for the validation harness (T-005). GATED (fails the run.mjs verdict + exit code): sannysoft.maxFailed and the webrtc leak checks. MEASURED-ONLY (reported in the JSON, never fails this harness): creepjs and coherence. The only threshold NUMBER run.mjs reads is sannysoft.maxFailed; the webrtc booleans document intent that the harness enforces in code; creepjs/coherence values are targets, not gates.",
   "sannysoft": {
     "maxFailed": 2,
-    "note": "WebGL Vendor/Renderer are native (deep) surfaces handled by Lobium; they read the host GPU until the Lobium build ships, so up to 2 WebGL fails are expected/allowed here."
+    "gated": true,
+    "note": "GATED. WebGL Vendor/Renderer are native (deep) surfaces handled by Lobium; they read the host GPU until the Lobium build ships, so up to 2 WebGL fails are expected/allowed here."
   },
-  "creepjs": { "minTrustScore": 60, "maxLies": 0 },
+  "creepjs": {
+    "minTrustScore": 60,
+    "maxLies": 0,
+    "gated": false,
+    "note": "MEASUREMENT ONLY — not enforced by run.mjs. CreepJS runs only when LOBSTER_CREEPJS=1 and its trust/lies are reported in detectorMatrix, never compared to these numbers (JS deep-surface spoofing is itself the tell CreepJS detects, so trust stays low until Lobium's native patches land). minTrustScore/maxLies are the target for the Lobium build, not a current gate."
+  },
   "webrtc": {
     "forbidLocalIpLeak": true,
     "forbidPublicIpLeakUnderPolicy": true,
-    "note": "Gated by the harness webrtcLeakProtected check: (1) the profile's own host candidates are all mDNS .local (no raw private IPv4 / no global IPv6), and (2) with disable_non_proxied_udp + a live STUN server the browser emits NO public-IP srflx (proves the policy suppresses the leak; the control WOULD leak). requireIcePublicIpEqualsProxyIp — asserting a srflx equals the PROXY egress IP — needs a live test proxy and is a follow-up (T-019a)."
+    "gated": true,
+    "note": "GATED by the harness webrtcLeakProtected check (the booleans here document intent; the checks live in run.mjs): (1) the profile's own host candidates are all mDNS .local (no raw private IPv4 / no global IPv6), and (2) with disable_non_proxied_udp + a live STUN server the browser emits NO public-IP srflx. The suppression assertion (2) only counts once a CONTROL run (default_public_interface_only + STUN) proves the probe CAN leak; if the control does not leak (no network/STUN), webrtcLeakProtected is reported as not-measured (null) and skipped rather than a vacuous pass. requireIcePublicIpEqualsProxyIp — asserting a srflx equals the PROXY egress IP — needs a live test proxy and is a follow-up (T-019a)."
   },
-  "coherence": { "maxIssues": 0 }
+  "coherence": {
+    "maxIssues": 0,
+    "gated": false,
+    "note": "MEASUREMENT ONLY in this harness — run.mjs derives a coherent fingerprint but does not re-run a coherence gate against maxIssues. Coherence is enforced upstream by the @lobster/fingerprint unit tests (validateFingerprintCoherence over the 50-seed x OS x engine sweep)."
+  }
 }

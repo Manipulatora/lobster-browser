@@ -138,8 +138,11 @@ test('humanClick presses (buttons:1) then releases (buttons:0) the left button a
 test('humanType inserts each char once (keyDown+keyUp, NO char event) with key/code populated', async () => {
   const cdp = new RecordingCdp();
   await humanType(cdp, 'aB2', { seed: 'ht', sleep: noSleep });
-  assert.equal(cdp.ofType('keyDown').length, 3);
-  assert.equal(cdp.ofType('keyUp').length, 3);
+  // 'a' and '2' emit one keyDown/keyUp each; the uppercase 'B' also brackets a Shift keyDown/keyUp.
+  assert.equal(cdp.ofType('keyDown').length, 4);
+  assert.equal(cdp.ofType('keyUp').length, 4);
+  // Exactly one text-bearing keyDown per input char — the Shift press carries no text (no double-insert).
+  assert.equal(cdp.ofType('keyDown').filter((p) => p.text !== undefined).length, 3);
   assert.equal(
     cdp.ofType('char').length,
     0,
@@ -156,4 +159,53 @@ test('humanType inserts each char once (keyDown+keyUp, NO char event) with key/c
   // A digit resolves to a Digit* code.
   const digitDown = cdp.calls.find((c) => c.params?.text === '2');
   assert.equal(digitDown?.params?.code, 'Digit2');
+});
+
+test('humanType brackets a shifted char with a real Shift press and tags the Shift modifier', async () => {
+  const cdp = new RecordingCdp();
+  await humanType(cdp, 'A', { seed: 'sh', sleep: noSleep });
+  // Real hardware order: Shift down, char down, char up, Shift up.
+  const types = cdp.calls.map((c) => ({ type: c.params?.type, key: c.params?.key }));
+  assert.deepEqual(types, [
+    { type: 'keyDown', key: 'Shift' },
+    { type: 'keyDown', key: 'A' },
+    { type: 'keyUp', key: 'A' },
+    { type: 'keyUp', key: 'Shift' },
+  ]);
+  const shiftDown = cdp.calls[0]?.params;
+  assert.equal(shiftDown?.code, 'ShiftLeft');
+  assert.equal(shiftDown?.windowsVirtualKeyCode, 16);
+  assert.equal(shiftDown?.modifiers, 8);
+  // The letter carries an authoritative code/keyCode and the Shift modifier (e.shiftKey === true).
+  const letterDown = cdp.calls[1]?.params;
+  assert.equal(letterDown?.code, 'KeyA');
+  assert.equal(letterDown?.windowsVirtualKeyCode, 65);
+  assert.equal(letterDown?.text, 'A');
+  assert.equal(letterDown?.modifiers, 8);
+  assert.equal(cdp.calls[2]?.params?.modifiers, 8); // the keyUp too
+});
+
+test('humanType gives shifted symbols a real US-layout code/keyCode + Shift (never code:"" keyCode:0)', async () => {
+  const cdp = new RecordingCdp();
+  await humanType(cdp, '!', { seed: 'ex', sleep: noSleep });
+  const types = cdp.calls.map((c) => c.params?.type);
+  assert.deepEqual(types, ['keyDown', 'keyDown', 'keyUp', 'keyUp']); // Shift brackets the symbol
+  const bang = cdp.calls[1]?.params;
+  assert.equal(bang?.key, '!');
+  assert.equal(bang?.code, 'Digit1'); // Shift+1 on a US layout — was '' before the fix
+  assert.equal(bang?.windowsVirtualKeyCode, 49); // was 0 before the fix
+  assert.equal(bang?.text, '!');
+  assert.equal(bang?.modifiers, 8);
+  assert.equal(cdp.calls[0]?.params?.key, 'Shift');
+});
+
+test('humanType leaves an unshifted symbol unshifted but with a real code/keyCode', async () => {
+  const cdp = new RecordingCdp();
+  await humanType(cdp, '.', { seed: 'dot', sleep: noSleep });
+  // No Shift key events for an unshifted symbol — just the char keyDown/keyUp.
+  assert.equal(cdp.calls.filter((c) => c.params?.key === 'Shift').length, 0);
+  const dot = cdp.calls.find((c) => c.params?.type === 'keyDown')?.params;
+  assert.equal(dot?.code, 'Period'); // was '' before the fix
+  assert.equal(dot?.windowsVirtualKeyCode, 190); // was 0 before the fix
+  assert.equal(dot?.modifiers, 0);
 });

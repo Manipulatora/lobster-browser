@@ -1,13 +1,15 @@
 import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import test, { after, before } from 'node:test';
-import { ValidationPipe, type INestApplication } from '@nestjs/common';
+import { ValidationPipe } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
 import { PrismaModule } from '../prisma/prisma.module';
 import { AuthModule } from '../auth/auth.module';
+import { configureBodyLimit } from '../body-limit';
 import { ProfilesModule } from './profiles.module';
 import { DEFAULT_FREE_PROFILE_LIMIT } from './profiles.service';
 
@@ -17,7 +19,7 @@ import { DEFAULT_FREE_PROFILE_LIMIT } from './profiles.service';
  * repositories are used. Each registered user gets a personal team automatically (auth), which
  * profiles are scoped to.
  */
-let app: INestApplication;
+let app: NestExpressApplication;
 
 /** Register a fresh user and return their bearer token. */
 async function registerToken(email: string): Promise<string> {
@@ -41,7 +43,10 @@ before(async () => {
     ],
   }).compile();
 
-  app = moduleRef.createNestApplication();
+  // Mirror the production bootstrap (main.ts): disable the built-in ~100kb body parser and apply
+  // the raised limit, so large encrypted profile blobs on sync are exercised as they run in prod.
+  app = moduleRef.createNestApplication<NestExpressApplication>({ bodyParser: false });
+  configureBodyLimit(app);
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
   );
@@ -306,6 +311,31 @@ test('a push with a stale baseVersion is rejected with 409 Conflict', async () =
     .set(auth)
     .send({ direction: 'push', payload: encryptedBlob('racy'), baseVersion: 1 });
   assert.equal(retry.body.data.version, 2);
+});
+
+test('a >100kb encrypted blob syncs (push) successfully (body limit raised above the ~100kb default)', async () => {
+  const token = await registerToken('profiles-largeblob@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+  const id = await createProfile(auth, 'Large blob');
+
+  // 300kB of raw bytes → ~400kB of base64, comfortably past Express's ~100kb default which would
+  // otherwise reject a realistic encrypted profile blob with 413.
+  const payload = Buffer.alloc(300 * 1024, 0xab).toString('base64');
+  assert.ok(payload.length > 100 * 1024, 'payload must exceed the ~100kb default body limit');
+
+  const push = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'push', payload });
+  assert.ok([200, 201].includes(push.status), `push status ${push.status}`);
+  assert.equal(push.body.data.version, 1);
+
+  // Round-trips byte-for-byte, proving the whole large body was accepted and stored.
+  const pull = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'pull' });
+  assert.equal(pull.body.data.payload, payload);
 });
 
 test('pull on a never-synced profile returns version 0 and a null payload', async () => {

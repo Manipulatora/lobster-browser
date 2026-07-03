@@ -1,28 +1,221 @@
 import type { Fingerprint, GeoInfo, LocaleFingerprint, OsFamily } from '@lobster/shared-types';
 
-/** Minimal country → primary locale map. Day 1 expands this from a full locale dataset. */
+/**
+ * Country (ISO-3166 alpha-2) → primary browser locale. Covers the ~70 most common proxy exit
+ * countries so that when a proxy lands in, say, Sweden we set a Swedish locale rather than leaving
+ * the seed-default en-US next to a `Europe/Stockholm` timezone — a navigator.language/Accept-Language
+ * vs timezone mismatch is one of the strongest bot signals. For a still-unmapped country we fall back
+ * to {@link TIMEZONE_LOCALE} (deriving the language from the exit timezone) before ever keeping en-US.
+ */
 const COUNTRY_LOCALE: Record<string, string> = {
+  // English-speaking
   US: 'en-US',
   GB: 'en-GB',
   CA: 'en-CA',
   AU: 'en-AU',
+  NZ: 'en-NZ',
+  IE: 'en-IE',
+  ZA: 'en-ZA',
+  SG: 'en-SG',
+  NG: 'en-NG',
+  KE: 'en-KE',
+  PH: 'en-PH',
+  IN: 'en-IN',
+  // Western / Central Europe
   DE: 'de-DE',
+  AT: 'de-AT',
+  CH: 'de-CH',
   FR: 'fr-FR',
+  BE: 'nl-BE',
+  LU: 'fr-LU',
+  NL: 'nl-NL',
   ES: 'es-ES',
   IT: 'it-IT',
-  NL: 'nl-NL',
-  BR: 'pt-BR',
   PT: 'pt-PT',
+  // Nordics
+  SE: 'sv-SE',
+  NO: 'nb-NO',
+  DK: 'da-DK',
+  FI: 'fi-FI',
+  IS: 'is-IS',
+  // Eastern Europe / Balkans
+  PL: 'pl-PL',
+  CZ: 'cs-CZ',
+  SK: 'sk-SK',
+  HU: 'hu-HU',
+  RO: 'ro-RO',
+  BG: 'bg-BG',
+  HR: 'hr-HR',
+  RS: 'sr-RS',
+  SI: 'sl-SI',
+  GR: 'el-GR',
+  UA: 'uk-UA',
   RU: 'ru-RU',
+  BY: 'ru-BY',
+  EE: 'et-EE',
+  LV: 'lv-LV',
+  LT: 'lt-LT',
+  TR: 'tr-TR',
+  // Middle East / North Africa
+  IL: 'he-IL',
+  AE: 'ar-AE',
+  SA: 'ar-SA',
+  EG: 'ar-EG',
+  MA: 'ar-MA',
+  DZ: 'ar-DZ',
+  TN: 'ar-TN',
+  IR: 'fa-IR',
+  // Asia-Pacific
   JP: 'ja-JP',
   KR: 'ko-KR',
   CN: 'zh-CN',
-  IN: 'en-IN',
+  HK: 'zh-HK',
+  TW: 'zh-TW',
+  TH: 'th-TH',
+  VN: 'vi-VN',
+  ID: 'id-ID',
+  MY: 'ms-MY',
+  PK: 'ur-PK',
+  BD: 'bn-BD',
+  LK: 'si-LK',
+  MM: 'my-MM',
+  KZ: 'ru-KZ',
+  // Latin America
+  BR: 'pt-BR',
   MX: 'es-MX',
+  AR: 'es-AR',
+  CL: 'es-CL',
+  CO: 'es-CO',
+  PE: 'es-PE',
+  VE: 'es-VE',
+  EC: 'es-EC',
+  UY: 'es-UY',
+  BO: 'es-BO',
+  PY: 'es-PY',
+  GT: 'es-GT',
+  CR: 'es-CR',
+  DO: 'es-DO',
 };
 
+/**
+ * IANA timezone → primary browser locale. Two jobs: (1) when a proxy's country is not in
+ * {@link COUNTRY_LOCALE} we derive the language from the exit timezone instead of keeping en-US, and
+ * (2) {@link validateFingerprintCoherence} uses it to flag a timezone whose region implies a language
+ * that disagrees with the locale. Kept consistent with COUNTRY_LOCALE (same primary language per
+ * country) so a fingerprint produced by {@link applyGeoToFingerprint} never flags itself. Under-
+ * coverage is safe (an unmapped zone simply skips the check); a *disagreeing* entry would not be.
+ */
+const TIMEZONE_LOCALE: Record<string, string> = {
+  // North America (English / Spanish / Portuguese)
+  'America/New_York': 'en-US',
+  'America/Detroit': 'en-US',
+  'America/Chicago': 'en-US',
+  'America/Denver': 'en-US',
+  'America/Phoenix': 'en-US',
+  'America/Los_Angeles': 'en-US',
+  'America/Anchorage': 'en-US',
+  'Pacific/Honolulu': 'en-US',
+  'America/Toronto': 'en-CA',
+  'America/Vancouver': 'en-CA',
+  'America/Edmonton': 'en-CA',
+  'America/Winnipeg': 'en-CA',
+  'America/Halifax': 'en-CA',
+  'America/Mexico_City': 'es-MX',
+  'America/Sao_Paulo': 'pt-BR',
+  'America/Argentina/Buenos_Aires': 'es-AR',
+  'America/Santiago': 'es-CL',
+  'America/Bogota': 'es-CO',
+  'America/Lima': 'es-PE',
+  'America/Caracas': 'es-VE',
+  'America/Guayaquil': 'es-EC',
+  'America/Montevideo': 'es-UY',
+  'America/La_Paz': 'es-BO',
+  'America/Asuncion': 'es-PY',
+  'America/Guatemala': 'es-GT',
+  'America/Costa_Rica': 'es-CR',
+  'America/Santo_Domingo': 'es-DO',
+  // Europe
+  'Europe/London': 'en-GB',
+  'Europe/Dublin': 'en-IE',
+  'Europe/Berlin': 'de-DE',
+  'Europe/Vienna': 'de-AT',
+  'Europe/Zurich': 'de-CH',
+  'Europe/Paris': 'fr-FR',
+  'Europe/Brussels': 'nl-BE',
+  'Europe/Luxembourg': 'fr-LU',
+  'Europe/Amsterdam': 'nl-NL',
+  'Europe/Madrid': 'es-ES',
+  'Europe/Rome': 'it-IT',
+  'Europe/Lisbon': 'pt-PT',
+  'Europe/Stockholm': 'sv-SE',
+  'Europe/Oslo': 'nb-NO',
+  'Europe/Copenhagen': 'da-DK',
+  'Europe/Helsinki': 'fi-FI',
+  'Atlantic/Reykjavik': 'is-IS',
+  'Europe/Warsaw': 'pl-PL',
+  'Europe/Prague': 'cs-CZ',
+  'Europe/Bratislava': 'sk-SK',
+  'Europe/Budapest': 'hu-HU',
+  'Europe/Bucharest': 'ro-RO',
+  'Europe/Sofia': 'bg-BG',
+  'Europe/Zagreb': 'hr-HR',
+  'Europe/Belgrade': 'sr-RS',
+  'Europe/Ljubljana': 'sl-SI',
+  'Europe/Athens': 'el-GR',
+  'Europe/Kyiv': 'uk-UA',
+  'Europe/Kiev': 'uk-UA',
+  'Europe/Moscow': 'ru-RU',
+  'Europe/Minsk': 'ru-BY',
+  'Europe/Tallinn': 'et-EE',
+  'Europe/Riga': 'lv-LV',
+  'Europe/Vilnius': 'lt-LT',
+  'Europe/Istanbul': 'tr-TR',
+  // Middle East / Africa
+  'Asia/Jerusalem': 'he-IL',
+  'Asia/Dubai': 'ar-AE',
+  'Asia/Riyadh': 'ar-SA',
+  'Asia/Tehran': 'fa-IR',
+  'Africa/Cairo': 'ar-EG',
+  'Africa/Casablanca': 'ar-MA',
+  'Africa/Algiers': 'ar-DZ',
+  'Africa/Tunis': 'ar-TN',
+  'Africa/Johannesburg': 'en-ZA',
+  'Africa/Lagos': 'en-NG',
+  'Africa/Nairobi': 'en-KE',
+  // Asia-Pacific
+  'Asia/Tokyo': 'ja-JP',
+  'Asia/Seoul': 'ko-KR',
+  'Asia/Shanghai': 'zh-CN',
+  'Asia/Hong_Kong': 'zh-HK',
+  'Asia/Taipei': 'zh-TW',
+  'Asia/Bangkok': 'th-TH',
+  'Asia/Ho_Chi_Minh': 'vi-VN',
+  'Asia/Jakarta': 'id-ID',
+  'Asia/Singapore': 'en-SG',
+  'Asia/Kuala_Lumpur': 'ms-MY',
+  'Asia/Manila': 'en-PH',
+  'Asia/Karachi': 'ur-PK',
+  'Asia/Dhaka': 'bn-BD',
+  'Asia/Colombo': 'si-LK',
+  'Asia/Yangon': 'my-MM',
+  'Asia/Almaty': 'ru-KZ',
+  'Asia/Kolkata': 'en-IN',
+  // Oceania
+  'Australia/Sydney': 'en-AU',
+  'Australia/Melbourne': 'en-AU',
+  'Australia/Brisbane': 'en-AU',
+  'Australia/Perth': 'en-AU',
+  'Australia/Adelaide': 'en-AU',
+  'Pacific/Auckland': 'en-NZ',
+};
+
+/** Base language subtag of a BCP-47 locale, e.g. "sv-SE" → "sv", "en" → "en". */
+function baseLanguage(locale: string): string {
+  return locale.split('-')[0] ?? locale;
+}
+
 function localeToLanguages(locale: string): string[] {
-  const base = locale.split('-')[0] ?? 'en';
+  const base = baseLanguage(locale);
   return locale === base ? [locale] : [locale, base];
 }
 
@@ -44,7 +237,14 @@ export function languagesToAcceptLanguage(languages: readonly string[]): string 
  * Accept-Language must all agree with where the proxy says the user is.
  */
 export function applyGeoToFingerprint(fp: Fingerprint, geo: GeoInfo): Fingerprint {
-  const locale = COUNTRY_LOCALE[geo.countryCode.toUpperCase()] ?? fp.locale.locale;
+  // Prefer the country's primary locale; if the country is unmapped, derive the language from the
+  // exit timezone (e.g. an unmapped country reporting `Europe/Stockholm` still gets Swedish) so we
+  // never leave the seed-default en-US next to a foreign timezone. Only when both are unknown (e.g.
+  // `Etc/UTC`, which implies no language) do we keep the seed default.
+  const locale =
+    COUNTRY_LOCALE[geo.countryCode.toUpperCase()] ??
+    TIMEZONE_LOCALE[geo.timezone] ??
+    fp.locale.locale;
   const languages = localeToLanguages(locale);
 
   const localeFp: LocaleFingerprint = {
@@ -151,6 +351,17 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
       `Accept-Language (${fp.locale.acceptLanguage}) does not lead with locale (${fp.locale.locale})`,
     );
   }
+  // The timezone says where the proxy exit is, and therefore which language a real browser there
+  // reports. A foreign timezone paired with a disagreeing language — most commonly a `Europe/*`
+  // timezone left next to the seed-default en-US after only the timezone was applied from the geo —
+  // is a top bot signal. For a timezone whose region implies a definite primary language, flag a
+  // locale/navigator.languages[0] that speaks a different one.
+  const tzLocale = TIMEZONE_LOCALE[fp.locale.timezone];
+  if (tzLocale && baseLanguage(tzLocale) !== baseLanguage(fp.locale.locale)) {
+    issues.push(
+      `timezone "${fp.locale.timezone}" implies language "${baseLanguage(tzLocale)}" but locale is "${fp.locale.locale}" (navigator.languages[0]=${fp.navigator.languages[0]})`,
+    );
+  }
   if (!OS_PLATFORM_MATCHERS[fp.os](fp.navigator.platform)) {
     issues.push(
       `navigator.platform "${fp.navigator.platform}" is not coherent with claimed OS "${fp.os}"`,
@@ -168,6 +379,27 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
     issues.push(
       `WebGL renderer uses the Windows-only Direct3D backend on OS "${fp.os}": ${fp.webgl.renderer}`,
     );
+  }
+  // A software rasterizer (SwiftShader / llvmpipe / Microsoft Basic Render) means no real GPU — the
+  // hallmark of a headless/VM automation host, and a hard tell on any OS. The generator's real-device
+  // distribution ships these for a large slice of samples, so reject them during derivation.
+  const webglText = `${fp.webgl.vendor} ${fp.webgl.renderer}`;
+  if (/SwiftShader|llvmpipe|Software|Microsoft Basic Render/i.test(webglText)) {
+    issues.push(`WebGL uses a software renderer (no real GPU) — an automation tell: ${webglText}`);
+  }
+  // Real Windows Chrome renders through ANGLE's Direct3D backend and exposes a "Google Inc. (…)"
+  // WebGL vendor + an "ANGLE (…, … Direct3D11 …)" renderer. A macOS/Apple-format GPU string — a bare
+  // OpenGL vendor like "Intel Inc.", a legacy "… OpenGL Engine" renderer, or an "ANGLE Metal Renderer"
+  // (Metal is Apple-only) — on a Windows profile is a platform mismatch tell.
+  if (fp.os === 'windows') {
+    if (!(/\bANGLE\b/.test(fp.webgl.renderer) && /Direct3D/i.test(fp.webgl.renderer))) {
+      issues.push(
+        `WebGL renderer on Windows must use the ANGLE Direct3D backend (e.g. "ANGLE (Intel, … Direct3D11 …)"): ${fp.webgl.renderer}`,
+      );
+    }
+    if (/Intel Inc\.|ATI Technologies Inc\.|OpenGL Engine|Metal Renderer/i.test(webglText)) {
+      issues.push(`WebGL uses a macOS/Apple-format GPU string on a Windows profile: ${webglText}`);
+    }
   }
 
   // --- User-Agent Client Hints must agree with the User-Agent string ------------------------------

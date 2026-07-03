@@ -88,24 +88,20 @@ export interface PatchrightLauncherOptions {
   extraArgs?: string[];
 }
 
-export function createPatchrightLauncher(opts: PatchrightLauncherOptions = {}): Launcher {
-  return async (ctx: LaunchContext): Promise<LaunchHandle> => {
-    const chromium = await loadChromium();
-    const args = [...ctx.options.args, ...(opts.extraArgs ?? []), '--remote-debugging-port=0'];
-
-    const options: PersistentContextOptions = {
-      headless: opts.headless ?? ctx.options.headless,
-      args,
-      // JS-safe value substitution (deep surfaces stay native — see MASTER_PLAN §5).
-      userAgent: ctx.emulation.userAgent,
-      locale: ctx.emulation.locale,
-      timezoneId: ctx.emulation.timezoneId,
-    };
-    if (ctx.options.proxy) options.proxy = ctx.options.proxy;
-    if (ctx.emulation.geolocation) options.geolocation = ctx.emulation.geolocation;
-
-    const context = await chromium.launchPersistentContext(ctx.options.userDataDir, options);
-
+/**
+ * Run the post-launch configuration on an already-spawned persistent context (grant geolocation, apply
+ * the per-page CDP fingerprint, read the CDP endpoint) and return the {@link LaunchHandle}.
+ *
+ * If ANY step throws, the Chromium we just spawned would be orphaned — never closed, its user-data
+ * `SingletonLock` left behind so the next launch of this profile fails. We close it (best-effort) on
+ * any failure before rethrowing. Exported so the orphan-cleanup path is unit-testable with a fake
+ * context (a live browser is otherwise required).
+ */
+export async function configureLaunchedContext(
+  context: PwContext,
+  ctx: LaunchContext,
+): Promise<LaunchHandle> {
+  try {
     // Grant geolocation so a page that asks actually reads the proxy-derived coordinates. Without this
     // the override is set but `getCurrentPosition` is denied — geo would silently not apply in production.
     if (ctx.emulation.geolocation) {
@@ -133,6 +129,30 @@ export function createPatchrightLauncher(opts: PatchrightLauncherOptions = {}): 
       debuggerAddress: `127.0.0.1:${port}`,
       close: () => context.close(),
     };
+  } catch (err) {
+    await context.close().catch(() => {});
+    throw err;
+  }
+}
+
+export function createPatchrightLauncher(opts: PatchrightLauncherOptions = {}): Launcher {
+  return async (ctx: LaunchContext): Promise<LaunchHandle> => {
+    const chromium = await loadChromium();
+    const args = [...ctx.options.args, ...(opts.extraArgs ?? []), '--remote-debugging-port=0'];
+
+    const options: PersistentContextOptions = {
+      headless: opts.headless ?? ctx.options.headless,
+      args,
+      // JS-safe value substitution (deep surfaces stay native — see MASTER_PLAN §5).
+      userAgent: ctx.emulation.userAgent,
+      locale: ctx.emulation.locale,
+      timezoneId: ctx.emulation.timezoneId,
+    };
+    if (ctx.options.proxy) options.proxy = ctx.options.proxy;
+    if (ctx.emulation.geolocation) options.geolocation = ctx.emulation.geolocation;
+
+    const context = await chromium.launchPersistentContext(ctx.options.userDataDir, options);
+    return configureLaunchedContext(context, ctx);
   };
 }
 

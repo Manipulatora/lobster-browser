@@ -13,6 +13,14 @@ import { resolveJwtSecret } from './jwt-secret';
 /** bcrypt work factor. 10 is the common default: strong enough, ~tens of ms per hash. */
 const BCRYPT_COST = 10;
 
+/**
+ * A real bcrypt hash (of a throwaway password) compared against when the email is unknown, so an
+ * unknown-email login costs the same as a wrong-password login. Without it, skipping the compare
+ * for a missing user is a user-enumeration timing oracle ("no such user" returns much faster than
+ * "wrong password"). Precomputed once at module load; the plaintext never matches a real password.
+ */
+const DUMMY_HASH = bcrypt.hashSync('lobster:auth:timing-safe-dummy', BCRYPT_COST);
+
 /** How long an issued token stays valid before the client must log in again. */
 const TOKEN_TTL = '7d';
 
@@ -68,9 +76,11 @@ export class AuthService {
 
   async login(dto: LoginDto): Promise<AuthResult> {
     const user = await this.users.findByEmail(this.normalizeEmail(dto.email));
-    // Verify even when the user is missing? bcrypt.compare against a real hash only runs
-    // when we found a user; the generic message avoids leaking which half was wrong.
-    if (!user || !(await bcrypt.compare(dto.password, user.passwordHash))) {
+    // ALWAYS run one bcrypt.compare of the same cost, even when the email is unknown (against a
+    // precomputed DUMMY_HASH), so an unknown email is indistinguishable in time from a wrong
+    // password. The generic message avoids leaking which half was wrong.
+    const passwordMatches = await bcrypt.compare(dto.password, user?.passwordHash ?? DUMMY_HASH);
+    if (!user || !passwordMatches) {
       throw new UnauthorizedException('invalid email or password');
     }
     return { user: this.toPublicUser(user), token: this.signToken(user) };

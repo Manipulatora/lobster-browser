@@ -11,7 +11,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Pin an exact Chrome-stable tag. Bumped by rebase.sh; keep within a few days of upstream stable.
-CHROMIUM_REF="${CHROMIUM_REF:-131.0.6778.86}"
+# Default matches the ref the active patch (core/hardware-concurrency-poc.patch) was built + proven on.
+CHROMIUM_REF="${CHROMIUM_REF:-152.0.7928.0}"
 SRC_DIR="${SRC_DIR:-${HERE}/chromium/src}"
 OUT_DIR="${OUT_DIR:-out/Lobium}"
 RUN="${1:-}"

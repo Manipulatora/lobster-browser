@@ -63,6 +63,10 @@ impl SidecarClient {
                     }
                 }
             }
+            // Reader loop ended: the sidecar closed stdout or crashed. Drop every pending
+            // sender so each in-flight caller's oneshot receiver resolves with a cancelled
+            // error and fails fast, instead of blocking until the 90s timeout.
+            reader_pending.lock().await.clear();
         });
 
         Ok(Arc::new(Self {
@@ -79,19 +83,34 @@ impl SidecarClient {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id.clone(), tx);
 
-        let request = serde_json::json!({ "id": id, "method": method, "params": params });
-        let mut line = serde_json::to_string(&request)?;
-        line.push('\n');
-        {
-            let mut stdin = self.stdin.lock().await;
-            stdin.write_all(line.as_bytes()).await?;
-            stdin.flush().await?;
-        }
+        // Send the request and await its response inside a single fallible future so we can
+        // guarantee the pending entry is removed on *every* early return (serialization
+        // failure, stdin write/flush error, or timeout). Otherwise the map would grow
+        // unbounded, and on timeout a late response would arrive with no receiver.
+        let sent: Result<Value> = async {
+            let request = serde_json::json!({ "id": id, "method": method, "params": params });
+            let mut line = serde_json::to_string(&request)?;
+            line.push('\n');
+            {
+                let mut stdin = self.stdin.lock().await;
+                stdin.write_all(line.as_bytes()).await?;
+                stdin.flush().await?;
+            }
 
-        let response = tokio::time::timeout(Duration::from_secs(90), rx)
-            .await
-            .map_err(|_| anyhow!("sidecar call '{method}' timed out"))?
-            .map_err(|_| anyhow!("sidecar closed before responding to '{method}'"))?;
+            tokio::time::timeout(Duration::from_secs(90), rx)
+                .await
+                .map_err(|_| anyhow!("sidecar call '{method}' timed out"))?
+                .map_err(|_| anyhow!("sidecar closed before responding to '{method}'"))
+        }
+        .await;
+
+        let response = match sent {
+            Ok(response) => response,
+            Err(err) => {
+                self.pending.lock().await.remove(&id);
+                return Err(err);
+            }
+        };
 
         if response.get("ok").and_then(Value::as_bool).unwrap_or(false) {
             Ok(response.get("result").cloned().unwrap_or(Value::Null))
@@ -131,5 +150,65 @@ mod tests {
             .await
             .expect("status");
         assert!(status.get("running").is_some(), "status has a running list");
+    }
+
+    /// Regression (bug 1): a `call` that fails to reach the sidecar must not leak its
+    /// pending entry. We use `true` as a fake sidecar: it exits immediately, so its
+    /// reader task ends *before* we call and the stdin write hits a broken pipe. The
+    /// call must return an error quickly and leave the pending map empty.
+    #[tokio::test]
+    async fn call_removes_pending_on_send_failure() {
+        let client = SidecarClient::spawn("true", "")
+            .await
+            .expect("spawn fake sidecar");
+
+        // Let `true` exit and its reader task finish so the write below fails fast.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.call("ping", serde_json::json!({})),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "call must not hang when the sidecar is gone"
+        );
+        assert!(
+            result.unwrap().is_err(),
+            "call must fail when the sidecar is gone"
+        );
+        assert!(
+            client.pending.lock().await.is_empty(),
+            "pending entry must be removed after a failed send (no unbounded growth)"
+        );
+    }
+
+    /// Regression (bug 2): when the reader task exits with an in-flight caller waiting,
+    /// the caller must fail fast rather than block for the full 90s timeout. `head -c1`
+    /// accepts our request (so the write succeeds), emits one byte, then closes stdout
+    /// without a real response — ending the reader loop, which must clear `pending` and
+    /// cancel the waiting oneshot.
+    #[tokio::test]
+    async fn call_fails_fast_when_reader_exits() {
+        let client = SidecarClient::spawn("head", "-c1")
+            .await
+            .expect("spawn fake sidecar");
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            client.call("ping", serde_json::json!({})),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "call must fail fast (well under 90s) when the reader task exits"
+        );
+        assert!(
+            result.unwrap().is_err(),
+            "call must surface an error when the sidecar closes without responding"
+        );
     }
 }

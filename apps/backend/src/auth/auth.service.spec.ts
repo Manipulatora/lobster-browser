@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { mock } from 'node:test';
 
 import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+
+// The service calls `bcrypt.compare` through a star-import namespace whose bindings are getter-only,
+// which node:test's `mock.method` cannot replace. Grab the underlying (Node-cached) CommonJS module
+// object instead — the service's namespace delegates to it, so a spy here is observed by the service.
+const bcryptModule = require('bcryptjs') as typeof import('bcryptjs');
 
 import { AuthService, type JwtPayload } from './auth.service';
 import { DEV_JWT_SECRET } from './jwt-secret';
@@ -106,4 +111,26 @@ test('login with an unknown email throws UnauthorizedException', async () => {
     () => service.login({ email: 'nobody@example.com', password: 'password123' }),
     UnauthorizedException,
   );
+});
+
+test('login with an unknown email still runs bcrypt.compare (no user-enumeration timing oracle)', async () => {
+  const { service } = makeService();
+  // Spy on the same bcryptjs module the service calls, preserving the real implementation so the
+  // constant-time dummy compare still runs (and still fails to match) as in production.
+  const compareSpy = mock.method(bcryptModule, 'compare');
+  try {
+    await assert.rejects(
+      () => service.login({ email: 'ghost@example.com', password: 'password123' }),
+      UnauthorizedException,
+    );
+    // Before the fix the missing-user branch short-circuited and skipped compare entirely (0 calls),
+    // which is exactly the timing oracle; the fix must compare against a dummy hash instead.
+    assert.equal(
+      compareSpy.mock.callCount(),
+      1,
+      'a bcrypt.compare must run even when the email is unknown',
+    );
+  } finally {
+    compareSpy.mock.restore();
+  }
 });

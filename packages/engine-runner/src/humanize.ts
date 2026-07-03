@@ -61,26 +61,73 @@ function autoSeed(base: string, seed?: string): string {
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 /**
- * Key identity for a character's CDP key events. Real `keydown`/`keyup` listeners read `e.key` /
- * `e.code` / `e.keyCode`, not the inserted text, so we populate them (letters/digits/space/enter/tab
- * fully; other symbols carry an authoritative `key` with a best-effort `code`).
+ * US-layout physical key for each printable symbol: the `code` (never changes with Shift), the
+ * `windowsVirtualKeyCode` of the underlying key, and whether the character requires Shift. Digits are
+ * handled by the `[0-9]` branch in {@link keyInfo}; here we cover the shifted digits (`!@#…`) plus the
+ * OEM punctuation keys in both their unshifted and shifted forms.
  */
-function keyInfo(ch: string): { key: string; code: string; keyCode: number } {
+const SYMBOL_KEYS: Record<string, { code: string; keyCode: number; shift: boolean }> = {
+  '`': { code: 'Backquote', keyCode: 192, shift: false },
+  '~': { code: 'Backquote', keyCode: 192, shift: true },
+  '!': { code: 'Digit1', keyCode: 49, shift: true },
+  '@': { code: 'Digit2', keyCode: 50, shift: true },
+  '#': { code: 'Digit3', keyCode: 51, shift: true },
+  $: { code: 'Digit4', keyCode: 52, shift: true },
+  '%': { code: 'Digit5', keyCode: 53, shift: true },
+  '^': { code: 'Digit6', keyCode: 54, shift: true },
+  '&': { code: 'Digit7', keyCode: 55, shift: true },
+  '*': { code: 'Digit8', keyCode: 56, shift: true },
+  '(': { code: 'Digit9', keyCode: 57, shift: true },
+  ')': { code: 'Digit0', keyCode: 48, shift: true },
+  '-': { code: 'Minus', keyCode: 189, shift: false },
+  _: { code: 'Minus', keyCode: 189, shift: true },
+  '=': { code: 'Equal', keyCode: 187, shift: false },
+  '+': { code: 'Equal', keyCode: 187, shift: true },
+  '[': { code: 'BracketLeft', keyCode: 219, shift: false },
+  '{': { code: 'BracketLeft', keyCode: 219, shift: true },
+  ']': { code: 'BracketRight', keyCode: 221, shift: false },
+  '}': { code: 'BracketRight', keyCode: 221, shift: true },
+  '\\': { code: 'Backslash', keyCode: 220, shift: false },
+  '|': { code: 'Backslash', keyCode: 220, shift: true },
+  ';': { code: 'Semicolon', keyCode: 186, shift: false },
+  ':': { code: 'Semicolon', keyCode: 186, shift: true },
+  "'": { code: 'Quote', keyCode: 222, shift: false },
+  '"': { code: 'Quote', keyCode: 222, shift: true },
+  ',': { code: 'Comma', keyCode: 188, shift: false },
+  '<': { code: 'Comma', keyCode: 188, shift: true },
+  '.': { code: 'Period', keyCode: 190, shift: false },
+  '>': { code: 'Period', keyCode: 190, shift: true },
+  '/': { code: 'Slash', keyCode: 191, shift: false },
+  '?': { code: 'Slash', keyCode: 191, shift: true },
+};
+
+/**
+ * Key identity for a character's CDP key events. Real `keydown`/`keyup` listeners read `e.key` /
+ * `e.code` / `e.keyCode` / `e.shiftKey`, not the inserted text, so we populate them: letters, digits,
+ * space/enter/tab, and the US-layout punctuation in {@link SYMBOL_KEYS}. `shift` is true for the
+ * characters produced with Shift held (uppercase letters and the shifted symbols) so
+ * {@link humanType} can press Shift and tag the event modifiers — a shifted char with no Shift is a tell.
+ */
+function keyInfo(ch: string): { key: string; code: string; keyCode: number; shift: boolean } {
   if (/^[a-z]$/.test(ch)) {
-    return { key: ch, code: `Key${ch.toUpperCase()}`, keyCode: ch.toUpperCase().charCodeAt(0) };
+    const upper = ch.toUpperCase();
+    return { key: ch, code: `Key${upper}`, keyCode: upper.charCodeAt(0), shift: false };
   }
-  if (/^[A-Z]$/.test(ch)) return { key: ch, code: `Key${ch}`, keyCode: ch.charCodeAt(0) };
-  if (/^[0-9]$/.test(ch)) return { key: ch, code: `Digit${ch}`, keyCode: ch.charCodeAt(0) };
+  if (/^[A-Z]$/.test(ch))
+    return { key: ch, code: `Key${ch}`, keyCode: ch.charCodeAt(0), shift: true };
+  if (/^[0-9]$/.test(ch))
+    return { key: ch, code: `Digit${ch}`, keyCode: ch.charCodeAt(0), shift: false };
   switch (ch) {
     case ' ':
-      return { key: ' ', code: 'Space', keyCode: 32 };
+      return { key: ' ', code: 'Space', keyCode: 32, shift: false };
     case '\n':
-      return { key: 'Enter', code: 'Enter', keyCode: 13 };
+      return { key: 'Enter', code: 'Enter', keyCode: 13, shift: false };
     case '\t':
-      return { key: 'Tab', code: 'Tab', keyCode: 9 };
-    default:
-      return { key: ch, code: '', keyCode: 0 };
+      return { key: 'Tab', code: 'Tab', keyCode: 9, shift: false };
   }
+  const sym = SYMBOL_KEYS[ch];
+  if (sym) return { key: ch, code: sym.code, keyCode: sym.keyCode, shift: sym.shift };
+  return { key: ch, code: '', keyCode: 0, shift: false };
 }
 
 /**
@@ -227,10 +274,17 @@ export async function humanClick(
   await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, buttons: 0 });
 }
 
+/** CDP `Input.*` modifier bitmask for a held Shift key. */
+const SHIFT_MODIFIER = 8;
+
 /**
  * Type `text` with a human-like cadence. Each character is one `keyDown` (carrying `text`, which
  * inserts it once, plus `key`/`code`/`windowsVirtualKeyCode` so keydown listeners work) followed by a
  * `keyUp` — NOT a separate `char` event, which would double-insert the character.
+ *
+ * A shifted character (an uppercase letter or a shifted symbol) is produced exactly as real hardware
+ * does: a `Shift` `keyDown` first, the char events tagged with the Shift modifier, then a `Shift`
+ * `keyUp`. A bare shifted char with no Shift key event and `e.shiftKey === false` is a bot tell.
  */
 export async function humanType(
   cdp: CdpSession,
@@ -243,19 +297,39 @@ export async function humanType(
   for (let i = 0; i < chars.length; i += 1) {
     const ch = chars[i] as string;
     const info = keyInfo(ch);
+    const modifiers = info.shift ? SHIFT_MODIFIER : 0;
+    if (info.shift) {
+      await cdp.send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key: 'Shift',
+        code: 'ShiftLeft',
+        windowsVirtualKeyCode: 16,
+        modifiers: SHIFT_MODIFIER,
+      });
+    }
     await cdp.send('Input.dispatchKeyEvent', {
       type: 'keyDown',
       key: info.key,
       code: info.code,
       windowsVirtualKeyCode: info.keyCode,
       text: ch,
+      modifiers,
     });
     await cdp.send('Input.dispatchKeyEvent', {
       type: 'keyUp',
       key: info.key,
       code: info.code,
       windowsVirtualKeyCode: info.keyCode,
+      modifiers,
     });
+    if (info.shift) {
+      await cdp.send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: 'Shift',
+        code: 'ShiftLeft',
+        windowsVirtualKeyCode: 16,
+      });
+    }
     const gap = delays[i];
     if (gap !== undefined) {
       await sleep(gap);

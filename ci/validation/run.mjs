@@ -12,7 +12,7 @@
 import { readFile } from 'node:fs/promises';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { applyGeoToFingerprint, deriveFingerprint, generateSeed } from '@lobster/fingerprint';
@@ -56,6 +56,25 @@ function classifyAddress(addr) {
 }
 const isPublicLeak = (c) => ['public4', 'global6'].includes(classifyAddress(candidateAddress(c)));
 const isLocalLeak = (c) => classifyAddress(candidateAddress(c)) !== 'masked';
+
+/**
+ * Decide WebRTC leak protection WITHOUT a vacuous pass. The suppression assertion — the protected run
+ * (`disable_non_proxied_udp` + STUN) emits no public-IP srflx — only has teeth if the probe can
+ * actually surface a leak in the first place. So a CONTROL run (`default_public_interface_only` +
+ * STUN) MUST leak (`controlLeakCount > 0`). If it does not (no network / STUN unreachable in CI), the
+ * "no public leak" observation is meaningless, so we return `null` = not-measured (skip) instead of a
+ * bogus pass. Only once the control proves the probe works is a real `true`/`false` verdict returned.
+ * @returns {boolean|null} true = protected · false = leaked/misconfigured · null = not measured (skip)
+ */
+export function evaluateWebrtcLeakProtection({
+  policyApplied,
+  localLeakCount,
+  controlLeakCount,
+  suppressionLeakCount,
+}) {
+  if (!(controlLeakCount > 0)) return null; // control never leaked → probe unproven → not-measured
+  return policyApplied && localLeakCount === 0 && suppressionLeakCount === 0;
+}
 
 /** Gather ICE candidates from a throwaway headless context with `extraArgs` (optionally via STUN). */
 async function probeIceCandidates(chromium, extraArgs, useStun) {
@@ -236,12 +255,21 @@ async function runReal() {
       ['--force-webrtc-ip-handling-policy=disable_non_proxied_udp'],
       true, // via STUN — without the policy this WOULD surface the real public IP
     );
+    // CONTROL: prove the probe can actually surface a leak. With `default_public_interface_only` +
+    // STUN the browser SHOULD emit a public-IP srflx; if it does NOT (no network / STUN unreachable),
+    // the suppressed run's zero-leak result is vacuous and the gate is skipped as not-measured.
+    const control = await probeIceCandidates(
+      chromium,
+      ['--force-webrtc-ip-handling-policy=default_public_interface_only'],
+      true, // via STUN — this run MUST leak for the suppression assertion to have teeth
+    );
 
     const webrtcPolicyApplied = options.args.includes(
       '--force-webrtc-ip-handling-policy=default_public_interface_only',
     );
     const localLeaks = iceCandidates.filter(isLocalLeak);
     const suppressionLeaks = suppressed.filter(isPublicLeak);
+    const controlLeaks = control.filter(isPublicLeak);
 
     const geo = fingerprint.locale.geolocation;
     const checks = {
@@ -260,9 +288,14 @@ async function runReal() {
           Math.abs(applied.geo.latitude - geo.latitude) < 0.01 &&
           Math.abs(applied.geo.longitude - geo.longitude) < 0.01),
       // (i) our host candidates are mDNS-masked, AND (ii) the leak-protection policy suppresses the
-      // STUN public-IP srflx, AND the correct policy value is applied to this profile.
-      webrtcLeakProtected:
-        webrtcPolicyApplied && localLeaks.length === 0 && suppressionLeaks.length === 0,
+      // STUN public-IP srflx, AND the correct policy value is applied to this profile. Gated only when
+      // the CONTROL run proves the probe can leak; otherwise `null` = not-measured (see helper).
+      webrtcLeakProtected: evaluateWebrtcLeakProtection({
+        policyApplied: webrtcPolicyApplied,
+        localLeakCount: localLeaks.length,
+        controlLeakCount: controlLeaks.length,
+        suppressionLeakCount: suppressionLeaks.length,
+      }),
     };
 
     // 3a-ter. Deep-surface MEASUREMENT (canvas / WebGL / audio) — measured, NOT gated. These are the
@@ -349,8 +382,10 @@ async function runReal() {
     // become green once Lobium's native patches land (canvas/WebGL/audio/TLS). Keeps the plan honest.
     const detectorMatrix = {
       sannysoft: 'blocking (JS-safe surfaces + automation tells)',
-      webrtc: 'blocking (leak protection)',
-      coherence: 'blocking (fingerprint model)',
+      webrtc:
+        'blocking (leak protection — gated only when the control run proves the probe can leak)',
+      coherence:
+        'measurement — enforced by @lobster/fingerprint unit tests (50-seed coherence sweep), not this harness',
       deepSurfaces: 'measurement — needs Lobium (canvas/WebGL/audio native farbling)',
       creepjs: process.env.LOBSTER_CREEPJS
         ? await measureCreepjs(chromium, fingerprint, emulation, options).catch((e) => ({
@@ -377,7 +412,8 @@ async function runReal() {
     );
     const failed = rows.filter((r) => r.status === 'failed');
 
-    const directPass = Object.values(checks).every(Boolean);
+    // A `null` check is "not measured" (skip) — it must not fail the gate, but `false` must.
+    const directPass = Object.values(checks).every((v) => v !== false);
     const sannysoftPass = failed.length <= (thresholds.sannysoft?.maxFailed ?? 0);
     const verdict = directPass && sannysoftPass ? 'pass' : 'fail';
 
@@ -398,8 +434,11 @@ async function runReal() {
       checks,
       webrtc: {
         policyApplied: webrtcPolicyApplied,
+        measured: checks.webrtcLeakProtected !== null, // false = control never leaked (not gated)
         localCandidates: iceCandidates.length,
         localLeaks: localLeaks.length,
+        controlCandidates: control.length,
+        controlLeaks: controlLeaks.length,
         suppressionCandidates: suppressed.length,
         suppressionLeaks: suppressionLeaks.length,
         sample: iceCandidates.slice(0, 2),
@@ -434,7 +473,10 @@ async function main() {
   await runReal();
 }
 
-main().catch((e) => {
-  process.stderr.write(`${e instanceof Error ? e.stack || e.message : String(e)}\n`);
-  process.exitCode = 1;
-});
+// Run only when invoked directly (`node …/run.mjs`), so tests can import the pure helpers above.
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((e) => {
+    process.stderr.write(`${e instanceof Error ? e.stack || e.message : String(e)}\n`);
+    process.exitCode = 1;
+  });
+}

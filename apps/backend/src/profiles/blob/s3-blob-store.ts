@@ -35,6 +35,9 @@ export class S3BlobStore implements BlobStore {
 
   async put(_key: string, _bytes: Buffer, _meta: BlobPutMeta): Promise<BlobPutResult> {
     // Day 2: PutObject to `${this.bucket}` (region ${this.region}, endpoint ${this.endpoint}).
+    // When `_meta.expectedVersion` is set it MUST be enforced atomically — e.g. a conditional
+    // PutObject (If-Match on the version marker's ETag) — throwing BlobVersionConflictError on a
+    // 412 so racing pushes at the same base can't clobber each other.
     throw new Error('S3BlobStore.put not configured — TODO(Day 2): implement S3 PutObject');
   }
 

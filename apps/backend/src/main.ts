@@ -8,11 +8,16 @@ import 'reflect-metadata';
 
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 
 import { AppModule } from './app.module';
+import { configureBodyLimit } from './body-limit';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule);
+  // Disable Nest's built-in body parser so the raised-limit parsers below are the only ones that
+  // run; the default ~100kb limit would otherwise 413 realistic encrypted profile blobs on sync.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
+  configureBodyLimit(app);
 
   // Global request validation. `whitelist` strips properties not declared on the DTO,
   // and `transform` coerces payloads into their DTO class instances.

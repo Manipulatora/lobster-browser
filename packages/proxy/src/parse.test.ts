@@ -35,6 +35,20 @@ test('throws on invalid port and empty input', () => {
   assert.throws(() => parseProxy(''));
 });
 
+test('keeps a literal percent in credentials instead of throwing on decode', () => {
+  const p = parseProxy('http://user:pa%ss@host.example:8080', 'id7');
+  assert.equal(p.host, 'host.example');
+  assert.equal(p.port, 8080);
+  assert.equal(p.username, 'user');
+  assert.equal(p.password, 'pa%ss');
+});
+
+test('accepts the scheme default port (url.port is empty for http:80/https:443/socks:default)', () => {
+  assert.equal(parseProxy('http://host.example:80', 'id8').port, 80);
+  assert.equal(parseProxy('https://host.example:443', 'id9').port, 443);
+  assert.equal(parseProxy('socks5://host.example', 'id10').port, 1080);
+});
+
 test('formatProxyUrl round-trips a URL-form proxy', () => {
   const p = parseProxy('http://u:p@h:8000', 'id4');
   assert.equal(formatProxyUrl(p), 'http://u:p@h:8000');

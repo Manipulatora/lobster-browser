@@ -12,7 +12,7 @@ import type { Profile, ProfileExport, ProfileExportBundle } from '@lobster/share
 
 import { AuditService } from '../audit/audit.service';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
-import { BLOB_STORE, type BlobStore } from './blob/blob-store';
+import { BLOB_STORE, BlobVersionConflictError, type BlobStore } from './blob/blob-store';
 import type { BulkCreateProfilesDto } from './dto/bulk-create-profiles.dto';
 import type { CreateProfileDto } from './dto/create-profile.dto';
 import type { ImportProfilesDto } from './dto/import-profiles.dto';
@@ -313,15 +313,25 @@ export class ProfilesService {
     if (input.payload === undefined) {
       throw new BadRequestException('push requires a base64 payload');
     }
-    if (input.baseVersion !== undefined) {
-      const currentVersion = (await this.blobs.head(key))?.version ?? 0;
-      if (input.baseVersion !== currentVersion) {
-        throw new ConflictException('stale base version');
-      }
-    }
     // `payload` is validated as base64 at the DTO boundary; store the decoded bytes opaquely.
     const bytes = Buffer.from(input.payload, 'base64');
-    const { version } = await this.blobs.put(key, bytes, { teamId, profileId });
+    // Optimistic concurrency is enforced atomically inside the store (compare-and-set): passing
+    // `baseVersion` as `expectedVersion` makes the version check and write one indivisible step,
+    // so two concurrent pushes at the same base can't both succeed (one loses with a conflict).
+    // Omitting baseVersion writes unconditionally, matching the previous behaviour.
+    let version: number;
+    try {
+      ({ version } = await this.blobs.put(key, bytes, {
+        teamId,
+        profileId,
+        expectedVersion: input.baseVersion,
+      }));
+    } catch (err) {
+      if (err instanceof BlobVersionConflictError) {
+        throw new ConflictException('stale base version');
+      }
+      throw err;
+    }
     return {
       profileId,
       direction: 'push',

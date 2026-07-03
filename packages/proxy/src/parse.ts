@@ -8,6 +8,24 @@ function schemeToType(scheme: string): ProxyType {
   return 'http';
 }
 
+/** The well-known default port for a scheme when the URL omits one. */
+function defaultPortForScheme(scheme: string): number | undefined {
+  const s = scheme.toLowerCase();
+  if (s === 'https' || s === 'wss') return 443;
+  if (s === 'http' || s === 'ws') return 80;
+  if (s === 'socks' || s === 'socks5' || s === 'socks5h') return 1080;
+  return undefined;
+}
+
+/** decodeURIComponent, but fall back to the raw value on malformed input (e.g. a literal '%'). */
+function tolerantDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 /**
  * Parse the proxy formats users paste, into a normalized {@link ProxyConfig}:
  *   - URL form:   `socks5://user:pass@host:port`, `http://host:port`
@@ -19,18 +37,20 @@ export function parseProxy(input: string, id: string = randomUUID()): ProxyConfi
 
   if (raw.includes('://')) {
     const url = new URL(raw);
-    const port = Number(url.port);
-    if (!Number.isInteger(port) || port <= 0) {
+    const scheme = url.protocol.replace(':', '');
+    // url.port is '' for the scheme's default port (e.g. http://host:80); fall back to it.
+    const port = url.port === '' ? defaultPortForScheme(scheme) : Number(url.port);
+    if (port === undefined || !Number.isInteger(port) || port <= 0) {
       throw new Error(`parseProxy: invalid port in "${raw}"`);
     }
     const config: ProxyConfig = {
       id,
-      type: schemeToType(url.protocol.replace(':', '')),
+      type: schemeToType(scheme),
       host: url.hostname,
       port,
     };
-    if (url.username) config.username = decodeURIComponent(url.username);
-    if (url.password) config.password = decodeURIComponent(url.password);
+    if (url.username) config.username = tolerantDecode(url.username);
+    if (url.password) config.password = tolerantDecode(url.password);
     return config;
   }
 

@@ -44,7 +44,22 @@ test('applyGeoToFingerprint aligns timezone/locale/languages with the proxy geo'
   assert.deepEqual(validateFingerprintCoherence(out), []);
 });
 
-test('unknown country keeps a coherent fallback locale and applies the timezone', () => {
+test('unmapped country derives the language from a real foreign timezone (no en-US mismatch)', () => {
+  // ZZ is not a real country, so this exercises the timezone-derived fallback. A `Europe/Stockholm`
+  // exit must yield a Swedish locale/language — keeping the seed-default en-US here would be a
+  // navigator.language-vs-timezone mismatch (a top bot signal), which the coherence rule now flags.
+  const fp = deriveFingerprint('seed-xx', { os: 'linux', engine: 'lobium' });
+  const geo: GeoInfo = { ip: '9.9.9.9', countryCode: 'ZZ', timezone: 'Europe/Stockholm' };
+  const out = applyGeoToFingerprint(fp, geo);
+
+  assert.equal(out.locale.timezone, 'Europe/Stockholm');
+  assert.equal(out.locale.locale, 'sv-SE');
+  assert.equal(out.navigator.languages[0], 'sv-SE');
+  assert.ok(out.locale.acceptLanguage.startsWith('sv-SE'));
+  assert.deepEqual(validateFingerprintCoherence(out), []);
+});
+
+test('unknown country AND unknown timezone (Etc/UTC) keeps a coherent seed-default locale', () => {
   const fp = deriveFingerprint('seed-xx', { os: 'linux', engine: 'lobium' });
   const geo: GeoInfo = { ip: '9.9.9.9', countryCode: 'ZZ', timezone: 'Etc/UTC' };
   const out = applyGeoToFingerprint(fp, geo);
@@ -53,6 +68,23 @@ test('unknown country keeps a coherent fallback locale and applies the timezone'
   assert.equal(out.navigator.languages[0], out.locale.locale);
   assert.equal(out.locale.geolocation, undefined);
   assert.deepEqual(validateFingerprintCoherence(out), []);
+});
+
+test('a mapped foreign country (SE) gets its primary locale coherent with the timezone', () => {
+  const fp = deriveFingerprint('seed-se', { os: 'windows', engine: 'chromium' });
+  const geo: GeoInfo = { ip: '5.5.5.5', countryCode: 'SE', timezone: 'Europe/Stockholm' };
+  const out = applyGeoToFingerprint(fp, geo);
+
+  assert.equal(out.locale.locale, 'sv-SE');
+  assert.equal(out.navigator.languages[0], 'sv-SE');
+  assert.deepEqual(validateFingerprintCoherence(out), []);
+});
+
+test('flags a foreign timezone left next to an en-US locale (language-vs-timezone mismatch)', () => {
+  // The exact bug: only the timezone was applied from the proxy geo, leaving the seed-default en-US.
+  const fp = coherentBase();
+  fp.locale.timezone = 'Europe/Stockholm'; // base fixture is en-US / America/New_York
+  assertFlags(fp, /timezone "Europe\/Stockholm" implies language "sv"/);
 });
 
 test('flags a Sec-CH-UA brand version mismatched with the UA Chrome major', () => {
@@ -179,6 +211,67 @@ test('flags an unrealistic colorDepth and devicePixelRatio, but allows fractiona
   const fractional = coherentBase();
   fractional.screen.devicePixelRatio = 0.5;
   assert.ok(!validateFingerprintCoherence(fractional).some((i) => /devicePixelRatio/.test(i)));
+});
+
+/** A coherent, freshly derived macOS fingerprint to mutate in the WebGL rule tests. */
+function coherentMacBase(): Fingerprint {
+  const fp = deriveFingerprint('coherence-mac-base', { os: 'macos', engine: 'chromium' });
+  assert.deepEqual(validateFingerprintCoherence(fp), [], 'mac base fixture must start coherent');
+  return structuredClone(fp);
+}
+
+/** A coherent, freshly derived Linux fingerprint to mutate in the WebGL rule tests. */
+function coherentLinuxBase(): Fingerprint {
+  const fp = deriveFingerprint('coherence-linux-base', { os: 'linux', engine: 'chromium' });
+  assert.deepEqual(validateFingerprintCoherence(fp), [], 'linux base fixture must start coherent');
+  return structuredClone(fp);
+}
+
+test('flags a SwiftShader software renderer on macOS (no real GPU is an automation tell)', () => {
+  const fp = coherentMacBase();
+  fp.webgl.vendor = 'Google Inc. (Google)';
+  fp.webgl.renderer =
+    'ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)';
+  fp.webgl.unmaskedVendor = fp.webgl.vendor;
+  fp.webgl.unmaskedRenderer = fp.webgl.renderer;
+  assertFlags(fp, /software renderer/);
+});
+
+test('flags an llvmpipe software renderer on Linux', () => {
+  const fp = coherentLinuxBase();
+  fp.webgl.vendor = 'Google Inc. (Mesa/X.org)';
+  fp.webgl.renderer = 'ANGLE (Mesa/X.org, llvmpipe (LLVM 15.0.6 256 bits), OpenGL 4.5)';
+  fp.webgl.unmaskedVendor = fp.webgl.vendor;
+  fp.webgl.unmaskedRenderer = fp.webgl.renderer;
+  assertFlags(fp, /software renderer/);
+});
+
+test('flags a Windows profile whose renderer is not the ANGLE/Direct3D backend', () => {
+  const fp = coherentBase(); // windows
+  fp.webgl.vendor = 'Google Inc.';
+  fp.webgl.renderer = 'Intel Inc. Intel(R) HD Graphics 630'; // macOS-format, no ANGLE/Direct3D
+  fp.webgl.unmaskedVendor = fp.webgl.vendor;
+  fp.webgl.unmaskedRenderer = fp.webgl.renderer;
+  assertFlags(fp, /must use the ANGLE Direct3D backend/);
+});
+
+test('flags a Windows profile carrying a macOS/Apple-format GPU vendor (Intel Inc. + Direct3D)', () => {
+  const fp = coherentBase(); // windows
+  // Real generator sample: an ANGLE/Direct3D renderer but the Apple-OpenGL "Intel Inc." vendor.
+  fp.webgl.vendor = 'Intel Inc.';
+  fp.webgl.renderer = 'ANGLE (Intel(R) HD Graphics Family Direct3D11 vs_5_0 ps_5_0)';
+  fp.webgl.unmaskedVendor = fp.webgl.vendor;
+  fp.webgl.unmaskedRenderer = fp.webgl.renderer;
+  assertFlags(fp, /macOS\/Apple-format GPU string/);
+});
+
+test('flags a Windows profile carrying a legacy "OpenGL Engine" (macOS) renderer', () => {
+  const fp = coherentBase(); // windows
+  fp.webgl.vendor = 'Intel Inc.';
+  fp.webgl.renderer = 'Intel Iris OpenGL Engine';
+  fp.webgl.unmaskedVendor = fp.webgl.vendor;
+  fp.webgl.unmaskedRenderer = fp.webgl.renderer;
+  assertFlags(fp, /macOS\/Apple-format GPU string/);
 });
 
 test('normalizeDeviceMemory snaps onto the spec ladder and caps at 8', () => {

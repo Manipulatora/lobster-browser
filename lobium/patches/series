@@ -9,10 +9,12 @@
 # build machine (T-010/T-011). See hooks.md for the hook point + code of each.
 #
 # --- Core: config channel + navigator/UA-CH (T-011 POC — first native surface) ---
-core/build-gn.patch                 # register //third_party/lobium-fp in the build graph
-core/config-channel.patch           # allow the --lobium-fp-config switch; call sites read Current()
-core/hardware-concurrency-poc.patch # ✅ BUILT + PROVEN on Chromium 152: navigator.hardwareConcurrency native override
-core/navigator-ua-ch.patch          # navigator.* + Sec-CH-UA from config (userAgent/platform/langs/hw)
+# core/build-gn.patch                 # NOT YET AUTHORED — register //third_party/lobium-fp in the build graph
+# core/hardware-concurrency-poc.patch — ✅ BUILT + PROVEN on Chromium 152. Two hooks: (A) --lobium-hwc native
+#   navigator.hardwareConcurrency override, proven end-to-end; (B) the --lobium-fp-config switch-forward +
+#   JSON read (compiles; renderer sandbox blocks the file read — browser-process plumb is the next step).
+core/hardware-concurrency-poc.patch
+# core/navigator-ua-ch.patch          # NOT YET AUTHORED — navigator.* + Sec-CH-UA from config (userAgent/platform/langs/hw)
 #
 # --- Fingerprint deep surfaces (Phase 2 — the native moat) ---
 # fingerprint/screen-dpr.patch        # screen/window/DPR/colorDepth from config

@@ -15,6 +15,30 @@
 export interface BlobPutMeta {
   teamId: string;
   profileId: string;
+  /**
+   * Optimistic-concurrency precondition. When set, the store atomically requires the currently
+   * stored version to equal this value before writing (checked and applied without an intervening
+   * await, so two racing puts at the same base can never both win); a mismatch throws
+   * {@link BlobVersionConflictError}. `0` means "expected to not exist yet". Omit to write
+   * unconditionally.
+   */
+  expectedVersion?: number;
+}
+
+/**
+ * Thrown by {@link BlobStore.put} when its `expectedVersion` precondition does not match the
+ * currently-stored version — a lost-update / optimistic-concurrency conflict. Kept framework-free
+ * so the store stays decoupled from HTTP concerns; callers map it to a 409.
+ */
+export class BlobVersionConflictError extends Error {
+  constructor(
+    readonly key: string,
+    readonly expectedVersion: number,
+    readonly actualVersion: number,
+  ) {
+    super(`blob version conflict for ${key}: expected ${expectedVersion}, found ${actualVersion}`);
+    this.name = 'BlobVersionConflictError';
+  }
 }
 
 /** Result of a {@link BlobStore.put}: the version just assigned to the stored bytes. */
@@ -40,7 +64,11 @@ export interface BlobHead {
  * The store never interprets the bytes.
  */
 export interface BlobStore {
-  /** Store `bytes` under `key`, bumping its version by one; returns the new version. */
+  /**
+   * Store `bytes` under `key`, bumping its version by one; returns the new version. When
+   * `meta.expectedVersion` is set, the version check + write happen atomically inside the store,
+   * throwing {@link BlobVersionConflictError} when the precondition fails (compare-and-set).
+   */
   put(key: string, bytes: Buffer, meta: BlobPutMeta): Promise<BlobPutResult>;
   /** The latest record for `key`, or null when nothing has ever been stored under it. */
   getLatest(key: string): Promise<BlobRecord | null>;
