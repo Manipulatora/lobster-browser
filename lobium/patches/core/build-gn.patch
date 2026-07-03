@@ -1,10 +1,12 @@
 Lobium — register the //components/lobium_fp config-channel module in the build graph.
 
-Wires the added first-party module (components/lobium_fp/, staged by lobium/build.sh) into the two Blink
-targets whose hooks read lobium::LobiumFpConfig::Current():
-  - blink core (component("core")):  deps += //components/lobium_fp ; core/DEPS += +components/lobium_fp
-  - blink common (source_set("common")): deps += //components/lobium_fp ; common/DEPS += +components/lobium_fp
-    (blink_common owns approximated_device_memory.cc — the deviceMemory single source).
+Wires the added first-party module (components/lobium_fp/, staged by lobium/build.sh) into the three
+Blink targets whose hooks read lobium::LobiumFpConfig::Current():
+  - blink core   (component("core")):     deps += //components/lobium_fp ; core/DEPS   += +components/lobium_fp
+  - blink common (source_set("common")):  deps += //components/lobium_fp ; common/DEPS += +components/lobium_fp
+    (owns approximated_device_memory.cc — the deviceMemory single source)
+  - blink modules (component("modules")):  deps += //components/lobium_fp ; modules/DEPS += +components/lobium_fp
+    (owns webgl_rendering_context_base.cc — the WebGL vendor/renderer hook)
 
 Kept minimal, and in the //components first-party root rather than //third_party (which the license
 scanner tools/licenses.py rejects for a directory lacking README.chromium/LICENSE, breaking the
@@ -60,3 +62,27 @@ index 07c55106e5..06ab6cf4d6 100644
      "+components/performance_manager/public/mojom/coordination_unit.mojom-blink.h",
      "+components/performance_manager/public/mojom/web_memory.mojom-blink.h",
      "+components/viz/common/frame_timing_details.h",
+diff --git a/third_party/blink/renderer/modules/BUILD.gn b/third_party/blink/renderer/modules/BUILD.gn
+index fecd5c279e..be0d717a5d 100644
+--- a/third_party/blink/renderer/modules/BUILD.gn
++++ b/third_party/blink/renderer/modules/BUILD.gn
+@@ -202,6 +202,7 @@ component("modules") {
+     ":make_modules_generated",
+     "//build:android_buildflags",
+     "//cc",
++    "//components/lobium_fp",
+     "//components/webrtc:thread_wrapper",
+     "//gin",
+     "//net",
+diff --git a/third_party/blink/renderer/modules/DEPS b/third_party/blink/renderer/modules/DEPS
+index 875071014b..8659565221 100644
+--- a/third_party/blink/renderer/modules/DEPS
++++ b/third_party/blink/renderer/modules/DEPS
+@@ -5,6 +5,7 @@ include_rules = [
+     "+base/containers/heap_array.h",
+     "+base/containers/span.h",
+     "+base/threading/platform_thread.h",
++    "+components/lobium_fp",
+     "+mojo/public/cpp/base",
+     "+mojo/public/cpp/bindings",
+     "+mojo/public/cpp/system",

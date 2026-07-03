@@ -75,14 +75,37 @@ comes via the CDP/`SetNavigatorPlatformOverride` reduced-UA path), and a browser
 `setUserAgentOverride` already does. Native patching buys nothing here and risks desync. The native moat
 is for surfaces CDP genuinely **cannot** reach — see below.
 
-## Deep surfaces (Phase 2, the native moat) — NOT YET AUTHORED
+## Deep surfaces (the native moat) — CDP genuinely cannot reach these
 
-These CANNOT be done via CDP/JS (JS spoofing is itself the tell), so they are the real native work:
+JS spoofing of these is itself the tell, so they are the real native work.
+
+### WebGL vendor/renderer — ✅ BUILT (strings), with a documented capability gap
+
+`webgl_rendering_context_base.cc` `getParameter` overrides `UNMASKED_VENDOR_WEBGL` /
+`UNMASKED_RENDERER_WEBGL` (the `WEBGL_debug_renderer_info` strings — where the real GPU actually leaks)
+from `cfg->webgl.unmasked_vendor/renderer`, as an **atomic pair** (both or neither). One site covers
+WebGL1 + WebGL2 (delegation) + Workers/OffscreenCanvas. The masked `GL_VENDOR`/`GL_RENDERER` stay
+Chrome's constant `"WebKit"`/`"WebKit WebGL"` (overriding them would be a tell). Proven: SwiftShader →
+the persona GPU, masked unchanged.
+
+> **KNOWN LIMITATION — string-only.** Only the vendor/renderer *strings* are overridden. The rest of the
+> WebGL surface still reflects the real backend: `getSupportedExtensions()`, the `MAX_*` limits,
+> `getShaderPrecisionFormat()`, the WebGL2 limit block, and — the strongest tell — the **rendered-pixel
+> hash** (`readPixels`/`toDataURL`). A detector can cross-check the renderer string against these. This
+> is starkest on a **SwiftShader** dev backend (an RTX-3060 string next to a software rasterizer). The
+> mitigation roadmap: (a) never ship SwiftShader as the real backend; (b) pin personas to the host GPU
+> class in production; (c) incrementally align the extension list + key limits + precision to the claimed
+> GPU class; (d) per-profile **pixel farbling** (`seeds.webgl`) so the pixel hash is stable-per-profile
+> and not a known SwiftShader/host hash. (`GL_VERSION` does NOT leak the raw driver string — the
+> command-buffer sanitises it — so that specific leg is not a concern.)
+
+### Still to author
+
 `fingerprint/canvas-farbling.patch` (seeded 2D noise across main frame + workers + OffscreenCanvas),
-`fingerprint/webgl-vendor-renderer.patch` (UNMASKED_* + params + seeded pixel farbling),
-`fingerprint/audio-context.patch` (seeded DSP), `fingerprint/fonts.patch`, and the net layer
-(`net/webrtc-ip-policy`, `net/tls-ja3-ja4`, `net/http2-settings-order`). `screen`/`DPR` is a borderline
-JS-safe surface (`fingerprint/screen-dpr.patch`) that can go either way. Each deep surface reads
+WebGL **pixel farbling** + capability alignment (the limitation above), `fingerprint/audio-context.patch`
+(seeded DSP), `fingerprint/fonts.patch`, and the net layer (`net/webrtc-ip-policy`, `net/tls-ja3-ja4`,
+`net/http2-settings-order`). `screen`/`DPR` is a borderline JS-safe surface
+(`fingerprint/screen-dpr.patch`) that can go either way. Each deep surface reads
 `lobium::LobiumFpConfig::Current()->{seeds,webgl,...}` via the same proven config channel.
 
 ## Verification (build machine)

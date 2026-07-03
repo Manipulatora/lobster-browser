@@ -1,4 +1,4 @@
-Lobium — native fingerprint config channel + first native surfaces (browser reads file → renderer reads base64).
+Lobium — native fingerprint config channel + native surfaces (browser reads file → renderer reads base64).
 
 The sidecar writes lobium-fp.json and launches Lobium with --lobium-fp-config=<path>. The renderer is
 sandboxed and cannot read files, so — mirroring Chromium's own GaiaConfig file→switch serialization —
@@ -13,26 +13,33 @@ Native surfaces hooked so far, each reading Current() (all PROVEN on Chromium 15
      consistent main-thread + Workers. --lobium-hwc=<n> retained as a single-value POC fallback.
   2. navigator.deviceMemory + the Device-Memory / Sec-CH-Device-Memory client-hint HTTP headers, hooked
      at their SINGLE shared source ApproximatedDeviceMemory::GetApproximatedDeviceMemory()
-     (approximated_device_memory.cc) so the JS getter and the HTTP header report the IDENTICAL value
-     (proven: config 16 → both JS and header report 16, not host 32). The configured value is snapped to
-     a bucket this build actually emits (nearest power-of-two GB, clamped to desktop [2,32] / Android
-     [1,8]) so it can never itself be an off-spec/out-of-range tell.
-  3. navigator.maxTouchPoints (navigator_events.cc) — proven 0→5; overrides on the optional's
-     has_value() so a desktop persona can force 0. NOTE: the paired touch surfaces (ontouchstart /
-     TouchEvent / CSS pointer & hover media queries) are Settings-driven and NOT yet overridden, so this
-     is coherent for a desktop persona (maxTouchPoints 0) on a non-touch host; full touch coherence for
-     touch personas / touch-capable hosts is a follow-up (WebPreferences pointer_events_max_touch_points
-     + available_pointer_types + the touch-event feature gate).
+     (approximated_device_memory.cc) so the JS getter and the HTTP header report the IDENTICAL value,
+     bucket-snapped to a value this build emits (desktop [2,32] / Android [1,8]).
+  3. navigator.maxTouchPoints (navigator_events.cc) — 0→5; overrides on the optional's has_value().
+  4. WebGL UNMASKED_VENDOR_WEBGL / UNMASKED_RENDERER_WEBGL (webgl_rendering_context_base.cc) — the real
+     GPU strings (WEBGL_debug_renderer_info) → cfg->webgl.unmasked_vendor/renderer, overridden as an
+     ATOMIC pair (both or neither, so a partial persona can't pair a spoofed vendor with the host
+     renderer). One getParameter site covers WebGL1 + WebGL2 (delegation) + Workers/OffscreenCanvas.
+     The masked GL_VENDOR/GL_RENDERER stay Chrome's constant "WebKit"/"WebKit WebGL" (real behaviour —
+     overriding them would be a tell). This is a genuine native-only surface: a JS getParameter override
+     is itself detectable, so CDP cannot do it cleanly.
+     KNOWN LIMITATION (deep-surface roadmap, see hooks.md): only the vendor/renderer STRINGS are
+     overridden; getSupportedExtensions(), the MAX_* limits, getShaderPrecisionFormat(), the WebGL2
+     limit block, and the rendered-pixel hash still reflect the real backend. A detector can cross-check
+     the renderer string against those. This is starkest on a SwiftShader dev backend (RTX-3060 string +
+     software capabilities); in production the mitigation is (a) never ship SwiftShader as the real
+     backend, (b) pin personas to the host GPU class, and (c) incrementally align the extension list /
+     key limits / precision + per-profile pixel farbling (seeds.webgl) to the claimed GPU.
 
-navigator.platform and navigator.languages are deliberately NOT hooked here — both are coupled to HTTP
-headers (Sec-CH-UA-Platform / navigator.userAgentData.platform; Accept-Language) and must be landed in a
-dedicated coherent UA-CH / locale patch, not as lone JS-getter overrides.
+platform / UA-CH / languages are NOT hooked here — they are JS-safe/CDP surfaces (MASTER_PLAN §5),
+handled by the sidecar's cdp-fingerprint.ts setUserAgentOverride (see hooks.md).
 
-Four hook points:
+Five hook points:
   1. content/browser/.../render_process_host_impl.cc — browser reads --lobium-fp-config, forwards base64 --lobium-fp-data.
-  2. third_party/blink/common/.../approximated_device_memory.cc — deviceMemory single source (JS getter + client-hint header).
+  2. third_party/blink/common/.../approximated_device_memory.cc — deviceMemory single source (JS + client-hint header).
   3. third_party/blink/renderer/core/events/navigator_events.cc — maxTouchPoints.
   4. third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc — hardwareConcurrency.
+  5. third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc — WebGL unmasked vendor/renderer.
 
 diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
 index ffdaf1716e..b9ea49e5cc 100644
@@ -243,3 +250,46 @@ index f5c0db2d1b..2b0fcd072a 100644
    return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
  }
  
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index a977030857..7b242d0a8d 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -45,6 +45,7 @@
+ #include "base/trace_event/memory_dump_manager.h"
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "components/viz/common/gpu/raster_context_provider.h"
+ #include "components/viz/common/resources/shared_image_format_utils.h"
+ #include "device/vr/buildflags/buildflags.h"
+@@ -4191,6 +4192,16 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        // Lobium: report the per-profile GPU renderer natively. The real driver string leaks ONLY
++        // through this unmasked param (the masked GL_RENDERER stays Chrome's generic "WebKit WebGL"),
++        // and it cannot be spoofed cleanly from JS/CDP — a getParameter override is itself detectable.
++        // Override the vendor+renderer PAIR atomically (both configured or neither) so a partial persona
++        // can never pair a spoofed vendor with the host renderer — an obvious cross-check tell.
++        if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++            cfg && !cfg->webgl.unmasked_vendor.empty() &&
++            !cfg->webgl.unmasked_renderer.empty()) {
++          return WebGLAny(script_state, String::FromUtf8(cfg->webgl.unmasked_renderer));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_RENDERER)));
+       }
+@@ -4200,6 +4211,13 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        // Lobium: report the per-profile GPU vendor natively (unmasked-only, same rationale as above;
++        // paired atomically with the renderer so the two are never sourced from different origins).
++        if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++            cfg && !cfg->webgl.unmasked_vendor.empty() &&
++            !cfg->webgl.unmasked_renderer.empty()) {
++          return WebGLAny(script_state, String::FromUtf8(cfg->webgl.unmasked_vendor));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_VENDOR)));
+       }
