@@ -190,7 +190,7 @@ First-class programmatic control. **Full reference: `api-reference.md`.**
 | MCP server | MCP wrapper exposing start/stop/list/status + profile ops to AI agents. | P2 | (new/differentiator) | **planned** |
 | Headless | `headless` flag on `start`. | P1 | all | **partial** (flag in contract) |
 | Cloud-run | Launch/drive a profile in the cloud (browser not on the user's machine). | P2 | Octo, ML, GL | **planned** |
-| Human-like input | Non-linear mouse paths + realistic timing library for automation. | P1 | Dolphin, Kameleo | **planned** |
+| Human-like input | Non-linear mouse paths + realistic timing library for automation. | P1 | Dolphin, Kameleo | **done (T-024)** — seeded Bézier mouse paths + typing cadence + CDP dispatch (`humanize`); correlated tremor still planned |
 | Scenario / RPA | Visual no-code automation builder (steps, loops, variables, data sources). | P2 | ADS, Dolphin, GL | **planned** |
 | Sync automation | Batch-open/close, group actions, synchronized multi-profile input. | P2 | ADS, GL | **planned** |
 

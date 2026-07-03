@@ -10,5 +10,8 @@
   },
   "files": [
     "index.js"
-  ]
+  ],
+  "scripts": {
+    "test": "node --test"
+  }
 }

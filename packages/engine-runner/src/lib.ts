@@ -16,5 +16,21 @@ export { buildCdpEmulation, buildFingerprintInitScript, buildLaunchOptions } fro
 export type { CdpEmulation, PersistentLaunchOptions, UserAgentMetadata } from './launch.js';
 export { applyCdpFingerprint } from './cdp-fingerprint.js';
 export type { CdpSession } from './cdp-fingerprint.js';
+export {
+  mousePath,
+  moveTimings,
+  typingCadence,
+  humanMouseMove,
+  humanClick,
+  humanType,
+} from './humanize.js';
+export type {
+  Point,
+  MousePathOptions,
+  MoveTimingOptions,
+  TypingOptions,
+  HumanMoveOptions,
+  Sleep,
+} from './humanize.js';
 export type { EngineRunner } from './runner.js';
 export type { Launcher, LaunchContext, LaunchHandle, LauncherRegistry } from './runners/types.js';

@@ -31,6 +31,8 @@ tickets; the assigned agent implements; the other agent reviews. Keep this table
 | T-021 | API-key management (issue/list/revoke + verify) | C · Backend | Claude | done · [`/api-keys`](T-021-api-key-management.md); one-time `lb_live_` secret, only prefix+sha256 stored; `verify()` for the automation API; team-scoped; 9 e2e |
 | T-022 | Action logs / audit trail | C · Backend | Claude | done · [`AuditService.record` (fail-safe) + `GET /audit`](T-022-audit-log.md) team-scoped **keyset**-cursor feed (lossless across same-ms ties, hardened after review); instrumented into profiles + api-keys; 7 e2e |
 | T-020a | Atomic plan-limit enforcement (serializable txn / advisory lock) | C · Backend | Claude | draft · follow-up from T-020 (TOCTOU under concurrent bulk/import) |
+| T-023 | Official SDK examples (Py/JS) + connect docs | D · Automation | Codex+Claude | done · [`@lobster/local-api-sdk`](T-023-sdk-examples-connect-docs.md) fleshed out (timeout/retry/typed errors); Selenium/Playwright/Puppeteer recipes; 8 JS tests |
+| T-024 | Human-like input (mouse Bézier paths + typing cadence) | Automation · Stealth | Claude | done · [`humanize`](T-024-human-like-input.md) seeded mouse/type generators + CDP dispatch; hardened after review (double-insert, key/code, `buttons` bitmask, integer coords); 8 tests |
 
 **Status legend:** `draft` (spec not final) · `ready` (spec final, unassigned work can start) ·
 `in-progress` · `in-review` · `done`.
