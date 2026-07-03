@@ -8,23 +8,26 @@ fingerprint surfaces **natively** (no JS/CDP tell) and exposes a per-profile con
 > Lobium is a **parallel, longer-horizon track**. The product ships and stays fully usable on the
 > interim prebuilt Chromium (driven via patchright) while Lobium matures into the default engine.
 
-## ✅ Proven end-to-end (T-010 + T-011 POC)
+## ✅ Proven end-to-end (T-010 + T-011)
 
 Chromium **152.0.7928.0** was fetched, configured, and compiled from source (~6.5 h stock on a 12-core
-box), then a native fingerprint patch was applied and **incrementally rebuilt in ~2 min**. Result,
-verified live:
+box), then the native fingerprint **config channel** was applied and **incrementally rebuilt in ~2 min**.
+The per-profile config **file** now drives `navigator.hardwareConcurrency` natively — verified live:
 
 | launch | `navigator.hardwareConcurrency` |
 |---|---|
 | stock (no flag) | **12** (host cores) |
-| `--lobium-hwc=99` | **99** |
-| `--lobium-hwc=4` | **4** |
+| `--lobium-fp-config=<file with hwc:7>` | **7** — main thread **and** Worker (no cross-context tell) |
+| `--lobium-hwc=99` (single-value POC) | **99** |
+| missing / invalid config file | **12** (host) + a `LOG(ERROR)` — never a *silent* host-leak |
 
-The value is decided in **C++ inside Blink** ([`patches/core/hardware-concurrency-poc.patch`](patches/core/hardware-concurrency-poc.patch)),
-so there is **no JS/CDP tell** — the exact capability the interim engine cannot provide, and the same
-hook shape the deep surfaces (canvas/WebGL/audio) need. This confirms the whole Lobium approach compiles
-and works; the remaining effort is breadth (the full patch series via the config channel) + a build farm
-for release binaries, not feasibility.
+The value is decided in **C++ inside Blink** via `lobium::LobiumFpConfig::Current()`
+([`core/config-channel.patch`](patches/core/config-channel.patch) + [`core/build-gn.patch`](patches/core/build-gn.patch)),
+so there is **no JS/CDP tell**. The renderer is sandboxed and can't read files, so the browser process
+reads the file and forwards its base64 as `--lobium-fp-data` (Chromium's own `GaiaConfig` pattern). This
+proves the whole config channel end-to-end; each further surface (deviceMemory, UA-CH, screen, then the
+deep canvas/WebGL/audio surfaces) is now a one-line hook reading `Current()`. Remaining effort is breadth
++ a build farm for release binaries, not feasibility.
 
 ## Layout
 
@@ -49,8 +52,8 @@ Compiles are long — run on a dedicated build machine / self-hosted CI with `cc
 
 **Full, reproducible instructions:** [REPRODUCIBLE_BUILD.md](REPRODUCIBLE_BUILD.md) — clone → fetch the
 pinned Chromium ref → apply `patches/` → build the exact binary, with a step to **verify** the native
-override took effect. The `patches/core/hardware-concurrency-poc.patch` in this repo is verified to
-apply cleanly to a pristine `152.0.7928.0` tree, so `lobium/` alone reconstructs the fork (the 37 GB
+override took effect. The `core/build-gn.patch` + `core/config-channel.patch` in this repo are verified
+to apply cleanly to a pristine `152.0.7928.0` tree, so `lobium/` alone reconstructs the fork (the 37 GB
 base Chromium is fetched, never committed — as with every Chromium fork).
 
 ## Native patch domains (target)

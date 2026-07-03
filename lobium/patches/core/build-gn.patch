@@ -1,0 +1,35 @@
+Lobium — register the //components/lobium_fp config-channel module in the build graph.
+
+Wires the added first-party module (components/lobium_fp/, staged by lobium/build.sh) into Blink so the
+navigator/UA-CH/screen/WebGL/... hooks can read lobium::LobiumFpConfig::Current():
+  - blink core (component("core")) deps += //components/lobium_fp:lobium_fp
+  - blink core DEPS include-rule += +components/lobium_fp
+
+Kept minimal, and in the //components first-party root rather than //third_party (which the license
+scanner tools/licenses.py rejects for a directory lacking README.chromium/LICENSE, breaking the
+is_official_build credits step). COMPILE-VERIFIED on Chromium 152.0.7928.0.
+
+diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
+index a4a53a9003..e5143277a2 100644
+--- a/third_party/blink/renderer/core/BUILD.gn
++++ b/third_party/blink/renderer/core/BUILD.gn
+@@ -410,6 +410,7 @@ component("core") {
+     "//base",
+     "//components/attribution_reporting",
+     "//components/attribution_reporting:mojom_blink",
++    "//components/lobium_fp:lobium_fp",
+     "//components/paint_preview/common",
+     "//components/performance_manager/public/mojom:mojom_blink",
+     "//components/shared_highlighting/core/common",
+diff --git a/third_party/blink/renderer/core/DEPS b/third_party/blink/renderer/core/DEPS
+index 07c55106e5..06ab6cf4d6 100644
+--- a/third_party/blink/renderer/core/DEPS
++++ b/third_party/blink/renderer/core/DEPS
+@@ -69,6 +69,7 @@ include_rules = [
+     "+cc/trees/ukm_manager.h",
+     "+components/subresource_filter/core/common/scoped_rule.h",
+     "+components/attribution_reporting/features.h",
++    "+components/lobium_fp",
+     "+components/performance_manager/public/mojom/coordination_unit.mojom-blink.h",
+     "+components/performance_manager/public/mojom/web_memory.mojom-blink.h",
+     "+components/viz/common/frame_timing_details.h",

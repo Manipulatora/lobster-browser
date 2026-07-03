@@ -30,8 +30,9 @@ correct and intentional — the pinned ref below reproduces the exact base every
 Chromium ref (tag):  152.0.7928.0        # lobium/build.sh CHROMIUM_REF (default)
 ```
 
-The active patch ([`patches/core/hardware-concurrency-poc.patch`](patches/core/hardware-concurrency-poc.patch))
-is authored, refreshed, and compile-verified against this exact ref.
+The active patches ([`core/build-gn.patch`](patches/core/build-gn.patch) +
+[`core/config-channel.patch`](patches/core/config-channel.patch)) are authored, refreshed, and
+compile-verified against this exact ref.
 
 ## Prerequisites (build machine)
 
@@ -67,15 +68,15 @@ What it does, step by step (reproduce by hand if you prefer):
    ```
 2. **Stage the Lobium added files** into the source tree (they never conflict on rebase):
    ```bash
-   mkdir -p third_party/lobium-fp
-   cp ../../src/* third_party/lobium-fp/
+   mkdir -p components/lobium_fp
+   cp ../../src/* components/lobium_fp/
    ```
 3. **Apply the patch series** (the minimal hook points into existing Chromium files):
    ```bash
    QUILT_PATCHES=../../patches QUILT_SERIES=../../patches/series quilt push -a
    ```
-   (Equivalently: `git apply ../../patches/core/hardware-concurrency-poc.patch` — the patch is verified
-   to apply cleanly to a pristine 152.0.7928.0 tree.)
+   (Equivalently: `git apply ../../patches/core/build-gn.patch ../../patches/core/config-channel.patch`
+   — both are verified to apply cleanly to a pristine 152.0.7928.0 tree.)
 4. **Configure (GN)** with the Lobium args:
    ```bash
    gn gen out/Lobium --args="$(grep -v '^#' ../../gn-args.gn.example | tr '\n' ' ')"
@@ -97,33 +98,40 @@ Result: `out/Lobium/chrome` (the proven POC binary was 172 MB). Rebrand + sign i
 
 ## Verify the customization actually took effect
 
-The point of a native patch is that it changes behavior with **no JS-detectable tell**. Verify:
+The point of a native patch is that it changes behavior with **no JS-detectable tell**. Verify both the
+production **config-file** channel and the single-value POC switch:
 
 ```bash
-# Baseline — reports the host CPU count:
-out/Lobium/chrome --headless=new --dump-dom \
-  'data:text/html,<script>document.title=navigator.hardwareConcurrency</script>'
+# A config file the sidecar would write (navigator.hardwareConcurrency = 7):
+echo '{"version":1,"navigator":{"hardwareConcurrency":7}}' > /tmp/lobium-fp.json
+PROBE='data:text/html,<title>_</title><script>document.title=navigator.hardwareConcurrency</script>'
+title() { out/Lobium/chrome --headless=new --no-sandbox --disable-gpu "$@" --dump-dom "$PROBE" \
+            2>/dev/null | grep -oP '<title>\K[0-9]+'; }
 
-# Overridden natively — reports 99 regardless of host:
-out/Lobium/chrome --lobium-hwc=99 --headless=new --dump-dom \
-  'data:text/html,<script>document.title=navigator.hardwareConcurrency</script>'
+title                                    # baseline  → host CPU count (e.g. 12)
+title --lobium-fp-config=/tmp/lobium-fp.json   # config FILE → 7   (the production path)
+title --lobium-hwc=99                    # POC switch → 99
+title --lobium-fp-config=/no/such.json   # bad file  → host value + a LOG(ERROR) on stderr
 ```
 
-Proven live during the POC build: baseline `HWC=12` → `--lobium-hwc=99` ⇒ `99` → `--lobium-hwc=4` ⇒ `4`.
-Because the value is computed in C++ inside Blink, `navigator.hardwareConcurrency.toString` and the
-property descriptor are untouched — there is nothing for a detector to catch, unlike a JS/CDP override.
+Proven on the 152.0.7928.0 build: baseline `HWC=12`; the config **file** yields `7` (consistently on
+the main thread AND in a dedicated Worker — no cross-context tell); the `--lobium-hwc` POC yields its
+value; a missing/invalid/incompatible file falls back to the host value and logs `Lobium: … reporting
+HOST fingerprint values.` Because the value is computed in C++ inside Blink,
+`navigator.hardwareConcurrency.toString` and the property descriptor are untouched — nothing for a
+detector to catch, unlike a JS/CDP override.
 
 ## Patch status (honest)
 
 | Patch | Status |
 |---|---|
-| `core/hardware-concurrency-poc.patch` — hook (A) `--lobium-hwc` | ✅ **Built + proven end-to-end** on 152.0.7928.0 |
-| `core/hardware-concurrency-poc.patch` — hook (B) `--lobium-fp-config` file read | ⚠️ **Compiles + links**, but the getter runs in the **renderer** process whose sandbox blocks file reads, so it falls back to the host value. Production design: read `lobium-fp.json` in the **browser** process and plumb resolved values via switches/mojo (or have the sidecar resolve the file and pass scalars). Next Lobium step. |
-| everything under `patches/` marked `NOT YET AUTHORED` / Phase 2 | 🔜 deep surfaces (canvas/WebGL/audio/fonts/WebGPU) + net (WebRTC/TLS-JA4/HTTP2) — the native moat |
+| `core/build-gn.patch` — registers `//components/lobium_fp` in the build graph | ✅ **Built** on 152.0.7928.0 |
+| `core/config-channel.patch` — browser reads `--lobium-fp-config`, forwards base64 `--lobium-fp-data`; renderer's `LobiumFpConfig::Current()` serves it to `navigator.hardwareConcurrency` | ✅ **Built + proven end-to-end** (config **file** override, worker-consistent, logged graceful fallback). `--lobium-hwc` retained as a single-value POC fallback. |
+| everything under `patches/` marked `NOT YET AUTHORED` / Phase 2 | 🔜 more navigator fields (deviceMemory, UA-CH) + deep surfaces (canvas/WebGL/audio/fonts/WebGPU) + net (WebRTC/TLS-JA4/HTTP2) — each a one-line hook reading `Current()` |
 
 ## Rebasing onto a newer Chrome stable
 
 [`rebase.sh`](rebase.sh) bumps `CHROMIUM_REF`, re-syncs, and `quilt push`es the series against the new
 tree so conflicts surface per-hook. Because nearly all logic lives in **added files** under
-`third_party/lobium-fp/` (which never conflict) and the in-tree hooks are deliberately tiny, tracking
+`components/lobium_fp/` (which never conflict) and the in-tree hooks are deliberately tiny, tracking
 Chrome stable within days stays feasible — the Octo-class moat requirement.

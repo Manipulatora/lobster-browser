@@ -1,13 +1,18 @@
 # Copyright 2026 The Lobster Browser Authors.
 #
-# Build target for the Lobium fingerprint config channel — the ADDED module staged by build.sh into
-# //third_party/lobium-fp. Consumers (Blink navigator, UA-CH provider, WebGL/canvas, net) depend on
-# ":lobium_fp" (wired by core/build-gn.patch). Kept as an added file so upstream rebases never reject it.
+# Build target for the Lobium fingerprint config channel — the ADDED first-party module staged by
+# build.sh into //components/lobium_fp. Consumers (Blink navigator, UA-CH provider, WebGL/canvas, net)
+# depend on ":lobium_fp" (wired by core/build-gn.patch). Kept as an added directory so upstream rebases
+# never reject it, and under //components (a first-party root) rather than //third_party so it is not
+# swept by the third-party license/metadata scanner (tools/licenses).
 
 source_set("lobium_fp") {
   sources = [
     "lobium_fp_config.cc",
     "lobium_fp_config.h",
   ]
-  deps = [ "//base" ]
+
+  # public_deps: lobium_fp_config.h exposes base::FilePath (Load()) + includes base/files/file_path.h,
+  # so //base is part of this target's public interface and must be re-exported to consumers.
+  public_deps = [ "//base" ]
 }

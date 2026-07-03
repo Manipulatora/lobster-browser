@@ -8,17 +8,18 @@
 // audio farbling, timezone/locale, WebRTC) reads from the returned `LobiumFpConfig` instead of the
 // host device — so every deep surface is spoofed *natively*, with no JS tell.
 //
-// It builds into `//third_party/lobium-fp` (an ADDED directory, so it survives upstream rebases with
+// It builds into `//components/lobium_fp` (an ADDED directory, so it survives upstream rebases with
 // zero patch rejects). The small diffs that call into it from existing Chromium files are the quilt
 // patches under `lobium/patches/`. NOTE: this file has NOT been compiled in the dev sandbox — it is
 // authored against the pinned Chromium ref and is finalized/compiled on the build machine (T-010/T-011).
 
-#ifndef THIRD_PARTY_LOBIUM_FP_LOBIUM_FP_CONFIG_H_
-#define THIRD_PARTY_LOBIUM_FP_LOBIUM_FP_CONFIG_H_
+#ifndef COMPONENTS_LOBIUM_FP_LOBIUM_FP_CONFIG_H_
+#define COMPONENTS_LOBIUM_FP_LOBIUM_FP_CONFIG_H_
 
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "base/files/file_path.h"
@@ -31,7 +32,9 @@ struct NavigatorConfig {
   std::string platform;
   std::vector<std::string> languages;
   int hardware_concurrency = 0;
-  double device_memory = 8;
+  // 0 = unconfigured (fall back to the host value), mirroring hardware_concurrency's sentinel — so a
+  // future deviceMemory hook only overrides when the config actually specifies it.
+  double device_memory = 0;
   int max_touch_points = 0;
   std::string ua_platform;
   std::string ua_platform_version;
@@ -101,4 +104,4 @@ struct LobiumFpConfig {
 
 }  // namespace lobium
 
-#endif  // THIRD_PARTY_LOBIUM_FP_LOBIUM_FP_CONFIG_H_
+#endif  // COMPONENTS_LOBIUM_FP_LOBIUM_FP_CONFIG_H_

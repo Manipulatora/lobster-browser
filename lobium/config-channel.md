@@ -3,20 +3,35 @@
 The orchestrator must set all 50+ fingerprint parameters **natively** (no JS tell). Lobium reads a
 per-profile fingerprint config at launch and applies it in C++.
 
-## Approach (decided + implemented, T-011 POC)
+## Approach (decided + implemented + **PROVEN** on Chromium 152)
 
-- **Transport: a per-profile config file + a command-line switch.** The sidecar writes
-  `<userDataDir>/lobium-fp.json` (0600) and launches Lobium with `--lobium-fp-config=<path>`. A file
-  (not an env var / argv blob) keeps the ~KB payload off the process table and off `/proc`.
-- **Sidecar side (done, tested):** `packages/engine-runner/src/lobium-config.ts` —
-  `buildLobiumConfig(fingerprint, {proxy, seed})` → `writeLobiumConfig()` → `lobiumConfigArg()`. It
-  serializes the resolved `Fingerprint` + deterministic per-profile farbling seeds (canvas/webgl/audio)
-  + a `net` envelope (WebRTC policy; type/host/port — **never** credentials).
-- **Native side (build-machine artifact):** `lobium/src/lobium_fp_config.{h,cc}` parses it once at
-  startup (`LobiumFpConfig::Current()`); the `core/*` hook patches route navigator/UA-CH (and, in
-  Phase 2, screen/WebGL/canvas/audio/TLS) through it — natively, with no JS tell.
-- Values are **stable per profile** (seeded) and **coherent** (one real machine). The JSON shape is the
-  single source of truth both sides serialize/parse (`lobium-config.ts` ⇄ `lobium_fp_config.cc`).
+The renderer is sandboxed and **cannot read files**, so the config takes a two-hop path — the same
+pattern Chromium itself uses for `GaiaConfig` (a file switch the renderer can't read, which the browser
+serializes into a command-line switch for the child):
+
+1. **Sidecar → browser: a per-profile config file.** `packages/engine-runner/src/lobium-config.ts`
+   (`buildLobiumConfig(fingerprint, {proxy, seed})` → `writeLobiumConfig()` → `lobiumConfigArg()`)
+   writes `<userDataDir>/lobium-fp.json` (0600) and launches Lobium with `--lobium-fp-config=<path>`.
+   It serializes the resolved `Fingerprint` + deterministic per-profile farbling seeds
+   (canvas/webgl/audio) + a `net` envelope (WebRTC policy; proxy type/host/port — **never** credentials).
+   A file (not an argv blob) keeps the payload off the *launch* command line.
+2. **Browser → renderer: base64 in a switch.** In the browser process (unsandboxed),
+   `RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer` reads the file and appends
+   `--lobium-fp-data=<base64>` to each renderer's command line — see `core/config-channel.patch`.
+3. **Renderer: parse once, read typed.** `lobium/src/lobium_fp_config.{h,cc}` (staged as the added
+   directory `//components/lobium_fp/`, wired into blink `core` by `core/build-gn.patch`) base64-decodes
+   `--lobium-fp-data`, parses the JSON **once** (cached via `base::NoDestructor`), and exposes typed
+   fields via `LobiumFpConfig::Current()`. The `core/*` hook patches route surfaces through it — natively,
+   with no JS tell.
+
+**Status:** proven end-to-end on 152.0.7928.0 — `navigator.hardwareConcurrency` reads the value from the
+config **file** (7, vs host 12), consistently across the main thread and dedicated Workers, with graceful
+fallback to the host value on a missing/invalid/incompatible file. `navigator_concurrent_hardware.cc` is
+the first surface reading `Current()`; screen/WebGL/canvas/audio/TLS follow the same one-line hook shape.
+
+Values are **stable per profile** (seeded) and **coherent** (one real machine). The JSON shape is the
+single source of truth both sides serialize/parse (`lobium-config.ts` ⇄ `lobium_fp_config.cc`), and the
+config `version` (currently 1) is asserted on both sides so a schema bump can't be misapplied.
 
 ## Contract stability
 

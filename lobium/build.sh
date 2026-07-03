@@ -11,7 +11,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Pin an exact Chrome-stable tag. Bumped by rebase.sh; keep within a few days of upstream stable.
-# Default matches the ref the active patch (core/hardware-concurrency-poc.patch) was built + proven on.
+# Default matches the ref the active patches (core/build-gn + core/config-channel) were built + proven on.
 CHROMIUM_REF="${CHROMIUM_REF:-152.0.7928.0}"
 SRC_DIR="${SRC_DIR:-${HERE}/chromium/src}"
 OUT_DIR="${OUT_DIR:-out/Lobium}"
@@ -34,9 +34,9 @@ run "mkdir -p '${HERE}/chromium' && cd '${HERE}/chromium'"
 run "[ -d src ] || fetch --nohooks chromium"
 run "cd '${SRC_DIR}' && git fetch --tags && gclient sync --nohooks --revision 'src@${CHROMIUM_REF}' && gclient runhooks"
 
-step "3. Stage Lobium added files (third_party/lobium-fp/) — apply cleanly across rebases"
-run "mkdir -p '${SRC_DIR}/third_party/lobium-fp'"
-run "cp '${HERE}'/src/* '${SRC_DIR}/third_party/lobium-fp/'"
+step "3. Stage Lobium added files (components/lobium_fp/) — first-party root; applies cleanly across rebases"
+run "mkdir -p '${SRC_DIR}/components/lobium_fp'"
+run "cp '${HERE}'/src/* '${SRC_DIR}/components/lobium_fp/'"
 
 step "4. Apply the quilt patch series (hook points into existing Chromium files)"
 run "cd '${SRC_DIR}' && QUILT_PATCHES='${HERE}/patches' QUILT_SERIES='${HERE}/patches/series' quilt push -a"

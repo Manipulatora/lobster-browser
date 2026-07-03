@@ -109,7 +109,7 @@ lobium/
     lobium-fp/             # our C++ helper lib (seeded PRNG, config parser) added via GN
 ```
 
-The C++ we add lives in a **new component** `third_party/lobium-fp/` (a GN `source_set`) so most of
+The C++ we add lives in a **new component** `components/lobium_fp/` (a GN `source_set`) so most of
 our logic is *added files*, not edits to upstream files — this minimizes rebase-time rejects. Patches
 into upstream files are kept to **call-site hooks** that delegate into `lobium_fp::…`.
 
@@ -206,7 +206,7 @@ branding/30-rebrand.patch
 
 ### 3.1 `core/00-config-channel` — the plumbing everything depends on
 
-**status: planned (T-011).** Adds `third_party/lobium-fp/` (config parser + a process-wide
+**status: planned (T-011).** Adds `components/lobium_fp/` (config parser + a process-wide
 `lobium_fp::Config` singleton), a command-line switch `--lobium-fp-config=<path>` registered in
 `chrome/common/chrome_switches.*`, and propagation of the parsed config to renderer/GPU/utility
 processes. See §4 for the wire format and per-process delivery. **No fingerprint patch reads config

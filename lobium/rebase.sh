@@ -3,7 +3,7 @@
 #
 # The Octo-class moat is tracking Chrome stable within days. This bumps CHROMIUM_REF in build.sh,
 # syncs, and re-applies the series with `quilt push`, reporting any patch that no longer applies so a
-# human refreshes just that hook. The ADDED files under third_party/lobium-fp/ never reject — only the
+# human refreshes just that hook. The ADDED files under components/lobium_fp/ never reject — only the
 # small hook patches can, which is the whole point of the added-file strategy.
 #
 #   ./rebase.sh 132.0.6834.83        # dry run: show what would change
@@ -35,7 +35,7 @@ step "2. Sync the checkout"
 
 step "3. Refresh the series"
 ( cd "${SRC_DIR}" && QUILT_PATCHES="${HERE}/patches" quilt pop -a || true )
-cp "${HERE}"/src/* "${SRC_DIR}/third_party/lobium-fp/"
+cp "${HERE}"/src/* "${SRC_DIR}/components/lobium_fp/"
 if ( cd "${SRC_DIR}" && QUILT_PATCHES="${HERE}/patches" quilt push -a ); then
   echo "all patches applied cleanly onto ${NEW_REF}"
 else

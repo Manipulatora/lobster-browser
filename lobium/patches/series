@@ -1,6 +1,6 @@
 # Lobium patch apply order (quilt). One patch path per line; grouped by domain.
 #
-# STRATEGY: nearly all Lobium logic lives in ADDED files under //third_party/lobium-fp/ (staged by
+# STRATEGY: nearly all Lobium logic lives in ADDED files under //components/lobium_fp/ (staged by
 # build.sh, see ../src/) which never conflict on rebase. The patches below are the MINIMAL hook points
 # into existing Chromium files — each just routes a surface through lobium::LobiumFpConfig::Current().
 # Keeping them tiny is what makes tracking Chrome stable within days feasible (see rebase.sh).
@@ -8,12 +8,15 @@
 # Status: authored against the pinned ref (build.sh CHROMIUM_REF); each is refreshed + compiled on the
 # build machine (T-010/T-011). See hooks.md for the hook point + code of each.
 #
-# --- Core: config channel + navigator/UA-CH (T-011 POC — first native surface) ---
-# core/build-gn.patch                 # NOT YET AUTHORED — register //third_party/lobium-fp in the build graph
-# core/hardware-concurrency-poc.patch — ✅ BUILT + PROVEN on Chromium 152. Two hooks: (A) --lobium-hwc native
-#   navigator.hardwareConcurrency override, proven end-to-end; (B) the --lobium-fp-config switch-forward +
-#   JSON read (compiles; renderer sandbox blocks the file read — browser-process plumb is the next step).
-core/hardware-concurrency-poc.patch
+# --- Core: config channel + navigator/UA-CH (T-011 — first native surfaces) ---
+# core/build-gn.patch — ✅ registers the added //components/lobium_fp module in the build graph
+#   (blink core dep + core/DEPS include-rule).
+core/build-gn.patch
+# core/config-channel.patch — ✅ BUILT + PROVEN on Chromium 152. Browser reads --lobium-fp-config and
+#   forwards base64 --lobium-fp-data to the renderer (cached, size-guarded, logged); the renderer's
+#   LobiumFpConfig::Current() serves it; navigator.hardwareConcurrency is the first surface. The
+#   single-value --lobium-hwc POC switch is retained as a fallback.
+core/config-channel.patch
 # core/navigator-ua-ch.patch          # NOT YET AUTHORED — navigator.* + Sec-CH-UA from config (userAgent/platform/langs/hw)
 #
 # --- Fingerprint deep surfaces (Phase 2 — the native moat) ---

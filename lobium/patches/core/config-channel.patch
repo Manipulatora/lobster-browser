@@ -1,0 +1,140 @@
+Lobium — per-profile fingerprint config channel (browser reads file → renderer reads base64).
+
+The sidecar writes lobium-fp.json and launches Lobium with --lobium-fp-config=<path>. The renderer is
+sandboxed and cannot read files, so — mirroring Chromium's own GaiaConfig file→switch serialization —
+the BROWSER process reads the file ONCE (cached; base::ScopedAllowBlocking; kept off the per-spawn hot
+path so it neither blocks the UI thread repeatedly nor hands later renderers different data) and
+forwards its base64 to each renderer as --lobium-fp-data. A Windows command-line size guard skips an
+oversized payload (graceful fall back to host values) rather than failing renderer launch. The
+RENDERER's lobium::LobiumFpConfig::Current() base64-decodes and parses it once and exposes typed
+fields; every failure path LOG(ERROR)s (a config that is present-but-unparseable must never silently
+leak the real device fingerprint). navigator_concurrent_hardware.cc is the first surface, reading
+cfg->navigator.hardware_concurrency; --lobium-hwc remains as a single-value POC fallback.
+
+PROVEN on Chromium 152.0.7928.0: navigator.hardwareConcurrency reads the value from the config FILE
+(7 vs host 12), consistently across the main thread and dedicated Workers, with graceful + LOGGED
+fallback on a missing/invalid/incompatible file. Depends on core/build-gn.patch and the added
+//components/lobium_fp module (lobium/src/*).
+
+Two hooks:
+  1. content/browser/.../render_process_host_impl.cc — browser reads --lobium-fp-config, forwards
+     base64 --lobium-fp-data to the renderer (cached, size-guarded, logged).
+  2. third_party/blink/.../navigator_concurrent_hardware.cc — the getter reads LobiumFpConfig::Current().
+
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index ffdaf1716e..b9ea49e5cc 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -17,6 +17,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include "base/base64.h"
+ #include "base/base_switches.h"
+ #include "base/byte_size.h"
+ #include "base/clang_profiling_buildflags.h"
+@@ -3826,6 +3827,7 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+   // Propagate the following switches to the renderer command line (along
+   // with any associated values) if present in the browser command line.
+   static const char* const kSwitchNames[] = {
++      "lobium-hwc",  // Lobium: single-value POC override (forwarded as-is)
+       switches::kDisableInProcessStackTraces,
+       sandbox::policy::switches::kDisableLandlockSandbox,
+       sandbox::policy::switches::kDisableSeccompFilterSandbox,
+@@ -4030,6 +4032,43 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+         renderer_cmd);
+   }
+ 
++  // Lobium: --lobium-fp-config points at the per-profile fingerprint file (lobium-fp.json). The
++  // renderer is sandboxed and cannot read it, so — exactly as GaiaConfig does above — the browser
++  // process reads it and serializes the contents into --lobium-fp-data (base64) for the renderer.
++  // The sidecar writes the file once before launch, so we read+encode it ONCE and cache the result:
++  // this method runs on the UI thread on every renderer spawn, where re-reading would both block the
++  // UI thread and risk handing later renderers different data (a same-profile coherence tell). The
++  // static flag is safe because this method is UI-thread only; only RenderProcessHostImpl is on
++  // base::ScopedAllowBlocking's friend list, so the one-time read must live here (not in a lambda).
++  static bool lobium_fp_read = false;
++  static base::NoDestructor<std::string> lobium_fp_data;
++  if (!lobium_fp_read) {
++    lobium_fp_read = true;
++    if (browser_cmd.HasSwitch("lobium-fp-config")) {
++      base::ScopedAllowBlocking allow_blocking;  // one-time read of a local, pre-written file
++      std::string contents;
++      if (base::ReadFileToString(
++              browser_cmd.GetSwitchValuePath("lobium-fp-config"), &contents)) {
++        *lobium_fp_data = base::Base64Encode(contents);
++      } else {
++        LOG(ERROR) << "Lobium: --lobium-fp-config is set but the file could not be read; "
++                      "renderers will report HOST fingerprint values.";
++      }
++    }
++  }
++  if (!lobium_fp_data->empty()) {
++    // The payload rides the renderer command line, which Windows caps at 32767 chars. If a config is
++    // implausibly large (e.g. a huge font enumeration), skip the switch so the renderer falls back to
++    // host values rather than failing to launch (an over-length CreateProcess line is rejected).
++    if (lobium_fp_data->size() <= 24u * 1024u) {
++      renderer_cmd->AppendSwitchASCII("lobium-fp-data", *lobium_fp_data);
++    } else {
++      LOG(ERROR) << "Lobium: fingerprint config is too large for the renderer command line ("
++                 << lobium_fp_data->size()
++                 << " bytes); skipping the native override for this renderer.";
++    }
++  }
++
+ #if BUILDFLAG(IS_ANDROID)
+   if (browser_cmd.HasSwitch(switches::kDisableGpuCompositing)) {
+     renderer_cmd->AppendSwitch(switches::kDisableGpuCompositing);
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+index f5c0db2d1b..2b0fcd072a 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -4,11 +4,48 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ 
++#include <cstdlib>
++#include <string>
++
++#include "base/command_line.h"
+ #include "base/system/sys_info.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ 
+ namespace blink {
+ 
++namespace {
++
++// Lobium native fingerprint override. Reads the per-profile hardwareConcurrency ONCE (cached) from the
++// shared config accessor (lobium::LobiumFpConfig::Current(), populated from --lobium-fp-data — the
++// base64 of the sidecar's lobium-fp.json that the browser process forwards to the sandboxed renderer),
++// falling back to the single-value POC shortcut (`--lobium-hwc=<n>`). Returns 0 when unconfigured.
++// Because this resolves in C++ inside Blink, there is no JS-detectable tell — the exact capability the
++// interim CDP/JS engine cannot provide, and the same accessor every other native surface will read.
++int LobiumConfiguredHardwareConcurrency() {
++  static const int value = []() -> int {
++    if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current()) {
++      if (cfg->navigator.hardware_concurrency > 0) {
++        return cfg->navigator.hardware_concurrency;
++      }
++    }
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (cmd->HasSwitch("lobium-hwc")) {
++      const int n = std::atoi(cmd->GetSwitchValueASCII("lobium-hwc").c_str());
++      if (n > 0) {
++        return n;
++      }
++    }
++    return 0;
++  }();
++  return value;
++}
++
++}  // namespace
++
+ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
++  if (const int configured = LobiumConfiguredHardwareConcurrency(); configured > 0) {
++    return static_cast<unsigned>(configured);
++  }
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 
