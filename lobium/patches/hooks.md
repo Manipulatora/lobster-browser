@@ -59,15 +59,31 @@ Two more surfaces ship in the same patch (both **proven**, both adversarially re
   (`0`) on a non-touch host; full touch coherence (ontouchstart / TouchEvent / CSS pointer-media) is a
   WebPreferences follow-up.
 
-## `core/navigator-ua-ch.patch` — next native surfaces (NOT YET AUTHORED)
+## `platform` / UA-CH / `languages` — NOT native; handled by CDP (MASTER_PLAN §5)
 
-`platform` and `languages` are **deferred here on purpose**: each is coupled to an HTTP header
-(`Sec-CH-UA-Platform` + `navigator.userAgentData.platform`; `Accept-Language`) and a lone JS-getter
-override would *desync* them — the same class of bug the review caught for deviceMemory. They land in a
-dedicated coherent patch: `platform` follows the `Current()` pattern in `NavigatorID::platform()` **plus**
-the browser-process `UserAgentMetadata` (so `Sec-CH-UA-Platform` and `navigator.userAgentData.platform`
-agree); `languages` overrides `Navigator::GetAcceptLanguages()` so `navigator.languages` and the
-`Accept-Language` header agree. `screen`/`DPR` follow the same `Current()` shape (`fingerprint/screen-dpr.patch`).
+**Investigated and deliberately NOT hooked natively.** These are `JS-safe` value-substitution surfaces,
+which §5 routes through clean CDP, not the native engine — and the sidecar already does exactly that:
+[`cdp-fingerprint.ts`](../../packages/engine-runner/src/cdp-fingerprint.ts) calls
+`Emulation.setUserAgentOverride` with `platform` (→ `navigator.platform`) **and** `userAgentMetadata`
+(→ the `Sec-CH-UA-Platform` header + `navigator.userAgentData.platform`), which sets all of them
+coherently in one call.
+
+A native attempt confirmed this is the right layer: `navigator.platform` is **not** served by
+`NavigatorID::platform()` under this Chrome (an unconditional override there had zero effect — the value
+comes via the CDP/`SetNavigatorPlatformOverride` reduced-UA path), and a browser-process
+`UserAgentMetadata` hook, while it *did* drive the header + `userAgentData`, only duplicated what
+`setUserAgentOverride` already does. Native patching buys nothing here and risks desync. The native moat
+is for surfaces CDP genuinely **cannot** reach — see below.
+
+## Deep surfaces (Phase 2, the native moat) — NOT YET AUTHORED
+
+These CANNOT be done via CDP/JS (JS spoofing is itself the tell), so they are the real native work:
+`fingerprint/canvas-farbling.patch` (seeded 2D noise across main frame + workers + OffscreenCanvas),
+`fingerprint/webgl-vendor-renderer.patch` (UNMASKED_* + params + seeded pixel farbling),
+`fingerprint/audio-context.patch` (seeded DSP), `fingerprint/fonts.patch`, and the net layer
+(`net/webrtc-ip-policy`, `net/tls-ja3-ja4`, `net/http2-settings-order`). `screen`/`DPR` is a borderline
+JS-safe surface (`fingerprint/screen-dpr.patch`) that can go either way. Each deep surface reads
+`lobium::LobiumFpConfig::Current()->{seeds,webgl,...}` via the same proven config channel.
 
 ## Verification (build machine)
 
