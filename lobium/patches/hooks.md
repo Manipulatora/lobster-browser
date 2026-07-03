@@ -45,11 +45,29 @@ Because it reads the config **in C++**, there is no `Object.defineProperty` tell
 problem — the exact issue the interim (patchright) engine cannot solve. **Proven:** config file → `7`
 (host 12), consistent across the main thread and dedicated Workers.
 
+Two more surfaces ship in the same patch (both **proven**, both adversarially reviewed):
+
+- **`navigator.deviceMemory` + the `Device-Memory` / `Sec-CH-Device-Memory` client-hint header** — hooked
+  at their SINGLE shared source `ApproximatedDeviceMemory::GetApproximatedDeviceMemory()`
+  (`third_party/blink/common/device_memory/approximated_device_memory.cc`), so the JS getter and the HTTP
+  header always report the identical value (the review caught that hooking only the JS getter left the
+  header leaking the host value — a cross-surface tell). The configured value is snapped to a bucket this
+  build actually emits (nearest power-of-two GB, clamped to desktop `[2,32]` / Android `[1,8]`). Proven:
+  config `16` → JS **and** header report `16` (host `32`); `1→2`, `6→4`, `32→32`.
+- **`navigator.maxTouchPoints`** (`third_party/blink/renderer/core/events/navigator_events.cc`) — overrides
+  on the optional's `has_value()` so a desktop persona can force `0`. Coherent for a desktop persona
+  (`0`) on a non-touch host; full touch coherence (ontouchstart / TouchEvent / CSS pointer-media) is a
+  WebPreferences follow-up.
+
 ## `core/navigator-ua-ch.patch` — next native surfaces (NOT YET AUTHORED)
 
-`languages` / `platform` / `deviceMemory` follow the identical `Current()` pattern in their Blink
-getters; UA + `Sec-CH-UA` come from `cfg->navigator.user_agent` / `ua_brands` / `ua_platform` in the
-`UserAgentMetadata` provider. `screen`/`DPR` follow the same shape (`fingerprint/screen-dpr.patch`).
+`platform` and `languages` are **deferred here on purpose**: each is coupled to an HTTP header
+(`Sec-CH-UA-Platform` + `navigator.userAgentData.platform`; `Accept-Language`) and a lone JS-getter
+override would *desync* them — the same class of bug the review caught for deviceMemory. They land in a
+dedicated coherent patch: `platform` follows the `Current()` pattern in `NavigatorID::platform()` **plus**
+the browser-process `UserAgentMetadata` (so `Sec-CH-UA-Platform` and `navigator.userAgentData.platform`
+agree); `languages` overrides `Navigator::GetAcceptLanguages()` so `navigator.languages` and the
+`Accept-Language` header agree. `screen`/`DPR` follow the same `Current()` shape (`fingerprint/screen-dpr.patch`).
 
 ## Verification (build machine)
 

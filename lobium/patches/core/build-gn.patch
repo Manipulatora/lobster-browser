@@ -1,14 +1,41 @@
 Lobium — register the //components/lobium_fp config-channel module in the build graph.
 
-Wires the added first-party module (components/lobium_fp/, staged by lobium/build.sh) into Blink so the
-navigator/UA-CH/screen/WebGL/... hooks can read lobium::LobiumFpConfig::Current():
-  - blink core (component("core")) deps += //components/lobium_fp:lobium_fp
-  - blink core DEPS include-rule += +components/lobium_fp
+Wires the added first-party module (components/lobium_fp/, staged by lobium/build.sh) into the two Blink
+targets whose hooks read lobium::LobiumFpConfig::Current():
+  - blink core (component("core")):  deps += //components/lobium_fp ; core/DEPS += +components/lobium_fp
+  - blink common (source_set("common")): deps += //components/lobium_fp ; common/DEPS += +components/lobium_fp
+    (blink_common owns approximated_device_memory.cc — the deviceMemory single source).
 
 Kept minimal, and in the //components first-party root rather than //third_party (which the license
 scanner tools/licenses.py rejects for a directory lacking README.chromium/LICENSE, breaking the
 is_official_build credits step). COMPILE-VERIFIED on Chromium 152.0.7928.0.
 
+diff --git a/third_party/blink/common/BUILD.gn b/third_party/blink/common/BUILD.gn
+index c34a848099..4b4ef10665 100644
+--- a/third_party/blink/common/BUILD.gn
++++ b/third_party/blink/common/BUILD.gn
+@@ -310,6 +310,7 @@ source_set("common") {
+     "//base",
+     "//build:android_buildflags",
+     "//build:chromecast_buildflags",
++    "//components/lobium_fp",
+     "//media/capture:capture_base",
+     "//media/capture/mojom:video_capture_mojom_support",
+     "//mojo/public/cpp/system",
+diff --git a/third_party/blink/common/DEPS b/third_party/blink/common/DEPS
+index 10d3a58c78..88c50c982c 100644
+--- a/third_party/blink/common/DEPS
++++ b/third_party/blink/common/DEPS
+@@ -5,6 +5,9 @@ include_rules = [
+     "-content",
+     "-third_party/blink",
+ 
++    # Lobium: the added first-party fingerprint config module (longest-prefix overrides -components).
++    "+components/lobium_fp",
++
+     # It is allowed to depend on common chromium stuff (and itself).
+     "+base",
+     "+build",
 diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
 index a4a53a9003..e5143277a2 100644
 --- a/third_party/blink/renderer/core/BUILD.gn

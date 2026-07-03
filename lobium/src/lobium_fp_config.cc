@@ -51,7 +51,8 @@ void ReadNavigator(const base::DictValue& dict, NavigatorConfig& nav) {
   nav.languages = ReadStringList(dict.FindList("languages"));
   nav.hardware_concurrency = dict.FindInt("hardwareConcurrency").value_or(0);
   nav.device_memory = dict.FindDouble("deviceMemory").value_or(0);
-  nav.max_touch_points = dict.FindInt("maxTouchPoints").value_or(0);
+  // Assign the optional directly: present JSON key → value; absent → nullopt (leave host value).
+  nav.max_touch_points = dict.FindInt("maxTouchPoints");
   if (const std::string* s = dict.FindString("uaPlatform")) nav.ua_platform = *s;
   if (const std::string* s = dict.FindString("uaPlatformVersion"))
     nav.ua_platform_version = *s;

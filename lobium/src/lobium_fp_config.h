@@ -35,7 +35,9 @@ struct NavigatorConfig {
   // 0 = unconfigured (fall back to the host value), mirroring hardware_concurrency's sentinel — so a
   // future deviceMemory hook only overrides when the config actually specifies it.
   double device_memory = 0;
-  int max_touch_points = 0;
+  // std::optional because 0 is a LEGITIMATE value (desktop personas report maxTouchPoints=0) and must
+  // be distinguishable from "unconfigured" — the parser sets it only when the JSON key is present.
+  std::optional<int> max_touch_points;
   std::string ua_platform;
   std::string ua_platform_version;
   std::string ua_full_version;

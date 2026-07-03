@@ -1,25 +1,38 @@
-Lobium — per-profile fingerprint config channel (browser reads file → renderer reads base64).
+Lobium — native fingerprint config channel + first native surfaces (browser reads file → renderer reads base64).
 
 The sidecar writes lobium-fp.json and launches Lobium with --lobium-fp-config=<path>. The renderer is
 sandboxed and cannot read files, so — mirroring Chromium's own GaiaConfig file→switch serialization —
 the BROWSER process reads the file ONCE (cached; base::ScopedAllowBlocking; kept off the per-spawn hot
-path so it neither blocks the UI thread repeatedly nor hands later renderers different data) and
-forwards its base64 to each renderer as --lobium-fp-data. A Windows command-line size guard skips an
-oversized payload (graceful fall back to host values) rather than failing renderer launch. The
-RENDERER's lobium::LobiumFpConfig::Current() base64-decodes and parses it once and exposes typed
-fields; every failure path LOG(ERROR)s (a config that is present-but-unparseable must never silently
-leak the real device fingerprint). navigator_concurrent_hardware.cc is the first surface, reading
-cfg->navigator.hardware_concurrency; --lobium-hwc remains as a single-value POC fallback.
+path) and forwards its base64 to each renderer as --lobium-fp-data (with a Windows command-line size
+guard). The RENDERER's lobium::LobiumFpConfig::Current() (added module //components/lobium_fp, wired by
+core/build-gn.patch) base64-decodes and parses it once and exposes typed fields; every failure path
+LOG(ERROR)s (a present-but-unparseable config must never silently leak the host fingerprint).
 
-PROVEN on Chromium 152.0.7928.0: navigator.hardwareConcurrency reads the value from the config FILE
-(7 vs host 12), consistently across the main thread and dedicated Workers, with graceful + LOGGED
-fallback on a missing/invalid/incompatible file. Depends on core/build-gn.patch and the added
-//components/lobium_fp module (lobium/src/*).
+Native surfaces hooked so far, each reading Current() (all PROVEN on Chromium 152.0.7928.0):
+  1. navigator.hardwareConcurrency (navigator_concurrent_hardware.cc) — file value 7 vs host 12,
+     consistent main-thread + Workers. --lobium-hwc=<n> retained as a single-value POC fallback.
+  2. navigator.deviceMemory + the Device-Memory / Sec-CH-Device-Memory client-hint HTTP headers, hooked
+     at their SINGLE shared source ApproximatedDeviceMemory::GetApproximatedDeviceMemory()
+     (approximated_device_memory.cc) so the JS getter and the HTTP header report the IDENTICAL value
+     (proven: config 16 → both JS and header report 16, not host 32). The configured value is snapped to
+     a bucket this build actually emits (nearest power-of-two GB, clamped to desktop [2,32] / Android
+     [1,8]) so it can never itself be an off-spec/out-of-range tell.
+  3. navigator.maxTouchPoints (navigator_events.cc) — proven 0→5; overrides on the optional's
+     has_value() so a desktop persona can force 0. NOTE: the paired touch surfaces (ontouchstart /
+     TouchEvent / CSS pointer & hover media queries) are Settings-driven and NOT yet overridden, so this
+     is coherent for a desktop persona (maxTouchPoints 0) on a non-touch host; full touch coherence for
+     touch personas / touch-capable hosts is a follow-up (WebPreferences pointer_events_max_touch_points
+     + available_pointer_types + the touch-event feature gate).
 
-Two hooks:
-  1. content/browser/.../render_process_host_impl.cc — browser reads --lobium-fp-config, forwards
-     base64 --lobium-fp-data to the renderer (cached, size-guarded, logged).
-  2. third_party/blink/.../navigator_concurrent_hardware.cc — the getter reads LobiumFpConfig::Current().
+navigator.platform and navigator.languages are deliberately NOT hooked here — both are coupled to HTTP
+headers (Sec-CH-UA-Platform / navigator.userAgentData.platform; Accept-Language) and must be landed in a
+dedicated coherent UA-CH / locale patch, not as lone JS-getter overrides.
+
+Four hook points:
+  1. content/browser/.../render_process_host_impl.cc — browser reads --lobium-fp-config, forwards base64 --lobium-fp-data.
+  2. third_party/blink/common/.../approximated_device_memory.cc — deviceMemory single source (JS getter + client-hint header).
+  3. third_party/blink/renderer/core/events/navigator_events.cc — maxTouchPoints.
+  4. third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc — hardwareConcurrency.
 
 diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
 index ffdaf1716e..b9ea49e5cc 100644
@@ -85,6 +98,98 @@ index ffdaf1716e..b9ea49e5cc 100644
  #if BUILDFLAG(IS_ANDROID)
    if (browser_cmd.HasSwitch(switches::kDisableGpuCompositing)) {
      renderer_cmd->AppendSwitch(switches::kDisableGpuCompositing);
+diff --git a/third_party/blink/common/device_memory/approximated_device_memory.cc b/third_party/blink/common/device_memory/approximated_device_memory.cc
+index 7fcdad8d17..4fb6b61f90 100644
+--- a/third_party/blink/common/device_memory/approximated_device_memory.cc
++++ b/third_party/blink/common/device_memory/approximated_device_memory.cc
+@@ -8,10 +8,48 @@
+ #include "base/check_op.h"
+ #include "base/feature_list.h"
+ #include "base/system/sys_info.h"
++#include "build/build_config.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "third_party/blink/public/common/features.h"
+ 
+ namespace blink {
+ 
++namespace {
++
++// Lobium: round a configured deviceMemory (GB) exactly as CalculateAndSetApproximatedDeviceMemory does
++// for real RAM — nearest power-of-two GB, then clamp to this build's platform limits — so the value is
++// always one a genuine Chromium of this version could emit (no off-spec / out-of-range tell).
++float LobiumRoundDeviceMemoryGb(double configured_gb) {
++  int64_t mb = static_cast<int64_t>(configured_gb * 1024.0);
++  if (mb < 1) {
++    mb = 1;
++  }
++  int64_t lower = mb;
++  int power = 0;
++  while (lower > 1) {
++    lower >>= 1;
++    power++;
++  }
++  const int64_t upper = (lower + 1) << power;
++  lower = lower << power;
++  float gb = (mb - lower <= upper - mb) ? static_cast<float>(lower) / 1024.0f
++                                        : static_cast<float>(upper) / 1024.0f;
++  float min_memory = 2.0f;
++  float max_memory = 32.0f;
++#if BUILDFLAG(IS_ANDROID)
++  min_memory = 1.0f;
++  max_memory = 8.0f;
++#endif
++  if (gb < min_memory) {
++    gb = min_memory;
++  } else if (gb > max_memory) {
++    gb = max_memory;
++  }
++  return gb;
++}
++
++}  // namespace
++
+ // static
+ float ApproximatedDeviceMemory::approximated_device_memory_gb_ = 0.0;
+ int64_t ApproximatedDeviceMemory::physical_memory_mb_ = 0;
+@@ -27,6 +65,13 @@ void ApproximatedDeviceMemory::Initialize() {
+ 
+ // static
+ float ApproximatedDeviceMemory::GetApproximatedDeviceMemory() {
++  // Lobium: a per-profile config overrides the reported memory at this SINGLE source, so
++  // navigator.deviceMemory AND the Device-Memory / Sec-CH-Device-Memory client-hint headers — which
++  // all read this function — report the identical, coherent, spec-valid value.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->navigator.device_memory > 0) {
++    return LobiumRoundDeviceMemoryGb(cfg->navigator.device_memory);
++  }
+   return approximated_device_memory_gb_;
+ }
+ 
+diff --git a/third_party/blink/renderer/core/events/navigator_events.cc b/third_party/blink/renderer/core/events/navigator_events.cc
+index a57561775c..f9ca3723ae 100644
+--- a/third_party/blink/renderer/core/events/navigator_events.cc
++++ b/third_party/blink/renderer/core/events/navigator_events.cc
+@@ -30,6 +30,7 @@
+ 
+ #include "third_party/blink/renderer/core/events/navigator_events.h"
+ 
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+@@ -38,6 +39,12 @@
+ namespace blink {
+ 
+ int32_t NavigatorEvents::maxTouchPoints(Navigator& navigator) {
++  // Lobium native override. Guard on has_value(), not > 0: 0 is a legitimate desktop value that must
++  // override the host's touch count, so "unconfigured" is the optional being empty (not the value 0).
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->navigator.max_touch_points.has_value()) {
++    return static_cast<int32_t>(*cfg->navigator.max_touch_points);
++  }
+   LocalDOMWindow* window = navigator.DomWindow();
+   return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
+ }
 diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
 index f5c0db2d1b..2b0fcd072a 100644
 --- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc

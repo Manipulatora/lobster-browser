@@ -11,23 +11,26 @@ fingerprint surfaces **natively** (no JS/CDP tell) and exposes a per-profile con
 ## ✅ Proven end-to-end (T-010 + T-011)
 
 Chromium **152.0.7928.0** was fetched, configured, and compiled from source (~6.5 h stock on a 12-core
-box), then the native fingerprint **config channel** was applied and **incrementally rebuilt in ~2 min**.
-The per-profile config **file** now drives `navigator.hardwareConcurrency` natively — verified live:
+box), then the native fingerprint **config channel** + first surfaces were applied and **incrementally
+rebuilt in ~2 min** each. The per-profile config **file** now drives three navigator surfaces natively
+(no JS/CDP tell), all verified live on the built binary (host: 12 cores / 32 GB):
 
-| launch | `navigator.hardwareConcurrency` |
+| surface | result from the config file |
 |---|---|
-| stock (no flag) | **12** (host cores) |
-| `--lobium-fp-config=<file with hwc:7>` | **7** — main thread **and** Worker (no cross-context tell) |
-| `--lobium-hwc=99` (single-value POC) | **99** |
-| missing / invalid config file | **12** (host) + a `LOG(ERROR)` — never a *silent* host-leak |
+| `navigator.hardwareConcurrency` | file `7` → **7**, main thread **and** Worker (no cross-context tell); `--lobium-hwc=99` POC → **99** |
+| `navigator.deviceMemory` **+ the `Device-Memory` client-hint HTTP header** | file `16` → **16** on **both** the JS getter and the HTTP header (host `32`) — hooked at their single shared source, so they can't disagree. Off-spec values snap to a bucket this build emits: `1→2`, `6→4`, `32→32` |
+| `navigator.maxTouchPoints` | file `5` → **5**; a desktop persona can force **0** (optional sentinel) |
+| missing / invalid config file | host value + a `LOG(ERROR)` — never a *silent* host-leak |
 
-The value is decided in **C++ inside Blink** via `lobium::LobiumFpConfig::Current()`
-([`core/config-channel.patch`](patches/core/config-channel.patch) + [`core/build-gn.patch`](patches/core/build-gn.patch)),
-so there is **no JS/CDP tell**. The renderer is sandboxed and can't read files, so the browser process
-reads the file and forwards its base64 as `--lobium-fp-data` (Chromium's own `GaiaConfig` pattern). This
-proves the whole config channel end-to-end; each further surface (deviceMemory, UA-CH, screen, then the
-deep canvas/WebGL/audio surfaces) is now a one-line hook reading `Current()`. Remaining effort is breadth
-+ a build farm for release binaries, not feasibility.
+Values are decided in **C++ inside Blink** via `lobium::LobiumFpConfig::Current()`
+([`core/config-channel.patch`](patches/core/config-channel.patch) + [`core/build-gn.patch`](patches/core/build-gn.patch)).
+The renderer is sandboxed and can't read files, so the browser process reads the file and forwards its
+base64 as `--lobium-fp-data` (Chromium's own `GaiaConfig` pattern). Each surface was **adversarially
+reviewed** — that's how the deviceMemory bucket range and the client-hint-header coupling were caught and
+fixed. `navigator.platform` / `navigator.languages` are deliberately deferred (they need coherent HTTP
+headers — Sec-CH-UA-Platform / Accept-Language). Remaining effort is breadth (more surfaces, each a small
+`Current()` hook; then the deep canvas/WebGL/audio surfaces) + a build farm for release binaries, not
+feasibility.
 
 ## Layout
 
