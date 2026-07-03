@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { CpuArch, EngineKind, OsFamily } from '@lobster/shared-types';
-import { DESKTOP_MIN_DEVICE_MEMORY, validateFingerprintCoherence } from './coherence.js';
+import type { CpuArch, EngineKind, GeoInfo, OsFamily } from '@lobster/shared-types';
+import {
+  DESKTOP_MIN_DEVICE_MEMORY,
+  applyGeoToFingerprint,
+  validateFingerprintCoherence,
+} from './coherence.js';
 import { deriveFingerprint, deriveFromPools } from './derive.js';
+import { DEVICE_TEMPLATES } from './pools.js';
 import { generateSeed } from './seed.js';
 
 const OSES: OsFamily[] = ['windows', 'macos', 'linux'];
 const ENGINES: EngineKind[] = ['lobium', 'chromium'];
+
+/** Extract the GPU vendor family from a WebGL vendor string like "Google Inc. (NVIDIA)". */
+function gpuVendor(vendor: string): string {
+  return vendor.match(/\(([^)]+)\)/)?.[1] ?? vendor;
+}
 
 test('deriveFingerprint is deterministic across 50 seeds x OS x engine', () => {
   for (let i = 0; i < 50; i++) {
@@ -57,7 +67,7 @@ test('every engine presents a Chrome UA + Sec-CH-UA brands (both engines are Chr
   }
 });
 
-test('derives real-device data (rich fonts, real GPU, plausible screen) from the generator', () => {
+test('derives coherent device data (rich fonts, real GPU, plausible screen) from the internal catalog', () => {
   for (let i = 0; i < 25; i++) {
     const seed = generateSeed();
     for (const os of OSES) {
@@ -90,7 +100,7 @@ test('no desktop profile advertises an implausibly low deviceMemory (>= 4 GB, ca
   }
 });
 
-test('the built-in pool fallback is itself coherent for every OS/arch', () => {
+test('deriveFromPools is coherent for every OS/arch', () => {
   const ARCHES: CpuArch[] = ['x86_64', 'arm64'];
   for (let i = 0; i < 25; i++) {
     const seed = generateSeed();
@@ -100,9 +110,122 @@ test('the built-in pool fallback is itself coherent for every OS/arch', () => {
         assert.deepEqual(
           validateFingerprintCoherence(fp),
           [],
-          `incoherent pool fallback ${os}/${arch} seed=${seed}`,
+          `incoherent deriveFromPools ${os}/${arch} seed=${seed}`,
         );
       }
+    }
+  }
+});
+
+// --- Internal-catalog guarantees (senior-engineer hint) ---------------------------------------
+
+test('EVERY catalog device class is coherent (exhaustive, not sampled)', () => {
+  // Build the exact base fingerprint each device would yield and validate it directly, so a bad
+  // catalog entry is caught even if no seed happened to select it.
+  for (const os of OSES) {
+    const tpl = DEVICE_TEMPLATES[os];
+    assert.ok(tpl.devices.length >= 3, `catalog too thin for ${os}: ${tpl.devices.length} devices`);
+    for (const device of tpl.devices) {
+      const fp = {
+        os,
+        arch: 'x86_64' as CpuArch,
+        navigator: {
+          userAgent: `Mozilla/5.0 (${tpl.osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36`,
+          platform: tpl.platform,
+          languages: ['en-US', 'en'],
+          hardwareConcurrency: device.hardwareConcurrency,
+          deviceMemory: device.deviceMemory,
+          maxTouchPoints: 0,
+          uaBrands: [
+            { brand: 'Chromium', version: '152' },
+            { brand: 'Google Chrome', version: '152' },
+            { brand: 'Not_A Brand', version: '24' },
+          ],
+          uaPlatform: tpl.uaPlatform,
+          uaPlatformVersion: tpl.uaPlatformVersion,
+          uaMobile: false,
+          uaFullVersion: '152.0.0.0',
+        },
+        screen: {
+          width: device.screen.width,
+          height: device.screen.height,
+          availWidth: device.screen.width,
+          availHeight: device.screen.height - 40,
+          colorDepth: 24,
+          devicePixelRatio: device.screen.dpr,
+        },
+        webgl: { ...device.webgl },
+        locale: { timezone: 'America/New_York', locale: 'en-US', acceptLanguage: 'en-US,en;q=0.9' },
+        fonts: [...tpl.fonts],
+      };
+      assert.deepEqual(
+        validateFingerprintCoherence(fp),
+        [],
+        `catalog device ${device.id} is incoherent`,
+      );
+    }
+  }
+});
+
+test('different seeds select DIVERSE GPU vendors per OS (not one collapsed device)', () => {
+  // The catalog spans Intel/NVIDIA/AMD on Windows+Linux and Apple on macOS. Over many seeds we must
+  // actually see that spread — proof the derivation is coherent-but-varied, not fixed.
+  const expected: Record<OsFamily, number> = { windows: 3, macos: 1, linux: 3 };
+  for (const os of OSES) {
+    const vendors = new Set<string>();
+    for (let i = 0; i < 300; i++) {
+      const fp = deriveFingerprint(generateSeed(), { os, engine: 'chromium' });
+      vendors.add(gpuVendor(fp.webgl.vendor));
+    }
+    assert.ok(
+      vendors.size >= expected[os],
+      `expected >= ${expected[os]} GPU vendors for ${os}, saw ${[...vendors].join(', ')}`,
+    );
+  }
+  // And the catalog as a whole must include all three desktop GPU vendors somewhere.
+  const allVendors = new Set(
+    OSES.flatMap((os) => DEVICE_TEMPLATES[os].devices.map((d) => gpuVendor(d.webgl.vendor))),
+  );
+  for (const v of ['NVIDIA', 'Intel', 'AMD', 'Apple']) {
+    assert.ok(allVendors.has(v), `catalog is missing a ${v} device class`);
+  }
+});
+
+test('proxy geo is an OVERLAY: it rewrites locale/timezone/languages but never the device identity', () => {
+  const geo: GeoInfo = {
+    ip: '203.0.113.7',
+    countryCode: 'DE',
+    timezone: 'Europe/Berlin',
+    latitude: 52.52,
+    longitude: 13.405,
+  };
+  for (let i = 0; i < 25; i++) {
+    const seed = generateSeed();
+    for (const os of OSES) {
+      const base = deriveFingerprint(seed, { os, engine: 'chromium' });
+      const geoed = applyGeoToFingerprint(base, geo);
+
+      // Geo cluster tracks the proxy...
+      assert.equal(geoed.locale.timezone, 'Europe/Berlin', `tz ${os} seed=${seed}`);
+      assert.equal(geoed.locale.locale, 'de-DE', `locale ${os} seed=${seed}`);
+      assert.equal(geoed.navigator.languages[0], 'de-DE', `languages ${os} seed=${seed}`);
+
+      // ...while the DEVICE identity is byte-for-byte untouched.
+      assert.equal(geoed.navigator.platform, base.navigator.platform);
+      assert.equal(geoed.navigator.userAgent, base.navigator.userAgent);
+      assert.equal(geoed.navigator.hardwareConcurrency, base.navigator.hardwareConcurrency);
+      assert.equal(geoed.navigator.deviceMemory, base.navigator.deviceMemory);
+      assert.equal(geoed.navigator.uaPlatform, base.navigator.uaPlatform);
+      assert.deepEqual(geoed.webgl, base.webgl);
+      assert.deepEqual(geoed.screen, base.screen);
+      assert.deepEqual(geoed.fonts, base.fonts);
+
+      // And the result stays fully coherent (device + new geo agree).
+      assert.deepEqual(
+        validateFingerprintCoherence(geoed),
+        [],
+        `geo overlay broke coherence ${os} seed=${seed}`,
+      );
     }
   }
 });

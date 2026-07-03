@@ -98,7 +98,7 @@ The **Rust desktop core is the single privileged control plane**: it owns the pr
 | Local automation API | **Rust Axum** HTTP+WS on a fixed loopback port | Single privileged control plane; Bearer API-key auth + rate limit. |
 | Engine runner (sidecar) | **Node/TS**; patchright driving Chromium (and Lobium's interim patched Chromium); Playwright base | JS-first velocity; patchright keeps CDP clean. |
 | **Lobium** | **Chromium fork** via `depot_tools` + GN/ninja; a **quilt/series patch pipeline** (ungoogled model); native fingerprint patches + BoringSSL TLS/JA4 + a per-profile config channel | Our moat: native, tell-free fingerprinting with 50+ params, like Octo. Built on a dedicated build machine/CI (long compiles → ccache/reclient). |
-| Fingerprint generation | **Apify fingerprint-suite** + **real-device datasets** (real-system fingerprints) | Statistically-real, internally-coherent values from real devices; Lobium enforces them natively. |
+| Fingerprint generation | **Lobster's own internal coherent device catalog** (`packages/fingerprint/pools.ts`): curated device classes, seed-based + deterministic | We OWN the fingerprint model — no third-party generation API (a shared statistical distribution is itself a tell) and no random field-mixing; a seed picks one coherent machine (GPU+screen+cores+memory bundled). Proxy geo is applied as an overlay on top. Lobium enforces the values natively. |
 | Interim engine (pinned) | **Chromium** — prebuilt ungoogled-chromium driven via patchright | Broad Chrome-family coverage while Lobium matures; serves `lobium` until the native build ships. |
 | Proxy tooling | Per-profile HTTP/SOCKS5; **mitmproxy** for header/geo canonicalization | Timezone/locale/Accept-Language derived from exit IP. |
 | Backend | **TypeScript + NestJS**, Postgres (Prisma), S3-compatible storage | Fast CRUD; shared types with front; Stripe SDK. |
@@ -265,7 +265,7 @@ Repo, npm workspaces, foundational packages (`shared-types`, `fingerprint`, `pro
 
 ### Day 1
 - A `[X]`: Tauri shell boots; custom UI shell + design-system foundation.
-- B `[C+X]`: sidecar IPC live; integrate fingerprint-suite + real-device data behind `deriveFingerprint`; expand to the 50+ param model.
+- B `[C+X]`: sidecar IPC live; internal coherent device catalog behind `deriveFingerprint` (no third-party API); expand to the 50+ param model.
 - C `[X]`: NestJS + Prisma migrate (User/Team/Profile/ApiKey/Subscription).
 - E `[C]`: host CreepJS/Sannysoft + score scraper.
 - **F `[C]`: stand up the Lobium build environment (depot_tools, fetch Chromium), kick off the first Linux build.**
