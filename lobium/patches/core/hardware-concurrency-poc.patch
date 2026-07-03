@@ -1,0 +1,58 @@
+Lobium T-011 POC — native navigator.hardwareConcurrency override.
+
+COMPILE-VERIFIED against Chromium 152.0.7928.0 (built on a 12-core machine, ~6.5h stock + ~2min
+incremental). When launched with --lobium-hwc=<n>, navigator.hardwareConcurrency reports <n> instead
+of the host CPU count — computed in C++ inside Blink, so there is NO JS-detectable tell (the exact
+thing the interim patchright/CDP engine cannot do). Proven live: baseline HWC=12 -> --lobium-hwc=99
+=> HWC=99 -> --lobium-hwc=4 => HWC=4.
+
+This POC uses a single --lobium-hwc switch for minimal risk. The production path is the full config
+channel (lobium/config-channel.md + lobium/src/lobium_fp_config.{h,cc} + engine-runner lobium-config.ts),
+which feeds the whole Fingerprint via a per-profile JSON file; the same hook shape extends to the deep
+surfaces (canvas/WebGL/audio) that ONLY native patching can spoof coherently.
+
+Two hooks:
+  1. content/browser/.../render_process_host_impl.cc — forward --lobium-hwc to the renderer process.
+  2. third_party/blink/.../navigator_concurrent_hardware.cc — the getter reads the switch.
+
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index ffdaf1716e..7774bdef8e 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -3826,6 +3826,7 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+   // Propagate the following switches to the renderer command line (along
+   // with any associated values) if present in the browser command line.
+   static const char* const kSwitchNames[] = {
++      "lobium-hwc",  // Lobium: forward the native fingerprint override to the renderer (T-011 POC)
+       switches::kDisableInProcessStackTraces,
+       sandbox::policy::switches::kDisableLandlockSandbox,
+       sandbox::policy::switches::kDisableSeccompFilterSandbox,
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+index f5c0db2d1b..2c95caa947 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -4,11 +4,24 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ 
++#include <cstdlib>
++
++#include "base/command_line.h"
+ #include "base/system/sys_info.h"
+ 
+ namespace blink {
+ 
+ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
++  // Lobium native fingerprint override (T-011 POC). When the orchestrator launches with
++  // --lobium-hwc=<n>, report that value instead of the host's real CPU count. Because this happens
++  // in C++ deep inside Blink, there is no JS-detectable tell (unlike the interim CDP/JS approach).
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch("lobium-hwc")) {
++    const int n = std::atoi(cmd->GetSwitchValueASCII("lobium-hwc").c_str());
++    if (n > 0) {
++      return static_cast<unsigned>(n);
++    }
++  }
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 

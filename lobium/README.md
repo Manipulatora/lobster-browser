@@ -8,6 +8,24 @@ fingerprint surfaces **natively** (no JS/CDP tell) and exposes a per-profile con
 > Lobium is a **parallel, longer-horizon track**. The product ships and stays fully usable on the
 > interim prebuilt Chromium (driven via patchright) while Lobium matures into the default engine.
 
+## ✅ Proven end-to-end (T-010 + T-011 POC)
+
+Chromium **152.0.7928.0** was fetched, configured, and compiled from source (~6.5 h stock on a 12-core
+box), then a native fingerprint patch was applied and **incrementally rebuilt in ~2 min**. Result,
+verified live:
+
+| launch | `navigator.hardwareConcurrency` |
+|---|---|
+| stock (no flag) | **12** (host cores) |
+| `--lobium-hwc=99` | **99** |
+| `--lobium-hwc=4` | **4** |
+
+The value is decided in **C++ inside Blink** ([`patches/core/hardware-concurrency-poc.patch`](patches/core/hardware-concurrency-poc.patch)),
+so there is **no JS/CDP tell** — the exact capability the interim engine cannot provide, and the same
+hook shape the deep surfaces (canvas/WebGL/audio) need. This confirms the whole Lobium approach compiles
+and works; the remaining effort is breadth (the full patch series via the config channel) + a build farm
+for release binaries, not feasibility.
+
 ## Layout
 
 ```

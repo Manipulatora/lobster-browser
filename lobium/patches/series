@@ -11,6 +11,7 @@
 # --- Core: config channel + navigator/UA-CH (T-011 POC — first native surface) ---
 core/build-gn.patch                 # register //third_party/lobium-fp in the build graph
 core/config-channel.patch           # allow the --lobium-fp-config switch; call sites read Current()
+core/hardware-concurrency-poc.patch # ✅ BUILT + PROVEN on Chromium 152: navigator.hardwareConcurrency native override
 core/navigator-ua-ch.patch          # navigator.* + Sec-CH-UA from config (userAgent/platform/langs/hw)
 #
 # --- Fingerprint deep surfaces (Phase 2 — the native moat) ---
