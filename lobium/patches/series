@@ -38,7 +38,15 @@ fingerprint/screen-dpr.patch
 # Still to author:
 # fingerprint/webgl-pixel-farbling.patch   # seeded WebGL readPixels/toDataURL noise + capability alignment
 # fingerprint/audio-worklet-tap.patch # AudioWorklet/ScriptProcessorNode upstream sample taps (offline-deterministic)
-# fingerprint/fonts.patch             # OS-accurate font enumeration
+# fonts: NOT a Blink patch — a PACKAGING task (scouted). The dominant vector is the permissionless
+#   measureText/offsetWidth metrics probe, which reads real glyph advances off a font FILE; no
+#   config->fonts C++ hook can synthesize those. The coherent additive win is: bundle a metric-compatible
+#   substitute pack (Liberation->Arial/Times/Courier, Carlito->Calibri/Segoe UI, Caladea->Cambria, Noto),
+#   ship a private fontconfig aliasing them, inject FONTCONFIG_FILE via a new launch.ts `env` field, and
+#   constrain pools.ts cfg.fonts to the pack's resolvable set. Only THEN add a subtract-only allowlist gate
+#   (FontCache::GetFontData + FontAccessManager enumeration + FontFaceSet::check, one predicate) as
+#   consistency insurance. A queryLocalFonts filter alone is a TRAP (FontMetadata.blob() throws for
+#   host-absent fonts -> cross-surface incoherence). See docs/tickets for the packaging follow-up.
 # fingerprint/webgpu-adapter.patch    # coherent WebGPU adapter
 #
 # --- Network (Phase 2 — TLS/JA4 parity) ---
