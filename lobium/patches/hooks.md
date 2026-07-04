@@ -4,9 +4,10 @@ Each hook patch is a **small** diff into an existing Chromium file that routes a
 `lobium::LobiumFpConfig::Current()` (the reader in `../src/`). The insertion points + code are given
 here so a build engineer finalizes them against the pinned checkout (`quilt push -f` → edit → `quilt
 refresh`) — the exact line numbers shift per Chromium ref, which is why the series ships as intent +
-code rather than frozen context diffs. Four surfaces (WebGL vendor/renderer, canvas 2D farbling, Web
-Audio farbling, screen/DPR) are BUILT + PROVEN; fonts/TLS, the audio upstream taps, and the screen/DPR
-follow-ups remain to author.
+code rather than frozen context diffs. Five surfaces (WebGL vendor/renderer, canvas 2D farbling, Web
+Audio farbling incl. the AudioWorklet/ScriptProcessorNode upstream taps, and screen/DPR) are BUILT +
+PROVEN; fonts (a packaging task, see series) and the net/TLS layer remain, plus the screen/DPR
+Window-Management-API follow-ups.
 
 ## `core/build-gn.patch` — register the added module ✅ BUILT
 
@@ -184,15 +185,20 @@ float freq/time (sampled deterministically via `OfflineAudioContext.suspend`) fa
 even farbled; and a user `createBuffer()+copyToChannel()+getChannelData/copyFromChannel` is **bit-exact**
 under a seed (`maxdiff 0`) — real/app/playback audio is never corrupted.
 
+The **upstream sample taps** are now also covered (`fingerprint/audio-worklet-tap.patch`, BUILT + PROVEN):
+`AudioWorkletProcessor.process(inputs)` and the deprecated `ScriptProcessorNode.onaudioprocess`
+`inputBuffer` both expose the processed audio UPSTREAM of the farbled offline result, and both are
+deterministic inside an OfflineAudioContext. They are farbled with the same kernel/seed, **gated to
+offline** so realtime DSP is untouched — the worklet via a default-false `AudioWorkletGlobalScope`
+`IsOfflineContext()` flag that only `OfflineAudioWorkletThread` sets, the SPN via
+`!HasRealtimeConstraint()` — and only the **JS-visible copy** is perturbed (`input_array_buffers_` /
+`external_input_buffer_`), never the shared graph signal, so playback stays bit-exact.
+`LobiumFpConfig::Current()` is safe on the worklet render thread (thread-safe `NoDestructor` static,
+immutable after an early main-thread init). Proven host-differing / stable-per-seed / distinct-per-seed;
+a 2-lane adversarial review returned **0 confirmed** (double-farble-in-passthrough and base-index notes
+all refuted as inherent/benign).
+
 > **KNOWN LIMITATIONS (adversarial review — confirmed, deferred with rationale).**
-> - **Upstream sample taps not yet farbled** (`AudioWorkletProcessor.process(inputs)` and the deprecated
->   `ScriptProcessorNode.onaudioprocess` `inputBuffer`). Both copy the *upstream* processed AudioBus to JS
->   before it reaches the farbled destination, and both are deterministic inside an OfflineAudioContext —
->   so a determined adversary can read un-farbled rendered audio through them. They are **secondary**
->   (essentially all real-world audio fingerprinting uses the `getChannelData` path, which is covered) and
->   deferred to their own patch: the worklet tap runs **off the main thread** (needs a thread-safe seed
->   snapshot) and must be gated to offline-only to avoid corrupting legitimate realtime DSP — it deserves
->   its own scout→prove→review cycle, not a rushed bolt-on. Tracked as `fingerprint/audio-worklet-tap.patch`.
 > - **Known-input ratio inversion.** Because the farble is a *deterministic* multiplicative factor on the
 >   readback (and user source buffers are intentionally un-farbled to protect playback), an adversary who
 >   plays a *known* signal through an identity graph can compute `observed/known = 1+eps(seed,k)` and,
@@ -252,11 +258,13 @@ persona reports `availTop=25` / `availHeight=height-25`; Windows/Linux `availTop
 
 ### Still to author
 
-WebGL **pixel farbling** + capability alignment (the WebGL limitation above), the audio **upstream taps**
-(`fingerprint/audio-worklet-tap.patch`), the **screen/DPR follow-ups** (macOS `availTop`, the
-Window-Management API surfaces, the headful outer-geometry clamp — above), `fingerprint/fonts.patch`, and
-the net layer (`net/webrtc-ip-policy`, `net/tls-ja3-ja4`, `net/http2-settings-order`). Each deep surface
-reads `lobium::LobiumFpConfig::Current()->{seeds,webgl,screen,...}` via the same proven config channel.
+WebGL **pixel farbling** + capability alignment (the WebGL limitation above — largely mooted in
+production by pinning personas to the host GPU class), the **screen/DPR follow-ups** (the
+Window-Management-API surfaces + the headful outer-geometry clamp — above), **fonts** (a *packaging*
+task, not a Blink hook — bundle a metric-compatible substitute pack + fontconfig + a launch `env`
+channel, then a subtract-only allowlist gate; see `series`), and the net layer (`net/webrtc-ip-policy`,
+`net/tls-ja3-ja4`, `net/http2-settings-order`). Each deep surface reads
+`lobium::LobiumFpConfig::Current()->{seeds,webgl,screen,...}` via the same proven config channel.
 
 ## Verification (build machine)
 

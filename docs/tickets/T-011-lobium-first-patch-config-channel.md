@@ -2,7 +2,7 @@
 
 - **Pillar/Track:** F · Lobium
 - **Assignee:** Claude
-- **Status:** in progress — config channel BUILT + PROVEN; seven native surfaces live + a live-detector gate (see progress log)
+- **Status:** in progress — config channel BUILT + PROVEN; eight native surfaces live + a live-detector gate (see progress log)
 - **Depends on:** T-010 (a working build)
 
 ## Goal

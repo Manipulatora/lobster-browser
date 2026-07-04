@@ -30,6 +30,12 @@ core/config-channel.patch
 #   AnalyserNode float freq/time paths, via the added kernel //components/lobium_fp/lobium_audio_farble.cc.
 #   Playback-safe (audio_buffer.cc untouched), stereo-coherent. See hooks.md for hook points + limitations.
 fingerprint/audio-context.patch
+# fingerprint/audio-worklet-tap.patch — ✅ BUILT + PROVEN on Chromium 152. Farbles the upstream sample
+#   taps a page can read BEFORE the farbled offline result: AudioWorkletProcessor.process(inputs) and the
+#   deprecated ScriptProcessorNode.onaudioprocess inputBuffer. Gated to OFFLINE (worklet: a default-false
+#   AudioWorkletGlobalScope flag only OfflineAudioWorkletThread sets; SPN: !HasRealtimeConstraint) so
+#   realtime DSP is untouched; farbles only the JS-visible copy (playback bit-exact). Same kernel/seed.
+fingerprint/audio-worklet-tap.patch
 # fingerprint/screen-dpr.patch — ✅ BUILT + PROVEN on Chromium 152. Persona screen geometry + colour
 #   depth + DPR from config: Screen::GetRect (width/height/avail*), Screen::colorDepth, and the DPR
 #   through BOTH window.devicePixelRatio and the CSS media-query path (MediaValues) so matchMedia agrees.
