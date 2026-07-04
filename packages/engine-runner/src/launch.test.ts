@@ -101,6 +101,33 @@ test('buildCdpEmulation carries UA, UA-CH metadata, timezone/locale, and geoloca
   assert.deepEqual(e.geolocation, { latitude: 52.5, longitude: 13.4, accuracy: 100 });
 });
 
+test('buildCdpEmulation sets a coherent fullVersionList (masks the real engine build, no leak)', () => {
+  // Without this, getHighEntropyValues(['fullVersionList']) returns the REAL engine build (e.g.
+  // 152.0.7928.0), contradicting a spoofed UA — a hard lie. The override must give each REAL brand the
+  // full build (== uaFullVersion) and pad the GREASE brand, so high-entropy agrees with the UA.
+  const fp = sampleFingerprint();
+  fp.navigator.userAgent =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
+  fp.navigator.uaFullVersion = '152.0.7928.0';
+  fp.navigator.uaBrands = [
+    { brand: 'Chromium', version: '152' },
+    { brand: 'Google Chrome', version: '152' },
+    { brand: 'Not_A Brand', version: '24' },
+  ];
+  const { fullVersionList } = buildCdpEmulation(fp).userAgentMetadata;
+  assert.deepEqual(fullVersionList, [
+    { brand: 'Chromium', version: '152.0.7928.0' }, // real brand -> full build
+    { brand: 'Google Chrome', version: '152.0.7928.0' }, // real brand -> full build
+    { brand: 'Not_A Brand', version: '24.0.0.0' }, // GREASE -> padded, not the engine build
+  ]);
+  // Every entry's major agrees with the UA major -> no version contradiction a detector can read.
+  const uaMajor = /Chrome\/(\d+)/.exec(fp.navigator.userAgent)?.[1];
+  for (const b of fullVersionList) {
+    if (b.version.startsWith(`${uaMajor}.`)) continue; // real brand
+    assert.equal(b.brand.includes('Brand'), true, `unexpected non-major brand ${b.brand}`);
+  }
+});
+
 test('init script owns only the residual JS-only surfaces (deviceMemory, maxTouchPoints)', () => {
   const s = buildFingerprintInitScript(sampleFingerprint());
   assert.match(s, /deviceMemory/);

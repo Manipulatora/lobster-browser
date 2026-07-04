@@ -106,8 +106,32 @@ async function probePage(page, claimedRenderer, claimedVendor) {
       } catch {
         /* no audio */
       }
+      // navigator.userAgentData (secure-context only) — a modern Chrome ALWAYS has it; a Chrome UA
+      // with undefined userAgentData is a hard tell. Capture brands + high-entropy version list.
+      let uaData = { present: false };
+      try {
+        if (navigator.userAgentData) {
+          const high = await navigator.userAgentData.getHighEntropyValues([
+            'fullVersionList',
+            'uaFullVersion',
+            'platformVersion',
+          ]);
+          uaData = {
+            present: true,
+            brands: navigator.userAgentData.brands,
+            platform: navigator.userAgentData.platform,
+            fullVersionList: high.fullVersionList,
+            uaFullVersion: high.uaFullVersion,
+            platformVersion: high.platformVersion,
+          };
+        }
+      } catch (e) {
+        uaData = { present: false, error: String(e).slice(0, 80) };
+      }
+      const uaMajor = (/Chrome\/(\d+)/.exec(navigator.userAgent) || [])[1] || null;
       return {
         userAgent: navigator.userAgent,
+        uaMajor,
         webdriver: navigator.webdriver === true,
         hardwareConcurrency: navigator.hardwareConcurrency,
         deviceMemory: navigator.deviceMemory ?? null,
@@ -115,6 +139,7 @@ async function probePage(page, claimedRenderer, claimedVendor) {
         platform: navigator.platform,
         languages: Array.from(navigator.languages),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        uaData,
         webgl,
         webglMatchesClaim: webgl.renderer === claimR && webgl.vendor === claimV,
         canvasHash,
@@ -123,6 +148,35 @@ async function probePage(page, claimedRenderer, claimedVendor) {
     },
     { claimR: claimedRenderer, claimV: claimedVendor },
   );
+}
+
+// CreepJS is the high-signal detector: it computes a trust score and flags "lies" (surfaces whose
+// self-report is internally inconsistent — exactly what a spoofing engine risks). Scrape the score,
+// the lies count, and the specific lied-about surfaces so a coherence tell points at its cause.
+async function measureCreepjs(page) {
+  await page.goto('https://abrahamjuliot.github.io/creepjs/', {
+    waitUntil: 'networkidle',
+    timeout: 60_000,
+  });
+  await new Promise((r) => setTimeout(r, 18_000)); // CreepJS computes asynchronously
+  return page.evaluate(() => {
+    const text = document.body.innerText || '';
+    const trust = /trust score[:\s]*([\d.]+)\s*%/i.exec(text);
+    const liesN = /(\d+)\s*lies?/i.exec(text);
+    const bot = /bot[:\s]*([\d.]+)/i.exec(text);
+    // The "lies" detail list — each flagged surface. CreepJS renders them as list items under a
+    // "Lies" heading; grab short label-ish lines that name a surface + reason.
+    const lieItems = Array.from(document.querySelectorAll('.lies, .rejected, [class*="lie"]'))
+      .map((el) => (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 100))
+      .filter((s) => s.length > 3)
+      .slice(0, 20);
+    return {
+      trustScore: trust ? Number(trust[1]) : null,
+      lies: liesN ? Number(liesN[1]) : null,
+      bot: bot ? bot[1] : null,
+      lieItems,
+    };
+  });
 }
 
 async function main() {
@@ -191,6 +245,9 @@ async function main() {
       );
       const failed = rows.filter((r) => r.status === 'failed');
       const nat = await probePage(page, fp.webgl.unmaskedRenderer, fp.webgl.unmaskedVendor);
+      const creepjs = process.env.LOBSTER_CREEPJS
+        ? await measureCreepjs(page).catch((e) => ({ error: String(e).slice(0, 120) }))
+        : 'skipped (set LOBSTER_CREEPJS=1)';
 
       const checks = {
         webdriverAbsent: nat.webdriver === false,
@@ -229,6 +286,7 @@ async function main() {
           failed: failed.length,
           failedTests: failed.map((r) => r.name),
         },
+        creepjs,
         verdict:
           Object.values(checks).every((v) => v === true) && failed.length === 0 ? 'pass' : 'review',
       };

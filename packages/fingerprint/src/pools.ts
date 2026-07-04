@@ -269,9 +269,29 @@ export const DEVICE_TEMPLATES: Record<OsFamily, OsTemplate> = {
 };
 
 /**
- * Chrome major versions the catalog advertises. TODO(engine-coord): these should be sourced from the
- * actually-launched engine build (Lobium is 152; the interim patchright Chromium ships its own), so
- * the UA version never contradicts the running binary. Kept as a small recent set until that wiring
- * exists; a mismatch of a major or two is common in the wild and not itself a hard tell.
+ * The Chrome version the catalog advertises. It MUST equal the actually-launched engine's version:
+ * a detector that feature-detects the engine — or simply reads `getHighEntropyValues(['fullVersionList'])`,
+ * which returns the REAL build the CDP UA override does not mask — catches any mismatch as a lie. (This
+ * was a real tell: a persona claiming Chrome 151 leaked `Chromium 152.0.7928.0` via fullVersionList.)
+ *
+ * So we pin to the running engine (Lobium = 152.0.7928.0) rather than a diverse pool — every profile
+ * runs the SAME binary, so they must all claim ITS version; cross-profile version diversity would be a
+ * lie the moment a detector feature-probes the engine. Chrome caps `navigator.userAgent` at
+ * `major.0.0.0` (UA reduction), while the high-entropy `uaFullVersion` / `fullVersionList` carry the
+ * full build — so we track both forms.
+ *
+ * `deriveFingerprint({ browserVersion })` overrides this when the sidecar knows a different engine build.
  */
-export const CHROME_VERSIONS = ['152.0.0.0', '151.0.0.0'] as const;
+export const ENGINE_CHROME = {
+  major: '152',
+  /** navigator.userAgent form (UA-reduced to major.0.0.0). */
+  reduced: '152.0.0.0',
+  /** getHighEntropyValues(['uaFullVersion'|'fullVersionList']) form (real build). */
+  full: '152.0.7928.0',
+} as const;
+
+/** Split a full Chrome build (e.g. "152.0.7928.0") into the UA-reduced + major forms it must present. */
+export function chromeVersionForms(full: string): { major: string; reduced: string; full: string } {
+  const major = full.split('.')[0] ?? ENGINE_CHROME.major;
+  return { major, reduced: `${major}.0.0.0`, full };
+}

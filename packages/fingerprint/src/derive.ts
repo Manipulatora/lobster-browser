@@ -9,13 +9,19 @@ import type {
 } from '@lobster/shared-types';
 import { SeededRandom } from './prng.js';
 import { languagesToAcceptLanguage } from './coherence.js';
-import { CHROME_VERSIONS, DEVICE_TEMPLATES } from './pools.js';
+import { ENGINE_CHROME, chromeVersionForms, DEVICE_TEMPLATES } from './pools.js';
 
 export interface DeriveOptions {
   os: OsFamily;
   /** The engine (lobium | chromium). Both are Chromium-based, so it does not change the fingerprint. */
   engine: EngineKind;
   arch?: CpuArch;
+  /**
+   * The full Chrome build the running engine actually is (e.g. "152.0.7928.0"). The UA version MUST
+   * match the engine or a feature-probe / fullVersionList read catches it as a lie, so this is pinned
+   * to the engine — never a random pool. Defaults to the Lobium build ({@link ENGINE_CHROME}).
+   */
+  browserVersion?: string;
 }
 
 /**
@@ -33,16 +39,15 @@ export interface DeriveOptions {
  * device identity, never mixed into device generation.
  */
 export function deriveFingerprint(seed: FingerprintSeed, opts: DeriveOptions): Fingerprint {
-  const { os, arch = 'x86_64' } = opts;
-  return deriveFromPools(seed, os, arch);
+  const { os, arch = 'x86_64', browserVersion } = opts;
+  return deriveFromPools(seed, os, arch, browserVersion);
 }
 
-function buildUserAgent(osToken: string, version: string): string {
-  return `Mozilla/5.0 (${osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
+function buildUserAgent(osToken: string, reducedVersion: string): string {
+  return `Mozilla/5.0 (${osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${reducedVersion} Safari/537.36`;
 }
 
-function buildBrands(version: string): NavigatorFingerprint['uaBrands'] {
-  const major = version.split('.')[0] ?? '152';
+function buildBrands(major: string): NavigatorFingerprint['uaBrands'] {
   return [
     { brand: 'Chromium', version: major },
     { brand: 'Google Chrome', version: major },
@@ -56,29 +61,37 @@ function buildBrands(version: string): NavigatorFingerprint['uaBrands'] {
  * passes validateFingerprintCoherence. Exported so tests can assert that guarantee and the seed→device
  * determinism/diversity directly.
  */
-export function deriveFromPools(seed: FingerprintSeed, os: OsFamily, arch: CpuArch): Fingerprint {
+export function deriveFromPools(
+  seed: FingerprintSeed,
+  os: OsFamily,
+  arch: CpuArch,
+  browserVersion?: string,
+): Fingerprint {
   const rng = new SeededRandom(seed);
   const tpl = DEVICE_TEMPLATES[os];
 
-  // Pick a whole machine (GPU + screen + cores + memory stay a coherent set), then a Chrome version.
+  // Pick a whole machine (GPU + screen + cores + memory stay a coherent set). The Chrome version is NOT
+  // seed-diverse — it is pinned to the running engine (all profiles share one binary), so the UA never
+  // contradicts a feature-probe or the fullVersionList high-entropy read. The UA string carries the
+  // reduced form (major.0.0.0); uaFullVersion carries the real build, exactly as Chrome 152 reports.
   const device = rng.pick(tpl.devices);
-  const version = rng.pick(CHROME_VERSIONS);
+  const ver = chromeVersionForms(browserVersion ?? ENGINE_CHROME.full);
 
   const primaryLocale = 'en-US';
   const languages = [primaryLocale, 'en'];
 
   const navigator: NavigatorFingerprint = {
-    userAgent: buildUserAgent(tpl.osToken, version),
+    userAgent: buildUserAgent(tpl.osToken, ver.reduced),
     platform: tpl.platform,
     languages,
     hardwareConcurrency: device.hardwareConcurrency,
     deviceMemory: device.deviceMemory,
     maxTouchPoints: 0,
-    uaBrands: buildBrands(version),
+    uaBrands: buildBrands(ver.major),
     uaPlatform: tpl.uaPlatform,
     uaPlatformVersion: tpl.uaPlatformVersion,
     uaMobile: false,
-    uaFullVersion: version,
+    uaFullVersion: ver.full,
   };
 
   const screenFp: ScreenFingerprint = {

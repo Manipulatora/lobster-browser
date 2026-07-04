@@ -67,6 +67,47 @@ test('every engine presents a Chrome UA + Sec-CH-UA brands (both engines are Chr
   }
 });
 
+test('Chrome version is PINNED to the engine build, not seed-diverse (no UA-vs-engine lie)', () => {
+  // Every profile runs the SAME engine binary, so all must claim ITS version. A seed-diverse version
+  // pool (the old bug: 151 vs 152) is a lie the moment a detector reads getHighEntropyValues
+  // fullVersionList — which returns the real engine build. So the UA major is identical across seeds,
+  // the UA string is UA-reduced (major.0.0.0), and uaFullVersion carries the real build.
+  const majors = new Set<string>();
+  for (let i = 0; i < 40; i++) {
+    const fp = deriveFingerprint(generateSeed(), { os: 'windows', engine: 'lobium' });
+    const uaMajor = /Chrome\/(\d+)/.exec(fp.navigator.userAgent)?.[1];
+    majors.add(uaMajor ?? '?');
+    assert.match(fp.navigator.userAgent, /Chrome\/\d+\.0\.0\.0 /, `unreduced UA seed ${i}`);
+    assert.equal(fp.navigator.uaBrands[0]?.version, uaMajor, `brand major seed ${i}`);
+    assert.equal(
+      fp.navigator.uaFullVersion.split('.')[0],
+      uaMajor,
+      `uaFullVersion major seed ${i}`,
+    );
+    assert.equal(
+      fp.navigator.uaFullVersion.split('.').length,
+      4,
+      `uaFullVersion not a full build seed ${i}`,
+    );
+  }
+  assert.equal(
+    majors.size,
+    1,
+    `Chrome major must be pinned across seeds, saw ${[...majors].join(',')}`,
+  );
+});
+
+test('browserVersion override pins the UA to a specified engine build (reduced + full forms)', () => {
+  const fp = deriveFingerprint('v', {
+    os: 'windows',
+    engine: 'lobium',
+    browserVersion: '140.0.1234.56',
+  });
+  assert.match(fp.navigator.userAgent, /Chrome\/140\.0\.0\.0 /); // reduced in the UA string
+  assert.equal(fp.navigator.uaFullVersion, '140.0.1234.56'); // full build in high-entropy
+  assert.equal(fp.navigator.uaBrands[0]?.version, '140');
+});
+
 test('derives coherent device data (rich fonts, real GPU, plausible screen) from the internal catalog', () => {
   for (let i = 0; i < 25; i++) {
     const seed = generateSeed();

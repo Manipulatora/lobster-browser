@@ -45,6 +45,12 @@ export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOption
 export interface UserAgentMetadata {
   brands: Array<{ brand: string; version: string }>;
   fullVersion: string;
+  /**
+   * The high-entropy `fullVersionList` (returned by `navigator.userAgentData.getHighEntropyValues`).
+   * MUST be set: if omitted, Chromium fills it with the REAL engine build (e.g. `152.0.7928.0`), which
+   * leaks the true version and contradicts a spoofed UA — a hard lie a detector reads directly.
+   */
+  fullVersionList: Array<{ brand: string; version: string }>;
   platform: string;
   platformVersion: string;
   architecture: string;
@@ -69,6 +75,16 @@ export interface CdpEmulation {
 
 export function buildCdpEmulation(fp: Fingerprint): CdpEmulation {
   const nav = fp.navigator;
+  // fullVersionList: each real brand carries the full build (uaFullVersion); the GREASE brand keeps its
+  // own version padded to a build shape. Real brands are those whose brand version equals the UA major
+  // (Chromium/Google Chrome = "152"); GREASE ("Not_A Brand" = "24") differs. This mirrors exactly what
+  // Chrome returns, so getHighEntropyValues(['fullVersionList']) agrees with the UA instead of leaking
+  // the engine's own build.
+  const major = nav.uaFullVersion.split('.')[0];
+  const fullVersionList = nav.uaBrands.map((b) => ({
+    brand: b.brand,
+    version: b.version === major ? nav.uaFullVersion : `${b.version}.0.0.0`,
+  }));
   const emulation: CdpEmulation = {
     userAgent: nav.userAgent,
     acceptLanguage: fp.locale.acceptLanguage,
@@ -76,6 +92,7 @@ export function buildCdpEmulation(fp: Fingerprint): CdpEmulation {
     userAgentMetadata: {
       brands: nav.uaBrands,
       fullVersion: nav.uaFullVersion,
+      fullVersionList,
       platform: nav.uaPlatform,
       platformVersion: nav.uaPlatformVersion,
       architecture: fp.arch === 'arm64' ? 'arm' : 'x86',
