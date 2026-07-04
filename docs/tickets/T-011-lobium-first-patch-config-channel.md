@@ -81,6 +81,16 @@ upstream 152.
 - **Coherence fixes found via the gate:** the UA-CH version leak (persona claimed Chrome 151 while
   `getHighEntropyValues(['fullVersionList'])` leaked the real 152 build) — fixed by pinning the catalog UA
   to the engine version + emitting a coherent `fullVersionList`.
-- **Still to author (this ticket's follow-ups):** WebGL pixel farbling + capability alignment, the audio
-  upstream taps (AudioWorklet/ScriptProcessorNode), the screen/DPR follow-ups, font enumeration, and the
-  net/TLS layer — each reuses this same proven channel.
+- **Web Audio upstream taps** (`fingerprint/audio-worklet-tap.patch`) — closed the two deterministic-offline
+  bypasses of the main audio farble: `AudioWorkletProcessor.process(inputs)` and the deprecated
+  `ScriptProcessorNode.onaudioprocess` `inputBuffer`. Gated to offline (worklet: a default-false
+  `AudioWorkletGlobalScope` flag only `OfflineAudioWorkletThread` sets; SPN: `!HasRealtimeConstraint()`),
+  farbling only the JS-visible copy (playback bit-exact). Proven host-diff/stable/distinct; a 2-lane
+  adversarial review returned **0 confirmed**.
+- **Remaining surfaces — dispositions (scouted, see `hooks.md`):** **TLS/JA3/JA4/HTTP-2 is already coherent**
+  — Lobium *is* genuine Chromium 152 (unmodified BoringSSL + HTTP/2), so its network fingerprint is
+  authentic Chrome, matching the Chrome-on-engine-version persona (the structural win of owning a real
+  fork). **WebGL capability alignment** is mooted in production by pinning personas to the host GPU class.
+  **WebGL pixel farbling** is tractable but has a readPixels-vs-toDataURL Y-flip coherence trap → its own
+  cycle. **fonts** is a packaging task (substitute-pack + fontconfig + launch `env`), not a Blink hook.
+  The screen/DPR Window-Management-API surfaces are permission-gated. Each reuses the same proven channel.

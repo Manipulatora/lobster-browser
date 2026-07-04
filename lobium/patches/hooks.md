@@ -256,15 +256,38 @@ persona reports `availTop=25` / `availHeight=height-25`; Windows/Linux `availTop
 >   native clamp of `outerWidth/Height/screenX/Y` to the persona rect (for hosts whose display exceeds
 >   the persona screen) is a follow-up.
 
-### Still to author
+### Still to author — with disposition
 
-WebGL **pixel farbling** + capability alignment (the WebGL limitation above — largely mooted in
-production by pinning personas to the host GPU class), the **screen/DPR follow-ups** (the
-Window-Management-API surfaces + the headful outer-geometry clamp — above), **fonts** (a *packaging*
-task, not a Blink hook — bundle a metric-compatible substitute pack + fontconfig + a launch `env`
-channel, then a subtract-only allowlist gate; see `series`), and the net layer (`net/webrtc-ip-policy`,
-`net/tls-ja3-ja4`, `net/http2-settings-order`). Each deep surface reads
-`lobium::LobiumFpConfig::Current()->{seeds,webgl,screen,...}` via the same proven config channel.
+Each remaining surface has been scouted; the honest disposition is recorded so the follow-up is precise
+rather than a vague TODO.
+
+- **WebGL pixel farbling** (`seeds.webgl`, already in the config). Tractable but has a coherence trap:
+  `gl.readPixels` (RGBA/UNSIGNED_BYTE) is a clean one-line hook after `ContextGL()->ReadPixels`
+  (webgl_rendering_context_base.cc ~5366) reusing `FarbleCanvasRgba`, BUT a WebGL canvas's `toDataURL`
+  reads the same framebuffer through the (currently 2D-only) snapshot path, and the two use opposite Y
+  origins (GL bottom-left vs image top-left). Farbling `readPixels` alone would make it disagree with
+  `toDataURL` — a new incoherence. Doing it right = farble both, keyed on a shared (Y-flip-normalised)
+  coordinate. Deserves its own cycle; not a rushed one-liner.
+- **WebGL capability alignment** (MAX_* limits, extension list matching the claimed GPU). Needs a
+  per-GPU-class capability database (a data effort, like fonts). **Largely mooted in production**: the
+  roadmap pins personas to the *host* GPU class, so the real backend's capabilities already match the
+  claimed GPU. The SwiftShader mismatch seen in dev (RTX-4060 string + 8192 texture cap) is a
+  test-backend artifact, not a production tell.
+- **TLS / JA3 / JA4 / HTTP-2** — **already coherent for Lobium, no work needed for Chrome personas.**
+  Lobium *is* stock Chromium 152 (BoringSSL + the HTTP/2 stack are unmodified), so its ClientHello cipher/
+  extension order, HTTP/2 SETTINGS, and pseudo-header order are byte-for-byte genuine Chrome 152 — exactly
+  what the persona (pinned to the engine's Chrome version) claims. This is the structural advantage of
+  owning a real Chromium fork over the interim patchright engine. Native TLS spoofing is only needed to
+  impersonate a *different* browser (Firefox/Safari) or a *different* Chrome version than the engine —
+  both out of v1 scope (personas are Chrome-on-the-engine-version).
+- **fonts** — a *packaging* task, not a Blink hook (bundle a metric-compatible substitute pack +
+  fontconfig + a launch `env` channel, then a subtract-only allowlist gate; see `series` for the plan).
+- **screen/DPR Window-Management-API follow-ups** (`getScreenDetails()` dpr/label, `isExtended`,
+  `getScreens()` enumeration) + the headful outer-geometry clamp — all permission-gated or headful-only
+  (above).
+
+Each hookable surface reads `lobium::LobiumFpConfig::Current()->{seeds,webgl,screen,...}` via the same
+proven config channel.
 
 ## Verification (build machine)
 
