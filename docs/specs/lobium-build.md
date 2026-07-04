@@ -499,9 +499,14 @@ allowance drops to 0** — that tightening is the objective proof the native pat
 
 ## Status vs target
 
-**Where we are:** the Lobium track is a **documented, scaffolded design, not yet a running engine.**
-Concretely built today: the dry-run `build.sh`, an example GN arg set, an empty quilt `series`, and the
-prose specs — plus the crucial *shared* pieces this engine depends on that already exist and work: the
+**Where we are:** _(Updated — see [PROJECT-STATUS §2.1](../PROJECT-STATUS.md); the Day-4 text below is
+historical.)_ Lobium is **a running engine**: Chromium 152.0.7928.0 built from source with ~10 native
+fingerprint surfaces (config channel, navigator/deviceMemory/maxTouchPoints, WebGL vendor/renderer,
+canvas & audio farbling, screen/DPR, UA/platform in all contexts), each proven **on SwiftShader**
+(real-GPU validation pending, ENG-2), and wired into the product launch path (RUN-1). The quilt `series`
+is populated. _Historically (Day-4), the track was a **documented, scaffolded design, not yet a running
+engine**:_ concretely built then were the dry-run `build.sh`, an example GN arg set, an empty quilt
+`series`, and the prose specs — plus the crucial *shared* pieces this engine depends on that already existed: the
 `Fingerprint` model in `@lobster/shared-types`, the sidecar `launch` contract Lobium will plug into, and
 the CI detector harness (`ci/validation/`) that already grades the interim engine and will grade Lobium
 unchanged. The `lobium` engine kind currently resolves to the interim patched Chromium via patchright.

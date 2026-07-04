@@ -6,8 +6,9 @@
  * the native engine layer in the engine-runner; this package owns the deterministic,
  * describable surfaces and the coherence rules that tie them together.
  *
- * Day 1 replaces the built-in device pools (`pools.ts`) with Apify fingerprint-suite's
- * real-device distributions while keeping this same public API.
+ * The device model is the built-in coherent catalog (`pools.ts`), derived deterministically
+ * (FNV-1a → mulberry32). An earlier plan to source distributions from Apify's fingerprint-suite was
+ * dropped (commit 9499136) to own the model and remove the supply-chain dependency.
  */
 export { SeededRandom, hashStringToUint32, mulberry32 } from './prng.js';
 export { generateSeed, isValidSeed } from './seed.js';

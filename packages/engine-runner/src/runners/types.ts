@@ -7,6 +7,8 @@ export interface LaunchContext {
   engine: EngineKind;
   /** The fully-resolved fingerprint — used to apply CDP overrides on each page. */
   fingerprint: Fingerprint;
+  /** The profile's fingerprint seed — the native launcher derives per-profile farbling seeds from it. */
+  fingerprintSeed?: string;
   options: PersistentLaunchOptions;
   emulation: CdpEmulation;
   initScript: string;

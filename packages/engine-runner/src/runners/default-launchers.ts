@@ -43,6 +43,15 @@ export interface BuildLaunchersOptions {
 export async function buildLaunchers(opts: BuildLaunchersOptions = {}): Promise<LauncherRegistry> {
   const chromiumReady = await isChromiumAvailable();
   const lobiumReady = isLobiumAvailable();
+  // Loud footgun guard: if LOBSTER_LOBIUM_BIN is SET but doesn't resolve, the operator likely intended
+  // native Lobium but a typo/missing file silently downgrades them to interim Chromium (no native
+  // canvas/WebGL/audio). Warn rather than pretend — an unset var (dev/CI) is silent and fine.
+  if (!lobiumReady && process.env.LOBSTER_LOBIUM_BIN) {
+    console.warn(
+      `[lobium] LOBSTER_LOBIUM_BIN="${process.env.LOBSTER_LOBIUM_BIN}" does not exist — falling back ` +
+        'to the interim Chromium engine for "lobium" launches; native fingerprint surfaces will NOT apply.',
+    );
+  }
   return {
     // Lobium is the flagship custom Chromium build. When its binary is provisioned
     // (`LOBSTER_LOBIUM_BIN`), `lobium` launches spawn it with the native config channel wired up

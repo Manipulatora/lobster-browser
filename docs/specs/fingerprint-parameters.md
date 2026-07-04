@@ -45,9 +45,10 @@ long-tail hardening. Mirrors MASTER_PLAN §5's priority column.
 
 - **`Fingerprint` model** (`fingerprint.ts`): `navigator`, `screen`, `webgl`, `locale`, `fonts`,
   plus `os`/`arch`. `FingerprintOverrides` allows per-section user edits.
-- **Derivation** (`derive.ts` → `generate.ts`): seed → seeded `Math.random` → Apify
-  `fingerprint-generator` pool of `CANDIDATE_POOL_SIZE = 32` real-device candidates → first
-  *selectable* one; deterministic fallback to built-in `pools.ts` templates.
+- **Derivation** (`derive.ts`): seed → FNV-1a → mulberry32 → one coherent device from the built-in
+  catalog (`pools.ts`), then apply overrides + proxy-geo overlay. _(Superseded: the earlier
+  Apify `fingerprint-generator` + 32-candidate pool was removed in commit 9499136 — see
+  [PROJECT-STATUS](../PROJECT-STATUS.md). The internal catalog is now the source of truth.)_
 - **Geo overlay** (`coherence.ts` → `applyGeoToFingerprint`): rewrites timezone/locale/languages/
   Accept-Language (+ geolocation) from the proxy `GeoInfo`.
 - **Coherence gate** (`coherence.ts` → `validateFingerprintCoherence`): 7 hard checks (see §3).
@@ -294,7 +295,13 @@ Deep surface → native-Lobium seeded noise.
 
 ## 2. Real-system sourcing
 
-### 2.1 Primary source — Apify `fingerprint-generator` / `fingerprint-suite`
+### 2.1 Primary source — internal coherent catalog (`pools.ts`)
+
+> ⚠️ **SUPERSEDED (historical).** The Apify `fingerprint-generator` / `fingerprint-suite` design below
+> was **removed in commit 9499136**. The current source of truth is the internal `pools.ts` catalog
+> (deterministic FNV-1a → mulberry32), which owns the device model and drops the supply-chain +
+> shared-distribution tell. This subsection is retained only for the reasoning trail; see
+> [PROJECT-STATUS](../PROJECT-STATUS.md) for reality.
 
 - `generate.ts` constructs one `FingerprintGenerator` (loads a Bayesian network of **real-device**
   co-occurrence statistics). We query it with `{operatingSystems:[os], browsers:['chrome'],

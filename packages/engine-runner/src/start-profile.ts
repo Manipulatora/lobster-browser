@@ -56,6 +56,8 @@ export async function startProfile(
     engine: params.engine,
     userDataDir: params.userDataDir,
     fingerprint,
+    // Thread the seed so native farbling seeds are unique per profile (not per device class).
+    fingerprintSeed: params.fingerprintSeed,
     ...(params.proxy ? { proxy: params.proxy } : {}),
     ...(params.headless !== undefined ? { headless: params.headless } : {}),
   };

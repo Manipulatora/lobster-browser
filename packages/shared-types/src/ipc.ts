@@ -33,6 +33,13 @@ export interface LaunchParams {
   userDataDir: string;
   /** Fully-resolved coherent fingerprint (deep surfaces handled natively by the engine). */
   fingerprint: Fingerprint;
+  /**
+   * The profile's fingerprint seed. Threaded to the native config so per-profile farbling seeds
+   * (canvas/WebGL/audio) derive from the UNIQUE profile seed rather than the device signature —
+   * otherwise two profiles that derive the same device class share farbling seeds and produce
+   * identical, linkable canvas/audio hashes (violating the distinct-per-profile requirement, §5).
+   */
+  fingerprintSeed?: string;
   proxy?: ProxyConfig;
   headless?: boolean;
 }

@@ -75,22 +75,41 @@ fn authorized(state: &LocalApiState, headers: &HeaderMap) -> bool {
     }
 }
 
+/// Distinguishes a missing profile (→ HTTP 404) from a launch failure (→ 500), so refactoring the
+/// launch path into a shared helper preserves the API's status-code contract.
+#[derive(Debug)]
+pub enum StartError {
+    NotFound(String),
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartError::NotFound(id) => write!(f, "profile {id} not found"),
+            StartError::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// Start a profile through the engine-runner sidecar. Shared by the local HTTP API and the desktop
 /// `launch_profile` Tauri command so both entry points drive the SAME launch path (derive fingerprint
 /// from the stored seed + overrides + proxy geo, then launch). Returns the sidecar's `startProfile`
-/// result (`{ profileId, pid, ws, debuggerAddress }`).
+/// result (`{ profileId, pid, ws, debuggerAddress }`); `NotFound` for an unknown profile.
 pub async fn start_profile_via_sidecar(
     db: &Arc<Mutex<Connection>>,
     sidecar: &SidecarClient,
     profiles_dir: &Path,
     profile_id: &str,
-) -> anyhow::Result<Value> {
+    headless: bool,
+) -> Result<Value, StartError> {
     let profile = {
         let conn = db
             .lock()
-            .map_err(|_| anyhow::anyhow!("profile store lock poisoned"))?;
-        profile_store::get(&conn, profile_id)?
-            .ok_or_else(|| anyhow::anyhow!("profile {profile_id} not found"))?
+            .map_err(|_| StartError::Failed(anyhow::anyhow!("profile store lock poisoned")))?;
+        profile_store::get(&conn, profile_id)
+            .map_err(StartError::Failed)?
+            .ok_or_else(|| StartError::NotFound(profile_id.to_string()))?
     };
     let user_data_dir = profiles_dir.join(&profile.id);
     let params = json!({
@@ -101,9 +120,12 @@ pub async fn start_profile_via_sidecar(
         "fingerprintOverrides": profile.fingerprint_overrides,
         "proxy": profile.proxy,
         "userDataDir": user_data_dir.to_string_lossy(),
-        "headless": false,
+        "headless": headless,
     });
-    sidecar.call("startProfile", params).await
+    sidecar
+        .call("startProfile", params)
+        .await
+        .map_err(StartError::Failed)
 }
 
 /// Stop a running profile through the sidecar. Shared by the HTTP API and the Tauri command.
@@ -120,6 +142,16 @@ pub async fn stop_profile_via_sidecar(
 struct ProfileIdBody {
     #[serde(rename = "profileId")]
     profile_id: String,
+}
+
+#[derive(Deserialize)]
+struct StartProfileBody {
+    #[serde(rename = "profileId")]
+    profile_id: String,
+    /// Optional; when omitted the engine launches headful (the desktop default). Honors the SDK/docs
+    /// `headless` option instead of silently ignoring it.
+    #[serde(default)]
+    headless: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -153,7 +185,7 @@ async fn health() -> Json<ApiResponse> {
 async fn profile_start(
     State(state): State<Arc<LocalApiState>>,
     headers: HeaderMap,
-    Json(body): Json<ProfileIdBody>,
+    Json(body): Json<StartProfileBody>,
 ) -> (StatusCode, Json<ApiResponse>) {
     if !authorized(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, ApiResponse::err("unauthorized"));
@@ -164,11 +196,17 @@ async fn profile_start(
         &state.sidecar,
         &state.profiles_dir,
         &body.profile_id,
+        body.headless.unwrap_or(false),
     )
     .await
     {
         Ok(result) => (StatusCode::OK, ApiResponse::ok(result)),
-        Err(e) => (
+        // Preserve the status-code contract: unknown profile → 404, launch failure → 500.
+        Err(StartError::NotFound(id)) => (
+            StatusCode::NOT_FOUND,
+            ApiResponse::err(format!("profile {id} not found")),
+        ),
+        Err(e @ StartError::Failed(_)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             ApiResponse::err(e.to_string()),
         ),

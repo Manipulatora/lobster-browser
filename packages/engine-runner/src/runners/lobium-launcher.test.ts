@@ -16,12 +16,21 @@ import type { LaunchContext } from './types.js';
 
 const fp = deriveFingerprint('seed-lobium-test', { os: 'windows', engine: 'lobium' });
 
-function ctxWith(userDataDir: string, proxy?: { server: string }): LaunchContext {
+function ctxWith(
+  userDataDir: string,
+  opts: { proxy?: { server: string }; seed?: string } = {},
+): LaunchContext {
   return {
     profileId: 'p',
     engine: 'lobium',
     fingerprint: fp,
-    options: { userDataDir, headless: false, args: [], ...(proxy ? { proxy } : {}) },
+    ...(opts.seed !== undefined ? { fingerprintSeed: opts.seed } : {}),
+    options: {
+      userDataDir,
+      headless: false,
+      args: [],
+      ...(opts.proxy ? { proxy: opts.proxy } : {}),
+    },
     emulation: {},
     initScript: '',
   } as unknown as LaunchContext;
@@ -103,14 +112,46 @@ test('buildLobiumLaunchArgs writes lobium-fp.json and returns the --lobium-fp-co
   }
 });
 
+test('farbling seeds are UNIQUE per profile seed even for the SAME device (distinct-per-profile, §5)', async () => {
+  // Same resolved fingerprint (identical device), two different profile seeds. Without threading the
+  // seed, both would fall back to the device signature and get IDENTICAL farbling seeds → linkable.
+  const uddA = await mkdtemp(join(tmpdir(), 'lobium-A-'));
+  const uddB = await mkdtemp(join(tmpdir(), 'lobium-B-'));
+  try {
+    await buildLobiumLaunchArgs(ctxWith(uddA, { seed: 'profile-A' }));
+    await buildLobiumLaunchArgs(ctxWith(uddB, { seed: 'profile-B' }));
+    const a = JSON.parse(await readFile(join(uddA, LOBIUM_CONFIG_FILENAME), 'utf8'));
+    const b = JSON.parse(await readFile(join(uddB, LOBIUM_CONFIG_FILENAME), 'utf8'));
+    assert.equal(a.navigator.userAgent, b.navigator.userAgent, 'same device (control)');
+    assert.notDeepEqual(
+      a.seeds,
+      b.seeds,
+      'different profile seed → different canvas/webgl/audio seeds',
+    );
+    // Stable per profile: re-deriving profile A yields the same seeds.
+    const uddA2 = await mkdtemp(join(tmpdir(), 'lobium-A2-'));
+    await buildLobiumLaunchArgs(ctxWith(uddA2, { seed: 'profile-A' }));
+    const a2 = JSON.parse(await readFile(join(uddA2, LOBIUM_CONFIG_FILENAME), 'utf8'));
+    assert.deepEqual(a2.seeds, a.seeds, 'same profile seed → same farbling seeds across launches');
+    await rm(uddA2, { recursive: true, force: true });
+  } finally {
+    await rm(uddA, { recursive: true, force: true });
+    await rm(uddB, { recursive: true, force: true });
+  }
+});
+
 test('buildLobiumLaunchArgs records the proxy WebRTC policy + non-secret summary (no creds)', async () => {
   const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-udd-'));
   try {
     await buildLobiumLaunchArgs(
-      ctxWith(userDataDir, { server: 'socks5://10.0.0.9:1080' }),
+      ctxWith(userDataDir, { proxy: { server: 'socks5://10.0.0.9:1080' } }),
     );
     const written = JSON.parse(await readFile(join(userDataDir, LOBIUM_CONFIG_FILENAME), 'utf8'));
-    assert.equal(written.net.webrtcPolicy, 'disable_non_proxied_udp', 'proxied → suppress non-proxied UDP');
+    assert.equal(
+      written.net.webrtcPolicy,
+      'disable_non_proxied_udp',
+      'proxied → suppress non-proxied UDP',
+    );
     assert.deepEqual(written.net.proxy, { type: 'socks5', host: '10.0.0.9', port: 1080 });
     // The config file must never carry proxy credentials.
     const raw = await readFile(join(userDataDir, LOBIUM_CONFIG_FILENAME), 'utf8');

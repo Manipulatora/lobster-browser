@@ -39,6 +39,7 @@ export class CompositeRunner implements EngineRunner {
       profileId: params.profileId,
       engine: params.engine,
       fingerprint: params.fingerprint,
+      ...(params.fingerprintSeed !== undefined ? { fingerprintSeed: params.fingerprintSeed } : {}),
       options: buildLaunchOptions(params),
       emulation: buildCdpEmulation(params.fingerprint),
       initScript: buildFingerprintInitScript(params.fingerprint),

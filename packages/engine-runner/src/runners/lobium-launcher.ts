@@ -56,7 +56,13 @@ export function proxySummaryFromServer(
  */
 export async function buildLobiumLaunchArgs(ctx: LaunchContext): Promise<string[]> {
   const proxy = ctx.options.proxy ? proxySummaryFromServer(ctx.options.proxy.server) : undefined;
-  const config = buildLobiumConfig(ctx.fingerprint, proxy ? { proxy } : {});
+  // Pass the profile seed so farbling seeds are unique per profile. Without it, buildLobiumConfig falls
+  // back to a device signature, and two profiles that derive the same device class would share
+  // canvas/WebGL/audio seeds → identical, linkable hashes (a distinct-per-profile violation, §5).
+  const config = buildLobiumConfig(ctx.fingerprint, {
+    ...(proxy ? { proxy } : {}),
+    ...(ctx.fingerprintSeed !== undefined ? { seed: ctx.fingerprintSeed } : {}),
+  });
   const path = await writeLobiumConfig(ctx.options.userDataDir, config);
   return [lobiumConfigArg(path)];
 }

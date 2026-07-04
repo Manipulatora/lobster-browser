@@ -96,7 +96,8 @@ async fn launch_profile(
         .sidecar
         .as_ref()
         .ok_or("engine-runner sidecar is not available (failed to start)")?;
-    local_api::start_profile_via_sidecar(&state.db, sidecar, &state.profiles_dir, &id)
+    // The desktop Launch button opens the browser headful; a headless toggle is future UI (DSK-13).
+    local_api::start_profile_via_sidecar(&state.db, sidecar, &state.profiles_dir, &id, false)
         .await
         .map_err(|e| e.to_string())
 }
@@ -137,8 +138,16 @@ pub fn run() {
             // command and the local automation API drive the SAME process over the SAME runtime's
             // stdio (no cross-runtime pipe). A spawn failure degrades gracefully: the app still opens,
             // and launches report the sidecar is unavailable rather than crashing startup.
-            let sidecar_js = std::env::var("LOBSTER_SIDECAR")
-                .unwrap_or_else(|_| "engine-runner/index.js".to_string());
+            // Dev default: the built sidecar bundle in the source tree, resolved from THIS crate so it
+            // works regardless of CWD (the old "engine-runner/index.js" relative path resolved to
+            // nothing in `tauri dev`, leaving the Launch button dead). Packaged builds set
+            // LOBSTER_SIDECAR or bundle the sidecar as a resource — see DSK-11.
+            let sidecar_js = std::env::var("LOBSTER_SIDECAR").unwrap_or_else(|_| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../packages/engine-runner/dist/index.js")
+                    .to_string_lossy()
+                    .into_owned()
+            });
             let sidecar = match tauri::async_runtime::block_on(SidecarClient::spawn(
                 "node",
                 &sidecar_js,
