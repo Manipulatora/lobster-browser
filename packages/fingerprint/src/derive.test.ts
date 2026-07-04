@@ -108,6 +108,27 @@ test('browserVersion override pins the UA to a specified engine build (reduced +
   assert.equal(fp.navigator.uaBrands[0]?.version, '140');
 });
 
+test('screen availTop is coherent with the OS chrome (macOS menu bar vs Windows/Linux taskbar)', () => {
+  for (let i = 0; i < 20; i++) {
+    const seed = generateSeed();
+    // macOS: top menu bar => availTop=25, the whole deficit at the top, no bottom inset.
+    const mac = deriveFingerprint(seed, { os: 'macos', engine: 'lobium' }).screen;
+    assert.equal(mac.availTop, 25, `macOS availTop seed=${seed}`);
+    assert.equal(
+      mac.height - mac.availHeight,
+      25,
+      `macOS deficit must be the menu bar seed=${seed}`,
+    );
+    // Windows/Linux: bottom taskbar => availTop=0, deficit at the bottom.
+    for (const os of ['windows', 'linux'] as const) {
+      const s = deriveFingerprint(seed, { os, engine: 'lobium' }).screen;
+      assert.equal(s.availTop, 0, `${os} availTop seed=${seed}`);
+      assert.equal(s.availLeft, 0, `${os} availLeft seed=${seed}`);
+      assert.equal(s.height - s.availHeight, 40, `${os} deficit must be the taskbar seed=${seed}`);
+    }
+  }
+});
+
 test('derives coherent device data (rich fonts, real GPU, plausible screen) from the internal catalog', () => {
   for (let i = 0; i < 25; i++) {
     const seed = generateSeed();

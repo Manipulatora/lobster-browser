@@ -103,7 +103,7 @@ index 6aa773e59b..910a3b3612 100644
    return GetFrame()->DevicePixelRatio();
  }
 diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
-index 69ffc2b05f..3a54663395 100644
+index 69ffc2b05f..cda8982346 100644
 --- a/third_party/blink/renderer/core/frame/screen.cc
 +++ b/third_party/blink/renderer/core/frame/screen.cc
 @@ -29,6 +29,7 @@
@@ -126,7 +126,7 @@ index 69ffc2b05f..3a54663395 100644
    return GetScreenInfo().depth == 0
               ? unknown_color_depth
               : base::saturated_cast<unsigned>(GetScreenInfo().depth);
-@@ -163,6 +169,16 @@ bool Screen::isExtended() const {
+@@ -163,6 +169,20 @@ bool Screen::isExtended() const {
  gfx::Rect Screen::GetRect(bool available) const {
    if (!DomWindow())
      return gfx::Rect();
@@ -137,7 +137,11 @@ index 69ffc2b05f..3a54663395 100644
 +  // available rect), the common real-desktop case.
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +      cfg && cfg->screen.width > 0 && cfg->screen.height > 0) {
-+    return available ? gfx::Rect(0, 0, cfg->screen.avail_width, cfg->screen.avail_height)
++    // The available rect is inset by the persona's OS chrome. availLeft/availTop carry the origin so a
++    // macOS persona reports availTop>0 (top menu bar) rather than a Windows-style (0,0) origin — the
++    // coherence the review flagged. Absent (Windows/Linux) => (0,0).
++    return available ? gfx::Rect(cfg->screen.avail_left, cfg->screen.avail_top,
++                                 cfg->screen.avail_width, cfg->screen.avail_height)
 +                     : gfx::Rect(0, 0, cfg->screen.width, cfg->screen.height);
 +  }
    LocalFrame* frame = DomWindow()->GetFrame();

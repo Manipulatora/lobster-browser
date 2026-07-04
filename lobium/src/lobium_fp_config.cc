@@ -76,6 +76,8 @@ void ReadScreen(const base::DictValue& dict, ScreenConfig& s) {
   s.height = dict.FindInt("height").value_or(0);
   s.avail_width = dict.FindInt("availWidth").value_or(s.width);
   s.avail_height = dict.FindInt("availHeight").value_or(s.height);
+  s.avail_left = dict.FindInt("availLeft").value_or(0);
+  s.avail_top = dict.FindInt("availTop").value_or(0);
   s.color_depth = dict.FindInt("colorDepth").value_or(24);
   s.device_pixel_ratio = dict.FindDouble("devicePixelRatio").value_or(1);
 }

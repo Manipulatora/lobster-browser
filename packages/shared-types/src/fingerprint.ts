@@ -30,6 +30,14 @@ export interface ScreenFingerprint {
   height: number;
   availWidth: number;
   availHeight: number;
+  /**
+   * Origin of the available rect (screen minus OS chrome). Optional (default 0). `availTop` is the key
+   * coherence signal: macOS always has a top menu bar (~25px) so a Mac persona MUST report availTop>0,
+   * while Windows/Linux with a bottom taskbar keep availTop=0. The native Screen::GetRect hook reads
+   * these; absent => 0.
+   */
+  availLeft?: number;
+  availTop?: number;
   colorDepth: number;
   devicePixelRatio: number;
 }

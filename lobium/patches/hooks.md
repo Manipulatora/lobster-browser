@@ -237,11 +237,12 @@ window), not the full screen, so `window.outerWidth/Height ≤ screen.avail*` st
 `-webkit-device-pixel-ratio` (retina persona reports 2 everywhere); `outerHeight ≤ availHeight`. Detector
 gate: **9/9 surfaces**, sannysoft 0-fail.
 
+macOS `availTop` coherence is FIXED: `avail_left`/`avail_top` are threaded through shared-types + the
+catalog (`derive.ts` sets `availTop=25` and puts the whole deficit at the top for Mac personas;
+Windows/Linux keep `availTop=0` with a bottom taskbar) and read by `Screen::GetRect`. Proven: a Mac
+persona reports `availTop=25` / `availHeight=height-25`; Windows/Linux `availTop=0` / `availHeight=height-40`.
+
 > **KNOWN LIMITATIONS (adversarial review — confirmed, deferred with rationale).**
-> - **macOS `availTop` is 0** (a real Mac's menu bar makes `availTop ~25`). Fixing it needs
->   `avail_left`/`avail_top` threaded through shared-types + the catalog (`derive.ts`) so a Mac persona
->   expresses a menu-bar inset — a cross-package follow-up. Windows/Linux `availTop=0` (bottom taskbar)
->   is already coherent.
 > - **Multi-Screen Window Placement API** (`getScreenDetails()`: `ScreenDetailed.devicePixelRatio`/`label`,
 >   `Screen.isExtended`, `getScreens()` enumeration) still reflects real host values. These need the
 >   `window-management` permission prompt, so they are not silently scriptable — deferred.

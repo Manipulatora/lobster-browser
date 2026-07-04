@@ -51,6 +51,8 @@ struct ScreenConfig {
   int height = 0;
   int avail_width = 0;
   int avail_height = 0;
+  int avail_left = 0;
+  int avail_top = 0;
   int color_depth = 24;
   double device_pixel_ratio = 1;
 };

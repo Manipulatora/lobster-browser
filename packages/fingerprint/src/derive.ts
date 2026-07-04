@@ -94,11 +94,20 @@ export function deriveFromPools(
     uaFullVersion: ver.full,
   };
 
+  // Available rect = screen minus OS chrome, laid out per-OS so screen.availTop is COHERENT with the
+  // claimed platform: macOS reserves a top menu bar (~25px, dock auto-hidden), so availTop=25 and the
+  // deficit is at the TOP; Windows/Linux reserve a bottom taskbar (~40px), so availTop=0 and the deficit
+  // is at the bottom. (A Mac persona reporting availTop=0 with availHeight<height is a detectable tell —
+  // the missing pixels would imply a bottom dock and no menu bar, impossible on default macOS.)
+  const menuBarTop = os === 'macos' ? 25 : 0;
+  const bottomBar = os === 'macos' ? 0 : 40;
   const screenFp: ScreenFingerprint = {
     width: device.screen.width,
     height: device.screen.height,
     availWidth: device.screen.width,
-    availHeight: device.screen.height - 40,
+    availHeight: device.screen.height - menuBarTop - bottomBar,
+    availLeft: 0,
+    availTop: menuBarTop,
     colorDepth: 24,
     devicePixelRatio: device.screen.dpr,
   };
