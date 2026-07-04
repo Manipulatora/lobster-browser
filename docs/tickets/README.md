@@ -7,6 +7,13 @@ tickets; the assigned agent implements; the other agent reviews. Keep this table
 > [`../PROJECT-STATUS.md`](../PROJECT-STATUS.md)** (the living tracker). This board is the per-ticket
 > history; PROJECT-STATUS is the "where are we / what's next" view. Native-engine surface detail is in
 > [`../../lobium/patches/hooks.md`](../../lobium/patches/hooks.md).
+>
+> ⚠️ **"done" here means "the ticket delivered its coded scope + unit tests," NOT "production-proven
+> end-to-end."** A 9-lane code audit (2026-07-04) found several rows over-claim maturity — the native
+> engine is **not wired into any product launch path** (RUN-1), cloud blobs are **plaintext** not
+> encrypted (SEC-1), `testProxy` is **unreachable** by users (PROX-3), `@lobster/cookies` has **zero
+> product consumers** (PROX-1), and the desktop Launch action is a **stub** (DSK-1). PROJECT-STATUS §2–§3
+> is authoritative for real maturity; consult it before trusting a "done" below.
 
 | ID | Title | Pillar / Track | Assignee | Status |
 |----|-------|----------------|----------|--------|

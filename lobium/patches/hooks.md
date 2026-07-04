@@ -1,5 +1,16 @@
 # Lobium hook points (the quilt series)
 
+> ⚠️ **Two load-bearing caveats for every "PROVEN" below** (see [`../../docs/PROJECT-STATUS.md`](../../docs/PROJECT-STATUS.md)):
+> 1. **All proofs ran on SwiftShader software rendering** (`--enable-unsafe-swiftshader`) — itself a
+>    headless/VM tell. Read every "PROVEN" as "**PROVEN on SwiftShader**." The real-GPU score is
+>    **unmeasured** until ENG-2 runs on a GPU host.
+> 2. **These surfaces are not wired into the product launch path.** No launcher calls `writeLobiumConfig`
+>    or passes `--lobium-fp-config`; only the `ci/validation` harness exercises them. RUN-1 connects them.
+>
+> Also: **`seeds.webgl` is DEAD CONFIG** — it is emitted by the sidecar and parsed by the reader but
+> **consumed by nothing** (WebGL pixel farbling, ENG-3, is not implemented). Do not treat the WebGL pixel
+> hash as spoofed.
+
 Each hook patch is a **small** diff into an existing Chromium file that routes a surface through
 `lobium::LobiumFpConfig::Current()` (the reader in `../src/`). The insertion points + code are given
 here so a build engineer finalizes them against the pinned checkout (`quilt push -f` → edit → `quilt

@@ -5,15 +5,21 @@ The master plan is the strategy and the 10-day shape; these documents are the *e
 agent needs to implement a subsystem without re-deriving decisions. Read the master plan first, then
 the spec for the subsystem you're building.
 
-For an honest read on where we are vs. where these specs aim, see [`../GAP-ANALYSIS.md`](../GAP-ANALYSIS.md).
+> ⚠️ **These specs' "Status vs target" tags are STALE (~end of Day 4) and several are wrong** (e.g.
+> `lobium-build.md` says nothing native is built; `fingerprint-parameters.md` describes the removed Apify
+> architecture and claims canvas/WebGL/audio are unbuilt). For the **authoritative current state**, read
+> **[`../PROJECT-STATUS.md`](../PROJECT-STATUS.md)**. Reconciling each spec to reality is tracked as
+> **DOC-1** in the PROJECT-STATUS register. Treat the specs as the *build-to target*, not the status.
+
+For the honest current state see [`../PROJECT-STATUS.md`](../PROJECT-STATUS.md); the older Day-4 snapshot
+is [`../GAP-ANALYSIS.md`](../GAP-ANALYSIS.md).
 
 ## Convention: "Status vs target"
 
 Every spec is written to the **full Octo-class target** and tags each item **done · partial · planned**
-against the code that exists today (~end of Day 4), and closes with a *Status vs target* note. So each
-doc is simultaneously (a) the spec to build to and (b) an honest map of the remaining distance. Status
-tags are grounded in the actual tree (shared-types, prisma schema, the Rust core, engine-runner, the
-backend services, the validation harness) — not aspirational.
+against the code that existed at ~end of Day 4 (**now stale — see PROJECT-STATUS**), and closes with a
+*Status vs target* note. So each doc is simultaneously (a) the spec to build to and (b) a (dated) map of
+the remaining distance.
 
 ## The specs
 

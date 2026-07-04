@@ -73,6 +73,11 @@ node engines/download-engines.mjs
 
 ## Status
 
-**Day 0 — Foundations.** Repo, workspace, docs, CI skeleton, and package scaffolds are in place.
-See [`docs/MASTER_PLAN.md` §10](docs/MASTER_PLAN.md) for the 10-day plan and
-[`docs/tickets/`](docs/tickets/) for the current work board.
+**Native Lobium engine built; product wiring in progress.** A from-source Chromium 152 fork with ~10
+native fingerprint surfaces is built and proven **on SwiftShader** (real-GPU validation pending); the
+TypeScript orchestrator + NestJS backend are built with ~160 green tests. The engine is **not yet wired
+into the product launch path**, cloud blobs are **not yet encrypted**, and there is **no signed
+installer** — see the honest, detailed breakdown, critical path, and risk register in
+**[`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md)** (the authoritative live tracker).
+See [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) for strategy and [`docs/tickets/`](docs/tickets/) for the
+work board.
