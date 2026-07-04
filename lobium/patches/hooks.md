@@ -4,7 +4,8 @@ Each hook patch is a **small** diff into an existing Chromium file that routes a
 `lobium::LobiumFpConfig::Current()` (the reader in `../src/`). The insertion points + code are given
 here so a build engineer finalizes them against the pinned checkout (`quilt push -f` → edit → `quilt
 refresh`) — the exact line numbers shift per Chromium ref, which is why the series ships as intent +
-code rather than frozen context diffs. Deep-surface hooks (canvas/WebGL/audio/TLS) are Phase 2.
+code rather than frozen context diffs. The first two deep surfaces (WebGL vendor/renderer, canvas 2D
+farbling) are BUILT + PROVEN; audio/fonts/TLS remain to author.
 
 ## `core/build-gn.patch` — register the added module ✅ BUILT
 
@@ -99,9 +100,52 @@ the persona GPU, masked unchanged.
 > and not a known SwiftShader/host hash. (`GL_VERSION` does NOT leak the raw driver string — the
 > command-buffer sanitises it — so that specific leg is not a concern.)
 
+### Canvas 2D farbling — ✅ BUILT + PROVEN
+
+`seeds.canvas` drives a deterministic **±1-LSB** perturbation of R/G/B (alpha untouched) applied to the
+canvas **readback** surfaces by the shared skia-free kernel `lobium::FarbleCanvasRgba`
+(`//components/lobium_fp/lobium_farble.cc` — raw `uint8_t*` so `lobium_fp` stays `//base`-only). The
+noise is keyed on `(seed, absolute pixel coord, channel)`, the channel folded into the **hash input**
+(not applied after the avalanche) so each of R/G/B is an *independent* draw over `{-1,0,+1}` — otherwise
+all three derive from one mixed value and can never nudge the same direction (`dR+dG+dB` never reaches
+±3), itself a seed-independent tell. Result: **stable-per-profile, distinct-per-seed, differs from host,
+imperceptible.**
+
+Hooked at **four** readback entries so every path a fingerprinter can read is farbled identically and
+exactly once:
+
+- **`getImageData`** — `modules/canvas/canvas2d/base_rendering_context_2d.cc`. Perturbs the private,
+  freshly-allocated `ImageData` pixmap (RGBA8888/unpremultiplied — never the live canvas) in place at
+  origin `(sx,sy)`, so a sub-rect read matches the full-canvas read pixel-for-pixel.
+- **`toDataURL`** and **`toBlob`** — `core/html/canvas/html_canvas_element.cc`, via the
+  `LobiumFarbleReadback(Snapshot(...))` helper (reads the snapshot into a private
+  RGBA8888/unpremultiplied `SkBitmap`, farbles at `(0,0)`, returns an `UnacceleratedStaticBitmapImage`).
+- **`OffscreenCanvas.convertToBlob`** — `core/offscreencanvas/offscreen_canvas.cc`. A *separate* encode
+  path; without it a worker's `convertToBlob` would leak the true host hash while `getImageData` on the
+  same canvas returns farbled pixels — a cross-surface tell.
+
+Farbling is deliberately **NOT** applied in `HTMLCanvasElement::Snapshot()`. Snapshot is also the shared
+source-image path (`GetSourceImageForCanvas` → `drawImage` / `createImageBitmap` / WebGL `texImage2D`),
+so farbling there would perturb ordinary compositing **and** double-apply with the `getImageData` hook.
+Proven by the drawImage regression probe: `drawImage(A→B)+getImageData(B)` **equals**
+`direct-draw(D)+getImageData(D)` (`MATCH=true`) — i.e. `drawImage` copies unfarbled pixels and
+`getImageData` farbles exactly once. All hooks are guarded `IsRenderingContext2D()` so WebGL canvases
+stay on the WebGL pixel path (coherent with `gl.readPixels`) rather than being made inconsistent by
+2D-canvas noise. **Proven** (Chromium 152, SwiftShader): baseline `461f6aa5` → seed-A `625d2eaf` (stable
+across reads) → seed-B `2c485d78` (distinct) for `getImageData`; the same three-way result on
+`toDataURL`, `toBlob`, and `OffscreenCanvas.convertToBlob`; worker OffscreenCanvas `getImageData`
+consistent with the main thread.
+
+> **KNOWN LIMITATION — position-keyed noise.** Because the perturbation is keyed on absolute coordinate,
+> a detector that draws the SAME content at many offsets and takes the per-pixel **mode** across offsets
+> could average the ±1 noise away. Real fingerprinters draw their probe once at a fixed position, so this
+> is the same theoretical limit Brave's farbling accepts. The obvious fix (a per-read sub-seed) is
+> deliberately deferred: it would break **within-session read stability** — repeated reads of the same
+> canvas must return the identical hash, which detectors also check — so it would trade one tell for a
+> worse one. Revisit only with a scheme that is per-*content* rather than per-*read*.
+
 ### Still to author
 
-`fingerprint/canvas-farbling.patch` (seeded 2D noise across main frame + workers + OffscreenCanvas),
 WebGL **pixel farbling** + capability alignment (the limitation above), `fingerprint/audio-context.patch`
 (seeded DSP), `fingerprint/fonts.patch`, and the net layer (`net/webrtc-ip-policy`, `net/tls-ja3-ja4`,
 `net/http2-settings-order`). `screen`/`DPR` is a borderline JS-safe surface

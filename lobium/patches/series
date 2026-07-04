@@ -14,15 +14,19 @@
 core/build-gn.patch
 # core/config-channel.patch — ✅ BUILT + PROVEN on Chromium 152. Browser reads --lobium-fp-config and
 #   forwards base64 --lobium-fp-data to the renderer (cached, size-guarded, logged); the renderer's
-#   LobiumFpConfig::Current() serves it; navigator.hardwareConcurrency is the first surface. The
-#   single-value --lobium-hwc POC switch is retained as a fallback.
+#   LobiumFpConfig::Current() serves it. Surfaces hooked here (all proven): hardwareConcurrency,
+#   deviceMemory (+ client-hint header), maxTouchPoints, WebGL unmasked vendor/renderer, and canvas 2D
+#   farbling (getImageData/toDataURL/toBlob/OffscreenCanvas.convertToBlob). The single-value --lobium-hwc
+#   POC switch is retained as a fallback. See hooks.md for the per-surface hook points + code.
 core/config-channel.patch
 # core/navigator-ua-ch.patch          # NOT YET AUTHORED — navigator.* + Sec-CH-UA from config (userAgent/platform/langs/hw)
 #
-# --- Fingerprint deep surfaces (Phase 2 — the native moat) ---
+# --- Fingerprint deep surfaces (the native moat) ---
+# WebGL vendor/renderer + canvas 2D farbling are BUILT + PROVEN — they live in config-channel.patch
+# above (kept in one hook patch per pinned ref; split out only if a surface needs an independent rebase).
+# Still to author:
 # fingerprint/screen-dpr.patch        # screen/window/DPR/colorDepth from config
-# fingerprint/canvas-farbling.patch   # seeded 2D canvas noise (toDataURL/getImageData + workers)
-# fingerprint/webgl-vendor-renderer.patch  # UNMASKED_* + params + seeded pixel farbling
+# fingerprint/webgl-pixel-farbling.patch   # seeded WebGL readPixels/toDataURL noise + capability alignment
 # fingerprint/audio-context.patch     # seeded AudioContext DSP farbling
 # fingerprint/fonts.patch             # OS-accurate font enumeration
 # fingerprint/webgpu-adapter.patch    # coherent WebGPU adapter

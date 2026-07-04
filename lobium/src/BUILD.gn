@@ -8,6 +8,8 @@
 
 source_set("lobium_fp") {
   sources = [
+    "lobium_farble.cc",
+    "lobium_farble.h",
     "lobium_fp_config.cc",
     "lobium_fp_config.h",
   ]

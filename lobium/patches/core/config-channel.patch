@@ -30,17 +30,42 @@ Native surfaces hooked so far, each reading Current() (all PROVEN on Chromium 15
      software capabilities); in production the mitigation is (a) never ship SwiftShader as the real
      backend, (b) pin personas to the host GPU class, and (c) incrementally align the extension list /
      key limits / precision + per-profile pixel farbling (seeds.webgl) to the claimed GPU.
+  5. Canvas 2D seeded farbling (seeds.canvas) — deterministic ±1-LSB perturbation of R/G/B (alpha
+     untouched) on the READBACK surfaces, applied by the shared skia-free kernel lobium::FarbleCanvasRgba
+     (//components/lobium_fp/lobium_farble.cc). Keyed on (seed, absolute pixel coord, channel) so it is
+     stable-per-profile, distinct-per-seed, differs from the host, and imperceptible. Hooked at FOUR
+     readback entries so every path a fingerprinter can read is farbled IDENTICALLY and exactly once:
+       (a) getImageData — base_rendering_context_2d.cc, perturbs the private ImageData pixmap in place
+           at origin (sx,sy) so a sub-rect read matches the full-canvas read.
+       (b) toDataURL — html_canvas_element.cc, via the LobiumFarbleReadback(Snapshot) helper.
+       (c) toBlob — html_canvas_element.cc, same helper.
+       (d) OffscreenCanvas.convertToBlob — offscreen_canvas.cc (a separate encode path; without it a
+           worker's convertToBlob would leak the true host hash while getImageData is farbled).
+     Farbling is deliberately NOT applied in HTMLCanvasElement::Snapshot(): Snapshot is also the shared
+     source-image path (GetSourceImageForCanvas → drawImage / createImageBitmap / WebGL texImage2D), so
+     farbling there would perturb ordinary compositing AND double-apply with getImageData. Proven by the
+     drawImage regression probe: drawImage(A→B)+getImageData(B) EQUALS direct-draw(D)+getImageData(D)
+     (MATCH=true), i.e. drawImage copies unfarbled pixels and getImageData farbles exactly once. All
+     hooks are guarded IsRenderingContext2D() so WebGL canvases stay on the WebGL pixel path (coherent
+     with gl.readPixels) rather than being made inconsistent by 2D-canvas noise.
+     KNOWN LIMITATION (see hooks.md): the noise is position-keyed, so drawing the SAME content at many
+     offsets and taking the per-pixel mode could average the ±1 noise away. Real fingerprinters draw
+     their probe once at a fixed position, so this is the same theoretical limit Brave's farbling
+     accepts; the mitigation (a per-read sub-seed) is deferred as it would break within-session read
+     stability, which detectors also check.
 
 platform / UA-CH / languages are NOT hooked here — they are JS-safe/CDP surfaces (MASTER_PLAN §5),
 handled by the sidecar's cdp-fingerprint.ts setUserAgentOverride (see hooks.md).
 
-Five hook points:
+Eight hook points:
   1. content/browser/.../render_process_host_impl.cc — browser reads --lobium-fp-config, forwards base64 --lobium-fp-data.
   2. third_party/blink/common/.../approximated_device_memory.cc — deviceMemory single source (JS + client-hint header).
   3. third_party/blink/renderer/core/events/navigator_events.cc — maxTouchPoints.
   4. third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc — hardwareConcurrency.
   5. third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc — WebGL unmasked vendor/renderer.
-
+  6. third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc — canvas getImageData farbling.
+  7. third_party/blink/renderer/core/html/canvas/html_canvas_element.cc — canvas toDataURL/toBlob farbling (readback helper).
+  8. third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc — OffscreenCanvas.convertToBlob farbling.
 diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
 index ffdaf1716e..b9ea49e5cc 100644
 --- a/content/browser/renderer_host/render_process_host_impl.cc
@@ -249,6 +274,186 @@ index f5c0db2d1b..2b0fcd072a 100644
 +  }
    return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
  }
+ 
+diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+index a6e0435690..1aff378e86 100644
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+@@ -45,6 +45,8 @@
+ #include "build/build_config.h"
+ #include "cc/layers/texture_layer.h"
+ #include "cc/trees/layer_tree_host.h"
++#include "components/lobium_fp/lobium_farble.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "services/metrics/public/cpp/ukm_recorder.h"
+ #include "services/metrics/public/cpp/ukm_source_id.h"
+ #include "third_party/blink/public/common/features.h"
+@@ -120,6 +122,7 @@
+ #include "third_party/blink/renderer/platform/graphics/paint/paint_canvas.h"
+ #include "third_party/blink/renderer/platform/graphics/skia/skia_utils.h"
+ #include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
++#include "third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.h"
+ #include "third_party/blink/renderer/platform/graphics/static_bitmap_image_to_video_frame_copier.h"
+ #include "third_party/blink/renderer/platform/graphics/static_bitmap_image_transform.h"
+ #include "third_party/blink/renderer/platform/graphics/web_graphics_context_3d_video_frame_pool.h"
+@@ -128,6 +131,10 @@
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "third_party/skia/include/core/SkColorSpace.h"
++#include "third_party/skia/include/core/SkImage.h"
++#include "third_party/skia/include/core/SkImageInfo.h"
+ #include "ui/accessibility/accessibility_features.h"
+ #include "ui/base/resource/resource_scale_factor.h"
+ #include "ui/gfx/geometry/rect_conversions.h"
+@@ -1248,6 +1255,33 @@ const AtomicString HTMLCanvasElement::ImageSourceURL() const {
+       ImageEncoderUtils::kDefaultRequestedMimeType, 0, kFrontBuffer));
+ }
+ 
++// Lobium: return a seeded-farbled copy of a canvas READBACK snapshot (for toDataURL/toBlob), or the
++// original when unconfigured. Reads into a private RGBA8888/unpremultiplied bitmap (unpremul so RGB
++// nudges can't create invalid premultiplied pixels) so the live canvas is never touched; farbled at
++// origin (0,0), keyed identically to the getImageData hook so the two surfaces stay consistent. Applied
++// only at the toDataURL/toBlob encode entries (NOT in Snapshot, which is also the drawImage/
++// createImageBitmap source), so ordinary rendering is untouched and farbling is never applied twice.
++static scoped_refptr<StaticBitmapImage> LobiumFarbleReadback(
++    scoped_refptr<StaticBitmapImage> image) {
++  const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++  if (!cfg || !cfg->seeds.canvas || !image) {
++    return image;
++  }
++  const gfx::Size sz = image->Size();
++  const SkImageInfo info = SkImageInfo::Make(sz.width(), sz.height(), kRGBA_8888_SkColorType,
++                                             kUnpremul_SkAlphaType, SkColorSpace::MakeSRGB());
++  SkBitmap bm;
++  if (bm.tryAllocPixels(info) &&
++      image->PaintImageForCurrentFrame().readPixels(info, bm.getPixels(), bm.rowBytes(), 0, 0)) {
++    lobium::FarbleCanvasRgba(static_cast<uint8_t*>(bm.getPixels()), sz.width(), sz.height(),
++                             bm.rowBytes(), 0, 0, cfg->seeds.canvas);
++    if (sk_sp<SkImage> farbled = SkImages::RasterFromBitmap(bm)) {
++      return UnacceleratedStaticBitmapImage::Create(std::move(farbled));
++    }
++  }
++  return image;
++}
++
+ scoped_refptr<StaticBitmapImage> HTMLCanvasElement::Snapshot(
+     SourceDrawingBuffer source_buffer) const {
+   if (Size().IsEmpty()) {
+@@ -1275,6 +1309,10 @@ scoped_refptr<StaticBitmapImage> HTMLCanvasElement::Snapshot(
+     image_bitmap = CreateTransparentImage();
+   }
+ 
++  // NOTE: canvas farbling is deliberately NOT applied here. Snapshot() is the shared source-image path
++  // (GetSourceImageForCanvas -> drawImage / createImageBitmap / WebGL texImage2D), not just
++  // toDataURL/toBlob, so farbling here would perturb non-readback rendering AND double-apply with the
++  // getImageData hook. The readback farble belongs on the toDataURL/toBlob/convertToBlob encode entries.
+   return image_bitmap;
+ }
+ 
+@@ -1291,6 +1329,11 @@ String HTMLCanvasElement::ToDataURLInternal(
+           mime_type, ImageEncoderUtils::kEncodeReasonToDataURL);
+ 
+   scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(source_buffer);
++  // Lobium: farble the toDataURL readback for 2D canvases only (WebGL toDataURL is left to the WebGL
++  // pixel path so it stays coherent with gl.readPixels, not made inconsistent by 2D-canvas noise).
++  if (IsRenderingContext2D()) {
++    image_bitmap = LobiumFarbleReadback(std::move(image_bitmap));
++  }
+   if (image_bitmap) {
+     std::unique_ptr<ImageDataBuffer> data_buffer =
+         ImageDataBuffer::Create(image_bitmap);
+@@ -1396,6 +1439,10 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
+ 
+   CanvasAsyncBlobCreator* async_creator = nullptr;
+   scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(kBackBuffer);
++  // Lobium: farble the toBlob readback for 2D canvases only (same rationale as toDataURL above).
++  if (IsRenderingContext2D()) {
++    image_bitmap = LobiumFarbleReadback(std::move(image_bitmap));
++  }
+   if (image_bitmap) {
+     auto* options = ImageEncodeOptions::Create();
+     options->setType(ImageEncoderUtils::MimeTypeName(encoding_mime_type));
+diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+index 53c9f814fb..125ba00591 100644
+--- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
++++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+@@ -11,6 +11,8 @@
+ #include "base/metrics/histogram_functions.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
++#include "components/lobium_fp/lobium_farble.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
+@@ -48,6 +50,9 @@
+ #include "third_party/blink/renderer/platform/graphics/image.h"
+ #include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
+ #include "third_party/blink/renderer/platform/graphics/static_bitmap_image_transform.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "third_party/skia/include/core/SkColorSpace.h"
++#include "third_party/skia/include/core/SkImageInfo.h"
+ #include "third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.h"
+ #include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
+ #include "third_party/blink/renderer/platform/heap/thread_state.h"
+@@ -474,6 +479,27 @@ ScriptPromise<Blob> OffscreenCanvas::convertToBlob(
+ 
+   base::TimeTicks start_time = base::TimeTicks::Now();
+   scoped_refptr<StaticBitmapImage> image_bitmap = context_->GetImage();
++  // Lobium: farble the OffscreenCanvas convertToBlob readback for 2D contexts. This is a SEPARATE encode
++  // path from HTMLCanvasElement::toDataURL/toBlob, so without it a worker's convertToBlob would leak the
++  // true host canvas hash while getImageData on the same canvas returns farbled pixels — a cross-surface
++  // tell. Read into a private RGBA8888/unpremultiplied bitmap, farble at origin (0,0) with seeds.canvas
++  // (identical keying to getImageData), and swap in a fresh raster image; live canvas untouched.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->seeds.canvas && image_bitmap && context_->IsRenderingContext2D()) {
++    const gfx::Size sz = image_bitmap->Size();
++    const SkImageInfo info = SkImageInfo::Make(sz.width(), sz.height(), kRGBA_8888_SkColorType,
++                                               kUnpremul_SkAlphaType, SkColorSpace::MakeSRGB());
++    SkBitmap bm;
++    if (bm.tryAllocPixels(info) &&
++        image_bitmap->PaintImageForCurrentFrame().readPixels(info, bm.getPixels(), bm.rowBytes(), 0,
++                                                             0)) {
++      lobium::FarbleCanvasRgba(static_cast<uint8_t*>(bm.getPixels()), sz.width(), sz.height(),
++                               bm.rowBytes(), 0, 0, cfg->seeds.canvas);
++      if (sk_sp<SkImage> farbled = SkImages::RasterFromBitmap(bm)) {
++        image_bitmap = UnacceleratedStaticBitmapImage::Create(std::move(farbled));
++      }
++    }
++  }
+   if (image_bitmap) {
+     auto* resolver = MakeGarbageCollected<ScriptPromiseResolver<Blob>>(
+         script_state, exception_state.GetContext());
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+index fd13b97510..0f0c16bca7 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -27,6 +27,8 @@
+ #include "cc/paint/paint_flags.h"
+ #include "cc/paint/paint_image.h"
+ #include "cc/paint/record_paint_canvas.h"
++#include "components/lobium_fp/lobium_farble.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "components/viz/common/resources/shared_image_format_utils.h"
+ #include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
+ #include "third_party/blink/public/common/metrics/document_update_reason.h"
+@@ -510,6 +512,15 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+       SkIRect bounds =
+           snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
+       DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
++    } else if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++               cfg && cfg->seeds.canvas) {
++      // Lobium: seeded canvas farbling. image_data_pixmap is the freshly-allocated, private ImageData
++      // buffer (RGBA8888/unpremultiplied) — never the live canvas — so perturbing it in place is safe.
++      // Origin (sx, sy) makes a sub-rect read perturb each pixel identically to a full-canvas toDataURL.
++      lobium::FarbleCanvasRgba(
++          static_cast<uint8_t*>(image_data_pixmap.writable_addr()),
++          image_data_pixmap.width(), image_data_pixmap.height(),
++          image_data_pixmap.rowBytes(), sx, sy, cfg->seeds.canvas);
+     }
+   }
  
 diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 index a977030857..7b242d0a8d 100644
