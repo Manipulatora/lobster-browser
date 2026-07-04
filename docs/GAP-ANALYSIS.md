@@ -1,5 +1,11 @@
 # Gap Analysis & Self-Assessment — Lobster Browser
 
+> ⚠️ **HISTORICAL SNAPSHOT (~end of Day 4).** For the **current** status and the prioritized
+> remaining-work breakdown, see **[`PROJECT-STATUS.md`](PROJECT-STATUS.md)** — it supersedes this doc for
+> "where are we now." Much of "gap #1: Lobium not built" is now **done**: Lobium is built from source with
+> six proven native surfaces + a live-detector gate. This doc is kept for the reasoning trail and its
+> mapping of gaps → detailed specs, which remain valid.
+>
 > An honest mid-sprint review (~end of Day 4). It reminisces the path built so far, confirms what is
 > genuinely solid, and admits the gaps between "green demo" and a **perfect Octo-class product**. It
 > then maps every gap to the detailed spec that now closes it ([`docs/specs/`](specs/)) and to a

@@ -257,6 +257,11 @@ Trunk-based, one PR per ticket, squash merge, Conventional Commits + co-author t
 
 ## 10. The plan (parallel tracks + milestones)
 
+> **Live execution status is tracked in [`PROJECT-STATUS.md`](PROJECT-STATUS.md)**, not in this
+> day-numbered plan. The Day 0–10 schedule below is the original strategy; the actual state (Lobium built
+> with six native surfaces + a live-detector gate; the prioritized remaining work E‑1..E‑10 + Phases A–D)
+> is in PROJECT-STATUS. Update PROJECT-STATUS as work moves.
+
 `[C]` Claude · `[X]` Codex · `[C+X]` paired. Claude reviews all P0/engine/Lobium PRs.
 **Track A** Desktop Core · **Track B** Engine runner & Fingerprint · **Track C** Backend/SaaS · **Track D** Automation API + SDK · **Track E** QA/Validation · **Track F** Lobium (parallel, longer horizon).
 
