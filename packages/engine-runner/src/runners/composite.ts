@@ -46,6 +46,15 @@ export class CompositeRunner implements EngineRunner {
 
     const handle = await launcher(ctx);
     this.running.set(params.profileId, handle);
+    // Evict the profile if the browser dies out-of-band (crash / user closes the window). Without this
+    // the map entry survives and `launch` rejects with "already running" forever — a crash would brick
+    // the profile until restart. Guarded so we only delete THIS handle (a fast relaunch may have
+    // replaced it). Explicit stop() also deletes; Map.delete is idempotent.
+    handle.onClose?.(() => {
+      if (this.running.get(params.profileId) === handle) {
+        this.running.delete(params.profileId);
+      }
+    });
     return {
       profileId: params.profileId,
       pid: handle.pid,

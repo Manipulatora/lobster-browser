@@ -13,11 +13,17 @@
 > engine consumes), `packages/engine-runner/src/runners/types.ts` (the launcher contract Lobium plugs
 > into), `docs/contracts/sidecar-ipc.md` (`launch`/`startProfile`).
 
-**Honest status up front.** Today `lobium/` contains a *scaffold*: a dry-run `build.sh`, an example
-`gn-args.gn.example`, an **empty** `patches/series`, and prose specs (`config-channel.md`,
-`patches/README.md`). No Chromium tree has been fetched, no patch has been written, no binary exists.
-The interim `chromium` engine (ungoogled + patchright) carries the product today, and the `lobium`
-engine kind is served by that same patched Chromium until this plan is executed. This document is the
+**Honest status up front.** _(Updated — the original "scaffold, no binary" note below is stale; see
+[PROJECT-STATUS §2.1](../PROJECT-STATUS.md).)_ **Chromium 152.0.7928.0 is built from source** and carries
+~10 native fingerprint surfaces (config channel + navigator/deviceMemory/maxTouchPoints, WebGL
+vendor/renderer, canvas & Web Audio farbling, screen/DPR, UA/platform in all contexts), each proven
+**on SwiftShader** (real-GPU validation is the pending keystone, ENG-2). The native launcher wires the
+binary into the product launch path when `LOBSTER_LOBIUM_BIN` is set (RUN-1, proven live); otherwise the
+interim `chromium` engine (patchright) still serves `lobium` launches.
+
+_Originally (Day-4):_ `lobium/` was a *scaffold*: a dry-run `build.sh`, an example `gn-args.gn.example`,
+an **empty** `patches/series`, and prose specs. No Chromium tree had been fetched, no patch written, no
+binary existed; the interim `chromium` engine carried the product. This document is the
 **target** design plus the concrete first steps (tickets **T-010**, **T-011**). Every subsection is
 tagged **status: done / partial / planned**.
 

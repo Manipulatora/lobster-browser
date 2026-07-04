@@ -1,4 +1,9 @@
-import { applyGeoToFingerprint, applyOverrides, deriveFingerprint } from '@lobster/fingerprint';
+import {
+  applyGeoToFingerprint,
+  applyOverrides,
+  deriveFingerprint,
+  validateFingerprintCoherence,
+} from '@lobster/fingerprint';
 import { deriveGeoFromExitIp } from '@lobster/proxy';
 import type { LaunchParams, LaunchResult, StartProfileParams } from '@lobster/shared-types';
 import type { EngineRunner } from './runner.js';
@@ -22,10 +27,28 @@ export async function startProfile(
     try {
       const geo = await deriveGeoFromExitIp(params.proxy);
       fingerprint = applyGeoToFingerprint(fingerprint, geo);
-    } catch {
-      // Best-effort: if the proxy exit-IP geo lookup fails, launch with the seed-derived locale
-      // rather than failing the launch. Proxy quality is surfaced separately (testProxy).
+    } catch (err) {
+      // Fail-open on a transient exit-IP lookup — but NOT silently. A proxied profile whose
+      // locale/timezone don't match the exit IP is a top-tier bot signal, so surface it loudly (the
+      // sidecar forwards stderr) rather than quietly shipping a mismatched persona.
+      console.warn(
+        `[startProfile] proxy exit-IP geo derivation failed for profile ${params.profileId}; ` +
+          'launching with the seed-derived locale/timezone, which may not match the proxy exit — ' +
+          (err instanceof Error ? err.message : String(err)),
+      );
     }
+  }
+
+  // Fail-closed coherence gate. The derived persona is always coherent, but user overrides (or a
+  // failed geo overlay) can produce an IMPOSSIBLE device — e.g. macOS carrying a Direct3D renderer, or
+  // a timezone that contradicts the locale. Launching such an identity defeats the entire anti-detect
+  // purpose (it is trivially flagged), so refuse it with the specific violations instead.
+  const issues = validateFingerprintCoherence(fingerprint);
+  if (issues.length > 0) {
+    throw new Error(
+      `refusing to launch profile ${params.profileId}: incoherent fingerprint ` +
+        `(${issues.length} issue${issues.length === 1 ? '' : 's'}) — ${issues.join('; ')}`,
+    );
   }
 
   const launchParams: LaunchParams = {

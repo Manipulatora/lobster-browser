@@ -12,7 +12,7 @@
 | Local store | **SQLite** (rusqlite), AES-encrypted blobs |
 | Local automation API | **Rust Axum** HTTP+WS on a fixed loopback port (default 53211) |
 | Engine runner (sidecar) | **Node/TS**, patchright driving Chromium (and Lobium's interim patched Chromium), Playwright base. |
-| Fingerprint generation | **Apify fingerprint-suite** (`fingerprint-generator` + `fingerprint-injector`) |
+| Fingerprint generation | **Internal coherent device catalog** (`packages/fingerprint`, deterministic FNV-1a → mulberry32). _(Superseded: originally Apify fingerprint-suite; dropped in commit 9499136 to own the model + drop the supply-chain dependency — see [PROJECT-STATUS](../PROJECT-STATUS.md).)_ |
 | **Lobium** (flagship) | **Chromium fork** via `depot_tools` + GN/ninja + quilt patch series; native fingerprinting + BoringSSL TLS/JA4 + per-profile config channel (see ADR-0004) |
 | Interim engine | **Chromium** — prebuilt ungoogled-chromium (default, driven via patchright), pinned & vendored |
 | Proxy tooling | Per-profile HTTP/SOCKS5; **mitmproxy** for header/geo canonicalization |

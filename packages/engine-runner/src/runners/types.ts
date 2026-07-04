@@ -20,6 +20,12 @@ export interface LaunchHandle {
   /** host:port for Selenium `debuggerAddress`. */
   debuggerAddress: string;
   close(): Promise<void>;
+  /**
+   * Register a listener fired when the browser closes for ANY reason — explicit `close()`, a crash, or
+   * the user closing the window externally. The CompositeRunner uses it to evict the profile from its
+   * running map so a stale entry can't block relaunch after a crash. Optional so fakes/tests can omit it.
+   */
+  onClose?(listener: () => void): void;
 }
 
 /**

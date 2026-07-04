@@ -2,29 +2,36 @@
 //!
 //! Responsibilities wired up here:
 //!   * initialize structured logging (`tracing`),
-//!   * start the local automation API on a background Tokio runtime (off the UI thread),
+//!   * spawn the engine-runner sidecar + serve the local automation API on Tauri's shared async runtime,
 //!   * open the local SQLite profile store and expose profile IPC commands to the UI,
 //!   * build the Tauri app and register the shell plugin.
 //!
-//! Engine launch (`launch_profile`/`stop_profile`) delegates to the engine-runner sidecar; that
-//! wiring lands in T-002c once an engine binary is provisioned. See docs/MASTER_PLAN.md.
+//! Engine launch (`launch_profile`/`stop_profile`) drives the shared sidecar via
+//! `local_api::start_profile_via_sidecar` — the SAME path the local automation API uses — so the UI
+//! Launch button and external automation clients behave identically. See docs/MASTER_PLAN.md.
 
 mod local_api;
 mod profile_store;
 mod sidecar;
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tauri::{Manager, State};
 
 use profile_store::{CreateProfileInput, Profile, UpdateProfilePatch};
+use sidecar::SidecarClient;
 
 /// Port the local automation API binds to on 127.0.0.1. Loopback-only by design.
 const LOCAL_API_PORT: u16 = 53211;
 
-/// Shared desktop state: the open connection to the local SQLite profile store.
+/// Shared desktop state: the local SQLite profile store, the engine-runner sidecar (shared with the
+/// local automation API so the UI Launch button and the HTTP API drive the SAME launch path), and the
+/// per-profile user-data-dir root. `sidecar` is `None` only if the sidecar failed to spawn at startup.
 struct AppState {
     db: Arc<Mutex<rusqlite::Connection>>,
+    sidecar: Option<Arc<SidecarClient>>,
+    profiles_dir: PathBuf,
 }
 
 /// Returns the desktop agent version, sourced from Cargo at compile time.
@@ -78,27 +85,32 @@ fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), String> 
     }
 }
 
+/// Launch a profile's engine via the shared sidecar (same path the local automation API uses) and
+/// return its CDP endpoints (`{ profileId, pid, ws, debuggerAddress }`) so the UI can show/connect.
 #[tauri::command]
-fn launch_profile(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    // The actual launch goes through the local automation API, which owns the engine-runner sidecar.
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    profile_store::get(&conn, &id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("profile {id} not found"))?;
-    Err(format!(
-        "launch profile {id} via the local automation API: POST http://127.0.0.1:{LOCAL_API_PORT}/api/v1/profile/start"
-    ))
+async fn launch_profile(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let sidecar = state
+        .sidecar
+        .as_ref()
+        .ok_or("engine-runner sidecar is not available (failed to start)")?;
+    local_api::start_profile_via_sidecar(&state.db, sidecar, &state.profiles_dir, &id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
+/// Stop a running profile via the shared sidecar.
 #[tauri::command]
-fn stop_profile(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    profile_store::get(&conn, &id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("profile {id} not found"))?;
-    Err(format!(
-        "stop profile {id} via the local automation API: POST http://127.0.0.1:{LOCAL_API_PORT}/api/v1/profile/stop"
-    ))
+async fn stop_profile(state: State<'_, AppState>, id: String) -> Result<serde_json::Value, String> {
+    let sidecar = state
+        .sidecar
+        .as_ref()
+        .ok_or("engine-runner sidecar is not available (failed to start)")?;
+    local_api::stop_profile_via_sidecar(sidecar, &id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Application entrypoint invoked by `main.rs` (and the mobile entry macro later).
@@ -110,46 +122,54 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            // Open the local profile store under the OS app-data dir and share it as state.
+            // Open the local profile store under the OS app-data dir.
             let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let conn =
                 profile_store::init(dir.join("profiles.sqlite")).map_err(|e| e.to_string())?;
             let db = Arc::new(Mutex::new(conn));
-            app.manage(AppState { db: db.clone() });
 
-            // Start the local automation API on a dedicated OS thread (its own Tokio runtime), sharing
-            // the store and an engine-runner sidecar. It never contends with Tauri's event loop.
             let profiles_dir = dir.join("profiles");
             std::fs::create_dir_all(&profiles_dir).map_err(|e| e.to_string())?;
             let api_key = std::env::var("LOBSTER_API_KEY").ok();
-            std::thread::Builder::new()
-                .name("lobster-local-api".into())
-                .spawn(move || {
-                    let runtime = tokio::runtime::Runtime::new()
-                        .expect("failed to start Tokio runtime for the local automation API");
-                    runtime.block_on(async move {
-                        let sidecar_js = std::env::var("LOBSTER_SIDECAR")
-                            .unwrap_or_else(|_| "engine-runner/index.js".to_string());
-                        match sidecar::SidecarClient::spawn("node", &sidecar_js).await {
-                            Ok(sidecar) => {
-                                let state = Arc::new(local_api::LocalApiState {
-                                    db,
-                                    sidecar,
-                                    profiles_dir,
-                                    api_key,
-                                });
-                                if let Err(err) = local_api::serve(LOCAL_API_PORT, state).await {
-                                    tracing::error!(%err, "local automation API terminated");
-                                }
-                            }
-                            Err(err) => {
-                                tracing::error!(%err, "failed to spawn engine-runner sidecar");
-                            }
-                        }
-                    });
-                })
-                .expect("failed to spawn local automation API thread");
+
+            // Spawn the engine-runner sidecar ONCE on Tauri's shared async runtime, so the UI Launch
+            // command and the local automation API drive the SAME process over the SAME runtime's
+            // stdio (no cross-runtime pipe). A spawn failure degrades gracefully: the app still opens,
+            // and launches report the sidecar is unavailable rather than crashing startup.
+            let sidecar_js = std::env::var("LOBSTER_SIDECAR")
+                .unwrap_or_else(|_| "engine-runner/index.js".to_string());
+            let sidecar = match tauri::async_runtime::block_on(SidecarClient::spawn(
+                "node",
+                &sidecar_js,
+            )) {
+                Ok(sc) => Some(sc),
+                Err(err) => {
+                    tracing::error!(%err, "failed to spawn engine-runner sidecar; launches unavailable");
+                    None
+                }
+            };
+
+            app.manage(AppState {
+                db: db.clone(),
+                sidecar: sidecar.clone(),
+                profiles_dir: profiles_dir.clone(),
+            });
+
+            // Start the local automation API on the same runtime, sharing the store + sidecar.
+            if let Some(sidecar) = sidecar {
+                let state = Arc::new(local_api::LocalApiState {
+                    db,
+                    sidecar,
+                    profiles_dir,
+                    api_key,
+                });
+                tauri::async_runtime::spawn(async move {
+                    if let Err(err) = local_api::serve(LOCAL_API_PORT, state).await {
+                        tracing::error!(%err, "local automation API terminated");
+                    }
+                });
+            }
 
             Ok(())
         })

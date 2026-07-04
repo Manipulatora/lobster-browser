@@ -133,8 +133,15 @@ mod tests {
     /// Spawns the built sidecar and round-trips `ping` + `status` (no browser needed).
     #[tokio::test]
     async fn ping_and_status_roundtrip() {
-        let sidecar_js = std::env::var("LOBSTER_SIDECAR")
-            .unwrap_or_else(|_| "../../packages/engine-runner/dist/index.js".to_string());
+        // Resolve relative to THIS crate, not the test's CWD (which was wrong before: the crate lives
+        // at apps/desktop/src-tauri, so the sidecar bundle is THREE levels up under packages/). Using
+        // CARGO_MANIFEST_DIR makes `cargo test --lib` pass without needing LOBSTER_SIDECAR set.
+        let sidecar_js = std::env::var("LOBSTER_SIDECAR").unwrap_or_else(|_| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../packages/engine-runner/dist/index.js")
+                .to_string_lossy()
+                .into_owned()
+        });
         let client = SidecarClient::spawn("node", &sidecar_js)
             .await
             .expect("spawn sidecar");

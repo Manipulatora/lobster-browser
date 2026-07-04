@@ -9,7 +9,7 @@
 //! dev. Per-key rate limiting is a follow-up.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -75,6 +75,47 @@ fn authorized(state: &LocalApiState, headers: &HeaderMap) -> bool {
     }
 }
 
+/// Start a profile through the engine-runner sidecar. Shared by the local HTTP API and the desktop
+/// `launch_profile` Tauri command so both entry points drive the SAME launch path (derive fingerprint
+/// from the stored seed + overrides + proxy geo, then launch). Returns the sidecar's `startProfile`
+/// result (`{ profileId, pid, ws, debuggerAddress }`).
+pub async fn start_profile_via_sidecar(
+    db: &Arc<Mutex<Connection>>,
+    sidecar: &SidecarClient,
+    profiles_dir: &Path,
+    profile_id: &str,
+) -> anyhow::Result<Value> {
+    let profile = {
+        let conn = db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("profile store lock poisoned"))?;
+        profile_store::get(&conn, profile_id)?
+            .ok_or_else(|| anyhow::anyhow!("profile {profile_id} not found"))?
+    };
+    let user_data_dir = profiles_dir.join(&profile.id);
+    let params = json!({
+        "profileId": profile.id,
+        "engine": profile.engine,
+        "os": profile.os,
+        "fingerprintSeed": profile.fingerprint_seed,
+        "fingerprintOverrides": profile.fingerprint_overrides,
+        "proxy": profile.proxy,
+        "userDataDir": user_data_dir.to_string_lossy(),
+        "headless": false,
+    });
+    sidecar.call("startProfile", params).await
+}
+
+/// Stop a running profile through the sidecar. Shared by the HTTP API and the Tauri command.
+pub async fn stop_profile_via_sidecar(
+    sidecar: &SidecarClient,
+    profile_id: &str,
+) -> anyhow::Result<Value> {
+    sidecar
+        .call("stop", json!({ "profileId": profile_id }))
+        .await
+}
+
 #[derive(Deserialize)]
 struct ProfileIdBody {
     #[serde(rename = "profileId")]
@@ -118,46 +159,14 @@ async fn profile_start(
         return (StatusCode::UNAUTHORIZED, ApiResponse::err("unauthorized"));
     }
 
-    let profile = {
-        let conn = match state.db.lock() {
-            Ok(conn) => conn,
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ApiResponse::err("db lock"),
-                )
-            }
-        };
-        match profile_store::get(&conn, &body.profile_id) {
-            Ok(Some(profile)) => profile,
-            Ok(None) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    ApiResponse::err(format!("profile {} not found", body.profile_id)),
-                )
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    ApiResponse::err(e.to_string()),
-                )
-            }
-        }
-    };
-
-    let user_data_dir = state.profiles_dir.join(&profile.id);
-    let params = json!({
-        "profileId": profile.id,
-        "engine": profile.engine,
-        "os": profile.os,
-        "fingerprintSeed": profile.fingerprint_seed,
-        "fingerprintOverrides": profile.fingerprint_overrides,
-        "proxy": profile.proxy,
-        "userDataDir": user_data_dir.to_string_lossy(),
-        "headless": false,
-    });
-
-    match state.sidecar.call("startProfile", params).await {
+    match start_profile_via_sidecar(
+        &state.db,
+        &state.sidecar,
+        &state.profiles_dir,
+        &body.profile_id,
+    )
+    .await
+    {
         Ok(result) => (StatusCode::OK, ApiResponse::ok(result)),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -174,11 +183,7 @@ async fn profile_stop(
     if !authorized(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, ApiResponse::err("unauthorized"));
     }
-    match state
-        .sidecar
-        .call("stop", json!({ "profileId": body.profile_id }))
-        .await
-    {
+    match stop_profile_via_sidecar(&state.sidecar, &body.profile_id).await {
         Ok(_) => (
             StatusCode::OK,
             ApiResponse::ok(json!({ "profileId": body.profile_id, "stopped": true })),

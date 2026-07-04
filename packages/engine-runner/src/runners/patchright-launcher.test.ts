@@ -35,8 +35,8 @@ class FakeContext {
   async newPage(): Promise<Page> {
     return {};
   }
-  on(_event: 'page', handler: (page: Page) => void): void {
-    this.pageHandlers.push(handler);
+  on(event: 'page' | 'close', handler: (page: Page) => void): void {
+    if (event === 'page') this.pageHandlers.push(handler);
   }
   async close(): Promise<void> {
     this.closeCount += 1;

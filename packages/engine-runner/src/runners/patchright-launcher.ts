@@ -33,6 +33,8 @@ interface PersistentContextOptions {
   locale?: string;
   timezoneId?: string;
   geolocation?: PwGeolocation;
+  /** Override the browser binary (the native Lobium launcher points this at the from-source build). */
+  executablePath?: string;
 }
 type PwPage = object;
 interface PwContext {
@@ -40,6 +42,7 @@ interface PwContext {
   pages(): PwPage[];
   newPage(): Promise<PwPage>;
   on(event: 'page', handler: (page: PwPage) => void): void;
+  on(event: 'close', handler: () => void): void;
   grantPermissions(permissions: string[], options?: { origin?: string }): Promise<void>;
   close(): Promise<void>;
 }
@@ -86,6 +89,14 @@ export interface PatchrightLauncherOptions {
   headless?: boolean;
   /** Extra Chromium flags (e.g. `--no-sandbox` in containers/CI). */
   extraArgs?: string[];
+  /** Override the browser binary — the native Lobium launcher points this at the from-source build. */
+  executablePath?: string;
+  /**
+   * Per-launch async args provider, run just before spawn. The native Lobium launcher uses it to write
+   * the per-profile `lobium-fp.json` and return its `--lobium-fp-config=<path>` flag, so the native
+   * config channel is wired up on every real launch (not just the detector harness).
+   */
+  extraArgsFor?: (ctx: LaunchContext) => Promise<string[]> | string[];
 }
 
 /**
@@ -128,6 +139,8 @@ export async function configureLaunchedContext(
       ws,
       debuggerAddress: `127.0.0.1:${port}`,
       close: () => context.close(),
+      // Fires on crash / external window close too, so the runner can evict a dead profile.
+      onClose: (listener) => context.on('close', listener),
     };
   } catch (err) {
     await context.close().catch(() => {});
@@ -138,7 +151,13 @@ export async function configureLaunchedContext(
 export function createPatchrightLauncher(opts: PatchrightLauncherOptions = {}): Launcher {
   return async (ctx: LaunchContext): Promise<LaunchHandle> => {
     const chromium = await loadChromium();
-    const args = [...ctx.options.args, ...(opts.extraArgs ?? []), '--remote-debugging-port=0'];
+    const dynamicArgs = opts.extraArgsFor ? await opts.extraArgsFor(ctx) : [];
+    const args = [
+      ...ctx.options.args,
+      ...(opts.extraArgs ?? []),
+      ...dynamicArgs,
+      '--remote-debugging-port=0',
+    ];
 
     const options: PersistentContextOptions = {
       headless: opts.headless ?? ctx.options.headless,
@@ -148,6 +167,7 @@ export function createPatchrightLauncher(opts: PatchrightLauncherOptions = {}): 
       locale: ctx.emulation.locale,
       timezoneId: ctx.emulation.timezoneId,
     };
+    if (opts.executablePath) options.executablePath = opts.executablePath;
     if (ctx.options.proxy) options.proxy = ctx.options.proxy;
     if (ctx.emulation.geolocation) options.geolocation = ctx.emulation.geolocation;
 

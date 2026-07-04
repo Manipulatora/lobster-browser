@@ -1,3 +1,4 @@
+import { createLobiumLauncher, isLobiumAvailable } from './lobium-launcher.js';
 import { createPatchrightLauncher, isChromiumAvailable } from './patchright-launcher.js';
 import type { LaunchContext, LaunchHandle, LauncherRegistry } from './types.js';
 
@@ -41,10 +42,17 @@ export interface BuildLaunchersOptions {
  */
 export async function buildLaunchers(opts: BuildLaunchersOptions = {}): Promise<LauncherRegistry> {
   const chromiumReady = await isChromiumAvailable();
+  const lobiumReady = isLobiumAvailable();
   return {
-    // Lobium is the flagship custom Chromium build; until it ships, the patched interim Chromium
-    // serves `lobium` launches too.
-    lobium: chromiumReady ? createPatchrightLauncher(opts) : notProvisioned('lobium'),
+    // Lobium is the flagship custom Chromium build. When its binary is provisioned
+    // (`LOBSTER_LOBIUM_BIN`), `lobium` launches spawn it with the native config channel wired up
+    // (`--lobium-fp-config`); otherwise it falls back to the interim patched Chromium so dev/CI still
+    // works — deep surfaces are then interim-only until the native binary ships.
+    lobium: lobiumReady
+      ? createLobiumLauncher(opts)
+      : chromiumReady
+        ? createPatchrightLauncher(opts)
+        : notProvisioned('lobium'),
     chromium: chromiumReady ? createPatchrightLauncher(opts) : notProvisioned('chromium'),
   };
 }

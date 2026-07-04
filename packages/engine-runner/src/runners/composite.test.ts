@@ -96,6 +96,35 @@ test('status lists running instances; stop removes them', async () => {
   assert.equal(status.running[0]?.profileId, 'b');
 });
 
+test('a crashed / externally-closed browser is evicted so the profile can relaunch', async () => {
+  let closeListener: (() => void) | undefined;
+  const registry: LauncherRegistry = {
+    chromium: async (ctx: LaunchContext): Promise<LaunchHandle> => ({
+      pid: 1,
+      ws: `ws://127.0.0.1:9222/${ctx.profileId}`,
+      debuggerAddress: '127.0.0.1:9222',
+      close: () => Promise.resolve(),
+      onClose: (l) => {
+        closeListener = l;
+      },
+    }),
+  };
+  const runner = new CompositeRunner(registry);
+  await runner.launch(params('crashy'));
+  assert.equal((await runner.status({})).running.length, 1);
+  // While tracked as running, a relaunch is (correctly) blocked.
+  await assert.rejects(() => runner.launch(params('crashy')), /already running/);
+
+  // Simulate the browser dying out-of-band (crash / user closed the window).
+  assert.ok(closeListener, 'the launcher registered an onClose listener');
+  closeListener?.();
+
+  // The stale entry is gone and the profile relaunches cleanly (no "already running" brick).
+  assert.equal((await runner.status({})).running.length, 0);
+  await runner.launch(params('crashy'));
+  assert.equal((await runner.status({})).running.length, 1);
+});
+
 test('stopping a non-running profile throws', async () => {
   const runner = new CompositeRunner(fakeRegistry([]));
   await assert.rejects(() => runner.stop({ profileId: 'ghost' }), /not running/);

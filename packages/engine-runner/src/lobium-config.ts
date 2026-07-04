@@ -50,7 +50,8 @@ export interface LobiumConfig {
 }
 
 export interface BuildLobiumConfigOptions {
-  proxy?: ProxyConfig;
+  /** Non-secret proxy summary — only type/host/port are recorded (credentials never touch this file). */
+  proxy?: Pick<ProxyConfig, 'type' | 'host' | 'port'>;
   /** The profile's fingerprint seed; farbling seeds derive from it (else from a fingerprint signature). */
   seed?: string;
 }
