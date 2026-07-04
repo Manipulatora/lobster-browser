@@ -21,7 +21,11 @@ export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOption
     '--no-default-browser-check',
     '--disable-blink-features=AutomationControlled',
     `--lang=${fingerprint.locale.locale}`,
-    `--window-size=${fingerprint.screen.width},${fingerprint.screen.height}`,
+    // Size the window to the AVAILABLE area (screen minus taskbar/menu bar), i.e. a maximized window —
+    // NOT the full screen. Otherwise outerHeight == screen.height > screen.availHeight, an incoherence
+    // (a real window can't be taller than the available work area). availWidth/Height come from the
+    // coherent persona.
+    `--window-size=${fingerprint.screen.availWidth},${fingerprint.screen.availHeight}`,
     // WebRTC leak protection. Chrome already hides the private IP behind mDNS (.local candidates);
     // the real risk is the PUBLIC IP leaking via a STUN/srflx candidate that bypasses the proxy.
     // With a proxy we force `disable_non_proxied_udp`: WebRTC may only use paths it can route through

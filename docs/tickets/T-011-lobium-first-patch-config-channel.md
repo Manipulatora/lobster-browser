@@ -2,7 +2,7 @@
 
 - **Pillar/Track:** F · Lobium
 - **Assignee:** Claude
-- **Status:** in progress — config channel BUILT + PROVEN; six native surfaces live (see progress log)
+- **Status:** in progress — config channel BUILT + PROVEN; seven native surfaces live + a live-detector gate (see progress log)
 - **Depends on:** T-010 (a working build)
 
 ## Goal
@@ -67,5 +67,20 @@ upstream 152.
   this Chrome; the value comes via the CDP reduced-UA path). The native moat is reserved for surfaces CDP
   genuinely cannot reach (the deep surfaces above). The acceptance criterion is therefore met against a
   deep surface (WebGL/canvas persona differs by config) rather than UA.
-- **Still to author (this ticket's follow-ups):** WebGL pixel farbling + capability alignment, AudioContext
-  DSP farbling, font enumeration, and the net/TLS layer — each reuses this same proven channel.
+- **Screen / devicePixelRatio** (`fingerprint/screen-dpr.patch`) — persona screen geometry + colour depth
+  + DPR from the config, via `Screen::GetRect`/`colorDepth` and the DPR through BOTH `window.devicePixelRatio`
+  and the CSS media-query path (`MediaValues`) so `matchMedia` agrees. Closed a real detected tell (every
+  headless profile reported the default 800×600). Passed a 2-lane adversarial review (8/12 confirmed): the
+  HIGH matchMedia-DPR cross-check lie was fixed + re-proven; the remaining findings (macOS `availTop`,
+  the permission-gated Window-Management API surfaces, the headful outer-geometry clamp) are documented +
+  deferred in `hooks.md`.
+- **Live-detector gate** (`ci/validation/lobium-detect.mjs`) — launches the REAL Lobium binary with a full
+  coherent persona and scores it against bot.sannysoft.com + direct native-surface assertions. Currently
+  **9/9 surfaces applied, sannysoft 0-failed, per-profile-diverse**. This gate is what surfaced the UA-CH
+  and screen tells fixed above.
+- **Coherence fixes found via the gate:** the UA-CH version leak (persona claimed Chrome 151 while
+  `getHighEntropyValues(['fullVersionList'])` leaked the real 152 build) — fixed by pinning the catalog UA
+  to the engine version + emitting a coherent `fullVersionList`.
+- **Still to author (this ticket's follow-ups):** WebGL pixel farbling + capability alignment, the audio
+  upstream taps (AudioWorklet/ScriptProcessorNode), the screen/DPR follow-ups, font enumeration, and the
+  net/TLS layer — each reuses this same proven channel.

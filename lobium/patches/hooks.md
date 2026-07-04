@@ -4,8 +4,9 @@ Each hook patch is a **small** diff into an existing Chromium file that routes a
 `lobium::LobiumFpConfig::Current()` (the reader in `../src/`). The insertion points + code are given
 here so a build engineer finalizes them against the pinned checkout (`quilt push -f` → edit → `quilt
 refresh`) — the exact line numbers shift per Chromium ref, which is why the series ships as intent +
-code rather than frozen context diffs. Three deep surfaces (WebGL vendor/renderer, canvas 2D farbling,
-Web Audio farbling) are BUILT + PROVEN; fonts/TLS and the audio upstream taps remain to author.
+code rather than frozen context diffs. Four surfaces (WebGL vendor/renderer, canvas 2D farbling, Web
+Audio farbling, screen/DPR) are BUILT + PROVEN; fonts/TLS, the audio upstream taps, and the screen/DPR
+follow-ups remain to author.
 
 ## `core/build-gn.patch` — register the added module ✅ BUILT
 
@@ -205,14 +206,56 @@ under a seed (`maxdiff 0`) — real/app/playback audio is never corrupted.
 >   float/byte cross-check is near-inert; farbling them independently would risk a coarser ±1-LSB tell. If
 >   ever needed, re-quantize from the already-farbled float buffer (coherent), not independent byte noise.
 
+### Screen / devicePixelRatio — ✅ BUILT + PROVEN
+
+Reports the persona's screen geometry + DPR (from the config's already-parsed `screen.*`) instead of the
+host display's — closing a real tell the native detector run caught: every headless profile reported the
+default **800×600** (and, headful, the host monitor's real size), contradicting the persona. Done
+**natively** (not via CDP `setDeviceMetricsOverride`, which mutates the real viewport with layout side
+effects) so only the queried values change. Ships as `fingerprint/screen-dpr.patch`; all hooks guard on
+the config being present (else the real `GetScreenInfo` path is unchanged); no config change (screen.*
+already parsed).
+
+- **`Screen::GetRect`** (`core/frame/screen.cc`) — the SINGLE shared source for
+  `width`/`height`/`availWidth`/`availHeight`/`availLeft`/`availTop`, so one hook keeps them all
+  coherent (persona rect in CSS px). Adversarial review **confirmed** this shared hook does not corrupt
+  layout / media queries / fullscreen — only the JS-visible `screen.*`.
+- **`Screen::colorDepth`** (`core/frame/screen.cc`) — persona colour depth (`pixelDepth` delegates here).
+- **DPR through BOTH sources** — `LocalDOMWindow::devicePixelRatio` (`core/frame/local_dom_window.cc`)
+  **and** `MediaValues::CalculateDevicePixelRatio` (`core/css/media_values.cc`). Overriding only the
+  window getter left `matchMedia('(resolution: Xdppx)')` / `-webkit-device-pixel-ratio` reporting the
+  **real host DPR** — an adversarial-review **HIGH** finding: a guaranteed, no-permission,
+  trivially-scriptable lie for any persona whose DPR ≠ host DPR (a 2× retina persona on a 1× host). The
+  MediaValues-level hook makes the media path agree without touching real raster scale.
+
+The sidecar sizes the launch window to the **available area** (`availWidth × availHeight` — a maximized
+window), not the full screen, so `window.outerWidth/Height ≤ screen.avail*` stays coherent
+(`engine-runner/launch.ts`).
+
+**Proven** (Chromium 152, SwiftShader): baseline `800×600` → persona `1920×1080` (Windows dpr1) /
+`1512×982` (macOS dpr2); DPR coherent across `window.devicePixelRatio` **and** matchMedia resolution +
+`-webkit-device-pixel-ratio` (retina persona reports 2 everywhere); `outerHeight ≤ availHeight`. Detector
+gate: **9/9 surfaces**, sannysoft 0-fail.
+
+> **KNOWN LIMITATIONS (adversarial review — confirmed, deferred with rationale).**
+> - **macOS `availTop` is 0** (a real Mac's menu bar makes `availTop ~25`). Fixing it needs
+>   `avail_left`/`avail_top` threaded through shared-types + the catalog (`derive.ts`) so a Mac persona
+>   expresses a menu-bar inset — a cross-package follow-up. Windows/Linux `availTop=0` (bottom taskbar)
+>   is already coherent.
+> - **Multi-Screen Window Placement API** (`getScreenDetails()`: `ScreenDetailed.devicePixelRatio`/`label`,
+>   `Screen.isExtended`, `getScreens()` enumeration) still reflects real host values. These need the
+>   `window-management` permission prompt, so they are not silently scriptable — deferred.
+> - **Headful outer-geometry** is coupled to the persona only via the maximized-to-avail launch size; a
+>   native clamp of `outerWidth/Height/screenX/Y` to the persona rect (for hosts whose display exceeds
+>   the persona screen) is a follow-up.
+
 ### Still to author
 
 WebGL **pixel farbling** + capability alignment (the WebGL limitation above), the audio **upstream taps**
-(`fingerprint/audio-worklet-tap.patch`, above), `fingerprint/fonts.patch`, and the net layer
-(`net/webrtc-ip-policy`, `net/tls-ja3-ja4`, `net/http2-settings-order`). `screen`/`DPR` is a borderline
-JS-safe surface
-(`fingerprint/screen-dpr.patch`) that can go either way. Each deep surface reads
-`lobium::LobiumFpConfig::Current()->{seeds,webgl,...}` via the same proven config channel.
+(`fingerprint/audio-worklet-tap.patch`), the **screen/DPR follow-ups** (macOS `availTop`, the
+Window-Management API surfaces, the headful outer-geometry clamp — above), `fingerprint/fonts.patch`, and
+the net layer (`net/webrtc-ip-policy`, `net/tls-ja3-ja4`, `net/http2-settings-order`). Each deep surface
+reads `lobium::LobiumFpConfig::Current()->{seeds,webgl,screen,...}` via the same proven config channel.
 
 ## Verification (build machine)
 

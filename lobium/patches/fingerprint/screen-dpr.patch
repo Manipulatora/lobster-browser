@@ -1,0 +1,145 @@
+Lobium — native screen / devicePixelRatio spoofing (JS-safe surface, done natively for coherence).
+
+Reports the persona's screen geometry + DPR instead of the host display's, from the config channel's
+already-parsed `screen.*` (width/height/availWidth/availHeight/colorDepth/devicePixelRatio). This closes
+a real, easily-detected tell surfaced by the native detector run (ci/validation/lobium-detect.mjs):
+every headless profile reported the default 800x600 (and, headful, the host monitor's true size),
+contradicting the persona. Doing it natively (rather than via CDP setDeviceMetricsOverride, which mutates
+the real viewport and has layout side effects) keeps rendering untouched — only the queried values change.
+
+Three hook points (all reading LobiumFpConfig::Current(), all guarded on the config being present with a
+positive screen width, else the real GetScreenInfo path runs unchanged):
+
+  1. Screen::GetRect (core/frame/screen.cc) — the SINGLE shared source for
+     width()/height()/availWidth()/availHeight()/availLeft()/availTop(), so one hook keeps all of them
+     coherent. Returns the persona rect (CSS px): (0,0,width,height) for the full rect and
+     (0,0,availWidth,availHeight) for the available rect. (Adversarial review confirmed this shared hook
+     does NOT corrupt layout / media queries / fullscreen — only the JS-visible screen.* properties.)
+  2. Screen::colorDepth (core/frame/screen.cc) — the persona colour depth; pixelDepth() delegates here.
+  3. LocalDOMWindow::devicePixelRatio (core/frame/local_dom_window.cc) AND
+     MediaValues::CalculateDevicePixelRatio (core/css/media_values.cc) — the persona DPR through BOTH the
+     window.devicePixelRatio getter AND the CSS media-query resolution path, so
+     matchMedia('(resolution: Xdppx)') / '(-webkit-device-pixel-ratio)' AGREE with the getter. Hooking
+     the two disjoint DPR sources was required: an adversarial review found that overriding only the
+     window getter left matchMedia reporting the REAL host DPR — a guaranteed, no-permission,
+     trivially-scriptable lie for any persona whose DPR != host DPR (e.g. a 2x retina persona on a 1x
+     host). The MediaValues-level hook keeps real raster/layout scale untouched.
+
+The sidecar sizes the launch window to the AVAILABLE area (availWidth x availHeight — a maximized window),
+not the full screen, so window.outerWidth/Height <= screen.avail* stays coherent (engine-runner
+launch.ts; else outerHeight == screen.height > availHeight, an incoherence).
+
+Proven on Chromium 152.0.7928.0 (SwiftShader, headless): baseline screen 800x600 -> persona
+1920x1080 (Windows, dpr1) / 1512x982 (macOS, dpr2), availWidth/Height/colorDepth all match; DPR coherent
+across window.devicePixelRatio AND matchMedia resolution + -webkit-device-pixel-ratio (macOS dpr2 on a
+dpr1 host reports 2 everywhere); outerHeight <= availHeight. Detector gate: 9/9 surfaces, sannysoft 0-fail.
+
+KNOWN LIMITATIONS (adversarial review — confirmed, deferred with rationale; see hooks.md):
+  - macOS availTop is 0 (a real Mac's menu bar makes availTop ~25). Fixing it needs avail_left/avail_top
+    threaded through shared-types + the catalog (derive.ts) so a Mac persona expresses a menu-bar inset;
+    deferred as a cross-package follow-up. (Windows/Linux availTop=0 with a bottom taskbar is coherent.)
+  - The Multi-Screen Window Placement API (getScreenDetails(): ScreenDetailed.devicePixelRatio/label,
+    Screen.isExtended, getScreens() enumeration) still reflects real host values. These require the
+    `window-management` permission prompt, so they are not silently scriptable — deferred.
+  - Headful window outer-geometry is coupled to the persona only via the maximized-to-avail launch size;
+    a native clamp of outerWidth/Height/screenX/Y to the persona rect (for when the host display exceeds
+    the persona screen) is a follow-up.
+
+Three hook points touch existing files (this patch); no added files, no BUILD.gn change (all in the
+already-wired blink `core` component), no config change (screen.* already parsed by the config channel).
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+index 0d60244742..5b0f34d0a7 100644
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "third_party/blink/renderer/core/css/media_values.h"
+ 
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "third_party/blink/public/common/css/scripting.h"
+ #include "third_party/blink/renderer/core/css/css_resolution_units.h"
+ #include "third_party/blink/renderer/core/css/css_to_length_conversion_data.h"
+@@ -193,6 +194,16 @@ bool MediaValues::CalculateStrictMode(LocalFrame* frame) {
+ }
+ 
+ float MediaValues::CalculateDevicePixelRatio(LocalFrame* frame) {
++  // Lobium: route the persona DPR through the CSS media-query resolution path too, so
++  // matchMedia('(resolution: Xdppx)') / '(-webkit-device-pixel-ratio)' AGREE with
++  // window.devicePixelRatio (overridden in LocalDOMWindow::devicePixelRatio). Without this the two
++  // disagree for any persona whose DPR != host DPR (e.g. a 2x retina persona on a 1x host) — a
++  // guaranteed, no-permission, trivially-scriptable lie a detector cross-checks. Hooking here (not
++  // LocalFrame::DevicePixelRatio) keeps real raster/layout scale untouched — only the queried value.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->screen.device_pixel_ratio > 0) {
++    return static_cast<float>(cfg->screen.device_pixel_ratio);
++  }
+   return frame->DevicePixelRatio();
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index 6aa773e59b..910a3b3612 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -37,6 +37,7 @@
+ #include "base/trace_event/typed_macros.h"
+ #include "build/build_config.h"
+ #include "cc/input/snap_selection_strategy.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+ #include "net/storage_access_api/status.h"
+ #include "third_party/blink/public/common/features.h"
+@@ -1917,6 +1918,13 @@ double LocalDOMWindow::devicePixelRatio() const {
+   if (!GetFrame()) {
+     return 0.0;
+   }
++  // Lobium: report the persona's DPR so window.devicePixelRatio matches its screen class (e.g. a 2x
++  // retina Mac). NOTE: CSS resolution media queries still reflect the real DPR — full DPR coherence
++  // (matchMedia) is a documented follow-up; this covers the JS getter fingerprinters read.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->screen.device_pixel_ratio > 0) {
++    return cfg->screen.device_pixel_ratio;
++  }
+ 
+   return GetFrame()->DevicePixelRatio();
+ }
+diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
+index 69ffc2b05f..3a54663395 100644
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -29,6 +29,7 @@
+ #include "third_party/blink/renderer/core/frame/screen.h"
+ 
+ #include "base/numerics/safe_conversions.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
+ #include "third_party/blink/renderer/core/event_target_names.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+@@ -100,6 +101,11 @@ unsigned Screen::colorDepth() const {
+   if (!DomWindow()) {
+     return unknown_color_depth;
+   }
++  // Lobium: the persona's colour depth (pixelDepth() delegates here, so both stay coherent).
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->screen.color_depth > 0) {
++    return static_cast<unsigned>(cfg->screen.color_depth);
++  }
+   return GetScreenInfo().depth == 0
+              ? unknown_color_depth
+              : base::saturated_cast<unsigned>(GetScreenInfo().depth);
+@@ -163,6 +169,16 @@ bool Screen::isExtended() const {
+ gfx::Rect Screen::GetRect(bool available) const {
+   if (!DomWindow())
+     return gfx::Rect();
++  // Lobium: report the persona's screen geometry (CSS px) rather than the host display's. This is the
++  // single shared source for width()/height()/availWidth()/availHeight()/availLeft()/availTop(), so one
++  // hook keeps them all coherent — and it removes the headless-default 800x600 tell (and, headful, the
++  // host monitor's real size) so screen.* matches the profile. availLeft/Top become 0 (a full-screen
++  // available rect), the common real-desktop case.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->screen.width > 0 && cfg->screen.height > 0) {
++    return available ? gfx::Rect(0, 0, cfg->screen.avail_width, cfg->screen.avail_height)
++                     : gfx::Rect(0, 0, cfg->screen.width, cfg->screen.height);
++  }
+   LocalFrame* frame = DomWindow()->GetFrame();
+   const display::ScreenInfo& screen_info = GetScreenInfo();
+   gfx::Rect rect = available ? screen_info.available_rect : screen_info.rect;

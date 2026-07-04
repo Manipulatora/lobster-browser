@@ -133,6 +133,14 @@ async function probePage(page, claimedRenderer, claimedVendor) {
       return {
         userAgent: navigator.userAgent,
         uaMajor,
+        screen: {
+          width: screen.width,
+          height: screen.height,
+          availWidth: screen.availWidth,
+          availHeight: screen.availHeight,
+          colorDepth: screen.colorDepth,
+          devicePixelRatio: window.devicePixelRatio,
+        },
         webdriver: navigator.webdriver === true,
         hardwareConcurrency: navigator.hardwareConcurrency,
         deviceMemory: navigator.deviceMemory ?? null,
@@ -309,6 +317,11 @@ async function main() {
         languagesApplied: nat.languages.join(',') === fp.navigator.languages.join(','),
         timezoneApplied: nat.timezone === fp.locale.timezone,
         webglMatchesClaim: nat.webglMatchesClaim,
+        screenApplied:
+          nat.screen.width === fp.screen.width &&
+          nat.screen.height === fp.screen.height &&
+          nat.screen.colorDepth === fp.screen.colorDepth &&
+          Math.abs(nat.screen.devicePixelRatio - fp.screen.devicePixelRatio) < 0.001,
       };
       const surfacesApplied = Object.values(checks).filter((v) => v === true).length;
 
