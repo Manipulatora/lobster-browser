@@ -23,11 +23,17 @@ core/config-channel.patch
 #
 # --- Fingerprint deep surfaces (the native moat) ---
 # WebGL vendor/renderer + canvas 2D farbling are BUILT + PROVEN — they live in config-channel.patch
-# above (kept in one hook patch per pinned ref; split out only if a surface needs an independent rebase).
+# above (folded in during their commits). Audio farbling is BUILT + PROVEN as its own patch below
+# (deep surfaces get an independent patch from here on so one can rebase without disturbing the others).
+# fingerprint/audio-context.patch — ✅ BUILT + PROVEN on Chromium 152. Seeded Web Audio farbling
+#   (seeds.audio): OfflineAudioContext result (getChannelData/copyFromChannel — the dominant vector) +
+#   AnalyserNode float freq/time paths, via the added kernel //components/lobium_fp/lobium_audio_farble.cc.
+#   Playback-safe (audio_buffer.cc untouched), stereo-coherent. See hooks.md for hook points + limitations.
+fingerprint/audio-context.patch
 # Still to author:
 # fingerprint/screen-dpr.patch        # screen/window/DPR/colorDepth from config
 # fingerprint/webgl-pixel-farbling.patch   # seeded WebGL readPixels/toDataURL noise + capability alignment
-# fingerprint/audio-context.patch     # seeded AudioContext DSP farbling
+# fingerprint/audio-worklet-tap.patch # AudioWorklet/ScriptProcessorNode upstream sample taps (offline-deterministic)
 # fingerprint/fonts.patch             # OS-accurate font enumeration
 # fingerprint/webgpu-adapter.patch    # coherent WebGPU adapter
 #

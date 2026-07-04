@@ -4,8 +4,8 @@ Each hook patch is a **small** diff into an existing Chromium file that routes a
 `lobium::LobiumFpConfig::Current()` (the reader in `../src/`). The insertion points + code are given
 here so a build engineer finalizes them against the pinned checkout (`quilt push -f` → edit → `quilt
 refresh`) — the exact line numbers shift per Chromium ref, which is why the series ships as intent +
-code rather than frozen context diffs. The first two deep surfaces (WebGL vendor/renderer, canvas 2D
-farbling) are BUILT + PROVEN; audio/fonts/TLS remain to author.
+code rather than frozen context diffs. Three deep surfaces (WebGL vendor/renderer, canvas 2D farbling,
+Web Audio farbling) are BUILT + PROVEN; fonts/TLS and the audio upstream taps remain to author.
 
 ## `core/build-gn.patch` — register the added module ✅ BUILT
 
@@ -144,11 +144,73 @@ consistent with the main thread.
 > canvas must return the identical hash, which detectors also check — so it would trade one tell for a
 > worse one. Revisit only with a scheme that is per-*content* rather than per-*read*.
 
+### Web Audio farbling — ✅ BUILT + PROVEN
+
+`seeds.audio` (uint32) drives a deterministic **relative** perturbation `sample *= (1 + eps)`, where
+`eps ∈ [-1.5e-3, +1.5e-3]` (~ -56 dBFS, inaudible) is a pure **splitmix64** function of `(seed, absolute
+sample index)`, applied by the shared skia-free kernel `lobium::FarbleAudioSamples`
+(`//components/lobium_fp/lobium_audio_farble.cc`, `//base`-only like the canvas kernel). Relative (not
+additive) so it is scale-invariant/inaudible and sign-preserving; **per-sample** (not a constant fudge
+factor) so dividing two seeded fingerprints can't recover one ratio. Result: **stable-per-profile,
+distinct-per-seed, differs from host, imperceptible.** No `BUILD.gn` change (kernel joins the wired
+`lobium_fp` source_set); no config change (`seeds.audio` already parsed). Ships as
+`fingerprint/audio-context.patch`.
+
+Three hook points, chosen to cover the readback surfaces **without touching playback or internal DSP
+state** (`audio_buffer.cc` is deliberately **not** hooked):
+
+- **`OfflineAudioContext::FireCompletionEvent`** (`modules/webaudio/offline_audio_context.cc`) — THE
+  dominant audio-fingerprint vector (OfflineAudioContext + `DynamicsCompressor` → `getChannelData` /
+  `copyFromChannel` sum/hash; FingerprintJS, CreepJS). The render is complete and this main-thread event
+  fires **once** per context, so we farble the finished RESULT backing store in place, once, before it is
+  exposed. `getChannelData`, `copyFromChannel`, and `event.renderedBuffer` all read that same store, so
+  every readback path agrees by construction — no compounding, object identity preserved.
+- **`RealtimeAnalyser::GetFloatFrequencyData`** and **`GetFloatTimeDomainData`**
+  (`modules/webaudio/realtime_analyser.cc`) — perturb only the JS-visible destination span `[0,len)`
+  *after* the fill loop; the internal `magnitude_buffer_` / `input_buffer_` (FFT + smoothing source) are
+  untouched, so `smoothingTimeConstant` continuity and real visualizers are unaffected.
+
+**All channels use the same `(seed, index)` key — NOT a per-channel fold.** Honest Chrome upmixes a mono
+source to bit-identical L/R channels; a per-channel key would make them diverge, which
+`channelData(0)[k] === channelData(1)[k]` detects as a trivial farble oracle (an adversarial-review HIGH
+finding). One eps sequence keeps identical channels identical (the `(1+eps)` factor cancels in the
+inter-channel ratio, matching the honest ratio) while genuinely-distinct channels still farble distinctly.
+
+**Proven** (Chromium 152, SwiftShader): offline `getChannelData == copyFromChannel == re-read`, baseline
+`41c67cf0` → seed-A `235885ed` (stable) → seed-B `7b006b3c` (distinct), slicesum shifts ~0.003%; analyser
+float freq/time (sampled deterministically via `OfflineAudioContext.suspend`) farbled/stable/distinct
+(`livebins 1024/1024`); stereo mono-upmix `channelData(0) === channelData(1)` (`interChannelMaxDiff 0`)
+even farbled; and a user `createBuffer()+copyToChannel()+getChannelData/copyFromChannel` is **bit-exact**
+under a seed (`maxdiff 0`) — real/app/playback audio is never corrupted.
+
+> **KNOWN LIMITATIONS (adversarial review — confirmed, deferred with rationale).**
+> - **Upstream sample taps not yet farbled** (`AudioWorkletProcessor.process(inputs)` and the deprecated
+>   `ScriptProcessorNode.onaudioprocess` `inputBuffer`). Both copy the *upstream* processed AudioBus to JS
+>   before it reaches the farbled destination, and both are deterministic inside an OfflineAudioContext —
+>   so a determined adversary can read un-farbled rendered audio through them. They are **secondary**
+>   (essentially all real-world audio fingerprinting uses the `getChannelData` path, which is covered) and
+>   deferred to their own patch: the worklet tap runs **off the main thread** (needs a thread-safe seed
+>   snapshot) and must be gated to offline-only to avoid corrupting legitimate realtime DSP — it deserves
+>   its own scout→prove→review cycle, not a rushed bolt-on. Tracked as `fingerprint/audio-worklet-tap.patch`.
+> - **Known-input ratio inversion.** Because the farble is a *deterministic* multiplicative factor on the
+>   readback (and user source buffers are intentionally un-farbled to protect playback), an adversary who
+>   plays a *known* signal through an identity graph can compute `observed/known = 1+eps(seed,k)` and,
+>   re-rendering, confirm the sequence is frozen — i.e. **detect that farbling is happening** (not
+>   de-anonymize). This is inherent to *any* stable-per-profile deterministic scheme (Brave's audio shield
+>   shares it) — the stability detectors rely on is the same property that makes the factor recoverable.
+>   The real fix is a signal-dependent, non-invertible perturbation inside the node DSP; deferred as
+>   invasive future hardening.
+> - **Byte analyser paths** (`getByteFrequencyData` / `getByteTimeDomainData`) are not farbled. At
+>   `1.5e-3` the perturbation is sub-quantization, so `byte == quantize(float)` still holds and the
+>   float/byte cross-check is near-inert; farbling them independently would risk a coarser ±1-LSB tell. If
+>   ever needed, re-quantize from the already-farbled float buffer (coherent), not independent byte noise.
+
 ### Still to author
 
-WebGL **pixel farbling** + capability alignment (the limitation above), `fingerprint/audio-context.patch`
-(seeded DSP), `fingerprint/fonts.patch`, and the net layer (`net/webrtc-ip-policy`, `net/tls-ja3-ja4`,
-`net/http2-settings-order`). `screen`/`DPR` is a borderline JS-safe surface
+WebGL **pixel farbling** + capability alignment (the WebGL limitation above), the audio **upstream taps**
+(`fingerprint/audio-worklet-tap.patch`, above), `fingerprint/fonts.patch`, and the net layer
+(`net/webrtc-ip-policy`, `net/tls-ja3-ja4`, `net/http2-settings-order`). `screen`/`DPR` is a borderline
+JS-safe surface
 (`fingerprint/screen-dpr.patch`) that can go either way. Each deep surface reads
 `lobium::LobiumFpConfig::Current()->{seeds,webgl,...}` via the same proven config channel.
 

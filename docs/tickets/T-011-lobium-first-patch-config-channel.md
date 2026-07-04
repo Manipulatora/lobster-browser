@@ -2,7 +2,7 @@
 
 - **Pillar/Track:** F · Lobium
 - **Assignee:** Claude
-- **Status:** in progress — config channel BUILT + PROVEN; five native surfaces live (see progress log)
+- **Status:** in progress — config channel BUILT + PROVEN; six native surfaces live (see progress log)
 - **Depends on:** T-010 (a working build)
 
 ## Goal
@@ -50,10 +50,17 @@ upstream 152.
   failure path `LOG(ERROR)`s so a broken config never silently leaks the host fingerprint.
 - **Surfaces proven natively:** `hardwareConcurrency`; `deviceMemory` + its `Device-Memory` /
   `Sec-CH-Device-Memory` client-hint header (hooked at the single shared source so JS + header agree);
-  `maxTouchPoints`; WebGL `UNMASKED_VENDOR/RENDERER_WEBGL` (atomic pair); and **canvas 2D farbling**
+  `maxTouchPoints`; WebGL `UNMASKED_VENDOR/RENDERER_WEBGL` (atomic pair); **canvas 2D farbling**
   (`seeds.canvas`) across `getImageData` / `toDataURL` / `toBlob` / `OffscreenCanvas.convertToBlob` — all
   stable-per-profile, distinct-per-seed, host-differing, with a `drawImage` regression probe proving no
-  double-farble.
+  double-farble; and **Web Audio farbling** (`seeds.audio`) across the OfflineAudioContext result
+  (`getChannelData`/`copyFromChannel` — the dominant vector) and the AnalyserNode float freq/time paths,
+  playback-safe (`audio_buffer.cc` untouched; user buffers bit-exact under a seed) and stereo-coherent
+  (mono upmix stays `channelData(0) === channelData(1)`). Passed a 4-lane adversarial review + per-finding
+  verification (6/19 confirmed): the one HIGH farble-oracle — stereo channel divergence — was fixed
+  (same-key-all-channels) and re-proven; the remaining gaps (AudioWorklet/ScriptProcessorNode upstream
+  taps, known-input invertibility, byte analyser paths) are documented in `hooks.md` and deferred with
+  rationale.
 - **Scope correction:** the originally-specified `navigator.userAgent` / platform / UA-CH surface was
   investigated natively and deliberately **left to CDP** — these are the `JS-safe` surfaces MASTER_PLAN §5
   routes through `setUserAgentOverride` (a native `NavigatorID::platform()` override had zero effect under

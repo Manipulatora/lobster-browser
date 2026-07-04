@@ -1,0 +1,148 @@
+Lobium — native Web Audio farbling (seeded, per-profile). Deep surface #3 (after WebGL + canvas).
+
+Perturbs the float audio-sample READBACK surfaces by an imperceptible, per-sample relative amount
+(seeds.audio, uint32) so a rendered-audio fingerprint becomes stable-per-profile, distinct-per-seed, and
+differs from the host — the analogue of the canvas/WebGL work for the audio surface. The perturbation is
+the shared skia-free kernel lobium::FarbleAudioSamples (//components/lobium_fp/lobium_audio_farble.cc,
+staged with the module — NOT part of this hook patch): data[k] *= (1 + eps), eps in [-1.5e-3, +1.5e-3]
+(~ -56 dBFS, inaudible) a pure splitmix64 function of (seed, absolute sample index). Relative multiply is
+scale-invariant/sign-preserving; per-sample (not a constant fudge factor) so dividing two seeded
+fingerprints cannot recover one ratio. No BUILD.gn change (kernel lives in the already-wired lobium_fp
+source_set); no config change (seeds.audio already parsed). This is a genuine native-only surface — a JS
+override of getChannelData / analyser reads is itself a detectable tell, so CDP cannot do it cleanly.
+
+Three hook points (all reading LobiumFpConfig::Current(), all guarded on seeds.audio != 0), chosen to
+cover the readback surfaces WITHOUT touching playback or internal DSP state:
+
+  1. OfflineAudioContext::FireCompletionEvent (offline_audio_context.cc) — THE dominant audio fingerprint
+     vector (OfflineAudioContext + DynamicsCompressor -> getChannelData/copyFromChannel sum/hash, used by
+     FingerprintJS / CreepJS). The offline render is COMPLETE and this main-thread event fires exactly
+     once per context (the render thread already posted NotifyComplete), so we perturb the finished RESULT
+     backing store IN PLACE, once, before it is exposed. getChannelData(), copyFromChannel(), and
+     event.renderedBuffer all read this same store, so every readback path agrees by construction — no
+     per-call compounding, object identity preserved. The SAME (seed, index) key is used for every channel
+     (NOT a per-channel fold): honest Chrome upmixes mono to bit-identical channels, and a per-channel key
+     would make them diverge — a trivial `channelData(0)[k] === channelData(1)[k]` oracle; one eps
+     sequence keeps identical channels identical (the factor cancels in the inter-channel ratio) yet
+     farbles genuinely-distinct channels distinctly. We never touch the realtime graph or any playback
+     source — the offline result is a readback artifact.
+  2. RealtimeAnalyser::GetFloatFrequencyData (realtime_analyser.cc) — perturbs ONLY the JS-visible
+     destination span [0,len) AFTER the fill loop; the internal magnitude_buffer_ (FFT + smoothing source)
+     is untouched, so smoothingTimeConstant continuity and real visualizers are unaffected.
+  3. RealtimeAnalyser::GetFloatTimeDomainData (realtime_analyser.cc) — same, over input_buffer_'s JS copy.
+
+Deliberately NOT hooked (audio_buffer.cc is untouched): getChannelData/copyFromChannel on a user-created
+AudioBuffer (decoded app audio / a playback source) — proven bit-exact under a seed (maxdiff 0), so real
+audio is never corrupted. See hooks.md for the documented KNOWN LIMITATIONS (AudioWorklet /
+ScriptProcessorNode upstream taps, known-input ratio inversion, byte analyser paths) and their rationale.
+
+Proven on Chromium 152.0.7928.0 (SwiftShader, headless):
+  - Offline: getChannelData == copyFromChannel == re-read, baseline 41c67cf0 -> seedA 235885ed (stable) ->
+    seedB 7b006b3c (distinct); slicesum shifts ~0.003% (imperceptible).
+  - Analyser (sampled deterministically via OfflineAudioContext.suspend): freq/time farbled, stable per
+    seed, distinct per seed, livebins 1024/1024.
+  - Stereo oracle: mono upmixed to OfflineAudioContext(2,..) yields channelData(0) === channelData(1)
+    (interChannelMaxDiff 0) even farbled — matches honest upmix.
+  - Playback safety: a user createBuffer()+copyToChannel()+getChannelData/copyFromChannel is bit-exact
+    (maxdiff 0) with a seed set.
+
+Two hook points touch existing files (this patch); the kernel + BUILD.gn wiring are added files:
+  1. third_party/blink/renderer/modules/webaudio/offline_audio_context.cc — offline result farble (Hook A).
+  2. third_party/blink/renderer/modules/webaudio/realtime_analyser.cc — analyser float paths (Hooks B, C).
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+index aed92e0ec4..7e4f98c9dd 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -25,8 +25,11 @@
+ 
+ #include "third_party/blink/renderer/modules/webaudio/offline_audio_context.h"
+ 
++#include "base/containers/span.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
++#include "components/lobium_fp/lobium_audio_farble.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "media/base/audio_glitch_info.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+@@ -35,6 +38,8 @@
+ #include "third_party/blink/renderer/core/dom/dom_exception.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
++#include "third_party/blink/renderer/core/typed_arrays/dom_typed_array.h"
++#include "third_party/blink/renderer/modules/webaudio/audio_buffer.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_listener.h"
+ #include "third_party/blink/renderer/modules/webaudio/deferred_task_handler.h"
+ #include "third_party/blink/renderer/modules/webaudio/offline_audio_completion_event.h"
+@@ -432,6 +437,30 @@ void OfflineAudioContext::FireCompletionEvent() {
+       return;
+     }
+ 
++    // Lobium: seeded audio-fingerprint farbling. The offline render is COMPLETE and this main-thread
++    // event runs exactly once per context; the render thread already posted NotifyComplete before this
++    // runs, so nothing else aliases these buffers now. We perturb the finished RESULT backing store in
++    // place, once, keyed per (seed, channel, sample index). getChannelData(), copyFromChannel(), and
++    // event.renderedBuffer all read THIS same store, so every readback path agrees by construction — no
++    // per-call compounding, object identity preserved. This buffer is a readback artifact (the output
++    // of startRendering()); we never touch the realtime graph or any playback source. This is the #1
++    // audio fingerprint vector (OfflineAudioContext + DynamicsCompressor -> sample sum/hash).
++    if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++        cfg && cfg->seeds.audio) {
++      const unsigned channels = rendered_buffer->numberOfChannels();
++      for (unsigned ch = 0; ch < channels; ++ch) {
++        base::span<float> data = rendered_buffer->getChannelData(ch)->AsSpan();
++        // Use the SAME (seed, sample index) key for every channel — NOT a per-channel seed fold.
++        // Honest Chrome upmixes a mono source to bit-identical L/R channels; a per-channel seed would
++        // make them diverge, which `channelData(0)[k] === channelData(1)[k]` detects as a cheap farble
++        // oracle. Applying one eps sequence to all channels keeps identical channels identical (the
++        // (1+eps) factor cancels in channel0[k]/channel1[k], matching the honest ratio) while genuinely
++        // distinct channels still farble distinctly (different underlying samples). It also removes the
++        // channel-fold-hits-zero-sentinel edge case that could leave one channel unfarbled.
++        lobium::FarbleAudioSamples(data.data(), data.size(), /*base_index=*/0, cfg->seeds.audio);
++      }
++    }
++
+     // Call the offline rendering completion event listener and resolve the
+     // promise too.
+     DispatchEvent(*OfflineAudioCompletionEvent::Create(rendered_buffer));
+diff --git a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
+index d0b1bd6401..b808229cf8 100644
+--- a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
++++ b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
+@@ -32,6 +32,8 @@
+ #include <complex>
+ 
+ #include "base/compiler_specific.h"
++#include "components/lobium_fp/lobium_audio_farble.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "media/base/audio_bus.h"
+ #include "third_party/blink/renderer/platform/audio/audio_bus.h"
+ #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
+@@ -119,6 +121,13 @@ void RealtimeAnalyser::GetFloatFrequencyData(DOMFloat32Array* destination_array,
+       const double db_mag = audio_utilities::LinearToDecibels(linear_value);
+       destination[i] = static_cast<float>(db_mag);
+     }
++    // Lobium: perturb ONLY the JS-visible destination span [0,len); the internal magnitude_buffer_
++    // (FFT + smoothing source) is untouched, so smoothingTimeConstant continuity and real visualizers
++    // stay intact. Negative-dB domain; the relative (1+eps) nudge keeps values plausibly negative.
++    if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++        cfg && cfg->seeds.audio) {
++      lobium::FarbleAudioSamples(destination.data(), len, /*base_index=*/0, cfg->seeds.audio);
++    }
+   }
+ }
+ 
+@@ -186,6 +195,13 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
+ 
+       destination[i] = value;
+     }
++    // Lobium: perturb ONLY the JS-visible destination span [0,len); the internal input_buffer_
++    // (circular buffer feeding future FFT frames) is left pristine. Time-domain PCM ~[-1,1]; the
++    // relative (1+eps) nudge is sign/range preserving.
++    if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++        cfg && cfg->seeds.audio) {
++      lobium::FarbleAudioSamples(destination.data(), len, /*base_index=*/0, cfg->seeds.audio);
++    }
+   }
+ }
+ 
