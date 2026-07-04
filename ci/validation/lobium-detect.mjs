@@ -130,9 +130,47 @@ async function probePage(page, claimedRenderer, claimedVendor) {
         uaData = { present: false, error: String(e).slice(0, 80) };
       }
       const uaMajor = (/Chrome\/(\d+)/.exec(navigator.userAgent) || [])[1] || null;
+      // Worker cross-context coherence: a Worker/SharedWorker that leaks the real host UA/platform while
+      // the main frame claims another OS is a glaring lie (CreepJS reads it). Confirm both worker types
+      // report the SAME userAgent + platform as the main thread.
+      let workers = { ok: null };
+      try {
+        const code =
+          'self.onconnect=e=>e.ports[0].postMessage({ua:navigator.userAgent,plat:navigator.platform});' +
+          'self.postMessage&&self.postMessage({ua:navigator.userAgent,plat:navigator.platform});';
+        const dw = await new Promise((res) => {
+          const w = new Worker(URL.createObjectURL(new Blob([code])));
+          w.onmessage = (e) => res(e.data);
+          setTimeout(() => res(null), 3000);
+        });
+        let sw = null;
+        try {
+          const s = new SharedWorker(URL.createObjectURL(new Blob([code])));
+          sw = await new Promise((res) => {
+            s.port.onmessage = (e) => res(e.data);
+            s.port.start();
+            setTimeout(() => res(null), 3000);
+          });
+        } catch {
+          /* shared worker unavailable */
+        }
+        const sameOS = (w) => w && w.ua === navigator.userAgent && w.plat === navigator.platform;
+        workers = {
+          dedicated: dw
+            ? { uaMatch: dw.ua === navigator.userAgent, platMatch: dw.plat === navigator.platform }
+            : null,
+          shared: sw
+            ? { uaMatch: sw.ua === navigator.userAgent, platMatch: sw.plat === navigator.platform }
+            : null,
+          ok: sameOS(dw) && (sw === null || sameOS(sw)),
+        };
+      } catch (e) {
+        workers = { ok: null, error: String(e).slice(0, 80) };
+      }
       return {
         userAgent: navigator.userAgent,
         uaMajor,
+        workers,
         screen: {
           width: screen.width,
           height: screen.height,
@@ -317,6 +355,8 @@ async function main() {
         languagesApplied: nat.languages.join(',') === fp.navigator.languages.join(','),
         timezoneApplied: nat.timezone === fp.locale.timezone,
         webglMatchesClaim: nat.webglMatchesClaim,
+        // Workers must not leak the real host UA/platform (null = not measured, don't fail the gate).
+        workerCoherent: nat.workers?.ok !== false,
         screenApplied:
           nat.screen.width === fp.screen.width &&
           nat.screen.height === fp.screen.height &&

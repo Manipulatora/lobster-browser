@@ -54,18 +54,27 @@ Native surfaces hooked so far, each reading Current() (all PROVEN on Chromium 15
      accepts; the mitigation (a per-read sub-seed) is deferred as it would break within-session read
      stability, which detectors also check.
 
-platform / UA-CH / languages are NOT hooked here — they are JS-safe/CDP surfaces (MASTER_PLAN §5),
-handled by the sidecar's cdp-fingerprint.ts setUserAgentOverride (see hooks.md).
+navigator.userAgent + navigator.platform ARE hooked natively (navigator_base.cc), CORRECTING the earlier
+"UA/platform are pure CDP surfaces" finding. The CDP setUserAgentOverride reaches ONLY the main frame, so
+Workers / SharedWorkers / ServiceWorkers leaked the engine's real host identity (e.g. navigator.userAgent
+"Mozilla/5.0 (X11; Linux x86_64) ..." + navigator.platform "Linux x86_64" while the persona claims
+Windows) — a glaring cross-context lie CreepJS reads (it dropped CreepJS's hard "headless" score from
+33% to 0%). NavigatorBase is the shared base of BOTH Navigator (main) and WorkerNavigator (all worker
+types), so one hook per getter serves every execution context; the --lobium-fp-data switch already
+propagates to worker renderer processes, so Current() is populated there. The CDP override is retained
+for the HTTP User-Agent header + UA-CH userAgentData (both agree on the same persona value). UA-CH
+(Sec-CH-UA) + languages remain CDP-handled (cdp-fingerprint.ts); see hooks.md.
 
-Eight hook points:
+Nine hook points (workers inherit the same --lobium-fp-data forwarded by hook 1):
   1. content/browser/.../render_process_host_impl.cc — browser reads --lobium-fp-config, forwards base64 --lobium-fp-data.
   2. third_party/blink/common/.../approximated_device_memory.cc — deviceMemory single source (JS + client-hint header).
   3. third_party/blink/renderer/core/events/navigator_events.cc — maxTouchPoints.
   4. third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc — hardwareConcurrency.
-  5. third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc — WebGL unmasked vendor/renderer.
-  6. third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc — canvas getImageData farbling.
-  7. third_party/blink/renderer/core/html/canvas/html_canvas_element.cc — canvas toDataURL/toBlob farbling (readback helper).
-  8. third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc — OffscreenCanvas.convertToBlob farbling.
+  5. third_party/blink/renderer/core/execution_context/navigator_base.cc — navigator.userAgent + platform (ALL contexts, incl. workers).
+  6. third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc — WebGL unmasked vendor/renderer.
+  7. third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc — canvas getImageData farbling.
+  8. third_party/blink/renderer/core/html/canvas/html_canvas_element.cc — canvas toDataURL/toBlob farbling (readback helper).
+  9. third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc — OffscreenCanvas.convertToBlob farbling.
 diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
 index ffdaf1716e..b9ea49e5cc 100644
 --- a/content/browser/renderer_host/render_process_host_impl.cc
@@ -222,6 +231,46 @@ index a57561775c..f9ca3723ae 100644
    LocalDOMWindow* window = navigator.DomWindow();
    return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
  }
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index cccfafe8f9..27417320cf 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+@@ -47,11 +48,27 @@ NavigatorBase::NavigatorBase(ExecutionContext* context)
+     : NavigatorLanguage(context), ExecutionContextClient(context) {}
+ 
+ String NavigatorBase::userAgent() const {
++  // Lobium: serve the persona User-Agent from the config so it is coherent in EVERY execution context —
++  // the main frame AND all worker types (Navigator and WorkerNavigator share this base). The CDP UA
++  // override reaches only the main frame, so without this a Worker/ServiceWorker leaks the engine's real
++  // host UA (e.g. the Linux build string "Mozilla/5.0 (X11; Linux x86_64) ..." while the persona claims
++  // Windows) — a glaring cross-context lie CreepJS reads directly and scores as headless/chromium.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && !cfg->navigator.user_agent.empty()) {
++    return String::FromUtf8(cfg->navigator.user_agent);
++  }
+   ExecutionContext* execution_context = GetExecutionContext();
+   return execution_context ? execution_context->UserAgent() : String();
+ }
+ 
+ String NavigatorBase::platform() const {
++  // Lobium: persona navigator.platform in every context (main + workers) — same cross-context rationale
++  // as userAgent(). GetReducedNavigatorPlatform() below is COMPILE-TIME ("Linux x86_64" on this build),
++  // so without this a worker leaks the host OS while the persona claims Win32/MacIntel.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && !cfg->navigator.platform.empty()) {
++    return String::FromUtf8(cfg->navigator.platform);
++  }
+ #if BUILDFLAG(IS_ANDROID)
+   // We need to check the ReduceUserAgentMinorVersion feature flag for
+   // Android WebView, which does not currently ship a reduced User-Agent.
 diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
 index f5c0db2d1b..2b0fcd072a 100644
 --- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc

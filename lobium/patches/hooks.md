@@ -62,21 +62,29 @@ Two more surfaces ship in the same patch (both **proven**, both adversarially re
   (`0`) on a non-touch host; full touch coherence (ontouchstart / TouchEvent / CSS pointer-media) is a
   WebPreferences follow-up.
 
-## `platform` / UA-CH / `languages` — NOT native; handled by CDP (MASTER_PLAN §5)
+## `navigator.userAgent` + `navigator.platform` — NATIVE (workers proved CDP insufficient) ✅ BUILT + PROVEN
 
-**Investigated and deliberately NOT hooked natively.** These are `JS-safe` value-substitution surfaces,
-which §5 routes through clean CDP, not the native engine — and the sidecar already does exactly that:
-[`cdp-fingerprint.ts`](../../packages/engine-runner/src/cdp-fingerprint.ts) calls
-`Emulation.setUserAgentOverride` with `platform` (→ `navigator.platform`) **and** `userAgentMetadata`
-(→ the `Sec-CH-UA-Platform` header + `navigator.userAgentData.platform`), which sets all of them
-coherently in one call.
+**Corrects an earlier finding.** UA/platform were first classed as pure CDP surfaces, but end-to-end
+testing against CreepJS found the CDP `Emulation.setUserAgentOverride` reaches **only the main frame** —
+`Worker` / `SharedWorker` / `ServiceWorker` contexts leaked the engine's real host identity
+(`navigator.userAgent` = `Mozilla/5.0 (X11; Linux x86_64) ...`, `navigator.platform` = `Linux x86_64`)
+while the persona claimed Windows. CreepJS runs its fingerprint in a worker and read that Linux value —
+a glaring cross-context lie that scored the profile as headless/chromium (its hard **headless** metric
+was 33%).
 
-A native attempt confirmed this is the right layer: `navigator.platform` is **not** served by
-`NavigatorID::platform()` under this Chrome (an unconditional override there had zero effect — the value
-comes via the CDP/`SetNavigatorPlatformOverride` reduced-UA path), and a browser-process
-`UserAgentMetadata` hook, while it *did* drive the header + `userAgentData`, only duplicated what
-`setUserAgentOverride` already does. Native patching buys nothing here and risks desync. The native moat
-is for surfaces CDP genuinely **cannot** reach — see below.
+Fixed natively in `NavigatorBase::userAgent()` + `NavigatorBase::platform()`
+(`core/execution_context/navigator_base.cc`), the **shared base of both `Navigator` (main frame) and
+`WorkerNavigator` (every worker type)** — so one hook per getter serves *all* execution contexts. The
+`--lobium-fp-data` switch already propagates to worker renderer processes, so `Current()` is populated
+there. **Proven:** main + dedicated + shared workers all report the persona `userAgent`/`platform`
+(previously the workers leaked Linux); CreepJS's hard **headless** score dropped **33% → 0%**. The
+detector gate now asserts worker coherence (`workerCoherent`).
+
+The CDP override is **retained** for the HTTP `User-Agent` header + `navigator.userAgentData`
+(`Sec-CH-UA-Platform`) — both agree on the same persona value, so main-frame and worker are coherent.
+UA-CH (`Sec-CH-UA`) + `languages` remain CDP-handled ([`cdp-fingerprint.ts`](../../packages/engine-runner/src/cdp-fingerprint.ts)).
+(The earlier `NavigatorID::platform()` attempt failed only because that is *not* the getter under this
+Chrome — `NavigatorBase` is.)
 
 ## Deep surfaces (the native moat) — CDP genuinely cannot reach these
 
