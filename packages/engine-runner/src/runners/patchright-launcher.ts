@@ -35,6 +35,8 @@ interface PersistentContextOptions {
   geolocation?: PwGeolocation;
   /** Override the browser binary (the native Lobium launcher points this at the from-source build). */
   executablePath?: string;
+  /** Browser process environment (REPLACES the default env). Used to set FONTCONFIG_FILE (ENG-6). */
+  env?: Record<string, string>;
 }
 type PwPage = object;
 interface PwContext {
@@ -97,6 +99,12 @@ export interface PatchrightLauncherOptions {
    * config channel is wired up on every real launch (not just the detector harness).
    */
   extraArgsFor?: (ctx: LaunchContext) => Promise<string[]> | string[];
+  /**
+   * Per-launch env-var provider (merged over `process.env`), run just before spawn. The native Lobium
+   * launcher uses it to write the per-profile private fontconfig and set `FONTCONFIG_FILE` (ENG-6), so
+   * the font fingerprint is OS-plausible + stable per profile.
+   */
+  envFor?: (ctx: LaunchContext) => Promise<Record<string, string> | undefined>;
 }
 
 /**
@@ -168,6 +176,12 @@ export function createPatchrightLauncher(opts: PatchrightLauncherOptions = {}): 
       timezoneId: ctx.emulation.timezoneId,
     };
     if (opts.executablePath) options.executablePath = opts.executablePath;
+    const extraEnv = opts.envFor ? await opts.envFor(ctx) : undefined;
+    if (extraEnv) {
+      // Merge OVER the inherited env (Playwright's `env` replaces it), so the browser keeps its normal
+      // environment plus our per-profile overrides (FONTCONFIG_FILE).
+      options.env = { ...(process.env as Record<string, string>), ...extraEnv };
+    }
     if (ctx.options.proxy) options.proxy = ctx.options.proxy;
     if (ctx.emulation.geolocation) options.geolocation = ctx.emulation.geolocation;
 

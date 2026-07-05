@@ -14,11 +14,14 @@ export { createPatchrightLauncher, isChromiumAvailable } from './runners/patchri
 export type { PatchrightLauncherOptions } from './runners/patchright-launcher.js';
 export {
   buildLobiumLaunchArgs,
+  buildLobiumLaunchEnv,
   createLobiumLauncher,
   isLobiumAvailable,
   proxySummaryFromServer,
+  resolveFontsBaseDir,
   resolveLobiumBinary,
 } from './runners/lobium-launcher.js';
+export { buildFontConfig, hasFontPersona, writeFontConfig } from './fonts.js';
 export { buildCdpEmulation, buildFingerprintInitScript, buildLaunchOptions } from './launch.js';
 export type { CdpEmulation, PersistentLaunchOptions, UserAgentMetadata } from './launch.js';
 export { applyCdpFingerprint } from './cdp-fingerprint.js';

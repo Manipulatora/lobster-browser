@@ -1,0 +1,3 @@
+# Font pack files are provisioned at package/build time (or dev-symlinked), not committed. See README.md.
+*/
+!README.md

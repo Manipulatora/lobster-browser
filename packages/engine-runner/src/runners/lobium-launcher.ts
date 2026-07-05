@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import type { ProxyConfig } from '@lobster/shared-types';
+import { writeFontConfig } from '../fonts.js';
 import { buildLobiumConfig, lobiumConfigArg, writeLobiumConfig } from '../lobium-config.js';
 import { createPatchrightLauncher, type PatchrightLauncherOptions } from './patchright-launcher.js';
 import type { Launcher, LaunchContext } from './types.js';
@@ -23,6 +24,28 @@ import type { Launcher, LaunchContext } from './types.js';
 export function resolveLobiumBinary(): string | undefined {
   const p = process.env.LOBSTER_LOBIUM_BIN;
   return p && existsSync(p) ? p : undefined;
+}
+
+/** Resolve the bundled font-pack base dir (`LOBSTER_FONTS_DIR`, e.g. repo `lobium/fonts`), else undefined. */
+export function resolveFontsBaseDir(): string | undefined {
+  const p = process.env.LOBSTER_FONTS_DIR;
+  return p && existsSync(p) ? p : undefined;
+}
+
+/**
+ * Per-launch env: write the profile's private fontconfig and point FONTCONFIG_FILE at it (ENG-6), so the
+ * font fingerprint is OS-plausible + stable per profile. No-op (host fonts) when no font pack is
+ * provisioned or the OS has no bundle.
+ */
+export async function buildLobiumLaunchEnv(
+  ctx: LaunchContext,
+): Promise<Record<string, string> | undefined> {
+  const base = resolveFontsBaseDir();
+  if (!base) {
+    return undefined;
+  }
+  const conf = await writeFontConfig(ctx.options.userDataDir, ctx.fingerprint.os, base);
+  return conf ? { FONTCONFIG_FILE: conf } : undefined;
 }
 
 /** True when the native Lobium binary is provisioned in this environment. */
@@ -82,5 +105,6 @@ export function createLobiumLauncher(opts: PatchrightLauncherOptions = {}): Laun
     ...opts,
     executablePath: bin,
     extraArgsFor: buildLobiumLaunchArgs,
+    envFor: buildLobiumLaunchEnv,
   });
 }
