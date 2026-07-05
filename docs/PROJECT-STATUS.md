@@ -1,6 +1,7 @@
 # Project Status & Operating Manual — Lobster Browser
 
 > **The single authoritative source of truth for what is real, what is scaffolding, and what remains.**
+> The phased plan from here to a shippable, multi-OS product is [`PRODUCTION-ROADMAP.md`](PRODUCTION-ROADMAP.md).
 > Reconciles [`MASTER_PLAN.md`](MASTER_PLAN.md) (strategy) with the **actual verified state of the code**.
 > Synthesized from a 9-lane deep code audit (not a doc review) and spot-verified against source. It does
 > **not** soften the maturity assessment. Companion docs: [`DEPENDENCIES.md`](DEPENDENCIES.md) (critical
