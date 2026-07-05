@@ -114,10 +114,10 @@ the authoritative task list. `→ID` = folded into that canonical task.
 | ENG-1 | P0 | S | Relink + re-validate current binary | binary newer than every `.o`; gate ≥3 seeds verdict=pass 10/10; report committed |
 | **ENG-2** | **P0** | M | **Real-GPU validation (the keystone)** | rebuild w/o SwiftShader on real GPU; `webglMatchesClaim=true`; CreepJS trust recorded; "headless ~38%" gone |
 | ENG-7 | P0 | XL | Signed build matrix (Win/mac×2/Linux) + notarization + `rebase.sh` on a real quilt sync | reproducible signed binary passes notarization; rebase pops/refreshes/pushes |
-| ENG-3 | P1 | M | WebGL pixel farbling + Y-flip coherence (consume `seeds.webgl`) | readPixels hash == toDataURL hash; stable/distinct/host-differing |
-| ENG-4 | P1 | L | chrome.runtime / branding via native bindings (not JS inject) | `window.chrome.runtime` native `toString`; CreepJS `chromium:true` gone |
-| ENG-5 | P1 | M | Worker HTTP User-Agent request header override | Worker/SW fetch echo shows persona UA + Sec-CH-UA-Platform |
-| ENG-6 | P1 | L | Fonts packaging (substitute pack + fontconfig + env + subtract-only allowlist) | `measureText` OS-plausible+stable; `queryLocalFonts==cfg.fonts` |
+| ~~ENG-3~~ | ✅DONE | M | WebGL pixel farbling + Y-flip coherence (`seeds.webgl`) | **PROVEN** (3f15927): readPixels+toDataURL host-diff/stable/distinct; Y-flip coherence mismatch=0 |
+| ~~ENG-4~~ | ✅RESOLVED | — | chrome.runtime / branding | **No chrome.runtime added** (Chrome 106+ hides it too → adding = a tell). Real "Google Chrome" brand delivered natively by ENG-5. Residual: `proprietary_codecs` off (canPlayType tell) — build-flag follow-up |
+| ~~ENG-5~~ | ✅DONE | M | Worker HTTP User-Agent header + Sec-CH-UA metadata | **PROVEN** (3f15927): worker UA flips host→persona natively; userAgentData brands `[…Google Chrome…]` + platform in main+worker |
+| ~~ENG-6~~ | ✅DONE | L | Fonts packaging (private fontconfig + launcher env) | **PROVEN** (29032a6): host fonts excluded, persona set only, stable metrics; via `FONTCONFIG_FILE` envFor hook. Fuller metric-clone bundle = follow-up |
 | ENG-8 | P2 | L | WebGL capability alignment (MAX_*, extensions, precision) per GPU class | off-host-class persona matches claimed GPU profile |
 | ENG-10 | P2 | S | Audio byte paths + Window-Management surfaces | byte==quantize(farbled float); getScreenDetails from config |
 
@@ -135,7 +135,7 @@ the authoritative task list. `→ID` = folded into that canonical task.
 | ID | P | Eff | Task |
 |---|---|---|---|
 | **RUN-1** | **P0** | L | **Native Lobium launcher in the runner** (resolve `LOBSTER_LOBIUM_BIN`, `writeLobiumConfig`, spawn `--lobium-fp-config`, still apply CDP, register for `'lobium'`, fall back to interim) |
-| RUN-2 | P1 | M | `Target.setAutoAttach` + `waitForDebuggerOnStart` (fix popup real-navigator leak) |
+| RUN-2 | P2↓ | M | `Target.setAutoAttach` + `waitForDebuggerOnStart` popup gate | **ASSESSED — severity downgraded for Lobium.** The native config channel forwards to EVERY renderer incl. popups, so a popup CANNOT leak the device identity (UA/platform/canvas/WebGL/audio/screen are all native-safe there — verified: main page fully spoofed with no CDP). Residual = only the CDP-only surfaces (timezone/locale/geo) have a brief pre-override window in a popup; the existing per-page handler applies them but doesn't gate. Full `waitForDebuggerOnStart` gate DEFERRED: it needs browser-level CDP that Playwright's persistent-context API doesn't cleanly expose + can't be verified here (headless popups don't fire the `page` event), so shipping it would risk the proven launch path. Still worth doing for the **interim** engine (all-CDP → higher severity). |
 | RUN-3 | P1 | M | Release single-instance lock on close/crash |
 | RUN-5 | P1 | S | Honor SDK `headless` flag end-to-end |
 | RUN-10 | P1 | M | Coherence assertions in launch integration tests (page+worker UA, hwc, tz) |
@@ -293,7 +293,7 @@ Y-flip-coherent; worker HTTP UA shows persona; SOCKS5 keeps geo coherence; kill-
 | 5 | Local API **default-allow** + non-constant-time compare — any local process/page can drive sessions + read proxy creds | HIGH | SEC-3 default-deny + Origin/Host + rate limit |
 | 6 | Cloud sync has **no durable store** (S3 throws) — all synced data lost on restart | HIGH | BE-1 + readiness check |
 | 7 | Postgres/Prisma path **never exercised** — SQL bugs surface only in prod | HIGH | BE-2 integration suite + CI Postgres |
-| 8 | Popup/child pages briefly expose **real navigator** before async override | HIGH | RUN-2 setAutoAttach |
+| 8 | Popup/child pages briefly expose real surfaces before async override | ~~HIGH~~→MED | **Downgraded (RUN-2 assessed):** Lobium's native config reaches popup renderers, so device identity is native-safe there; only CDP-only tz/locale/geo have a brief popup window. Full gate deferred (see RUN-2) |
 | 9 | WebRTC-behind-proxy proven only on interim/no-proxy | HIGH | QA-4 srflx==egress with live proxy |
 | 10 | No desktop release maturity (0.0.0, unsigned, no updater) → SmartScreen/Gatekeeper | HIGH | DSK-5 + ENG-7 + SEC-14 |
 | 11 | GUI **never run integrated**; core Launch action is a stub | HIGH | DSK-1 + DSK-2 + CI smoke |
