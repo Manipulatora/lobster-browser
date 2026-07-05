@@ -1,24 +1,33 @@
 # Lobium hook points (the quilt series)
 
-> ⚠️ **Two load-bearing caveats for every "PROVEN" below** (see [`../../docs/PROJECT-STATUS.md`](../../docs/PROJECT-STATUS.md)):
-> 1. **All proofs ran on SwiftShader software rendering** (`--enable-unsafe-swiftshader`) — itself a
->    headless/VM tell. Read every "PROVEN" as "**PROVEN on SwiftShader**." The real-GPU score is
->    **unmeasured** until ENG-2 runs on a GPU host.
-> 2. **These surfaces are not wired into the product launch path.** No launcher calls `writeLobiumConfig`
->    or passes `--lobium-fp-config`; only the `ci/validation` harness exercises them. RUN-1 connects them.
+> ⚠️ **One load-bearing caveat for every "PROVEN" below** (see [`../../docs/PROJECT-STATUS.md`](../../docs/PROJECT-STATUS.md)):
+> **All canvas/WebGL/audio/screen proofs ran on SwiftShader software rendering** (`--enable-unsafe-swiftshader`)
+> — itself a headless/VM tell. Read every such "PROVEN" as "**PROVEN on SwiftShader**." The real-GPU
+> score is **unmeasured** until ENG-2 runs on a GPU host. (The navigator/UA/Sec-CH-UA proofs are
+> GPU-independent and hold as-is.)
 >
-> Also: **`seeds.webgl` is DEAD CONFIG** — it is emitted by the sidecar and parsed by the reader but
-> **consumed by nothing** (WebGL pixel farbling, ENG-3, is not implemented). Do not treat the WebGL pixel
-> hash as spoofed.
+> **RUN-1 (done):** these surfaces ARE now wired into the product launch path — `createLobiumLauncher`
+> spawns `LOBSTER_LOBIUM_BIN` with `--lobium-fp-config` and `writeLobiumConfig` per profile; proven live.
+>
+> **`seeds.webgl` is now CONSUMED (ENG-3, done):** per-profile WebGL pixel farbling of `gl.readPixels` +
+> WebGL `toDataURL/toBlob`, Y-flip-coherent. The WebGL pixel hash IS spoofed (distinct/stable per profile).
 
 Each hook patch is a **small** diff into an existing Chromium file that routes a surface through
 `lobium::LobiumFpConfig::Current()` (the reader in `../src/`). The insertion points + code are given
 here so a build engineer finalizes them against the pinned checkout (`quilt push -f` → edit → `quilt
 refresh`) — the exact line numbers shift per Chromium ref, which is why the series ships as intent +
-code rather than frozen context diffs. Five surfaces (WebGL vendor/renderer, canvas 2D farbling, Web
-Audio farbling incl. the AudioWorklet/ScriptProcessorNode upstream taps, and screen/DPR) are BUILT +
-PROVEN; fonts (a packaging task, see series) and the net/TLS layer remain, plus the screen/DPR
-Window-Management-API follow-ups.
+code rather than frozen context diffs. **Surfaces BUILT + PROVEN:** navigator (hwc/deviceMemory/
+maxTouchPoints), navigator.userAgent+platform in all contexts, WebGL vendor/renderer, **WebGL pixel
+farbling** (ENG-3), canvas 2D farbling, Web Audio farbling (incl. AudioWorklet/ScriptProcessorNode taps),
+screen/DPR, and the **HTTP User-Agent header + Sec-CH-UA userAgentData natively** (ENG-5, covers workers,
+carries the "Google Chrome" brand). Fonts is a packaging task (ENG-6, launcher `FONTCONFIG_FILE` — no
+Blink hook); net/TLS is coherent-for-Chrome already.
+>
+> **chrome.runtime finding (ENG-4):** intentionally NOT added. Modern Chrome 106+ hides `chrome.runtime`
+> on normal pages too, so Lobium already matches stock Chrome 152; adding it would CREATE a
+> `hasBadChromeRuntime` tell. The real "looks like Chromium" signal was the missing "Google Chrome" brand,
+> now delivered natively by ENG-5. (Residual, lower-priority: `proprietary_codecs` off → `canPlayType`
+> mp4 = "" — a media-codec tell to address via a build flag later.)
 
 ## `core/build-gn.patch` — register the added module ✅ BUILT
 

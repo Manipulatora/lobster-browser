@@ -30,6 +30,19 @@ void FarbleCanvasRgba(uint8_t* base,
                       int origin_y,
                       uint32_t seed);
 
+// Same as FarbleCanvasRgba, but for a BOTTOM-UP buffer (the layout `gl.readPixels` returns). Buffer row
+// `y` maps to the top-down coordinate `top_origin_y - y`, so WebGL `readPixels` and the (top-down) WebGL
+// `toDataURL/toBlob` snapshot perturb the same on-screen pixel identically — coherent cross-surface
+// farbling for the WebGL pixel hash (keyed on seeds.webgl). Caller passes top_origin_y = H - 1 - y_gl,
+// where H is the drawing-buffer height and y_gl is the readPixels y argument.
+void FarbleCanvasRgbaFlippedRows(uint8_t* base,
+                                 int width,
+                                 int height,
+                                 size_t row_bytes,
+                                 int origin_x,
+                                 int top_origin_y,
+                                 uint32_t seed);
+
 }  // namespace lobium
 
 #endif  // COMPONENTS_LOBIUM_FP_LOBIUM_FARBLE_H_
