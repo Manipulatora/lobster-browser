@@ -40,6 +40,8 @@ export interface LobiumNetConfig {
 /** The exact JSON document written to `lobium-fp.json` and parsed by the native config-channel patch. */
 export interface LobiumConfig {
   version: number;
+  /** CPU architecture the persona presents — drives Sec-CH-UA-Arch natively (arm64 for Apple Silicon). */
+  arch: Fingerprint['arch'];
   navigator: Fingerprint['navigator'];
   screen: Fingerprint['screen'];
   webgl: Fingerprint['webgl'];
@@ -82,6 +84,7 @@ export function buildLobiumConfig(
   }
   return {
     version: LOBIUM_CONFIG_VERSION,
+    arch: fp.arch,
     navigator: fp.navigator,
     screen: fp.screen,
     webgl: fp.webgl,

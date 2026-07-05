@@ -5,10 +5,24 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { hasFontPersona, writeFontConfig } from './fonts.js';
 
-test('hasFontPersona: windows bundled, linux/macos fall through to host', () => {
+test('hasFontPersona: EVERY OS is bundled so non-Windows personas cannot leak host fonts', () => {
   assert.equal(hasFontPersona('windows'), true);
-  assert.equal(hasFontPersona('linux'), false);
-  assert.equal(hasFontPersona('macos'), false);
+  assert.equal(hasFontPersona('macos'), true);
+  assert.equal(hasFontPersona('linux'), true);
+});
+
+test('macOS persona renames to Mac system font names (Helvetica/Times/Courier), no host leak', async () => {
+  const udd = await mkdtemp(join(tmpdir(), 'fonts-mac-'));
+  try {
+    const conf = await writeFontConfig(udd, 'macos', '/opt/lobium/fonts');
+    const xml = await readFile(conf, 'utf8');
+    assert.match(xml, /<dir>\/opt\/lobium\/fonts\/macos<\/dir>/);
+    assert.doesNotMatch(xml, /etc\/fonts/);
+    assert.match(xml, /Liberation Sans<\/string>.*Helvetica<\/string>/s);
+    assert.match(xml, /sans-serif<\/family><prefer><family>Helvetica/);
+  } finally {
+    await rm(udd, { recursive: true, force: true });
+  }
 });
 
 test('writeFontConfig writes a private fontconfig exposing ONLY the persona dir (no /etc/fonts)', async () => {
@@ -34,10 +48,15 @@ test('writeFontConfig writes a private fontconfig exposing ONLY the persona dir 
   }
 });
 
-test('writeFontConfig returns undefined for an OS with no bundle (host fonts kept)', async () => {
-  const udd = await mkdtemp(join(tmpdir(), 'fonts-'));
+test('linux persona keeps DejaVu/Liberation names (real Linux fonts) but restricted to the bundle', async () => {
+  const udd = await mkdtemp(join(tmpdir(), 'fonts-lin-'));
   try {
-    assert.equal(await writeFontConfig(udd, 'linux', '/opt/lobium/fonts'), undefined);
+    const conf = await writeFontConfig(udd, 'linux', '/opt/lobium/fonts');
+    assert.equal(conf, join(udd, 'lobium-fonts.conf'));
+    const xml = await readFile(conf, 'utf8');
+    assert.match(xml, /<dir>\/opt\/lobium\/fonts\/linux<\/dir>/);
+    assert.doesNotMatch(xml, /etc\/fonts/);
+    assert.match(xml, /sans-serif<\/family><prefer><family>DejaVu Sans/);
   } finally {
     await rm(udd, { recursive: true, force: true });
   }

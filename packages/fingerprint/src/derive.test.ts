@@ -188,9 +188,14 @@ test('EVERY catalog device class is coherent (exhaustive, not sampled)', () => {
     const tpl = DEVICE_TEMPLATES[os];
     assert.ok(tpl.devices.length >= 3, `catalog too thin for ${os}: ${tpl.devices.length} devices`);
     for (const device of tpl.devices) {
+      // Mirror derive.ts's per-OS layout: Apple-Silicon Macs are arm64 with a 25px menu bar + P3 (30-bit)
+      // display; everything else is x86_64 with a bottom taskbar + 24-bit sRGB.
+      const appleSilicon = /Apple M\d/.test(device.webgl.renderer);
+      const menuBarTop = os === 'macos' ? 25 : 0;
+      const bottomBar = os === 'macos' ? 0 : 40;
       const fp = {
         os,
-        arch: 'x86_64' as CpuArch,
+        arch: (appleSilicon ? 'arm64' : 'x86_64') as CpuArch,
         navigator: {
           userAgent: `Mozilla/5.0 (${tpl.osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36`,
           platform: tpl.platform,
@@ -212,8 +217,10 @@ test('EVERY catalog device class is coherent (exhaustive, not sampled)', () => {
           width: device.screen.width,
           height: device.screen.height,
           availWidth: device.screen.width,
-          availHeight: device.screen.height - 40,
-          colorDepth: 24,
+          availHeight: device.screen.height - menuBarTop - bottomBar,
+          availLeft: 0,
+          availTop: menuBarTop,
+          colorDepth: appleSilicon ? 30 : 24,
           devicePixelRatio: device.screen.dpr,
         },
         webgl: { ...device.webgl },

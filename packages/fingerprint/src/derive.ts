@@ -77,6 +77,14 @@ export function deriveFromPools(
   const device = rng.pick(tpl.devices);
   const ver = chromeVersionForms(browserVersion ?? ENGINE_CHROME.full);
 
+  // Architecture is a PROPERTY OF THE PICKED DEVICE, not a free parameter: an Apple-Silicon Mac (Metal
+  // renderer "Apple M<n>") is arm64, and every other catalog device (Windows/Linux/Intel-Mac GPUs) is
+  // x86_64. Deriving it from the GPU keeps Sec-CH-UA-Arch coherent with the WebGL renderer — otherwise an
+  // "Apple M2 Pro" persona reporting arch=x86 is a glaring cross-check tell (FP-3). The `arch` arg is
+  // retained for API compatibility but the device is authoritative (there is no ARM-Windows device).
+  void arch;
+  const deviceArch: CpuArch = /Apple M\d/.test(device.webgl.renderer) ? 'arm64' : 'x86_64';
+
   const primaryLocale = 'en-US';
   const languages = [primaryLocale, 'en'];
 
@@ -101,6 +109,10 @@ export function deriveFromPools(
   // the missing pixels would imply a bottom dock and no menu bar, impossible on default macOS.)
   const menuBarTop = os === 'macos' ? 25 : 0;
   const bottomBar = os === 'macos' ? 0 : 40;
+  // Apple-Silicon MacBooks ship wide-gamut (P3) displays that report a 30-bit colorDepth; every other
+  // catalog device is standard 24-bit sRGB. Reporting 24 on a P3 MacBook is a small but real realism
+  // miss (M7), so tie colorDepth to the device like arch.
+  const colorDepth = deviceArch === 'arm64' ? 30 : 24;
   const screenFp: ScreenFingerprint = {
     width: device.screen.width,
     height: device.screen.height,
@@ -108,13 +120,13 @@ export function deriveFromPools(
     availHeight: device.screen.height - menuBarTop - bottomBar,
     availLeft: 0,
     availTop: menuBarTop,
-    colorDepth: 24,
+    colorDepth,
     devicePixelRatio: device.screen.dpr,
   };
 
   return {
     os,
-    arch,
+    arch: deviceArch,
     navigator,
     screen: screenFp,
     webgl: { ...device.webgl },

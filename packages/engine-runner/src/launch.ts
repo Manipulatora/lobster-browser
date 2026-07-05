@@ -60,6 +60,13 @@ export interface UserAgentMetadata {
   architecture: string;
   model: string;
   mobile: boolean;
+  /**
+   * `bitness` + `wow64` MUST be set. If omitted, the CDP-overridden main frame returns an EMPTY bitness
+   * from getHighEntropyValues(['bitness']) while native workers return "64" — a window-vs-worker UA-CH
+   * split (and real Chrome never returns empty bitness). All catalog personas are 64-bit, non-WoW64.
+   */
+  bitness: string;
+  wow64: boolean;
 }
 
 /**
@@ -102,6 +109,8 @@ export function buildCdpEmulation(fp: Fingerprint): CdpEmulation {
       architecture: fp.arch === 'arm64' ? 'arm' : 'x86',
       model: '',
       mobile: nav.uaMobile,
+      bitness: '64',
+      wow64: false,
     },
     timezoneId: fp.locale.timezone,
     locale: fp.locale.locale,

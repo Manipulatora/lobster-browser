@@ -30,7 +30,7 @@ interface FontPersona {
   generics: { sans: string; serif: string; mono: string };
 }
 
-const PERSONAS: Partial<Record<OsFamily, FontPersona>> = {
+const PERSONAS: Record<OsFamily, FontPersona> = {
   windows: {
     dir: 'windows',
     renames: [
@@ -39,6 +39,25 @@ const PERSONAS: Partial<Record<OsFamily, FontPersona>> = {
       { from: 'Liberation Mono', to: 'Courier New' },
     ],
     generics: { sans: 'Arial', serif: 'Times New Roman', mono: 'Courier New' },
+  },
+  // Every OS has a bundle so NON-Windows personas can never leak host fonts (a macOS persona listing
+  // "Ubuntu"/"DejaVu Sans" is a glaring tell). Dev bundles are Liberation/DejaVu-based; production ships
+  // fuller, exact metric-clone sets per OS (see lobium/fonts/README.md).
+  macos: {
+    dir: 'macos',
+    renames: [
+      { from: 'Liberation Sans', to: 'Helvetica' },
+      { from: 'Liberation Serif', to: 'Times' },
+      { from: 'Liberation Mono', to: 'Courier' },
+    ],
+    generics: { sans: 'Helvetica', serif: 'Times', mono: 'Courier' },
+  },
+  // Linux legitimately ships DejaVu + Liberation, so those names are kept (no rename) — but the set is
+  // still restricted to the bundle so it is deterministic and host-independent.
+  linux: {
+    dir: 'linux',
+    renames: [],
+    generics: { sans: 'DejaVu Sans', serif: 'DejaVu Serif', mono: 'DejaVu Sans Mono' },
   },
 };
 
@@ -74,19 +93,16 @@ ${alias('monospace', persona.generics.mono)}
 }
 
 /**
- * Write the per-profile private fontconfig into `userDataDir` and return its absolute path, or `undefined`
- * when no bundle exists for this OS (the caller then leaves fonts as the host default). Deterministic:
- * same os + same dirs => byte-identical config => stable font fingerprint across launches.
+ * Write the per-profile private fontconfig into `userDataDir` and return its absolute path. Every OS has
+ * a bundle (so no persona can leak host fonts), so this always produces a config. Deterministic: same
+ * os + same dirs => byte-identical config => stable font fingerprint across launches.
  */
 export async function writeFontConfig(
   userDataDir: string,
   os: OsFamily,
   fontsBaseDir: string,
-): Promise<string | undefined> {
+): Promise<string> {
   const persona = PERSONAS[os];
-  if (!persona) {
-    return undefined;
-  }
   const fontDir = join(fontsBaseDir, persona.dir);
   const cacheDir = join(userDataDir, 'fc-cache');
   await mkdir(cacheDir, { recursive: true });

@@ -50,7 +50,14 @@ impl SidecarClient {
         let reader_pending = pending.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            loop {
+                let line = match lines.next_line().await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break, // EOF: the sidecar closed stdout (process exited).
+                    // A transient read error (e.g. one invalid-UTF-8 line) must NOT permanently kill the
+                    // reader and fail every future call while the child is still alive — skip and continue.
+                    Err(_) => continue,
+                };
                 if line.trim().is_empty() {
                     continue;
                 }

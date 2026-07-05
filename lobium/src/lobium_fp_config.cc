@@ -113,9 +113,13 @@ std::optional<LobiumFpConfig> ParseConfig(std::string_view contents) {
 
   LobiumFpConfig cfg;
   cfg.version = root.FindInt("version").value_or(0);
-  if (cfg.version != kSupportedVersion) {
-    return std::nullopt;  // incompatible — fall back to stock behavior rather than misapply.
+  // Accept version >= the minimum and ignore unknown fields (forward-compatible), rather than exact
+  // match: an exact `== 1` meant a sidecar shipping a newer schema would silently disable ALL spoofing
+  // and leak the host fingerprint. A too-OLD config is still rejected.
+  if (cfg.version < kSupportedVersion) {
+    return std::nullopt;  // incompatible (older than we understand) — fall back rather than misapply.
   }
+  if (const std::string* a = root.FindString("arch")) cfg.arch = *a;
   if (const base::DictValue* d = root.FindDict("navigator")) ReadNavigator(*d, cfg.navigator);
   if (const base::DictValue* d = root.FindDict("screen")) ReadScreen(*d, cfg.screen);
   if (const base::DictValue* d = root.FindDict("webgl")) ReadWebGl(*d, cfg.webgl);

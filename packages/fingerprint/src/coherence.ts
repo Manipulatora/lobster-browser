@@ -370,6 +370,20 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
   if (fp.screen.availHeight > fp.screen.height || fp.screen.availWidth > fp.screen.width) {
     issues.push('screen avail dimensions exceed physical dimensions');
   }
+  // macOS always reserves a top menu bar (~25px), so a Mac persona MUST report availTop>0 (M6/FP-2). A
+  // Mac with availTop=0 but availHeight<height implies a bottom dock and no menu bar — impossible on
+  // default macOS. Windows/Linux keep the deficit at the bottom (availTop=0).
+  const availTop = fp.screen.availTop ?? 0;
+  if (fp.os === 'macos' && availTop < 24) {
+    issues.push(
+      `macOS screen.availTop (${availTop}) must reserve the ~25px menu bar (availTop>=24)`,
+    );
+  }
+  if (fp.os !== 'macos' && availTop !== 0) {
+    issues.push(
+      `screen.availTop (${availTop}) must be 0 on ${fp.os} (bottom taskbar, no top menu bar)`,
+    );
+  }
   // WebGL vendor/renderer must describe a real GPU and agree with the OS. Direct3D is a
   // Windows-only graphics backend, so a Direct3D renderer on macOS/Linux is an obvious tell.
   if (fp.webgl.vendor.length === 0 || fp.webgl.renderer.length === 0) {
@@ -400,6 +414,40 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
     if (/Intel Inc\.|ATI Technologies Inc\.|OpenGL Engine|Metal Renderer/i.test(webglText)) {
       issues.push(`WebGL uses a macOS/Apple-format GPU string on a Windows profile: ${webglText}`);
     }
+  }
+  // POSITIVE per-OS GPU-backend checks (M5): macOS Chrome renders through ANGLE's Metal backend; Linux
+  // through Mesa/OpenGL. A mac persona without a Metal renderer, or a Linux persona carrying Metal
+  // (Apple-only) or Direct3D (Windows-only), is a backend-vs-OS mismatch a detector cross-checks.
+  if (fp.os === 'macos' && !/ANGLE Metal Renderer/i.test(fp.webgl.renderer)) {
+    issues.push(`WebGL renderer on macOS must use the ANGLE Metal backend: ${fp.webgl.renderer}`);
+  }
+  if (fp.os === 'linux') {
+    if (/Metal Renderer|Direct3D/i.test(fp.webgl.renderer)) {
+      issues.push(
+        `WebGL renderer on Linux must not use Metal/Direct3D (Apple/Windows backends): ${fp.webgl.renderer}`,
+      );
+    }
+    if (!/Mesa|OpenGL|ANGLE/i.test(webglText)) {
+      issues.push(
+        `WebGL renderer on Linux should present a Mesa/OpenGL/ANGLE backend: ${fp.webgl.renderer}`,
+      );
+    }
+  }
+
+  // --- CPU architecture must agree with the GPU (Apple-Silicon coherence, FP-3) --------------------
+  // An Apple-Silicon Mac (Metal renderer "Apple M<n>") is arm64; anything else in the catalog is x86_64.
+  // A persona claiming an "Apple M2 Pro" GPU while reporting Sec-CH-UA-Arch=x86 (arch x86_64) is a glaring
+  // cross-check tell, and vice-versa (arm64 arch must carry an Apple-Silicon GPU).
+  const isAppleSilicon = /Apple M\d/.test(fp.webgl.renderer);
+  if (isAppleSilicon && fp.arch !== 'arm64') {
+    issues.push(
+      `arch "${fp.arch}" contradicts the Apple-Silicon GPU "${fp.webgl.renderer}" (must be arm64)`,
+    );
+  }
+  if (!isAppleSilicon && fp.arch === 'arm64') {
+    issues.push(
+      `arch "arm64" requires an Apple-Silicon GPU, but the renderer is "${fp.webgl.renderer}"`,
+    );
   }
 
   // --- User-Agent Client Hints must agree with the User-Agent string ------------------------------

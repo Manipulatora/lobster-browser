@@ -33,7 +33,7 @@ interim (unpatched) Chromium engine and is harmlessly redundant on Lobium (both 
 The exact hook points (file + surface) are enumerated in ../hooks.md; the diffs below are the source of
 truth. Workers inherit the same --lobium-fp-data forwarded by the render_process_host hook.
 diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
-index 608bea5cb3..f846434080 100644
+index 608bea5cb3..8019f9f3f0 100644
 --- a/components/embedder_support/user_agent_utils.cc
 +++ b/components/embedder_support/user_agent_utils.cc
 @@ -28,6 +28,7 @@
@@ -62,7 +62,7 @@ index 608bea5cb3..f846434080 100644
    std::optional<std::string> custom_ua = GetUserAgentFromCommandLine();
    if (custom_ua.has_value()) {
      return custom_ua.value();
-@@ -635,6 +647,46 @@ std::string GetPlatformForUAMetadata() {
+@@ -635,6 +647,49 @@ std::string GetPlatformForUAMetadata() {
  }
  
  blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
@@ -96,12 +96,15 @@ index 608bea5cb3..f846434080 100644
 +    }
 +    metadata.full_version = nav.ua_full_version;
 +    metadata.platform_version = nav.ua_platform_version;
-+    // architecture/bitness/model/wow64 stay host-derived (coherent for a desktop x86_64 persona;
-+    // architecture spoofing is tracked separately as FP-3/FP-8).
-+    metadata.architecture = GetCpuArchitecture();
-+    metadata.model = BuildModelInfo();
-+    metadata.bitness = GetCpuBitness();
-+    metadata.wow64 = IsWoW64();
++    // Architecture/bitness/model/wow64 are driven by the PERSONA, not the host (FP-3): an Apple-Silicon
++    // Mac persona reports arm/64 even on an x86 build host, matching its WebGL "Apple M<n>" renderer and
++    // the CDP metadata (both compute Sec-CH-UA-Arch from the same persona arch). All catalog personas are
++    // 64-bit desktops with no device model and no WoW64. Falls back to host arch only if unconfigured.
++    metadata.architecture =
++        cfg->arch.empty() ? GetCpuArchitecture() : (cfg->arch == "arm64" ? "arm" : "x86");
++    metadata.bitness = cfg->arch.empty() ? GetCpuBitness() : "64";
++    metadata.wow64 = false;
++    metadata.model = std::string();
 +    metadata.form_factors = GetFormFactorsClientHint(metadata, metadata.mobile);
 +    return metadata;
 +  }
@@ -572,7 +575,7 @@ index a6e0435690..c21d216fe7 100644
      auto* options = ImageEncodeOptions::Create();
      options->setType(ImageEncoderUtils::MimeTypeName(encoding_mime_type));
 diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
-index 53c9f814fb..125ba00591 100644
+index 53c9f814fb..b860823c98 100644
 --- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
 +++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
 @@ -11,6 +11,8 @@
@@ -594,7 +597,7 @@ index 53c9f814fb..125ba00591 100644
  #include "third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.h"
  #include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
  #include "third_party/blink/renderer/platform/heap/thread_state.h"
-@@ -474,6 +479,27 @@ ScriptPromise<Blob> OffscreenCanvas::convertToBlob(
+@@ -474,6 +479,40 @@ ScriptPromise<Blob> OffscreenCanvas::convertToBlob(
  
    base::TimeTicks start_time = base::TimeTicks::Now();
    scoped_refptr<StaticBitmapImage> image_bitmap = context_->GetImage();
@@ -603,8 +606,21 @@ index 53c9f814fb..125ba00591 100644
 +  // true host canvas hash while getImageData on the same canvas returns farbled pixels — a cross-surface
 +  // tell. Read into a private RGBA8888/unpremultiplied bitmap, farble at origin (0,0) with seeds.canvas
 +  // (identical keying to getImageData), and swap in a fresh raster image; live canvas untouched.
-+  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
-+      cfg && cfg->seeds.canvas && image_bitmap && context_->IsRenderingContext2D()) {
++  // Pick the readback seed by context type: seeds.canvas for a 2D OffscreenCanvas, seeds.webgl for a
++  // WebGL one. WebGL matters especially in workers, which fingerprint via OffscreenCanvas + WebGL +
++  // convertToBlob (there is no toDataURL in a worker); without this the worker's WebGL convertToBlob
++  // would leak the pristine host pixels while gl.readPixels on the same canvas is farbled — a
++  // cross-readback tell. The convertToBlob snapshot is top-down, so FarbleCanvasRgba at origin (0,0) is
++  // coherent with both the HTMLCanvas WebGL toDataURL path and the (flipped-row) readPixels path.
++  uint32_t readback_seed = 0;
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current(); cfg && context_) {
++    if (context_->IsRenderingContext2D()) {
++      readback_seed = cfg->seeds.canvas;
++    } else if (context_->IsWebGL()) {
++      readback_seed = cfg->seeds.webgl;
++    }
++  }
++  if (readback_seed && image_bitmap) {
 +    const gfx::Size sz = image_bitmap->Size();
 +    const SkImageInfo info = SkImageInfo::Make(sz.width(), sz.height(), kRGBA_8888_SkColorType,
 +                                               kUnpremul_SkAlphaType, SkColorSpace::MakeSRGB());
@@ -613,7 +629,7 @@ index 53c9f814fb..125ba00591 100644
 +        image_bitmap->PaintImageForCurrentFrame().readPixels(info, bm.getPixels(), bm.rowBytes(), 0,
 +                                                             0)) {
 +      lobium::FarbleCanvasRgba(static_cast<uint8_t*>(bm.getPixels()), sz.width(), sz.height(),
-+                               bm.rowBytes(), 0, 0, cfg->seeds.canvas);
++                               bm.rowBytes(), 0, 0, readback_seed);
 +      if (sk_sp<SkImage> farbled = SkImages::RasterFromBitmap(bm)) {
 +        image_bitmap = UnacceleratedStaticBitmapImage::Create(std::move(farbled));
 +      }
@@ -823,11 +839,14 @@ index bd2958443a..56e11a98af 100644
  
  }  // namespace blink
 diff --git a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
-index d0b1bd6401..b808229cf8 100644
+index d0b1bd6401..190bc3a77e 100644
 --- a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
 +++ b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
-@@ -32,6 +32,8 @@
+@@ -30,8 +30,11 @@
+ #include <algorithm>
+ #include <bit>
  #include <complex>
++#include <vector>
  
  #include "base/compiler_specific.h"
 +#include "components/lobium_fp/lobium_audio_farble.h"
@@ -835,7 +854,7 @@ index d0b1bd6401..b808229cf8 100644
  #include "media/base/audio_bus.h"
  #include "third_party/blink/renderer/platform/audio/audio_bus.h"
  #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
-@@ -119,6 +121,13 @@ void RealtimeAnalyser::GetFloatFrequencyData(DOMFloat32Array* destination_array,
+@@ -119,6 +122,13 @@ void RealtimeAnalyser::GetFloatFrequencyData(DOMFloat32Array* destination_array,
        const double db_mag = audio_utilities::LinearToDecibels(linear_value);
        destination[i] = static_cast<float>(db_mag);
      }
@@ -849,7 +868,37 @@ index d0b1bd6401..b808229cf8 100644
    }
  }
  
-@@ -186,6 +195,13 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
+@@ -147,14 +157,25 @@ void RealtimeAnalyser::GetByteFrequencyData(DOMUint8Array* destination_array,
+     const double min_decibels = min_decibels_;
+ 
+     base::span<unsigned char> destination = destination_array->AsSpan();
++    // Lobium: compute the float dB values, farble them IDENTICALLY to GetFloatFrequencyData (same
++    // seed + index), THEN quantize to byte — so getByteFrequencyData stays the exact byte-quantization
++    // of the farbled float path (an invariant honest Chrome holds) AND carries the same per-profile
++    // perturbation. Without this the byte path leaks the pristine host audio fingerprint (a coverage
++    // hole that makes two profiles on one host linkable via the common getByteFrequencyData probe).
++    std::vector<float> db(len);
++    for (unsigned i = 0; i < len; ++i) {
++      db[i] = static_cast<float>(
++          audio_utilities::LinearToDecibels(magnitude_buffer_[i]));
++    }
++    if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++        cfg && cfg->seeds.audio) {
++      lobium::FarbleAudioSamples(db.data(), len, /*base_index=*/0, cfg->seeds.audio);
++    }
+     for (unsigned i = 0; i < len; ++i) {
+-      const float linear_value = magnitude_buffer_[i];
+-      const double db_mag = audio_utilities::LinearToDecibels(linear_value);
+-
+       // The range m_minDecibels to m_maxDecibels will be scaled to byte values
+       // from 0 to UCHAR_MAX.
+       const double scaled_value =
+-          UCHAR_MAX * (db_mag - min_decibels) * range_scale_factor;
++          UCHAR_MAX * (db[i] - min_decibels) * range_scale_factor;
+ 
+       // Clip to valid range.
+       destination[i] =
+@@ -186,6 +207,13 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
  
        destination[i] = value;
      }
@@ -863,6 +912,34 @@ index d0b1bd6401..b808229cf8 100644
    }
  }
  
+@@ -203,14 +231,22 @@ void RealtimeAnalyser::GetByteTimeDomainData(DOMUint8Array* destination_array) {
+     const unsigned write_index = GetWriteIndex();
+ 
+     base::span<unsigned char> destination = destination_array->AsSpan();
++    // Lobium: same model as GetByteFrequencyData — gather the time-domain PCM, farble it identically to
++    // GetFloatTimeDomainData, then quantize to byte, so the byte path is the exact quantization of the
++    // farbled float path and never exposes the pristine host waveform.
++    std::vector<float> pcm(len);
+     for (unsigned i = 0; i < len; ++i) {
+       // Buffer access is protected due to modulo operation.
+-      const float value =
+-          input_buffer_[(i + write_index - fft_size + kInputBufferSize) %
+-                        kInputBufferSize];
+-
++      pcm[i] = input_buffer_[(i + write_index - fft_size + kInputBufferSize) %
++                             kInputBufferSize];
++    }
++    if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++        cfg && cfg->seeds.audio) {
++      lobium::FarbleAudioSamples(pcm.data(), len, /*base_index=*/0, cfg->seeds.audio);
++    }
++    for (unsigned i = 0; i < len; ++i) {
+       // Scale from nominal -1 -> +1 to unsigned byte.
+-      const double scaled_value = 128 * (value + 1);
++      const double scaled_value = 128 * (pcm[i] + 1);
+ 
+       // Clip to valid range.
+       destination[i] =
 diff --git a/third_party/blink/renderer/modules/webaudio/script_processor_node.cc b/third_party/blink/renderer/modules/webaudio/script_processor_node.cc
 index f797aa6484..f61f726b41 100644
 --- a/third_party/blink/renderer/modules/webaudio/script_processor_node.cc

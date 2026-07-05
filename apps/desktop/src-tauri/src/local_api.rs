@@ -62,15 +62,47 @@ impl ApiResponse {
     }
 }
 
-/// True when the request carries the configured Bearer key (or no key is configured — dev).
+/// Length-independent byte compare, so key verification doesn't leak the key via timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// DNS-rebinding defense: only accept requests whose `Host` is a loopback literal. A malicious web page
+/// can rebind a hostname it controls to 127.0.0.1 and POST to the local API; CORS blocks reading the
+/// response, but the side-effect (launching/stopping a profile) still fires. Requiring a loopback Host
+/// (browsers send the *original* Host, not the rebound IP) closes that.
+fn host_is_loopback(headers: &HeaderMap) -> bool {
+    match headers.get("host").and_then(|v| v.to_str().ok()) {
+        Some(h) => {
+            let host = h.rsplit_once(':').map(|(a, _)| a).unwrap_or(h);
+            host == "127.0.0.1" || host == "localhost" || host == "[::1]" || host == "::1"
+        }
+        None => false, // a legitimate local client always sends Host
+    }
+}
+
+/// True when the request is a loopback caller carrying the configured Bearer key. **Fail-closed**: if no
+/// key is configured, every request is denied (the desktop always provisions one at startup — see
+/// `lib.rs`). This replaces the old default-allow, which let any local process — or, via DNS rebinding,
+/// any website — drive authenticated sessions.
 fn authorized(state: &LocalApiState, headers: &HeaderMap) -> bool {
+    if !host_is_loopback(headers) {
+        return false;
+    }
     match &state.api_key {
-        None => true,
+        None => false,
         Some(key) => headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|h| h.strip_prefix("Bearer "))
-            .map(|token| token == key)
+            .map(|token| constant_time_eq(token.as_bytes(), key.as_bytes()))
             .unwrap_or(false),
     }
 }

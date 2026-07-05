@@ -132,7 +132,36 @@ pub fn run() {
 
             let profiles_dir = dir.join("profiles");
             std::fs::create_dir_all(&profiles_dir).map_err(|e| e.to_string())?;
-            let api_key = std::env::var("LOBSTER_API_KEY").ok();
+            // Provision a loopback API key so the local automation API is AUTHENTICATED by default (the
+            // API now fail-closes without one — see local_api::authorized). Prefer LOBSTER_API_KEY; else
+            // read/generate a persisted per-install key (0600) so it survives restarts and can be shown
+            // in the UI (Settings). Never leaves the API open.
+            let api_key: Option<String> = Some(match std::env::var("LOBSTER_API_KEY") {
+                Ok(k) if !k.is_empty() => k,
+                _ => {
+                    let key_path = dir.join("local-api-key");
+                    match std::fs::read_to_string(&key_path) {
+                        Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
+                        _ => {
+                            let k = format!(
+                                "lb_local_{}{}",
+                                uuid::Uuid::new_v4().simple(),
+                                uuid::Uuid::new_v4().simple()
+                            );
+                            let _ = std::fs::write(&key_path, &k);
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(
+                                    &key_path,
+                                    std::fs::Permissions::from_mode(0o600),
+                                );
+                            }
+                            k
+                        }
+                    }
+                }
+            });
 
             // Spawn the engine-runner sidecar ONCE on Tauri's shared async runtime, so the UI Launch
             // command and the local automation API drive the SAME process over the SAME runtime's

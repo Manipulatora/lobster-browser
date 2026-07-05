@@ -89,6 +89,9 @@ struct NetConfig {
 // The parsed `lobium-fp.json`. `Current()` returns the process-wide instance parsed at startup.
 struct LobiumFpConfig {
   int version = 0;
+  // CPU architecture the persona presents ("x86_64" | "arm64"); drives Sec-CH-UA-Arch/bitness so an
+  // Apple-Silicon Mac persona reports arm, not the host arch. Empty = fall back to host.
+  std::string arch;
   NavigatorConfig navigator;
   ScreenConfig screen;
   WebGlConfig webgl;
