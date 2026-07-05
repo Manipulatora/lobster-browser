@@ -57,11 +57,31 @@ struct ScreenConfig {
   double device_pixel_ratio = 1;
 };
 
+// Numeric WebGL limits (ENG-8). Overridden in getParameter so MAX_* etc. agree with the spoofed
+// renderer string instead of leaking the real (or software) backend's caps. `present` gates the override.
+struct WebGlCaps {
+  bool present = false;
+  int max_texture_size = 0;
+  int max_cube_map_texture_size = 0;
+  int max_renderbuffer_size = 0;
+  int max_viewport_dims[2] = {0, 0};
+  int max_vertex_attribs = 0;
+  int max_vertex_uniform_vectors = 0;
+  int max_fragment_uniform_vectors = 0;
+  int max_varying_vectors = 0;
+  int max_texture_image_units = 0;
+  int max_vertex_texture_image_units = 0;
+  int max_combined_texture_image_units = 0;
+  float aliased_line_width_range[2] = {0, 0};
+  float aliased_point_size_range[2] = {0, 0};
+};
+
 struct WebGlConfig {
   std::string vendor;
   std::string renderer;
   std::string unmasked_vendor;
   std::string unmasked_renderer;
+  WebGlCaps caps;
 };
 
 struct LocaleConfig {

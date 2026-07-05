@@ -1,4 +1,4 @@
-import type { OsFamily } from '@lobster/shared-types';
+import type { OsFamily, WebGlCaps } from '@lobster/shared-types';
 
 /**
  * Lobster's OWN internal coherent device catalog — the source of truth for base device fingerprints.
@@ -31,6 +31,8 @@ export interface DeviceProfile {
     renderer: string;
     unmaskedVendor: string;
     unmaskedRenderer: string;
+    /** Numeric GPU limits (ENG-8) — a real-ANGLE profile for the backend, not the software backend. */
+    caps: WebGlCaps;
   };
   screen: { width: number; height: number; dpr: number };
   hardwareConcurrency: number;
@@ -48,11 +50,62 @@ export interface OsTemplate {
   devices: readonly DeviceProfile[];
 }
 
+// Real-ANGLE WebGL capability profiles per backend. These replace the software (SwiftShader) backend's
+// distinctly-low limits (e.g. MAX_TEXTURE_SIZE 8192) with values a real GPU reports through ANGLE, so the
+// numeric caps agree with the spoofed renderer string. ANGLE normalises most limits across GPUs within a
+// backend, so a per-backend profile is coherent for the common case; exact per-GPU caps + the extension
+// list need real-GPU capture (the real-GPU boundary) and are left to the backend.
+const D3D11_CAPS: WebGlCaps = {
+  maxTextureSize: 16384,
+  maxCubeMapTextureSize: 16384,
+  maxRenderbufferSize: 16384,
+  maxViewportDims: [16384, 16384],
+  maxVertexAttribs: 16,
+  maxVertexUniformVectors: 4096,
+  maxFragmentUniformVectors: 1024,
+  maxVaryingVectors: 30,
+  maxTextureImageUnits: 16,
+  maxVertexTextureImageUnits: 16,
+  maxCombinedTextureImageUnits: 32,
+  aliasedLineWidthRange: [1, 1],
+  aliasedPointSizeRange: [1, 1024],
+};
+const METAL_CAPS: WebGlCaps = {
+  maxTextureSize: 16384,
+  maxCubeMapTextureSize: 16384,
+  maxRenderbufferSize: 16384,
+  maxViewportDims: [16384, 16384],
+  maxVertexAttribs: 16,
+  maxVertexUniformVectors: 1024,
+  maxFragmentUniformVectors: 1024,
+  maxVaryingVectors: 31,
+  maxTextureImageUnits: 16,
+  maxVertexTextureImageUnits: 16,
+  maxCombinedTextureImageUnits: 32,
+  aliasedLineWidthRange: [1, 1],
+  aliasedPointSizeRange: [1, 511],
+};
+const GL_CAPS: WebGlCaps = {
+  maxTextureSize: 16384,
+  maxCubeMapTextureSize: 16384,
+  maxRenderbufferSize: 16384,
+  maxViewportDims: [16384, 16384],
+  maxVertexAttribs: 16,
+  maxVertexUniformVectors: 4096,
+  maxFragmentUniformVectors: 1024,
+  maxVaryingVectors: 31,
+  maxTextureImageUnits: 16,
+  maxVertexTextureImageUnits: 16,
+  maxCombinedTextureImageUnits: 32,
+  aliasedLineWidthRange: [1, 1],
+  aliasedPointSizeRange: [1, 2047],
+};
+
 /** Windows GPU renderer string in ANGLE Direct3D11 form (the only backend real Windows Chrome uses). */
 function winGpu(vendor: 'NVIDIA' | 'Intel' | 'AMD', model: string): DeviceProfile['webgl'] {
   const v = `Google Inc. (${vendor})`;
   const r = `ANGLE (${vendor}, ${model} Direct3D11 vs_5_0 ps_5_0, D3D11)`;
-  return { vendor: v, renderer: r, unmaskedVendor: v, unmaskedRenderer: r };
+  return { vendor: v, renderer: r, unmaskedVendor: v, unmaskedRenderer: r, caps: D3D11_CAPS };
 }
 
 const WINDOWS: OsTemplate = {
@@ -136,7 +189,7 @@ const WINDOWS: OsTemplate = {
 function macGpu(chip: string): DeviceProfile['webgl'] {
   const v = 'Google Inc. (Apple)';
   const r = `ANGLE (Apple, ANGLE Metal Renderer: Apple ${chip}, Unspecified Version)`;
-  return { vendor: v, renderer: r, unmaskedVendor: v, unmaskedRenderer: r };
+  return { vendor: v, renderer: r, unmaskedVendor: v, unmaskedRenderer: r, caps: METAL_CAPS };
 }
 
 const MACOS: OsTemplate = {
@@ -197,7 +250,7 @@ const MACOS: OsTemplate = {
 /** Linux GPU renderer string in Mesa/OpenGL form (no Direct3D — that is Windows-only). */
 function linuxGpu(vendor: 'Intel' | 'AMD' | 'NVIDIA', renderer: string): DeviceProfile['webgl'] {
   const v = `Google Inc. (${vendor})`;
-  return { vendor: v, renderer, unmaskedVendor: v, unmaskedRenderer: renderer };
+  return { vendor: v, renderer, unmaskedVendor: v, unmaskedRenderer: renderer, caps: GL_CAPS };
 }
 
 const LINUX: OsTemplate = {

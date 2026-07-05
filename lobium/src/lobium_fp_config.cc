@@ -87,6 +87,32 @@ void ReadWebGl(const base::DictValue& dict, WebGlConfig& w) {
   if (const std::string* s = dict.FindString("renderer")) w.renderer = *s;
   if (const std::string* s = dict.FindString("unmaskedVendor")) w.unmasked_vendor = *s;
   if (const std::string* s = dict.FindString("unmaskedRenderer")) w.unmasked_renderer = *s;
+  if (const base::DictValue* c = dict.FindDict("caps")) {
+    WebGlCaps& caps = w.caps;
+    caps.present = true;
+    caps.max_texture_size = c->FindInt("maxTextureSize").value_or(0);
+    caps.max_cube_map_texture_size = c->FindInt("maxCubeMapTextureSize").value_or(0);
+    caps.max_renderbuffer_size = c->FindInt("maxRenderbufferSize").value_or(0);
+    caps.max_vertex_attribs = c->FindInt("maxVertexAttribs").value_or(0);
+    caps.max_vertex_uniform_vectors = c->FindInt("maxVertexUniformVectors").value_or(0);
+    caps.max_fragment_uniform_vectors = c->FindInt("maxFragmentUniformVectors").value_or(0);
+    caps.max_varying_vectors = c->FindInt("maxVaryingVectors").value_or(0);
+    caps.max_texture_image_units = c->FindInt("maxTextureImageUnits").value_or(0);
+    caps.max_vertex_texture_image_units = c->FindInt("maxVertexTextureImageUnits").value_or(0);
+    caps.max_combined_texture_image_units = c->FindInt("maxCombinedTextureImageUnits").value_or(0);
+    if (const base::ListValue* vd = c->FindList("maxViewportDims"); vd && vd->size() == 2) {
+      caps.max_viewport_dims[0] = (*vd)[0].GetIfInt().value_or(0);
+      caps.max_viewport_dims[1] = (*vd)[1].GetIfInt().value_or(0);
+    }
+    if (const base::ListValue* lw = c->FindList("aliasedLineWidthRange"); lw && lw->size() == 2) {
+      caps.aliased_line_width_range[0] = static_cast<float>((*lw)[0].GetIfDouble().value_or(0));
+      caps.aliased_line_width_range[1] = static_cast<float>((*lw)[1].GetIfDouble().value_or(0));
+    }
+    if (const base::ListValue* ps = c->FindList("aliasedPointSizeRange"); ps && ps->size() == 2) {
+      caps.aliased_point_size_range[0] = static_cast<float>((*ps)[0].GetIfDouble().value_or(0));
+      caps.aliased_point_size_range[1] = static_cast<float>((*ps)[1].GetIfDouble().value_or(0));
+    }
+  }
 }
 
 void ReadLocale(const base::DictValue& dict, LocaleConfig& l) {

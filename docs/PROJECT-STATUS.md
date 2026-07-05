@@ -118,8 +118,8 @@ the authoritative task list. `→ID` = folded into that canonical task.
 | ~~ENG-4~~ | ✅RESOLVED | — | chrome.runtime / branding | **No chrome.runtime added** (Chrome 106+ hides it too → adding = a tell). Real "Google Chrome" brand delivered natively by ENG-5. Residual: `proprietary_codecs` off (canPlayType tell) — build-flag follow-up |
 | ~~ENG-5~~ | ✅DONE | M | Worker HTTP User-Agent header + Sec-CH-UA metadata | **PROVEN** (3f15927): worker UA flips host→persona natively; userAgentData brands `[…Google Chrome…]` + platform in main+worker |
 | ~~ENG-6~~ | ✅DONE | L | Fonts packaging (private fontconfig + launcher env) | **PROVEN** (29032a6): host fonts excluded, persona set only, stable metrics; via `FONTCONFIG_FILE` envFor hook. Fuller metric-clone bundle = follow-up |
-| ENG-8 | P2 | L | WebGL capability alignment (MAX_*, extensions, precision) per GPU class | off-host-class persona matches claimed GPU profile |
-| ENG-10 | P2 | S | Audio byte paths + Window-Management surfaces | byte==quantize(farbled float); getScreenDetails from config |
+| ~~ENG-8~~ | ✅DONE (scalar) | L | WebGL capability alignment | **PROVEN**: MAX_*/viewport/aliased-range overridden natively per GPU class (D3D11/Metal/GL), so caps agree with the renderer (`maxTex` 8192→16384; Metal `maxVUnif`=1024 vs D3D11 4096). **Residual (real-GPU boundary):** extension-list + shader-precision alignment needs per-GPU capture |
+| ~~ENG-10~~ | ✅DONE | S | Audio byte paths farbled | **PROVEN**: getByte{Frequency,TimeDomain}Data = quantization of the farbled float (host-diff, per-seed distinct). WMA `getScreenDetails` still a P2 follow-up |
 
 ### FP — fingerprint
 | ID | P | Eff | Task |

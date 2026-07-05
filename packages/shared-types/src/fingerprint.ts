@@ -43,12 +43,38 @@ export interface ScreenFingerprint {
 }
 
 /** WebGL vendor/renderer identity. Populated at the native engine layer (P0). */
+/**
+ * WebGL numeric/structural capability limits. Overriding vendor/renderer STRINGS alone is a tell: the
+ * MAX_* limits, viewport dims and aliased ranges still describe the real backend. On a software
+ * (SwiftShader) backend these read distinctly low (e.g. MAX_TEXTURE_SIZE 8192) next to a real-GPU
+ * renderer string — a cross-check a detector reads directly. These are overridden natively (ENG-8) to a
+ * coherent real-ANGLE profile for the claimed GPU class. (The extension list + shader-precision buckets
+ * need per-GPU capture to be exact — the real-GPU boundary — so they are left to the backend for now.)
+ */
+export interface WebGlCaps {
+  maxTextureSize: number;
+  maxCubeMapTextureSize: number;
+  maxRenderbufferSize: number;
+  maxViewportDims: [number, number];
+  maxVertexAttribs: number;
+  maxVertexUniformVectors: number;
+  maxFragmentUniformVectors: number;
+  maxVaryingVectors: number;
+  maxTextureImageUnits: number;
+  maxVertexTextureImageUnits: number;
+  maxCombinedTextureImageUnits: number;
+  aliasedLineWidthRange: [number, number];
+  aliasedPointSizeRange: [number, number];
+}
+
 export interface WebGlFingerprint {
   vendor: string;
   renderer: string;
   /** UNMASKED_VENDOR_WEBGL / UNMASKED_RENDERER_WEBGL. */
   unmaskedVendor: string;
   unmaskedRenderer: string;
+  /** Numeric GPU limits, overridden natively so MAX_* agree with the renderer string (ENG-8). */
+  caps?: WebGlCaps;
 }
 
 /** Locale/timezone/geolocation cluster — derived from the proxy exit IP. */

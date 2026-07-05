@@ -982,7 +982,7 @@ index f797aa6484..f61f726b41 100644
    }
  
 diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
-index a977030857..c5561ce5ee 100644
+index a977030857..7bd229ffd4 100644
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 @@ -45,6 +45,8 @@
@@ -994,7 +994,59 @@ index a977030857..c5561ce5ee 100644
  #include "components/viz/common/gpu/raster_context_provider.h"
  #include "components/viz/common/resources/shared_image_format_utils.h"
  #include "device/vr/buildflags/buildflags.h"
-@@ -4191,6 +4193,16 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+@@ -3982,6 +3984,51 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+                                                     GLenum pname) {
+   if (isContextLost())
+     return ScriptValue::CreateNull(script_state->GetIsolate());
++  // Lobium: override the numeric GPU limits (ENG-8) so MAX_* / viewport / aliased ranges agree with the
++  // spoofed UNMASKED_RENDERER string instead of leaking the real (or software) backend's caps — a
++  // SwiftShader-shaped cap next to a real-GPU renderer is a direct cross-check tell. Only config-provided
++  // caps are intercepted; every other pname falls through to the normal driver query below.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->webgl.caps.present) {
++    const auto& caps = cfg->webgl.caps;
++    switch (pname) {
++      case GL_MAX_TEXTURE_SIZE:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_texture_size));
++      case GL_MAX_CUBE_MAP_TEXTURE_SIZE:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_cube_map_texture_size));
++      case GL_MAX_RENDERBUFFER_SIZE:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_renderbuffer_size));
++      case GL_MAX_VERTEX_ATTRIBS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_vertex_attribs));
++      case GL_MAX_VERTEX_UNIFORM_VECTORS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_vertex_uniform_vectors));
++      case GL_MAX_FRAGMENT_UNIFORM_VECTORS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_fragment_uniform_vectors));
++      case GL_MAX_VARYING_VECTORS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_varying_vectors));
++      case GL_MAX_TEXTURE_IMAGE_UNITS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_texture_image_units));
++      case GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_vertex_texture_image_units));
++      case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_combined_texture_image_units));
++      case GL_MAX_VIEWPORT_DIMS: {
++        const GLint dims[2] = {static_cast<GLint>(caps.max_viewport_dims[0]),
++                               static_cast<GLint>(caps.max_viewport_dims[1])};
++        return WebGLAny(script_state, DOMInt32Array::Create(base::span(dims)));
++      }
++      case GL_ALIASED_LINE_WIDTH_RANGE: {
++        const GLfloat r[2] = {caps.aliased_line_width_range[0], caps.aliased_line_width_range[1]};
++        return WebGLAny(script_state, DOMFloat32Array::Create(base::span(r)));
++      }
++      case GL_ALIASED_POINT_SIZE_RANGE: {
++        const GLfloat r[2] = {caps.aliased_point_size_range[0], caps.aliased_point_size_range[1]};
++        return WebGLAny(script_state, DOMFloat32Array::Create(base::span(r)));
++      }
++      default:
++        break;  // not a capped param — fall through to the normal driver query.
++    }
++  }
+   const int kIntZero = 0;
+   switch (pname) {
+     case GL_ACTIVE_TEXTURE:
+@@ -4191,6 +4238,16 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
@@ -1011,7 +1063,7 @@ index a977030857..c5561ce5ee 100644
          return WebGLAny(script_state,
                          String(ContextGL()->GetString(GL_RENDERER)));
        }
-@@ -4200,6 +4212,13 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+@@ -4200,6 +4257,13 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
@@ -1025,7 +1077,7 @@ index a977030857..c5561ce5ee 100644
          return WebGLAny(script_state,
                          String(ContextGL()->GetString(GL_VENDOR)));
        }
-@@ -5347,6 +5366,27 @@ void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
+@@ -5347,6 +5411,27 @@ void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
      }
      ContextGL()->ReadPixels(x, y, width, height, format, type, data);
    }
