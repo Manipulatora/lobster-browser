@@ -17,10 +17,11 @@ Puppeteer) **and** a Selenium `debuggerAddress`.
 | Method | Path | SDK call | Returns |
 |---|---|---|---|
 | `GET`  | `/health` | `health()` | `{ status: "ok" }` (no auth) |
-| `POST` | `/profile/start` | `start(id, { headless })` | `{ profileId, ws, debuggerAddress, webDriver?, pid }` |
+| `POST` | `/profile/start` | `start(id, { headless, password })` | `{ profileId, ws, debuggerAddress, webDriver?, pid }` |
 | `POST` | `/profile/stop` | `stop(id)` | `{ profileId, stopped }` |
 | `GET`  | `/profile/list` | `list()` | `[{ profileId, name, running }]` |
 | `GET`  | `/profile/status` | `status(id)` | `{ profileId, running, ws?, debuggerAddress? }` |
+| `POST` | `/proxy/test` | `testProxy(config, { id })` / `test_proxy(config, id=...)` | `{ ok, latencyMs?, geo?, error? }` |
 
 Every call except `/health` needs the Bearer API key (minted in the desktop UI / backend, see
 [`api-keys`](../../apps/backend/src/api-keys)).
@@ -44,6 +45,7 @@ exported from the JS module and importable from `lobster_client` in Python.
 import { LobsterClient } from '@lobster/local-api-sdk';
 const client = new LobsterClient({ apiKey: 'lb_live_…' });
 const { ws, debuggerAddress } = await client.start('my-profile-id');
+// Protected profile: await client.start('my-profile-id', { password: 'profile-password' });
 // …drive the browser…
 await client.stop('my-profile-id');
 ```

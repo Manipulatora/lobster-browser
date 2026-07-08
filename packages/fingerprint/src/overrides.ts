@@ -12,6 +12,7 @@ export function applyOverrides(fp: Fingerprint, overrides?: FingerprintOverrides
     navigator: overrides.navigator ? { ...fp.navigator, ...overrides.navigator } : fp.navigator,
     screen: overrides.screen ? { ...fp.screen, ...overrides.screen } : fp.screen,
     locale: overrides.locale ? { ...fp.locale, ...overrides.locale } : fp.locale,
+    webgl: overrides.webgl ? { ...fp.webgl, ...overrides.webgl } : fp.webgl,
     fonts: overrides.fonts ?? fp.fonts,
   };
 }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import {
   buildLobiumLaunchArgs,
   createLobiumLauncher,
   isLobiumAvailable,
+  lobiumBinaryCandidates,
   proxySummaryFromServer,
   resolveLobiumBinary,
 } from './lobium-launcher.js';
@@ -18,12 +19,23 @@ const fp = deriveFingerprint('seed-lobium-test', { os: 'windows', engine: 'lobiu
 
 function ctxWith(
   userDataDir: string,
-  opts: { proxy?: { server: string }; seed?: string } = {},
+  opts: { proxy?: { server: string }; seed?: string; policy?: true } = {},
 ): LaunchContext {
   return {
     profileId: 'p',
     engine: 'lobium',
+    ...(opts.policy ? { osVersion: 'Windows 11 23H2', webrtcPolicy: 'disabled' } : {}),
     fingerprint: fp,
+    ...(opts.policy
+      ? {
+          fingerprintPolicy: {
+            renderer: { mode: 'normalized_host' },
+            webrtc: 'disabled',
+            hardwareNoise: { webgl: true, canvas: false, audio: true, clientRects: true },
+            mediaDevices: { cameras: 2, microphones: 1, speakers: 3, stableDeviceIds: false },
+          },
+        }
+      : {}),
     ...(opts.seed !== undefined ? { fingerprintSeed: opts.seed } : {}),
     options: {
       userDataDir,
@@ -38,8 +50,12 @@ function ctxWith(
 
 test('resolveLobiumBinary / isLobiumAvailable follow LOBSTER_LOBIUM_BIN', async () => {
   const prev = process.env.LOBSTER_LOBIUM_BIN;
+  const prevDir = process.env.LOBSTER_LOBIUM_DIR;
+  const prevAuto = process.env.LOBSTER_LOBIUM_AUTO_DISCOVER;
   try {
+    process.env.LOBSTER_LOBIUM_AUTO_DISCOVER = '0';
     delete process.env.LOBSTER_LOBIUM_BIN;
+    delete process.env.LOBSTER_LOBIUM_DIR;
     assert.equal(resolveLobiumBinary(), undefined);
     assert.equal(isLobiumAvailable(), false);
 
@@ -57,16 +73,56 @@ test('resolveLobiumBinary / isLobiumAvailable follow LOBSTER_LOBIUM_BIN', async 
   } finally {
     if (prev === undefined) delete process.env.LOBSTER_LOBIUM_BIN;
     else process.env.LOBSTER_LOBIUM_BIN = prev;
+    if (prevDir === undefined) delete process.env.LOBSTER_LOBIUM_DIR;
+    else process.env.LOBSTER_LOBIUM_DIR = prevDir;
+    if (prevAuto === undefined) delete process.env.LOBSTER_LOBIUM_AUTO_DISCOVER;
+    else process.env.LOBSTER_LOBIUM_AUTO_DISCOVER = prevAuto;
+  }
+});
+
+test('resolveLobiumBinary can discover a built output from LOBSTER_LOBIUM_DIR', async () => {
+  const prevBin = process.env.LOBSTER_LOBIUM_BIN;
+  const prevDir = process.env.LOBSTER_LOBIUM_DIR;
+  const prevAuto = process.env.LOBSTER_LOBIUM_AUTO_DISCOVER;
+  const root = await mkdtemp(join(tmpdir(), 'lobium-root-'));
+  try {
+    delete process.env.LOBSTER_LOBIUM_BIN;
+    process.env.LOBSTER_LOBIUM_AUTO_DISCOVER = '0';
+    const out = join(root, 'src', 'out', 'Lobium');
+    const binPath = join(out, 'chrome');
+    await mkdir(out, { recursive: true });
+    await writeFile(binPath, '#!/bin/true\n', { mode: 0o755 });
+    process.env.LOBSTER_LOBIUM_DIR = root;
+
+    assert.ok(lobiumBinaryCandidates().includes(binPath));
+    assert.equal(resolveLobiumBinary(), binPath);
+    assert.equal(isLobiumAvailable(), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    if (prevBin === undefined) delete process.env.LOBSTER_LOBIUM_BIN;
+    else process.env.LOBSTER_LOBIUM_BIN = prevBin;
+    if (prevDir === undefined) delete process.env.LOBSTER_LOBIUM_DIR;
+    else process.env.LOBSTER_LOBIUM_DIR = prevDir;
+    if (prevAuto === undefined) delete process.env.LOBSTER_LOBIUM_AUTO_DISCOVER;
+    else process.env.LOBSTER_LOBIUM_AUTO_DISCOVER = prevAuto;
   }
 });
 
 test('createLobiumLauncher throws when the binary is not provisioned', () => {
   const prev = process.env.LOBSTER_LOBIUM_BIN;
+  const prevDir = process.env.LOBSTER_LOBIUM_DIR;
+  const prevAuto = process.env.LOBSTER_LOBIUM_AUTO_DISCOVER;
   try {
+    process.env.LOBSTER_LOBIUM_AUTO_DISCOVER = '0';
     delete process.env.LOBSTER_LOBIUM_BIN;
+    delete process.env.LOBSTER_LOBIUM_DIR;
     assert.throws(() => createLobiumLauncher(), /LOBSTER_LOBIUM_BIN/);
   } finally {
     if (prev !== undefined) process.env.LOBSTER_LOBIUM_BIN = prev;
+    if (prevDir === undefined) delete process.env.LOBSTER_LOBIUM_DIR;
+    else process.env.LOBSTER_LOBIUM_DIR = prevDir;
+    if (prevAuto === undefined) delete process.env.LOBSTER_LOBIUM_AUTO_DISCOVER;
+    else process.env.LOBSTER_LOBIUM_AUTO_DISCOVER = prevAuto;
   }
 });
 
@@ -156,6 +212,32 @@ test('buildLobiumLaunchArgs records the proxy WebRTC policy + non-secret summary
     // The config file must never carry proxy credentials.
     const raw = await readFile(join(userDataDir, LOBIUM_CONFIG_FILENAME), 'utf8');
     assert.ok(!/username|password/.test(raw), 'no credentials in the config file');
+  } finally {
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('buildLobiumLaunchArgs writes profile policy into the native config', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-policy-'));
+  try {
+    await buildLobiumLaunchArgs(ctxWith(userDataDir, { policy: true }));
+    const written = JSON.parse(await readFile(join(userDataDir, LOBIUM_CONFIG_FILENAME), 'utf8'));
+    assert.equal(written.policy.osVersion, 'Windows 11 23H2');
+    assert.equal(written.net.webrtcPolicy, 'disabled');
+    assert.equal(written.policy.webrtc, 'disabled');
+    assert.deepEqual(written.policy.renderer, { mode: 'normalized_host' });
+    assert.deepEqual(written.policy.hardwareNoise, {
+      webgl: true,
+      canvas: false,
+      audio: true,
+      clientRects: true,
+    });
+    assert.deepEqual(written.policy.mediaDevices, {
+      cameras: 2,
+      microphones: 1,
+      speakers: 3,
+      stableDeviceIds: false,
+    });
   } finally {
     await rm(userDataDir, { recursive: true, force: true });
   }

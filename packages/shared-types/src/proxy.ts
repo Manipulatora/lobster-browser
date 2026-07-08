@@ -32,3 +32,31 @@ export interface ProxyTestResult {
   geo?: GeoInfo;
   error?: string;
 }
+
+export type ProxySource = 'mine' | 'hive';
+export type StoredProxyStatus = 'ready' | 'warning' | 'testing' | 'error';
+
+export interface StoredProxy {
+  id: string;
+  source: ProxySource;
+  label: string;
+  config: ProxyConfig;
+  location?: string;
+  timezone?: string;
+  latencyMs?: number;
+  status: StoredProxyStatus;
+  rotateUrl?: string;
+  lastCheckedAt?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateStoredProxyInput {
+  source: ProxySource;
+  label: string;
+  config: ProxyConfig;
+  location?: string;
+  timezone?: string;
+  rotateUrl?: string;
+}

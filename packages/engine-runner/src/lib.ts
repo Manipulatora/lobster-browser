@@ -17,6 +17,7 @@ export {
   buildLobiumLaunchEnv,
   createLobiumLauncher,
   isLobiumAvailable,
+  lobiumBinaryCandidates,
   proxySummaryFromServer,
   resolveFontsBaseDir,
   resolveLobiumBinary,
@@ -55,5 +56,53 @@ export type {
   LobiumFarblingSeeds,
   BuildLobiumConfigOptions,
 } from './lobium-config.js';
+export {
+  ANDROID_LOBIUM_CONFIG_FILENAME,
+  ANDROID_LOBIUM_CONFIG_VERSION,
+  buildAndroidLobiumConfig,
+  writeAndroidLobiumConfig,
+} from './android-config.js';
+export type {
+  AndroidLobiumConfig,
+  AndroidLobiumFarblingSeeds,
+  AndroidLobiumNetConfig,
+  AndroidLobiumPolicyConfig,
+  BuildAndroidLobiumConfigOptions,
+} from './android-config.js';
+export {
+  AndroidDeviceBridge,
+  DEFAULT_ANDROID_CDP_SOCKET,
+  DEFAULT_ANDROID_LOBIUM_ACTIVITY,
+  DEFAULT_ANDROID_LOBIUM_PACKAGE,
+  NodeAdbClient,
+  buildAndroidCdpForwardCommand,
+  buildAndroidConfigDeliveryCommands,
+  buildAndroidLaunchPlan,
+  buildAndroidStartCommand,
+  buildAndroidStopCommand,
+  defaultAndroidRemoteConfigPath,
+  parseAdbDevices,
+  sanitizeAndroidProfileId,
+} from './android-bridge.js';
+export type {
+  AdbClient,
+  AdbCommandResult,
+  AndroidConfigDeliveryPlan,
+  AndroidDeviceInfo,
+  AndroidDeviceState,
+  AndroidLaunchPlan,
+  BuildAndroidLaunchPlanOptions,
+} from './android-bridge.js';
+export {
+  buildHostCalibrationProbeScript,
+  normalizeHostCalibrationSnapshot,
+  probeHostCalibration,
+} from './host-calibration-probe.js';
+export type {
+  HostCalibrationRawNavigator,
+  HostCalibrationRawSnapshot,
+  HostProbePage,
+  NormalizeHostCalibrationOptions,
+} from './host-calibration-probe.js';
 export type { EngineRunner } from './runner.js';
 export type { Launcher, LaunchContext, LaunchHandle, LauncherRegistry } from './runners/types.js';

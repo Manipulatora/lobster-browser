@@ -444,6 +444,29 @@ runs live coherence validation.
 | **Advanced / Long-tail** | doNotTrack, plugins/mimeTypes, permissions shape, battery, sensors, speech voices, codecs, connection, storage quota, gamepads | mostly toggles/presets | P2; native-Lobium |
 | **Device type** | desktop / mobile (Android) | top-level switch | flips mobile variants across every panel |
 
+### 5.1 Declared create-profile wizard fields
+
+The 2026-07-07 product UI declaration makes these controls first-class in the create/edit profile flow:
+
+| Wizard field | Model status | Engine status | Notes |
+|---|---|---|---|
+| User Agent | modeled in `NavigatorFingerprint` | CDP/native path exists | Must stay pinned to the actual Chrome/Lobium version. |
+| Operating system | desktop `windows/macos/linux`; Android has separate `AndroidFingerprint` model | desktop launchable; Android non-launchable | Android fingerprint catalog/coherence exists, but launch requires the separate APK/device runner; iOS is discarded. |
+| OS version | partial via `uaPlatformVersion` | partial | Needs explicit `osVersion`/platform-version policy in shared types and UI. |
+| Screen resolution | modeled | partial/native screen hooks exist | Needs full window/outer/inner coherence in UI. |
+| Fonts | modeled | conditional fontconfig path | Needs final packs and safer editor UX. |
+| Languages/timezone/geolocation | modeled | CDP/native path exists | Default should derive from proxy exit geo. |
+| WebRTC | not in `Fingerprint` yet | launch policy partial | Needs explicit `WebRtcPolicy` contract. |
+| CPU cores/RAM | modeled | CDP/native path exists | Values must remain spec/coherence bounded. |
+| Renderer/GPU | modeled strings + scalar caps | real-GPU/host calibration pending | Default must be host-calibrated; arbitrary foreign GPU selection is unsafe. |
+| Hardware noise: WebGL/canvas/audio | native seeds exist for main surfaces | dev-proven, real-GPU pending | Expose as supported only for Lobium paths that honor the config. |
+| Hardware noise: Client Rects | target only | absent | Show planned/unsupported until native rect farbling exists. |
+| Media devices | target in WebRTC section | absent | Needs stable `enumerateDevices` model and native/permission coherence. |
+
+Android must not be treated as a normal desktop Chromium/Lobium launch target. The TS catalog can now
+derive and validate Android personas, but they become launchable only through the Android APK/device
+runner described in [`android.md`](android.md). iOS is not a Lobster target.
+
 ---
 
 ## 6. Native (Lobium) vs interim (best-effort) mapping — summary
@@ -473,20 +496,20 @@ itself a tell.
 
 ## Status vs target
 
-**Built today:** the deterministic seed→coherent-`Fingerprint` pipeline (real-device sourced,
-32-candidate coherence filter, pool fallback), the proxy-geo overlay, a 7-rule coherence gate wired
-into `isSelectable` + `validateFingerprintCoherence`, and end-to-end application of the JS-safe
-identity + geo + hardware surfaces via clean CDP and a main-world init script — with the validation
-harness asserting UA / hardwareConcurrency / languages / timezone / webdriver actually applied
-against a live detector. That's roughly the UA/UA-CH, locale/timezone, and core hardware slice of the
-catalog: real, verified, honest.
+**Built today:** the deterministic seed→coherent-`Fingerprint` fallback pipeline (`pools.ts`), proxy-geo
+overlay, coherence validator, CDP application for JS-safe surfaces, and native Lobium config/farbling
+coverage for the main deep surfaces: canvas, WebGL vendor/renderer + pixel farbling + scalar caps, audio
+float/byte/worklet paths, screen/DPR/colorDepth/availTop, navigator hardware fields, UA/platform in workers,
+and UA header/Sec-CH-UA metadata. The launcher can also isolate fonts with private fontconfig when a font
+pack is provisioned.
 
-**Not yet built:** the deep surfaces that are the actual moat — canvas / WebGL pixel / audio /
-clientRects seeded farbling, font-metric and codec/voice/WebGPU enforcement, WebRTC leak control, and
-TLS/JA4 — all of which are **planned as native-Lobium** on the parallel Track F, plus a handful of
-interim gaps (screen/DPR substitution, Sec-CH-UA bitness, full mobile variant); the geolocation CDP
-send and the `navigator.languages` q-value leak are now closed (T-018).
-The parameter *model* and the coherence *constraints* for all ~90 parameters are specified here so
-that the editor UI, the sidecar, and the Lobium config channel can converge on one shape as Lobium
-comes online. In MASTER_PLAN terms: the JS-safe layer meets the v1 bar; native depth is the flagship
-work still ahead.
+**Still not built/proven:** host-calibrated persona derivation has a typed helper, browser-side probe
+scaffold, and `startProfile` path when a host snapshot is supplied, but there is no persisted first-run
+host calibration service and no real-GPU baseline yet. Native detector proof is still SwiftShader/dev
+proof; clientRects/codecs/voices/WebGPU and TLS/JA4 remain future depth; Android has catalog/coherence
+support but remains absent as a launch path; iOS is discarded; final licensed font bundles are packaging
+work. The parameter model and constraints here remain useful, but the primary production path is now:
+capture the real host -> derive from host -> farble per profile, with `pools.ts` retained as fallback.
+The full create-profile UI requested in
+[`product-ui-ux-plan.md`](product-ui-ux-plan.md) must expose support status rather than pretending all
+fields are already enforced by the engine.

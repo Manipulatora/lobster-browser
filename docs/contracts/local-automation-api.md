@@ -19,7 +19,7 @@ contract so existing integrations port with near-zero friction.
 No auth. → `{ "code": 0, "data": { "status": "ok" }, "msg": "success" }`
 
 ### `POST /api/v1/profile/start`
-Body: `{ "profileId": "string", "headless?": false }`
+Body: `{ "profileId": "string", "headless?": false, "password?": "string" }`
 → `data` (`StartProfileResult`):
 ```jsonc
 {
@@ -40,13 +40,19 @@ Body: `{ "profileId": "string" }` → `data: { "profileId", "stopped": true }`
 ### `GET /api/v1/profile/status?profileId=<id>`
 → `data` (`ProfileStatusResult`): `{ "profileId", "running", "ws?", "debuggerAddress?" }`
 
+### `POST /api/v1/proxy/test`
+Body: `{ "id?": "stored-proxy-id", "config": { "id": "px_1", "type": "http|https|socks5", "host": "string", "port": 1080, "username?": "string", "password?": "string" } }`
+→ `data` (`ProxyTestResult`): `{ "ok": boolean, "latencyMs?": number, "geo?": { "ip", "countryCode", "timezone", ... }, "error?": "string" }`
+
+If `id` is supplied, the desktop updates that stored proxy row's latest test status.
+
 ## Connect recipes
 
 **Playwright (Node/Python):**
 ```js
 const { ws } = (await fetch('http://127.0.0.1:53211/api/v1/profile/start', {
   method: 'POST', headers: { authorization: 'Bearer lb_...', 'content-type': 'application/json' },
-  body: JSON.stringify({ profileId }) }).then(r => r.json())).data;
+  body: JSON.stringify({ profileId, password: '<only-if-profile-is-protected>' }) }).then(r => r.json())).data;
 const browser = await chromium.connectOverCDP(ws);
 ```
 
@@ -63,6 +69,10 @@ driver = webdriver.Chrome(options=opts)
   spawns it and speaks JSON-RPC over stdio); `start` looks the profile up in the local store and sends
   the sidecar a `startProfile` request, which derives the fingerprint from the profile's seed
   (+ overrides + best-effort proxy-exit geo) and launches — returning the real CDP `ws` + `debuggerAddress`.
+- **Profile password:** if the profile has password protection enabled, `password` is required on
+  `/profile/start`; otherwise the request fails before the sidecar launch.
+- **Proxy test:** `/proxy/test` uses the Rust proxy checker shared with the desktop UI and supports
+  HTTP, HTTPS, and SOCKS5 (`socks5h`) endpoints.
 - **Auth:** `Authorization: Bearer <LOBSTER_API_KEY>` is enforced when the key env is set; the
   loopback-only server allows local dev when it is unset. Per-key rate limiting is a follow-up.
 - An MCP server wrapper over these endpoints is a Phase 2 item.

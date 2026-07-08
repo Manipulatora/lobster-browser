@@ -70,19 +70,29 @@ each profile gets its own VM/GPU.
 
 ## 1. Current baseline (what's verified, from PROJECT-STATUS)
 
-**Proven (on SwiftShader / this dev box):** from-source Chromium 152 fork; native config channel wired into
-the product launcher; **surfaces:** navigator (UA/platform/hwc/deviceMemory/maxTouchPoints in all contexts
-incl. workers), WebGL vendor/renderer + **pixel farbling** + **scalar caps override**, canvas farbling (4
-readback paths), Web Audio farbling (offline + analyser **float + byte** + worklet/SPN), screen/DPR + macOS
-availTop + colorDepth-30, native UA header + Sec-CH-UA metadata (arch/bitness/wow64), fonts via private
-fontconfig (per-OS bundles). Coherence validator (arch⇔GPU, GPU-backend⇔OS, availTop, tz⇔locale, …). A live
-detector gate + a 22/22-check battle-test. Local API hardened (default-deny + host-guard + constant-time).
-**160+ unit/integration tests, 6 cargo tests.**
+**Proven/implemented on the dev path:** from-source Chromium 152 fork; native config channel; native Lobium
+launcher when a binary is discovered through `LOBSTER_LOBIUM_BIN`, `LOBSTER_LOBIUM_DIR`, the local
+`~/lobium-build/src/out/Lobium/chrome` dev layout, or a packaged engine resource; per-profile
+`lobium-fp.json` + farbling seed threading; desktop `launch_profile`/`stop_profile` commands wired to the sidecar; local automation API
+default-deny + loopback Host guard + constant-time token compare; local durable proxy/template stores;
+proxy checking through Rust IPC and `/api/v1/proxy/test`; profile password protection through Argon2
+hashes; an opt-in Rust product launch/connect/stop E2E for the shared Rust→sidecar path that now launches
+`lobium` and asserts the native `lobium-fp.json` contract. Host-calibration type/model scaffolding exists:
+captured WebGL extensions, shader precision, GL version strings, and `HostCalibrationProfile` are shared
+types, and `deriveFingerprintFromHost` is unit-tested. Native/dev-validated surfaces include
+navigator (UA/platform/hwc/deviceMemory/maxTouchPoints in all contexts incl. workers), WebGL
+vendor/renderer + **pixel farbling** + scalar caps override, canvas farbling, Web Audio farbling (offline +
+analyser float/byte + worklet/SPN), screen/DPR/colorDepth/availTop, native UA header + Sec-CH-UA metadata,
+and private fontconfig **when a font pack is provisioned**. Latest focused local gates: shared-types
+typecheck, desktop typecheck/build, local API SDK tests, desktop Playwright smoke, opt-in product launch
+E2E, `git diff --check`, and 14 Rust desktop tests green.
 
-**Not yet real:** everything measured under `--enable-unsafe-swiftshader` (software render = a headless tell;
-real hashes/caps/extensions unknown); no host-calibration; single-OS build (Linux); orchestrator largely
-scaffolded (S3/Postgres stubs, GUI never run integrated, no packaging/signing, blobs plaintext); detector
-matrix breadth + live anti-bot untested.
+**Not yet production proof:** all native engine detector proof is still SwiftShader/headless/dev-box proof;
+there is no real-GPU baseline, no first-run host-calibration probe/service, no native Lobium blocking CI gate, no packaged
+sidecar/engine, no signed installers/updater, no client-side blob encryption, no local SQLite encryption,
+no S3 implementation, no Postgres CI path, no real Stripe flow, and no broad/live anti-bot detector matrix.
+The React desktop UI can call launch/stop and has a browser-preview Playwright smoke, but there is not yet
+a clean-VM packaged product E2E.
 
 ---
 
@@ -110,7 +120,9 @@ END-USER MACHINE (Windows / macOS / Linux, real GPU)
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-The **new** production piece is the **Host Calibration Service**; everything else exists in some form today.
+The **new core engine piece** is the **Host Calibration Service**. Several surrounding pieces exist in
+some form today (runner, desktop commands, backend scaffolds), but durability, encryption, packaging,
+multi-OS builds, signing, and detector proof remain real production work.
 
 ---
 
@@ -161,13 +173,13 @@ per profile. This is the heart of the pivot.
 
 | ID | Task | Acceptance | Eff |
 |---|---|---|---|
-| HC-1 | **Host GPU probe**: launch the engine once (no spoof) at install/first-run and read the real `VENDOR/RENDERER/UNMASKED_*`, all overridden caps, `getSupportedExtensions()`, `getShaderPrecisionFormat()` buckets, `VERSION/SHADING_LANGUAGE_VERSION`; persist as the host GPU profile | on 3 machines the probe captures the real GPU identity; deterministic on repeat | L |
-| HC-2 | **Host OS/screen/cores/mem/fonts/tz probe** (mostly OS APIs in the Rust core; fonts via the real fontconfig/queryLocalFonts; screen via the real `screen.*`) | captured host profile matches the machine on all 3 OSes | M |
-| HC-3 | **Persona derivation from host**: rewrite `deriveFingerprint` so the **primary** path builds the persona from the host profile (GPU = host GPU, screen = host screen with a per-profile *window*, caps/exts = host, OS = host) ⊕ per-profile farbling seeds ⊕ proxy-geo. Keep `pools.ts` as the **fallback** (probe unavailable) | persona GPU/caps/exts == host; coherence validator passes; two profiles differ only in farbling + safe surfaces | L |
-| HC-4 | **Extend the config channel + native** to carry the full captured GPU profile: real extension list + precision (new config fields), so `getSupportedExtensions`/`getShaderPrecisionFormat`/`VERSION`/`GLSL` are served from config (completes ENG-8 with *real* data, no database) | on real GPU: extension list + precision + version strings all == the host's real values, farbled pixels aside | L |
+| HC-1 | **Host GPU probe**: launch the engine once (no spoof) at install/first-run and read the real `VENDOR/RENDERER/UNMASKED_*`, all overridden caps, `getSupportedExtensions()`, `getShaderPrecisionFormat()` buckets, `VERSION/SHADING_LANGUAGE_VERSION`; persist as the host GPU profile. **Scaffold exists:** browser-side probe script + normalizer are unit-tested. | on 3 machines the probe captures the real GPU identity; deterministic on repeat | L |
+| HC-2 | **Host OS/screen/cores/mem/fonts/tz probe** (mostly OS APIs in the Rust core; fonts via the real fontconfig/queryLocalFonts; screen via the real `screen.*`). **Scaffold exists:** browser-side navigator/screen/timezone/queryLocalFonts capture is unit-tested. | captured host profile matches the machine on all 3 OSes | M |
+| HC-3 | **Persona derivation from host**: rewrite `deriveFingerprint` so the **primary** path builds the persona from the host profile (GPU = host GPU, screen = host screen with a per-profile *window*, caps/exts = host, OS = host) ⊕ per-profile farbling seeds ⊕ proxy-geo. Keep `pools.ts` as the **fallback** (probe unavailable). **Sidecar/library scaffold exists:** `deriveFingerprintFromHost` is typed and unit-tested, and `startProfile` uses a supplied `hostCalibration`; persisted first-run host profiles still need wiring. | persona GPU/caps/exts == host; coherence validator passes; two profiles differ only in farbling + safe surfaces | L |
+| HC-4 | **Extend the config channel + native** to carry the full captured GPU profile: real extension list + precision (new config fields), so `getSupportedExtensions`/`getShaderPrecisionFormat`/`VERSION`/`GLSL` are served from config (completes ENG-8 with *real* data, no database). **TS/config scaffold exists:** shared types and `lobium-fp.json` can carry these fields; native hooks still need to consume them. | on real GPU: extension list + precision + version strings all == the host's real values, farbled pixels aside | L |
 | HC-5 | **WebGL renderer masking policy**: decide per-OS whether to report the raw host renderer or a normalized common label (e.g. collapse driver-version/PCI-id noise) — validated against what real Chrome emits on that OS | renderer string byte-matches a real Chrome on the same GPU/OS (captured reference) | M |
 | HC-6 | **Screen-window coherence**: per-profile the browser window is a plausible size within the host screen; `outerWidth/innerWidth/screenX/screenY/isExtended` all cohere with the persona screen (closes native audit L10) | window metrics never exceed the persona screen; `isExtended` persona-driven | M |
-| FP-1 | Mobile/Android persona type (separate track; only if targeting mobile) | android emits `uaMobile:true`, mtp>0, mobile GPU; coherence passes | L |
+| AND-0..9 | Android Lobium track (separate post-desktop lane): APK build, device bridge, Android config channel, host calibration, proxy/WebRTC proof, and real-device detector gate. TS Android fingerprint catalog/coherence exists as the catalog side of AND-3; Android config + ADB bridge scaffolding exists for AND-2/AND-4. | Android profile runs in a real Android APK/device path; `uaMobile:true`, mtp>0, mobile GPU/touch/sensors cohere; desktop never pretends to be Android | XL |
 | RG-3 | Re-run the battle-test on all 3 OS machines after HC-1..6 | 22/22 coherence checks pass **on real hardware**, all 3 OSes; extension list coherent | M |
 
 **Exit:** on a real Windows/Mac/Linux machine, a launched profile is a coherent, farbled version of that
@@ -193,11 +205,26 @@ machine; the detector suite sees a real, self-consistent device with no software
 **Objective:** the orchestrator around the engine becomes shippable + secure. These are the PROJECT-STATUS
 P0/P1 product tasks; runnable in parallel with Phases 1–2.
 
+**2026-07-08 desktop progress note:** UX-1 and the current UX-2 desktop scope are implemented in source.
+PROX-UI-1 and TPL-1 now have local SQLite/Tauri implementations (add/list/check proxies; add/list templates;
+create profile from template), and DATA-UX-1 is complete for the local desktop contracts. The remaining
+Phase 3 product work is security/durability (encrypted local secrets and blobs), backend/cloud sync,
+packaging, pricing backend, richer provider/template features, and engine/runtime consumption of every UI
+field.
+
 | ID | Task | Acceptance | Eff |
 |---|---|---|---|
 | SEC-1 | **Client-side blob encryption** (AES-256-GCM, LBv1 envelope) — profiles are live sessions; today plaintext | wire/store bytes contain no cleartext cookie/domain (grep test); tamper fails decrypt | L |
 | SEC-2 | **Key hierarchy + OS keychain** (Argon2id → wrapped team/profile keys; DPAPI/Keychain/Secret-Service) | two members unwrap the same team key; member-removal re-wraps | XL |
 | SEC-12 | Local SQLite at-rest encryption (proxy creds today plaintext) | on-disk DB has no cleartext proxy password | L |
+| UX-1 | **Light/red product shell**: image logo in header, notification/profile controls, sidebar with Profiles/Proxies/Templates/Pricing | app no longer uses dark scaffold/emoji branding; required IA exists | M |
+| UX-2 | **Profiles workspace**: scalable list/table, search, filters, create action, launch/stop/edit/clone/delete | existing lifecycle actions preserved in the new UI | M |
+| DATA-UX-1 | **Profile wizard schema/contract expansion** for description, proxy ref, tags, OS version, cookies, extensions, WebRTC, hardware noise, media devices | shared-types, SQLite, backend metadata/DTOs, and IPC can round-trip the new fields | L |
+| UX-3 | **Create Profile wizard**: General, Fingerprint, Cookies, Extensions, Review | user can configure every requested category; unsupported fields are visibly disabled/warned | L |
+| UX-4 | **Full fingerprint editor UI** for requested fields and coherence warnings | UI exposes support status; impossible combinations are blocked | L |
+| PROX-UI-1 | **Proxy workspace** with My Proxies and Hive Proxy tabs, each with Add Proxy | add/test/list flow exists for My Proxies; Hive Proxy placeholder is product-shaped; encrypted secrets/provider depth still separate | M |
+| TPL-1 | **Templates workspace**: list, Add Template, create-from-template | templates persist locally and can seed profile creation; richer policy/backend sync still separate | M |
+| PRICE-1 | **Pricing workspace**: plan/usage/upgrade state | pricing page reflects billing plan config and limits | M |
 | DSK-1/2 | **Wire + first-run the desktop GUI** end-to-end (Launch button → sidecar → engine → CDP shown); first real integrated `tauri dev` on each OS; CI webview smoke | recording of Launch→running→Stop on real SQLite, all 3 OSes | M |
 | DSK-5/11 | **Packaging + bundled sidecar + auto-update** per OS (MSI/NSIS, .dmg×2, .deb/.AppImage); resolve sidecar+engine from resources | clean-VM install launches with no system Node; updater verifies signature | XL |
 | DSK-3 | Single-instance lock (tauri-plugin-single-instance) | 2nd launch focuses the 1st; no port/sqlite contention | S |
@@ -205,7 +232,7 @@ P0/P1 product tasks; runnable in parallel with Phases 1–2.
 | BE-2 | **Prove Postgres/Prisma** path + CI Postgres service — never exercised | CI spins Postgres, migrate deploy, same e2e assertions pass vs Prisma | L |
 | BE-3/4 | Persist `encryptedBlobRef` lifecycle + quota; **real Stripe** billing (raw-body webhook signature, Subscription write, plan-limit gate) | signed webhook flips tier + gate honors it; unsigned rejected | L |
 | BE-5/7/9 | ApiKeyGuard wiring; member-removal/leave-team routes; Dockerfile + staging deploy | key-scoped routes 401 on revoke; staging serves `/health` | M |
-| PROX-1/2/3/4 | **Cookie inject/export** into the launched context; expose `testProxy` to the UI; **SOCKS5 exit-geo** (today silent en-US) | cookie import → logged-in on a real site; UI proxy-test returns geo; SOCKS profile launches matching-exit locale | M×4 |
+| PROX-1/2/4 | **Cookie inject/export** into the launched context; complete launch-path **SOCKS5 exit-geo** and geo coherence | cookie import → logged-in on a real site; SOCKS profile launches matching-exit locale | M×3 |
 | PROX-8/7 | Proxy kill-switch (fail-closed) + DNS-leak/socks5h | proxy drop → no direct egress; DNS resolves only via proxy | L |
 | RUN-2 | **Popup override gate** (`Target.setAutoAttach`+`waitForDebuggerOnStart`) — testable now on a **headful** machine (the reason it was deferred) | popup's first script sees the persona tz/locale, not host | M |
 | SEC-6/7/8/9 | Observability (structured logs, `/metrics`, readiness, Sentry) + rate-limit/helmet | one JSON line/request; `/health/ready` 503 without DB in prod; forced 500 in Sentry | M |
@@ -221,7 +248,7 @@ behind a proxy with encrypted sync — a real, safe product.
 | ID | Task | Acceptance | Eff |
 |---|---|---|---|
 | QA-1 | Wire `lobium-detect.mjs` as a **blocking CI gate** on a self-hosted **real-GPU** runner per OS | non-zero exit on regression; JSON report archived | L |
-| QA-3 | **E2E product-flow** CI: create→launch-behind-proxy→fingerprint-applied→WebRTC-egress==proxy-IP→external CDP connect→stop | one green job per OS | L |
+| QA-3 | **E2E product-flow** CI: create→launch-behind-proxy→fingerprint-applied→WebRTC-egress==proxy-IP→external CDP connect→stop | opt-in local test creates a SQLite `lobium` profile, launches via Rust→sidecar, verifies CDP `/json/version`, and asserts `lobium-fp.json`; remaining acceptance is one green clean-VM full job per OS with proxy/WebRTC assertions | L |
 | QA-4 | WebRTC no-leak behind a **live proxy** on real Lobium (srflx == proxy egress, v4+v6) | zero host-IP leak, gated | M |
 | QA-5 | **Self-hosted detector breadth**: CreepJS trust/lies, Pixelscan "consistent", Iphey, browserleaks, FingerprintJS (visitorId stable-in-session / distinct-across / not-bot) | scored to `thresholds.json`, per OS | L |
 | QA-6 | **Live anti-bot panel** (nightly): Cloudflare, DataDome, Akamai, Kasada, HUMAN — own-domain vendor targets behind residential proxies | trend **≥90% pass-rate per engine/OS**, alerting, kill-switch-gated | XL |
@@ -254,8 +281,9 @@ RG-0 (Linux+GPU box) ─▶ RG-1 real baseline ─▶ HC-1..6 host-calibration �
                                              Beta ─▶ GA ─▶ scale
 ```
 
-**The one item that gates the most:** **HC-1..6 (host-calibration)** — it makes the engine coherent on real
-hardware, which every detector claim depends on. It needs the Phase-0 GPU box. Start there.
+**The one chain that gates the most:** **RG-1 real-GPU baseline → HC-1..6 host-calibration**. RG-1 gives the
+real numbers; HC makes the engine coherent by construction on those real machines. Start with the GPU box,
+then build the host-calibrated path from that evidence.
 
 **Longest procurement lead-times (start now, in parallel):** (a) the 3 OS validation/build machines, (b)
 **code-signing certificates** (Authenticode + Apple Developer ID — days-to-weeks of identity verification),
@@ -275,14 +303,17 @@ hardware, which every detector claim depends on. It needs the Phase-0 GPU box. S
 | 6 | Rebase treadmill: Chrome ships ~every 4 weeks | MED | ENG-7d automation; thin hooks; pin + rebase within days |
 | 7 | Plaintext blobs/creds until SEC-1/2/12 | HIGH | Phase 3 P0; gate cloud sync behind encryption-present check |
 | 8 | Real-GPU detector score unknown until RG-1 | HIGH | RG-1 is early + cheap; iterate from the real number, not assumptions |
+| 9 | Product UI exposes unsupported fingerprint claims | HIGH | UX-4 support badges + ENG-UX-1 launch contract; block impossible combinations |
+| 10 | Android is misrepresented as a desktop launch target | HIGH | Keep Android disabled until AND-1..9 produce a real APK/device runner; iOS is discarded |
 
 ---
 
 ## 7. Honest bottom line & what changes vs. the old plan
 
-- The **hard part is genuinely built + proven** (native engine, farbling, coherence, config channel, launcher).
-  The pivot to **host-calibration** makes it *coherent on real hardware* and **removes** the "need a per-GPU
-  capture database" boundary — we read the real host instead.
+- The **native-engine foundation is genuinely built** (config channel, farbling, coherence, launcher), but
+  its detector proof is still dev/SwiftShader proof. The pivot to **host-calibration** is the path that makes
+  it coherent on real hardware and removes the "need a per-GPU capture database" boundary — we read the real
+  host instead.
 - The distance to GA is now: **HC (real-hardware coherence)** → **multi-OS signed builds** → **productize
   (crypto, durable storage, packaging, GUI)** → **prove against real detectors**. None of it is blocked on
   unknown engineering; it's execution + a modest validation lab + certs + proxies.
@@ -291,5 +322,6 @@ hardware, which every detector claim depends on. It needs the Phase-0 GPU box. S
   GA in ~3–4 months**, given the machines/certs/proxies are procured up front.
 
 **Immediate next actions:** (1) rent the **Linux + RTX 3060** box and do **RG-0/RG-1** (real baseline); (2)
-start **code-signing cert** acquisition; (3) I begin **HC-1..3 host-calibration** (the primary Phase-1 work)
-in parallel. Acquire the Windows laptop + Mac mini as Phase 1 progresses.
+start **code-signing cert** acquisition; (3) begin **HC-1..3 host-calibration**; (4) begin **UX-1/UX-2** and
+**DATA-UX-1** so the declared light/red UI and profile wizard are backed by real contracts, not mock-only
+fields. Acquire the Windows laptop + Mac mini as Phase 1 progresses.

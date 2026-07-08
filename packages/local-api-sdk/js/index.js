@@ -72,6 +72,27 @@
  */
 
 /**
+ * Proxy config accepted by `POST /proxy/test`.
+ * @typedef {object} ProxyConfig
+ * @property {string} id
+ * @property {'http' | 'https' | 'socks5'} type
+ * @property {string} host
+ * @property {number} port
+ * @property {string} [username]
+ * @property {string} [password]
+ * @property {string} [label]
+ */
+
+/**
+ * `data` returned by `POST /proxy/test`.
+ * @typedef {object} ProxyTestResult
+ * @property {boolean} ok
+ * @property {number} [latencyMs]
+ * @property {{ ip: string, countryCode: string, timezone: string, region?: string, city?: string, latitude?: number, longitude?: number, asn?: string, isDatacenter?: boolean }} [geo]
+ * @property {string} [error]
+ */
+
+/**
  * Connection options for {@link LobsterClient}.
  * @typedef {object} LobsterClientOptions
  * @property {string} [host='127.0.0.1']  Loopback host the desktop core is bound to.
@@ -179,11 +200,14 @@ export class LobsterClient {
   /**
    * `POST /profile/start` — launch a profile and return its live CDP endpoints.
    * @param {string} profileId
-   * @param {{ headless?: boolean }} [opts]  `headless` defaults to `false` (a visible window).
+   * @param {{ headless?: boolean, password?: string }} [opts]  `headless` defaults to `false`.
    * @returns {Promise<StartProfileResult>}
    */
-  start(profileId, { headless = false } = {}) {
-    return this.#call('POST', '/profile/start', { body: { profileId, headless } });
+  start(profileId, { headless = false, password } = {}) {
+    /** @type {{ profileId: string, headless: boolean, password?: string }} */
+    const body = { profileId, headless };
+    if (password !== undefined) body.password = password;
+    return this.#call('POST', '/profile/start', { body });
   }
 
   /**
@@ -212,6 +236,18 @@ export class LobsterClient {
     return this.#call('GET', '/profile/list');
   }
 
+  /**
+   * `POST /proxy/test` — test a proxy endpoint and return exit-IP geo/latency.
+   * @param {ProxyConfig} config
+   * @param {{ id?: string }} [opts]  Pass a stored proxy id to update its local test result.
+   * @returns {Promise<ProxyTestResult>}
+   */
+  testProxy(config, { id } = {}) {
+    const body = { config };
+    if (id !== undefined) body.id = id;
+    return this.#call('POST', '/proxy/test', { body });
+  }
+
   // --- Convenience -----------------------------------------------------------------------------
 
   /**
@@ -219,7 +255,7 @@ export class LobsterClient {
    * does **not** import Playwright/Puppeteer — pass `ws` to `chromium.connectOverCDP(ws)` /
    * `puppeteer.connect({ browserWSEndpoint: ws })`, or `debuggerAddress` to Selenium yourself.
    * @param {string} profileId
-   * @param {{ headless?: boolean }} [opts]
+   * @param {{ headless?: boolean, password?: string }} [opts]
    * @returns {Promise<{ ws: string, debuggerAddress: string }>}
    */
   async connectPlaywright(profileId, opts) {

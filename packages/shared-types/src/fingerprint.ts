@@ -1,4 +1,4 @@
-import type { CpuArch, OsFamily } from './engine.js';
+import type { CpuArch, OsFamily, PlannedMobileOsFamily } from './engine.js';
 
 /**
  * The persisted per-profile seed. A profile's fingerprint is derived deterministically
@@ -22,6 +22,8 @@ export interface NavigatorFingerprint {
   uaPlatformVersion: string;
   uaMobile: boolean;
   uaFullVersion: string;
+  /** Sec-CH-UA-Model / high-entropy model. Empty or omitted on desktop; real device model on Android. */
+  uaModel?: string;
 }
 
 /** screen / window / matchMedia surface. */
@@ -67,6 +69,28 @@ export interface WebGlCaps {
   aliasedPointSizeRange: [number, number];
 }
 
+/** Result of `getShaderPrecisionFormat(..., ...)` for one shader/precision pair. */
+export interface WebGlShaderPrecisionFormat {
+  rangeMin: number;
+  rangeMax: number;
+  precision: number;
+}
+
+export interface WebGlShaderPrecisionStage {
+  lowFloat: WebGlShaderPrecisionFormat;
+  mediumFloat: WebGlShaderPrecisionFormat;
+  highFloat: WebGlShaderPrecisionFormat;
+  lowInt: WebGlShaderPrecisionFormat;
+  mediumInt: WebGlShaderPrecisionFormat;
+  highInt: WebGlShaderPrecisionFormat;
+}
+
+/** Captured shader precision buckets for vertex + fragment shaders. */
+export interface WebGlShaderPrecisionProfile {
+  vertex: WebGlShaderPrecisionStage;
+  fragment: WebGlShaderPrecisionStage;
+}
+
 export interface WebGlFingerprint {
   vendor: string;
   renderer: string;
@@ -75,6 +99,14 @@ export interface WebGlFingerprint {
   unmaskedRenderer: string;
   /** Numeric GPU limits, overridden natively so MAX_* agree with the renderer string (ENG-8). */
   caps?: WebGlCaps;
+  /** `gl.VERSION` captured from the real host backend. */
+  version?: string;
+  /** `gl.SHADING_LANGUAGE_VERSION` captured from the real host backend. */
+  shadingLanguageVersion?: string;
+  /** `getSupportedExtensions()` captured from the host. Order is kept stable. */
+  extensions?: string[];
+  /** `getShaderPrecisionFormat()` buckets captured from the host. */
+  shaderPrecision?: WebGlShaderPrecisionProfile;
 }
 
 /** Locale/timezone/geolocation cluster — derived from the proxy exit IP. */
@@ -85,6 +117,41 @@ export interface LocaleFingerprint {
   locale: string;
   acceptLanguage: string;
   geolocation?: { latitude: number; longitude: number; accuracy: number };
+}
+
+/** How WebRTC should expose network candidates for a launched profile. */
+export type WebRtcPolicy =
+  'default_public_interface_only' | 'disable_non_proxied_udp' | 'proxy_only' | 'disabled';
+
+/** User-facing deterministic noise switches. Unsupported switches must be surfaced in UI. */
+export interface HardwareNoisePolicy {
+  webgl: boolean;
+  canvas: boolean;
+  audio: boolean;
+  clientRects: boolean;
+}
+
+/** Stable media-device counts and identity policy for camera/mic/speaker enumeration. */
+export interface MediaDeviceProfile {
+  cameras: number;
+  microphones: number;
+  speakers: number;
+  stableDeviceIds: boolean;
+}
+
+/** Renderer policy. Arbitrary foreign renderer strings are intentionally not the default model. */
+export type RendererPolicy =
+  { mode: 'host' } | { mode: 'normalized_host' } | { mode: 'validated_preset'; presetId: string };
+
+/**
+ * Policy fields resolved from profile UI choices and carried to the engine launch path. These configure
+ * native behavior around the fingerprint rather than replacing ordinary JS-readable values.
+ */
+export interface FingerprintLaunchPolicy {
+  renderer: RendererPolicy;
+  webrtc: WebRtcPolicy;
+  hardwareNoise: HardwareNoisePolicy;
+  mediaDevices: MediaDeviceProfile;
 }
 
 /**
@@ -103,10 +170,70 @@ export interface Fingerprint {
   fonts: string[];
 }
 
+export interface AndroidDeviceFingerprint {
+  brand: string;
+  manufacturer: string;
+  model: string;
+  device: string;
+  androidVersion: string;
+  apiLevel: number;
+  buildId: string;
+  buildFingerprint: string;
+  formFactor: 'phone' | 'tablet';
+  cpuAbi: 'arm64-v8a';
+}
+
+/**
+ * Android is intentionally modeled separately from launchable desktop fingerprints. It can be derived,
+ * validated, and persisted as a future mobile target, but it must not be passed to the desktop runner.
+ */
+export interface AndroidFingerprint {
+  os: PlannedMobileOsFamily;
+  arch: 'arm64';
+  android: AndroidDeviceFingerprint;
+  navigator: NavigatorFingerprint;
+  screen: ScreenFingerprint;
+  webgl: WebGlFingerprint;
+  locale: LocaleFingerprint;
+  fonts: string[];
+}
+
+export type AnyFingerprint = Fingerprint | AndroidFingerprint;
+
+export interface HostNavigatorProfile {
+  platform: string;
+  hardwareConcurrency: number;
+  deviceMemory: number;
+  maxTouchPoints: number;
+}
+
+/**
+ * Host-calibration snapshot captured once per install. This is not a page-visible fingerprint by
+ * itself; `@lobster/fingerprint` combines it with the profile seed and proxy geo to produce one.
+ */
+export interface HostCalibrationProfile {
+  version: 1;
+  capturedAt: string;
+  os: OsFamily;
+  arch: CpuArch;
+  browserVersion?: string;
+  navigator: HostNavigatorProfile;
+  screen: ScreenFingerprint;
+  webgl: WebGlFingerprint;
+  fonts: string[];
+  timezone?: string;
+  warnings?: string[];
+}
+
 /** User-editable overrides applied on top of the seed-derived fingerprint. */
 export type FingerprintOverrides = Partial<{
   navigator: Partial<NavigatorFingerprint>;
   screen: Partial<ScreenFingerprint>;
   locale: Partial<LocaleFingerprint>;
+  webgl: Partial<WebGlFingerprint>;
+  renderer: RendererPolicy;
+  webrtc: WebRtcPolicy;
+  hardwareNoise: Partial<HardwareNoisePolicy>;
+  mediaDevices: Partial<MediaDeviceProfile>;
   fonts: string[];
 }>;

@@ -1,4 +1,6 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
 import type { ProxyConfig } from '@lobster/shared-types';
 import { writeFontConfig } from '../fonts.js';
 import { buildLobiumConfig, lobiumConfigArg, writeLobiumConfig } from '../lobium-config.js';
@@ -9,21 +11,80 @@ import type { Launcher, LaunchContext } from './types.js';
  * The **native Lobium launcher** (T-011 / RUN-1) — the piece that makes the from-source Lobium engine
  * reachable by the product instead of only by the detector harness.
  *
- * It spawns the native Lobium binary (`LOBSTER_LOBIUM_BIN`) via the same patchright driver as the
- * interim engine, but with the **native config channel** wired up: for each launch it writes the
+ * It spawns the native Lobium binary (explicit env, dev layout, or packaged resource) via the same
+ * patchright driver as the interim engine, but with the **native config channel** wired up: for each launch it writes the
  * profile's resolved fingerprint to `<userDataDir>/lobium-fp.json` (owner-only) and passes
  * `--lobium-fp-config=<path>`, so canvas/WebGL/audio/screen/navigator are spoofed in C++ (no JS tell).
  * The JS-safe surfaces (timezone/locale/geo) are still applied over CDP on top, exactly as for the
  * interim engine — so `connectOverCDP` / Selenium `debuggerAddress` work identically.
  *
- * When `LOBSTER_LOBIUM_BIN` is not set, the caller falls back to the interim patched Chromium for
+ * When no native binary can be resolved, the caller falls back to the interim patched Chromium for
  * `lobium` launches (see `buildLaunchers`), preserving the current dev/CI behaviour.
  */
 
-/** Resolve the native Lobium binary: `LOBSTER_LOBIUM_BIN` if it exists on disk, else undefined. */
+function isExecutableFile(path: string): boolean {
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return false;
+    return process.platform === 'win32' || (st.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+function platformBinaryNames(): string[] {
+  if (process.platform === 'win32') return ['chrome.exe'];
+  if (process.platform === 'darwin') {
+    return [
+      'Chromium.app/Contents/MacOS/Chromium',
+      'Google Chrome.app/Contents/MacOS/Google Chrome',
+      'chrome',
+    ];
+  }
+  return ['chrome'];
+}
+
+function binaryCandidatesFromDir(dir: string): string[] {
+  const root = resolve(dir);
+  const names = platformBinaryNames();
+  return [
+    root,
+    ...names.map((name) => join(root, name)),
+    ...names.map((name) => join(root, 'out', 'Lobium', name)),
+    ...names.map((name) => join(root, 'src', 'out', 'Lobium', name)),
+    ...names.map((name) => join(root, 'engines', 'lobium', name)),
+    ...names.map((name) => join(root, 'engines', 'bin', 'lobium', name)),
+    ...names.map((name) => join(root, 'resources', 'lobium', name)),
+  ];
+}
+
+export function lobiumBinaryCandidates(): string[] {
+  const explicitDir = process.env.LOBSTER_LOBIUM_DIR
+    ? binaryCandidatesFromDir(process.env.LOBSTER_LOBIUM_DIR)
+    : [];
+  const autoDiscover =
+    process.env.LOBSTER_LOBIUM_AUTO_DISCOVER !== '0' &&
+    process.env.LOBSTER_LOBIUM_AUTO_DISCOVER !== 'false';
+  const autoDirs = autoDiscover
+    ? [
+        process.cwd(),
+        join(process.cwd(), '..'),
+        homedir(),
+        join(homedir(), 'lobium-build'),
+        join(homedir(), 'browser'),
+      ]
+    : [];
+  return [...explicitDir, ...autoDirs.flatMap(binaryCandidatesFromDir)];
+}
+
+/** Resolve the native Lobium binary from explicit env or known dev/package locations. */
 export function resolveLobiumBinary(): string | undefined {
   const p = process.env.LOBSTER_LOBIUM_BIN;
-  return p && existsSync(p) ? p : undefined;
+  if (p && isExecutableFile(p)) return p;
+  for (const candidate of lobiumBinaryCandidates()) {
+    if (isExecutableFile(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 /** Resolve the bundled font-pack base dir (`LOBSTER_FONTS_DIR`, e.g. repo `lobium/fonts`), else undefined. */
@@ -85,6 +146,17 @@ export async function buildLobiumLaunchArgs(ctx: LaunchContext): Promise<string[
   const config = buildLobiumConfig(ctx.fingerprint, {
     ...(proxy ? { proxy } : {}),
     ...(ctx.fingerprintSeed !== undefined ? { seed: ctx.fingerprintSeed } : {}),
+    ...(ctx.osVersion !== undefined ? { osVersion: ctx.osVersion } : {}),
+    ...(ctx.webrtcPolicy !== undefined ? { webrtcPolicy: ctx.webrtcPolicy } : {}),
+    ...(ctx.fingerprintPolicy?.renderer !== undefined
+      ? { rendererPolicy: ctx.fingerprintPolicy.renderer }
+      : {}),
+    ...(ctx.fingerprintPolicy?.hardwareNoise !== undefined
+      ? { hardwareNoise: ctx.fingerprintPolicy.hardwareNoise }
+      : {}),
+    ...(ctx.fingerprintPolicy?.mediaDevices !== undefined
+      ? { mediaDevices: ctx.fingerprintPolicy.mediaDevices }
+      : {}),
   });
   const path = await writeLobiumConfig(ctx.options.userDataDir, config);
   return [lobiumConfigArg(path)];

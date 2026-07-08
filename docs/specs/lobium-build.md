@@ -18,8 +18,10 @@
 ~10 native fingerprint surfaces (config channel + navigator/deviceMemory/maxTouchPoints, WebGL
 vendor/renderer, canvas & Web Audio farbling, screen/DPR, UA/platform in all contexts), each proven
 **on SwiftShader** (real-GPU validation is the pending keystone, ENG-2). The native launcher wires the
-binary into the product launch path when `LOBSTER_LOBIUM_BIN` is set (RUN-1, proven live); otherwise the
-interim `chromium` engine (patchright) still serves `lobium` launches.
+binary into the product launch path when a built binary is discovered via `LOBSTER_LOBIUM_BIN`,
+`LOBSTER_LOBIUM_DIR`, the local `~/lobium-build/src/out/Lobium/chrome` dev layout, or a packaged engine
+resource (RUN-1, proven live); otherwise the interim `chromium` engine (patchright) still serves
+`lobium` launches.
 
 _Originally (Day-4):_ `lobium/` was a *scaffold*: a dry-run `build.sh`, an example `gn-args.gn.example`,
 an **empty** `patches/series`, and prose specs. No Chromium tree had been fetched, no patch written, no
@@ -48,7 +50,9 @@ each patch header.
 
 ## 1. Base + pipeline
 
-**status: partial** (scaffold `build.sh` dry-run exists; real fetch/sync/patch/gn/ninja lands in T-010).
+**status: partial/proven on Linux dev path**. The build driver, pinned Chromium 152 ref, active patch
+series, and dev proof exist. Multi-OS release builds, signing/notarization, and rebase automation proof
+remain production work.
 
 ### 1.1 Toolchain
 
@@ -428,24 +432,22 @@ rejects, which is what makes a ≤3-day cadence sustainable by two agents rather
 
 ---
 
-## 8. Mobile / Android Lobium variant
+## 8. Android Lobium variant
 
-**status: planned (post-desktop, MASTER_PLAN Roadmap §3; ADR-0004 "Mobile").** Follows once the
-desktop build + patch series are solid.
+**status: planned, Android-only.** iOS is dropped. Detailed track: [`android.md`](android.md).
 
-- **Base:** Chromium's Android build (`target_os = "android"`, `target_cpu = "arm64"`), same
-  `depot_tools`/GN/ninja pipeline + the **same patch series** — most fingerprint patches are
-  Blink/net-level and OS-agnostic, so they apply to Android too. OS-specific reworks: fonts (patch 13
-  → Android font manager) and screen/DPR/touch defaults (patch 11/14 → mobile ranges,
-  `uaMobile:true`, non-zero `maxTouchPoints`).
-- **Fingerprint config:** the same `Fingerprint`/config-channel — mobile profiles just carry mobile
-  values (`os` variant, mobile UA/UA-CH, touch, mobile GPU string, orientation). The JS-side mobile
-  profile type already exists at config level (MASTER_PLAN §1 "Android/mobile").
-- **Packaging:** APK, signed with an Android keystore; distributed via the same artifact host + update
-  manifest.
-- **Deferral rationale:** Android adds an OS/build target and a device-emulation surface (orientation,
-  DeviceMotion/Orientation sensors, touch event model) that only pays off after the desktop moat is
-  proven. Not v1.
+- **Base:** Chromium's Android build (`target_os = "android"`, usually `target_cpu = "arm64"`), built
+  as `chrome_public_apk` first. This is a separate Android APK/device runner path, not desktop Chromium
+  with an Android UA string.
+- **Patch portability:** most Blink/net-level hooks can be shared with desktop, but Android needs
+  platform-specific startup/config delivery, fonts, touch/orientation/sensors, mobile UA-CH model fields,
+  Android media/permission behavior, and Android proxy/WebRTC/DNS validation.
+- **Fingerprint config:** the conceptual config schema remains shared, but delivery may move from
+  `--lobium-fp-config=<path>` to app-private storage or an Android bridge owned by the APK/device
+  manager.
+- **Packaging:** APK/AAB signed with an Android keystore; distributed through the same artifact manifest
+  family as desktop engines.
+- **Proof rule:** emulator is smoke-only. Production Android proof requires physical Android devices.
 
 ---
 
@@ -499,26 +501,22 @@ allowance drops to 0** — that tightening is the objective proof the native pat
 
 ## Status vs target
 
-**Where we are:** _(Updated — see [PROJECT-STATUS §2.1](../PROJECT-STATUS.md); the Day-4 text below is
-historical.)_ Lobium is **a running engine**: Chromium 152.0.7928.0 built from source with ~10 native
+**Where we are:** _(Updated — see [PROJECT-STATUS §2.1](../PROJECT-STATUS.md); the old Day-4 scaffold
+text is historical.)_ Lobium is **a running engine**: Chromium 152.0.7928.0 built from source with native
 fingerprint surfaces (config channel, navigator/deviceMemory/maxTouchPoints, WebGL vendor/renderer,
-canvas & audio farbling, screen/DPR, UA/platform in all contexts), each proven **on SwiftShader**
-(real-GPU validation pending, ENG-2), and wired into the product launch path (RUN-1). The quilt `series`
-is populated. _Historically (Day-4), the track was a **documented, scaffolded design, not yet a running
-engine**:_ concretely built then were the dry-run `build.sh`, an example GN arg set, an empty quilt
-`series`, and the prose specs — plus the crucial *shared* pieces this engine depends on that already existed: the
-`Fingerprint` model in `@lobster/shared-types`, the sidecar `launch` contract Lobium will plug into, and
-the CI detector harness (`ci/validation/`) that already grades the interim engine and will grade Lobium
-unchanged. The `lobium` engine kind currently resolves to the interim patched Chromium via patchright.
+WebGL/canvas/audio farbling, screen/DPR, UA/platform in all contexts), proven on the local
+SwiftShader/headless dev path and wired into the product launch path (RUN-1). The native detector
+auto-discovers `/home/ivyhfx/lobium-build/src/out/Lobium/chrome` in this workspace and reports 10/10
+configured surfaces applied with 0 Sannysoft failures. The quilt `series` is populated. Host-calibration
+types and the sidecar-side `deriveFingerprintFromHost` scaffold now exist, including WebGL extension,
+shader precision, and GL version fields in the shared model/config channel.
 
-**Where we're going:** execute **T-010** (pin ref → real fetch/sync/patch/gn/ninja → first launchable
-build) then **T-011** (init the series → `core/config-channel` + `fingerprint/navigator-ua-ch` → one
-param native end-to-end, POC). From there the patch series (§3) fills in surface by surface, each
-gated by its detector check (§9), with rebase automation (§7) holding Lobium within days of Chrome
-stable — the moat. Multi-OS signing (§6) and the Android variant (§8) follow once the desktop patch
-series is proven. The product stays fully usable on the interim Chromium throughout (MASTER_PLAN §7.5:
-protect the v1 milestone); Lobium becomes the **default engine** as native coverage lands.
+**Where we're going:** the first-build/config-channel POC is complete. The current production path is:
+RG-1 real-GPU baseline, HC-1..6 host calibration, native real-GPU CI, then multi-OS build/signing/rebase
+automation. The product still falls back to the interim Chromium when no env-provided, auto-discovered,
+or bundled binary exists, but the flagship path is native Lobium on the user's real hardware.
 
-**Honest bottom line:** none of the native fingerprint patches exist yet — the moat is designed and
-sequenced but unbuilt. The nearest concrete proof point is the T-011 POC (two profiles → two native
-UAs, no JS tell). Everything past that is planned work on the critical path described above.
+**Honest bottom line:** the native engine moat is no longer just a design; the core dev-path patches are
+built and passing their local detector harness. The remaining boundary is production proof: real
+consumer-GPU validation, host probe/persisted calibration, native consumption of the captured
+extension/precision/version fields, multi-OS build/signing, and CI gates on real hardware.

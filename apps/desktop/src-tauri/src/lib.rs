@@ -12,7 +12,10 @@
 
 mod local_api;
 mod profile_store;
+mod proxy_check;
+mod proxy_store;
 mod sidecar;
+mod template_store;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -20,7 +23,10 @@ use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 
 use profile_store::{CreateProfileInput, Profile, UpdateProfilePatch};
+use proxy_check::{run_proxy_check, ProxyCheckResult};
+use proxy_store::{CreateStoredProxyInput, StoredProxy};
 use sidecar::SidecarClient;
+use template_store::{CreateProfileTemplateInput, ProfileTemplate};
 
 /// Port the local automation API binds to on 127.0.0.1. Loopback-only by design.
 const LOCAL_API_PORT: u16 = 53211;
@@ -44,6 +50,12 @@ fn app_version() -> String {
 fn list_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     profile_store::list(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_trashed_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    profile_store::list_trashed(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -85,21 +97,131 @@ fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), String> 
     }
 }
 
+#[tauri::command]
+fn restore_profile(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    if profile_store::restore(&conn, &id).map_err(|e| e.to_string())? {
+        Ok(())
+    } else {
+        Err(format!("trashed profile {id} not found"))
+    }
+}
+
+#[tauri::command]
+fn permanently_delete_profile(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    if profile_store::purge(&conn, &id).map_err(|e| e.to_string())? {
+        Ok(())
+    } else {
+        Err(format!("trashed profile {id} not found"))
+    }
+}
+
+#[tauri::command]
+fn set_profile_password(
+    state: State<'_, AppState>,
+    id: String,
+    password: Option<String>,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    if profile_store::set_password(&conn, &id, password).map_err(|e| e.to_string())? {
+        Ok(())
+    } else {
+        Err(format!("profile {id} not found"))
+    }
+}
+
+#[tauri::command]
+fn list_proxies(
+    state: State<'_, AppState>,
+    source: Option<String>,
+) -> Result<Vec<StoredProxy>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    proxy_store::list(&conn, source.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_proxy(
+    state: State<'_, AppState>,
+    input: CreateStoredProxyInput,
+) -> Result<StoredProxy, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    proxy_store::create(&conn, input).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_templates(state: State<'_, AppState>) -> Result<Vec<ProfileTemplate>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    template_store::list(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_template(
+    state: State<'_, AppState>,
+    input: CreateProfileTemplateInput,
+) -> Result<ProfileTemplate, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    template_store::create(&conn, input).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn test_proxy(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    config: serde_json::Value,
+) -> Result<ProxyCheckResult, String> {
+    let result = run_proxy_check(config).await;
+    if let Some(id) = id.as_deref() {
+        let location = result.geo.as_ref().map(|geo| {
+            [
+                geo.country_code.as_str(),
+                geo.region.as_deref().unwrap_or_default(),
+                geo.city.as_deref().unwrap_or_default(),
+            ]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+        });
+        let timezone = result.geo.as_ref().map(|geo| geo.timezone.clone());
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        proxy_store::update_test_result(
+            &conn,
+            id,
+            result.ok,
+            result.latency_ms,
+            location,
+            timezone,
+            result.error.clone(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(result)
+}
+
 /// Launch a profile's engine via the shared sidecar (same path the local automation API uses) and
 /// return its CDP endpoints (`{ profileId, pid, ws, debuggerAddress }`) so the UI can show/connect.
 #[tauri::command]
 async fn launch_profile(
     state: State<'_, AppState>,
     id: String,
+    password: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let sidecar = state
         .sidecar
         .as_ref()
         .ok_or("engine-runner sidecar is not available (failed to start)")?;
     // The desktop Launch button opens the browser headful; a headless toggle is future UI (DSK-13).
-    local_api::start_profile_via_sidecar(&state.db, sidecar, &state.profiles_dir, &id, false)
-        .await
-        .map_err(|e| e.to_string())
+    local_api::start_profile_via_sidecar(
+        &state.db,
+        sidecar,
+        &state.profiles_dir,
+        &id,
+        password.as_deref(),
+        false,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Stop a running profile via the shared sidecar.
@@ -128,6 +250,8 @@ pub fn run() {
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let conn =
                 profile_store::init(dir.join("profiles.sqlite")).map_err(|e| e.to_string())?;
+            proxy_store::init(&conn).map_err(|e| e.to_string())?;
+            template_store::init(&conn).map_err(|e| e.to_string())?;
             let db = Arc::new(Mutex::new(conn));
 
             let profiles_dir = dir.join("profiles");
@@ -214,10 +338,19 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_version,
             list_profiles,
+            list_trashed_profiles,
             create_profile,
             get_profile,
             update_profile,
             delete_profile,
+            restore_profile,
+            permanently_delete_profile,
+            set_profile_password,
+            list_proxies,
+            create_proxy,
+            test_proxy,
+            list_templates,
+            create_template,
             launch_profile,
             stop_profile
         ])

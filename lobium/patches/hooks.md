@@ -7,7 +7,8 @@
 > GPU-independent and hold as-is.)
 >
 > **RUN-1 (done):** these surfaces ARE now wired into the product launch path — `createLobiumLauncher`
-> spawns `LOBSTER_LOBIUM_BIN` with `--lobium-fp-config` and `writeLobiumConfig` per profile; proven live.
+> resolves native Lobium from explicit env, local dev layouts, or packaged engine resources, then spawns
+> it with `--lobium-fp-config` and `writeLobiumConfig` per profile; proven live.
 >
 > **`seeds.webgl` is now CONSUMED (ENG-3, done):** per-profile WebGL pixel farbling of `gl.readPixels` +
 > WebGL `toDataURL/toBlob`, Y-flip-coherent. The WebGL pixel hash IS spoofed (distinct/stable per profile).

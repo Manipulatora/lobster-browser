@@ -5,27 +5,28 @@ The HIGH anti-detect/security/correctness ones + cheap wins are fixed directly (
 references this ticket). The items below are **deferred** because they need more design or DB-level
 work than a point fix; tracked here so they aren't lost.
 
-## Deferred — HIGH
+## Reconciled 2026-07-06
 
-- **T-026a · Single-instance lock never releases when the browser is closed/crashes.**
-  `engine-runner` `CompositeRunner` marks a profile `running` and only clears it on an explicit `stop()`.
-  If the user closes the window or the engine crashes, the profile is stuck "running" forever (can't
-  relaunch). Fix: plumb a browser-exit signal (patchright `context.on('close')` / handle `close`) into
-  the runner so it auto-reconciles the active-instance map. `packages/engine-runner/src/runners/composite.ts` + `patchright-launcher.ts`.
+Several findings below were fixed or downgraded after this ticket was written. Keep this file as the
+reasoning trail; use `PROJECT-STATUS.md` for current priority.
 
-- **T-026b · Desktop local automation API is unauthenticated by default (default-allow).**
-  `local_api.rs` `authorized()` allows all requests when `LOBSTER_API_KEY` is unset — so any local
-  process (or a DNS-rebinding web page hitting `127.0.0.1:53211`) can start/stop profiles and read proxy
-  credentials. Fix: **default-deny** — on first run generate a random key, persist it 0600 in the app-data
-  dir, surface it in the UI for automation clients, and load it when the env var is unset; add
-  Origin/Host checks against DNS rebinding. (Compose with the backend `ApiKey.verify()` from T-021.)
+## Deferred / Resolved
+
+- **T-026a · RESOLVED — runner active map evicts on browser close/crash.**
+  `CompositeRunner` now registers `handle.onClose` and removes the profile if the same handle closes.
+  Desktop app single-instance is still a separate DSK-3 task.
+
+- **T-026b · CORE RESOLVED — local API default-deny + Host guard + constant-time compare.**
+  The desktop now provisions a per-install key when `LOBSTER_API_KEY` is unset, the API denies when no key
+  is configured, and non-loopback Host values are rejected. Residual work: rate limiting and a UI/settings
+  surface for automation clients to view/rotate the local key.
 
 ## Deferred — MEDIUM
 
-- **T-026c · Popup/child pages briefly expose the real navigator** before the async per-page CDP
-  fingerprint override lands (patchright's `page` event is post-hoc/fire-and-forget). Fix: browser-level
-  `Target.setAutoAttach({autoAttach, waitForDebuggerOnStart})` so overrides are installed before any new
-  target runs script. (Related to T-002d.)
+- **T-026c · DOWNGRADED for native Lobium.**
+  The native config channel reaches popup renderers for device/deep surfaces, so only CDP-only
+  timezone/locale/geo have a possible pre-override window. Still worth doing for interim Chromium and for
+  full geo correctness, but no longer a top device-identity leak on Lobium.
 - **T-020a · Plan-limit TOCTOU** (already filed) — concurrent create/bulk/import can exceed a team's
   limit; needs a serializable transaction / per-team advisory lock on the Postgres path.
 

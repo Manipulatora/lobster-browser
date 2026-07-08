@@ -3,15 +3,19 @@ import { useState } from 'react';
 import type {
   EngineKind,
   FingerprintOverrides,
+  HardwareNoisePolicy,
   LocaleFingerprint,
+  MediaDeviceProfile,
   NavigatorFingerprint,
   OsFamily,
   Profile,
+  RendererPolicy,
   ScreenFingerprint,
+  WebRtcPolicy,
 } from '@lobster/shared-types';
 
 import type { ProfilePatch } from '../../api/tauri';
-import { ENGINE_OPTIONS, OS_OPTIONS } from '../profiles/options';
+import { ENGINE_OPTIONS, OS_OPTIONS, OS_VERSION_OPTIONS } from '../profiles/options';
 
 interface FingerprintEditorProps {
   profile: Profile;
@@ -28,16 +32,30 @@ interface FingerprintEditorProps {
 interface FpForm {
   engine: EngineKind;
   os: OsFamily;
+  osVersion: string;
   platform: string;
   languages: string;
   locale: string;
   timezone: string;
+  geolocationLat: string;
+  geolocationLng: string;
+  geolocationAccuracy: string;
   hardwareConcurrency: string;
   deviceMemory: string;
   maxTouchPoints: string;
   screenWidth: string;
   screenHeight: string;
   devicePixelRatio: string;
+  renderer: RendererPolicy['mode'];
+  webrtc: WebRtcPolicy;
+  noiseWebgl: boolean;
+  noiseCanvas: boolean;
+  noiseAudio: boolean;
+  noiseClientRects: boolean;
+  mediaCameras: string;
+  mediaMicrophones: string;
+  mediaSpeakers: string;
+  stableDeviceIds: boolean;
 }
 
 function numToStr(value: number | undefined): string {
@@ -58,16 +76,58 @@ function initForm(profile: Profile): FpForm {
   return {
     engine: profile.engine,
     os: profile.os,
+    osVersion: profile.osVersion ?? OS_VERSION_OPTIONS[profile.os][0],
     platform: nav?.platform ?? '',
     languages: nav?.languages?.join(', ') ?? '',
     locale: loc?.locale ?? '',
     timezone: loc?.timezone ?? '',
+    geolocationLat: numToStr(loc?.geolocation?.latitude),
+    geolocationLng: numToStr(loc?.geolocation?.longitude),
+    geolocationAccuracy: numToStr(loc?.geolocation?.accuracy ?? 100),
     hardwareConcurrency: numToStr(nav?.hardwareConcurrency),
     deviceMemory: numToStr(nav?.deviceMemory),
     maxTouchPoints: numToStr(nav?.maxTouchPoints),
     screenWidth: numToStr(scr?.width),
     screenHeight: numToStr(scr?.height),
     devicePixelRatio: numToStr(scr?.devicePixelRatio),
+    renderer: profile.fingerprintOverrides?.renderer?.mode ?? 'host',
+    webrtc: profile.fingerprintOverrides?.webrtc ?? 'default_public_interface_only',
+    noiseWebgl: profile.fingerprintOverrides?.hardwareNoise?.webgl ?? true,
+    noiseCanvas: profile.fingerprintOverrides?.hardwareNoise?.canvas ?? true,
+    noiseAudio: profile.fingerprintOverrides?.hardwareNoise?.audio ?? true,
+    noiseClientRects: profile.fingerprintOverrides?.hardwareNoise?.clientRects ?? false,
+    mediaCameras: numToStr(profile.fingerprintOverrides?.mediaDevices?.cameras ?? 1),
+    mediaMicrophones: numToStr(profile.fingerprintOverrides?.mediaDevices?.microphones ?? 1),
+    mediaSpeakers: numToStr(profile.fingerprintOverrides?.mediaDevices?.speakers ?? 2),
+    stableDeviceIds: profile.fingerprintOverrides?.mediaDevices?.stableDeviceIds ?? true,
+  };
+}
+
+function wholeNumberOrZero(raw: string): number {
+  const n = Number(raw.trim());
+  if (!Number.isInteger(n) || n < 0) return 0;
+  return n;
+}
+
+function rendererPolicy(mode: RendererPolicy['mode']): RendererPolicy {
+  return mode === 'normalized_host' ? { mode: 'normalized_host' } : { mode: 'host' };
+}
+
+function hardwareNoise(form: FpForm): HardwareNoisePolicy {
+  return {
+    webgl: form.noiseWebgl,
+    canvas: form.noiseCanvas,
+    audio: form.noiseAudio,
+    clientRects: form.noiseClientRects,
+  };
+}
+
+function mediaDevices(form: FpForm): MediaDeviceProfile {
+  return {
+    cameras: wholeNumberOrZero(form.mediaCameras),
+    microphones: wholeNumberOrZero(form.mediaMicrophones),
+    speakers: wholeNumberOrZero(form.mediaSpeakers),
+    stableDeviceIds: form.stableDeviceIds,
   };
 }
 
@@ -105,6 +165,15 @@ function toOverrides(form: FpForm, profile: Profile): FingerprintOverrides {
   if (localeTag) locale.locale = localeTag;
   const timezone = form.timezone.trim();
   if (timezone) locale.timezone = timezone;
+  const latitude = toNum(form.geolocationLat);
+  const longitude = toNum(form.geolocationLng);
+  if (latitude !== undefined && longitude !== undefined) {
+    locale.geolocation = {
+      latitude,
+      longitude,
+      accuracy: toNum(form.geolocationAccuracy) ?? 100,
+    };
+  }
 
   const overrides: FingerprintOverrides = {};
   if (Object.keys(nav).length) overrides.navigator = nav;
@@ -112,6 +181,10 @@ function toOverrides(form: FpForm, profile: Profile): FingerprintOverrides {
   if (Object.keys(locale).length) overrides.locale = locale;
   const fonts = profile.fingerprintOverrides?.fonts;
   if (fonts) overrides.fonts = fonts;
+  overrides.renderer = rendererPolicy(form.renderer);
+  overrides.webrtc = form.webrtc;
+  overrides.hardwareNoise = hardwareNoise(form);
+  overrides.mediaDevices = mediaDevices(form);
   return overrides;
 }
 
@@ -138,6 +211,7 @@ export function FingerprintEditor({
     const patch: ProfilePatch = {
       engine: form.engine,
       os: form.os,
+      osVersion: form.osVersion,
       fingerprintOverrides: toOverrides(form, profile),
     };
     setError(null);
@@ -180,11 +254,29 @@ export function FingerprintEditor({
             <select
               className="input"
               value={form.os}
-              onChange={(e) => set('os', e.target.value as OsFamily)}
+              onChange={(e) => {
+                const os = e.target.value as OsFamily;
+                setForm((prev) => ({ ...prev, os, osVersion: OS_VERSION_OPTIONS[os][0] }));
+              }}
             >
               {OS_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
                   {o.label}
+                </option>
+              ))}
+              <option disabled>Android (separate mobile engine planned)</option>
+            </select>
+          </label>
+          <label className="field">
+            <span className="field__label">OS version</span>
+            <select
+              className="input"
+              value={form.osVersion}
+              onChange={(e) => set('osVersion', e.target.value)}
+            >
+              {OS_VERSION_OPTIONS[form.os].map((version) => (
+                <option key={version} value={version}>
+                  {version}
                 </option>
               ))}
             </select>
@@ -233,6 +325,28 @@ export function FingerprintEditor({
               value={form.timezone}
               placeholder="e.g. America/New_York"
               onChange={(e) => set('timezone', e.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span className="field__label">Geolocation latitude</span>
+            <input
+              className="input"
+              type="number"
+              step="0.000001"
+              value={form.geolocationLat}
+              placeholder="optional"
+              onChange={(e) => set('geolocationLat', e.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span className="field__label">Geolocation longitude</span>
+            <input
+              className="input"
+              type="number"
+              step="0.000001"
+              value={form.geolocationLng}
+              placeholder="optional"
+              onChange={(e) => set('geolocationLng', e.target.value)}
             />
           </label>
         </div>
@@ -314,6 +428,98 @@ export function FingerprintEditor({
               placeholder="e.g. 1"
               onChange={(e) => set('devicePixelRatio', e.target.value)}
             />
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset className="fp-group">
+        <legend>Native policy</legend>
+        <div className="field-grid">
+          <label className="field">
+            <span className="field__label">Renderer</span>
+            <select
+              className="input"
+              value={form.renderer}
+              onChange={(e) => set('renderer', e.target.value as RendererPolicy['mode'])}
+            >
+              <option value="host">Host GPU</option>
+              <option value="normalized_host">Normalized host GPU</option>
+              <option disabled>Intel UHD Graphics preset</option>
+              <option disabled>NVIDIA Quadro preset</option>
+              <option disabled>AMD Radeon preset</option>
+            </select>
+          </label>
+          <label className="field">
+            <span className="field__label">WebRTC</span>
+            <select
+              className="input"
+              value={form.webrtc}
+              onChange={(e) => set('webrtc', e.target.value as WebRtcPolicy)}
+            >
+              <option value="default_public_interface_only">Default public interface</option>
+              <option value="disable_non_proxied_udp">Disable non-proxied UDP</option>
+              <option value="proxy_only">Proxy only</option>
+              <option value="disabled">Disabled</option>
+            </select>
+          </label>
+        </div>
+        <div className="support-grid">
+          {(
+            [
+              ['noiseWebgl', 'WebGL'],
+              ['noiseCanvas', 'Canvas'],
+              ['noiseAudio', 'Audio'],
+              ['noiseClientRects', 'Client Rects'],
+            ] as const
+          ).map(([key, label]) => (
+            <label key={key} className="check-row">
+              <input
+                type="checkbox"
+                checked={form[key]}
+                onChange={(e) => set(key, e.target.checked)}
+              />
+              <span>{label}</span>
+            </label>
+          ))}
+        </div>
+        <div className="field-grid">
+          <label className="field">
+            <span className="field__label">Cameras</span>
+            <input
+              className="input"
+              type="number"
+              min={0}
+              value={form.mediaCameras}
+              onChange={(e) => set('mediaCameras', e.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span className="field__label">Microphones</span>
+            <input
+              className="input"
+              type="number"
+              min={0}
+              value={form.mediaMicrophones}
+              onChange={(e) => set('mediaMicrophones', e.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span className="field__label">Speakers</span>
+            <input
+              className="input"
+              type="number"
+              min={0}
+              value={form.mediaSpeakers}
+              onChange={(e) => set('mediaSpeakers', e.target.value)}
+            />
+          </label>
+          <label className="check-row check-row--field">
+            <input
+              type="checkbox"
+              checked={form.stableDeviceIds}
+              onChange={(e) => set('stableDeviceIds', e.target.checked)}
+            />
+            <span>Stable device IDs</span>
           </label>
         </div>
       </fieldset>

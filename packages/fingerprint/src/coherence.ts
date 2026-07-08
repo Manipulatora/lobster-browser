@@ -1,4 +1,10 @@
-import type { Fingerprint, GeoInfo, LocaleFingerprint, OsFamily } from '@lobster/shared-types';
+import type {
+  AndroidFingerprint,
+  Fingerprint,
+  GeoInfo,
+  LocaleFingerprint,
+  OsFamily,
+} from '@lobster/shared-types';
 
 /**
  * Country (ISO-3166 alpha-2) → primary browser locale. Covers the ~70 most common proxy exit
@@ -236,7 +242,10 @@ export function languagesToAcceptLanguage(languages: readonly string[]): string 
  * single most important coherence rule: timezone, locale, navigator.languages and
  * Accept-Language must all agree with where the proxy says the user is.
  */
-export function applyGeoToFingerprint(fp: Fingerprint, geo: GeoInfo): Fingerprint {
+export function applyGeoToFingerprint<T extends Fingerprint | AndroidFingerprint>(
+  fp: T,
+  geo: GeoInfo,
+): T {
   // Prefer the country's primary locale; if the country is unmapped, derive the language from the
   // exit timezone (e.g. an unmapped country reporting `Europe/Stockholm` still gets Swedish) so we
   // never leave the seed-default en-US next to a foreign timezone. Only when both are unknown (e.g.
@@ -260,7 +269,7 @@ export function applyGeoToFingerprint(fp: Fingerprint, geo: GeoInfo): Fingerprin
     ...fp,
     navigator: { ...fp.navigator, languages },
     locale: localeFp,
-  };
+  } as T;
 }
 
 const OS_UA_TOKEN: Record<OsFamily, string> = {
@@ -337,6 +346,9 @@ const OS_PLATFORM_MATCHERS: Record<OsFamily, (platform: string) => boolean> = {
 export function validateFingerprintCoherence(fp: Fingerprint): string[] {
   const issues: string[] = [];
   const ua = fp.navigator.userAgent;
+  if (!Object.prototype.hasOwnProperty.call(OS_UA_TOKEN, fp.os)) {
+    return [`Unsupported desktop fingerprint OS "${String(fp.os)}"`];
+  }
 
   if (!ua.includes(OS_UA_TOKEN[fp.os])) {
     issues.push(`User-Agent OS token does not match claimed OS "${fp.os}": ${ua}`);

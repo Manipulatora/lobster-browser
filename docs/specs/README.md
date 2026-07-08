@@ -5,27 +5,27 @@ The master plan is the strategy and the 10-day shape; these documents are the *e
 agent needs to implement a subsystem without re-deriving decisions. Read the master plan first, then
 the spec for the subsystem you're building.
 
-> ⚠️ **These specs' "Status vs target" tags are STALE (~end of Day 4) and several are wrong** (e.g.
-> `lobium-build.md` says nothing native is built; `fingerprint-parameters.md` describes the removed Apify
-> architecture and claims canvas/WebGL/audio are unbuilt). For the **authoritative current state**, read
-> **[`../PROJECT-STATUS.md`](../PROJECT-STATUS.md)**. Reconciling each spec to reality is tracked as
-> **DOC-1** in the PROJECT-STATUS register. Treat the specs as the *build-to target*, not the status.
+> **Status note:** specs are build targets and may lag the live maturity of specific implementation
+> details. For the authoritative current state, read
+> **[`../PROJECT-STATUS.md`](../PROJECT-STATUS.md)**. The product UI requirements declared on
+> 2026-07-07 are captured in [`product-ui-ux-plan.md`](product-ui-ux-plan.md).
 
 For the honest current state see [`../PROJECT-STATUS.md`](../PROJECT-STATUS.md); the older Day-4 snapshot
 is [`../GAP-ANALYSIS.md`](../GAP-ANALYSIS.md).
 
 ## Convention: "Status vs target"
 
-Every spec is written to the **full Octo-class target** and tags each item **done · partial · planned**
-against the code that existed at ~end of Day 4 (**now stale — see PROJECT-STATUS**), and closes with a
-*Status vs target* note. So each doc is simultaneously (a) the spec to build to and (b) a (dated) map of
-the remaining distance.
+Every spec is written to the **full Octo-class target** and tags each item **done · partial · planned**.
+When a status tag disagrees with [`../PROJECT-STATUS.md`](../PROJECT-STATUS.md), the live status wins.
+Each doc is simultaneously (a) the spec to build to and (b) a map of the remaining distance.
 
 ## The specs
 
 | Spec | Covers | Primary track / owner |
 |---|---|---|
 | [`feature-catalog.md`](feature-catalog.md) | Every product feature (11 areas + Lobium) with sub-features, P0/P1/P2 priority, competitor-parity note, and status; billing plan/tier matrix + metering axes; desktop screen inventory + key flows; the master feature matrix; the phased Phase 1→2→3 roadmap | Product / all tracks |
+| [`product-ui-ux-plan.md`](product-ui-ux-plan.md) | The 2026-07-07 product UI declaration: light/red app shell, Profiles/Proxies/Templates/Pricing IA, create-profile wizard, proxy/template/pricing screens, OS/mobile policy, data-model expansion, and engine implications | Product UI / Desktop / Engine contract |
+| [`android.md`](android.md) | Android-only engine track after the iOS drop: Android APK architecture, fingerprint family, config channel, device validation matrix, and AND-0..AND-9 roadmap | Android Lobium |
 | [`fingerprint-parameters.md`](fingerprint-parameters.md) | The **~90-parameter** catalog across 18 surfaces (past the advertised 50+); the coherence engine as a 29-rule constraint set; the seed→config pipeline + determinism invariants; native-Lobium vs interim JS-safe mapping; the 11-panel editor UI grouping | B · Fingerprint (Claude) |
 | [`data-model.md`](data-model.md) | Full cloud Postgres schema (6 built + 9 planned tables, DDL-level) + local SQLite schema; the three encryption boundaries; data lifecycle (retention, export, GDPR erasure); Prisma migration strategy | C · Backend (Codex) |
 | [`api-reference.md`](api-reference.md) | The local automation API (per-endpoint schemas, error codes, connect recipes) + the cloud REST API (auth, teams, profiles, sync, billing) + webhooks + SDKs + the MCP server + versioning policy | D · Automation (Claude/Codex) |

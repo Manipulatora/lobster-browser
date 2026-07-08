@@ -8,35 +8,34 @@ fingerprint surfaces **natively** (no JS/CDP tell) and exposes a per-profile con
 > Lobium is a **parallel, longer-horizon track**. The product ships and stays fully usable on the
 > interim prebuilt Chromium (driven via patchright) while Lobium matures into the default engine.
 
-## ✅ Proven end-to-end (T-010 + T-011)
+## Current status
 
 Chromium **152.0.7928.0** was fetched, configured, and compiled from source (~6.5 h stock on a 12-core
-box), then the native fingerprint **config channel** + first surfaces were applied and **incrementally
-rebuilt in ~2 min** each. The per-profile config **file** now drives three navigator surfaces natively
-(no JS/CDP tell), all verified live on the built binary (host: 12 cores / 32 GB):
+box). The native fingerprint **config channel** is built, and the product launch path can now reach native
+Lobium when a built binary is provided through `LOBSTER_LOBIUM_BIN`, `LOBSTER_LOBIUM_DIR`, the local
+`~/lobium-build/src/out/Lobium/chrome` dev layout, or a packaged engine resource.
 
-| surface | result from the config file |
+Native/dev-proven surfaces now include:
+
+| Surface group | Status |
 |---|---|
-| `navigator.hardwareConcurrency` | file `7` → **7**, main thread **and** Worker (no cross-context tell); `--lobium-hwc=99` POC → **99** |
-| `navigator.deviceMemory` **+ the `Device-Memory` client-hint HTTP header** | file `16` → **16** on **both** the JS getter and the HTTP header (host `32`) — hooked at their single shared source, so they can't disagree. Off-spec values snap to a bucket this build emits: `1→2`, `6→4`, `32→32` |
-| `navigator.maxTouchPoints` | file `5` → **5**; a desktop persona can force **0** (optional sentinel) |
-| missing / invalid config file | host value + a `LOG(ERROR)` — never a *silent* host-leak |
+| Config channel | Browser reads `--lobium-fp-config`, forwards base64 `--lobium-fp-data`, renderer reads `lobium::LobiumFpConfig::Current()`. |
+| Navigator / UA | UA/platform/hardwareConcurrency/deviceMemory/maxTouchPoints in main + workers; native UA header and Sec-CH-UA metadata. |
+| WebGL | Vendor/renderer, scalar caps, and pixel farbling (`readPixels` + WebGL canvas readback path). |
+| Canvas | 2D readback farbling across the main readback paths. |
+| Audio | Offline/analyser/worklet/SPN farbling, including byte paths. |
+| Screen | Geometry/DPR/colorDepth/availTop hooks. |
+| Fonts | Private fontconfig launch env when `LOBSTER_FONTS_DIR` is provisioned; final licensed bundles still need packaging. |
 
-Values are decided in **C++ inside Blink** via `lobium::LobiumFpConfig::Current()`
-([`core/config-channel.patch`](patches/core/config-channel.patch) + [`core/build-gn.patch`](patches/core/build-gn.patch)).
-The renderer is sandboxed and can't read files, so the browser process reads the file and forwards its
-base64 as `--lobium-fp-data` (Chromium's own `GaiaConfig` pattern). Each surface was **adversarially
-reviewed** — that's how the deviceMemory bucket range and the client-hint-header coupling were caught and
-fixed. `navigator.platform` / `navigator.languages` are deliberately deferred (they need coherent HTTP
-headers — Sec-CH-UA-Platform / Accept-Language). Remaining effort is breadth (more surfaces, each a small
-`Current()` hook; then the deep canvas/WebGL/audio surfaces) + a build farm for release binaries, not
-feasibility.
+Important caveat: current native detector proof is **SwiftShader/dev proof**, not real consumer-GPU proof.
+The next engine milestone is RG-1/HC-1..6 from [`../docs/PRODUCTION-ROADMAP.md`](../docs/PRODUCTION-ROADMAP.md):
+real-GPU baseline, then host-calibrated personas.
 
 ## Layout
 
 ```
 lobium/
-  build.sh            # scaffold build driver (fetch Chromium, sync, gn gen, ninja) — dry-run by default
+  build.sh            # build driver (fetch Chromium, sync, gn gen, ninja) — dry-run by default
   gn-args.gn.example  # example GN build args
   patches/            # quilt-style patch series applied on top of the pinned Chromium ref
     series            # ordered list of patches (ungoogled model)
@@ -65,7 +64,7 @@ navigator/UA-CH · screen/DPR · timezone/locale · fonts · hardwareConcurrency
 **canvas/WebGL/AudioContext farbling (seeded per profile)** · WebGL vendor/renderer · WebRTC IP ·
 **BoringSSL TLS/JA3/JA4 + HTTP/2 SETTINGS/header-order**.
 
-## v1 (10-day) scope
+## Next scope
 
-Build env up → first successful build → quilt series initialized → first native patch (navigator/UA-CH)
-→ one param wired end-to-end via the config channel (POC). Tickets: **T-010**, **T-011**.
+Real-GPU baseline -> host calibration -> multi-OS builds/signing. The old "first native patch POC" scope is
+complete; current work is production proof and release engineering, not basic feasibility.

@@ -30,9 +30,9 @@ correct and intentional — the pinned ref below reproduces the exact base every
 Chromium ref (tag):  152.0.7928.0        # lobium/build.sh CHROMIUM_REF (default)
 ```
 
-The active patches ([`core/build-gn.patch`](patches/core/build-gn.patch) +
-[`core/config-channel.patch`](patches/core/config-channel.patch)) are authored, refreshed, and
-compile-verified against this exact ref.
+The active patch series is authored against this exact ref. Most first-party logic lives in added files
+under `components/lobium_fp`; the quilt patches are the minimal Chromium hook points listed in
+[`patches/series`](patches/series).
 
 ## Prerequisites (build machine)
 
@@ -75,8 +75,8 @@ What it does, step by step (reproduce by hand if you prefer):
    ```bash
    QUILT_PATCHES=../../patches QUILT_SERIES=../../patches/series quilt push -a
    ```
-   (Equivalently: `git apply ../../patches/core/build-gn.patch ../../patches/core/config-channel.patch`
-   — both are verified to apply cleanly to a pristine 152.0.7928.0 tree.)
+   (For a narrow config-channel smoke, `core/build-gn.patch` + `core/config-channel.patch` are the core
+   hooks; the full product path uses the whole `series`.)
 4. **Configure (GN)** with the Lobium args:
    ```bash
    gn gen out/Lobium --args="$(grep -v '^#' ../../gn-args.gn.example | tr '\n' ' ')"
@@ -126,8 +126,11 @@ detector to catch, unlike a JS/CDP override.
 | Patch | Status |
 |---|---|
 | `core/build-gn.patch` — registers `//components/lobium_fp` in the build graph | ✅ **Built** on 152.0.7928.0 |
-| `core/config-channel.patch` — browser reads `--lobium-fp-config`, forwards base64 `--lobium-fp-data`; renderer's `LobiumFpConfig::Current()` serves it to `navigator.hardwareConcurrency` | ✅ **Built + proven end-to-end** (config **file** override, worker-consistent, logged graceful fallback). `--lobium-hwc` retained as a single-value POC fallback. |
-| everything under `patches/` marked `NOT YET AUTHORED` / Phase 2 | 🔜 more navigator fields (deviceMemory, UA-CH) + deep surfaces (canvas/WebGL/audio/fonts/WebGPU) + net (WebRTC/TLS-JA4/HTTP2) — each a one-line hook reading `Current()` |
+| `core/config-channel.patch` — browser reads `--lobium-fp-config`, forwards base64 `--lobium-fp-data`; renderer/browser code reads `LobiumFpConfig::Current()` | ✅ **Built + dev-proven** for the folded native surface set. `--lobium-hwc` retained as a single-value POC fallback. |
+| `fingerprint/audio-context.patch`, `fingerprint/audio-worklet-tap.patch`, `fingerprint/screen-dpr.patch` | ✅ **Built + dev-proven** on SwiftShader/dev runs. |
+| WebGL pixel farbling / scalar caps / UA header metadata | ✅ **Implemented in the folded active patches**; no longer a separate "not authored" item. |
+| Fonts | **Conditional packaging surface**: launcher writes private fontconfig when `LOBSTER_FONTS_DIR` is provisioned; final licensed bundles/resources still open. |
+| Real-GPU + host calibration | 🔜 **Open production proof**: shared types/config can now carry host extensions/precision/version and `deriveFingerprintFromHost` exists; the real host probe, native consumption, consumer-GPU validation, and product-primary wiring remain open. |
 
 ## Rebasing onto a newer Chrome stable
 

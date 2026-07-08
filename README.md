@@ -4,7 +4,11 @@ A production-grade **anti-detect browser + SaaS** — feature-comparable to Octo
 Rust + Tauri desktop agent that orchestrates native-strength browser engines, backed by a TypeScript
 cloud platform.
 
-> **Single source of truth:** [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md).
+> **Strategy:** [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md). **Current reality:**
+> [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md). **Production path:**
+> [`docs/PRODUCTION-ROADMAP.md`](docs/PRODUCTION-ROADMAP.md).
+> **GPU handoff for the next agent:** [`docs/AGENT-HANDOFF-GPU.md`](docs/AGENT-HANDOFF-GPU.md).
+> **Product UI plan:** [`docs/specs/product-ui-ux-plan.md`](docs/specs/product-ui-ux-plan.md).
 > Both builder agents (Claude = lead architect/reviewer, OpenAI Codex = primary implementer) must
 > follow the [Agent Protocol](docs/agent-protocol.md) and [Coding Standards](docs/coding-standards.md).
 
@@ -73,11 +77,17 @@ node engines/download-engines.mjs
 
 ## Status
 
-**Native Lobium engine built; product wiring in progress.** A from-source Chromium 152 fork with ~10
-native fingerprint surfaces is built and proven **on SwiftShader** (real-GPU validation pending); the
-TypeScript orchestrator + NestJS backend are built with ~160 green tests. The engine is **not yet wired
-into the product launch path**, cloud blobs are **not yet encrypted**, and there is **no signed
-installer** — see the honest, detailed breakdown, critical path, and risk register in
-**[`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md)** (the authoritative live tracker).
-See [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md) for strategy and [`docs/tickets/`](docs/tickets/) for the
-work board.
+**Engine foundation strong; product not yet beta.** Lobium's native config channel and major
+fingerprint surfaces are built and dev-proven on Chromium 152. Native Lobium is wired into the product
+launch path when a built binary is discovered via `LOBSTER_LOBIUM_BIN`, `LOBSTER_LOBIUM_DIR`, the local
+`~/lobium-build/src/out/Lobium/chrome` dev layout, or a packaged engine resource; otherwise `lobium`
+falls back to the interim patched Chromium for dev/CI.
+
+The big missing piece is now **real-hardware, host-calibrated proof**: current detector evidence is still
+SwiftShader/headless/dev-box evidence. Host-calibration types and a deterministic
+`deriveFingerprintFromHost` helper exist, but there is not yet a first-run host probe/persisted host
+profile or real-GPU validation. There is also no signed installer, bundled sidecar, client-side blob
+encryption, durable S3 implementation, Postgres CI path, or real Stripe flow yet.
+
+See **[`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md)** for the authoritative live status and
+**[`docs/PRODUCTION-ROADMAP.md`](docs/PRODUCTION-ROADMAP.md)** for the path to beta/GA.

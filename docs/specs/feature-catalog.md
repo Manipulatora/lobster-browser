@@ -67,7 +67,7 @@ fingerprint seed (+ overrides) + optional proxy + tags/folder/notes + status + t
 | Search | Full-text over name/notes/tags/proxy host; instant filter. | P1 | all | **planned** |
 | Filters | By engine, OS, status, tag, folder, proxy country, last-launched, shared/private. | P1 | all | **planned** |
 | Notes | `notes?: string` rich-ish free text per profile. | P1 | all | **partial** (field exists; editor **planned**) |
-| Profile templates | Named presets: engine + OS + fingerprint constraints (OS/browser version band, screen class) + default tags/proxy pool. Feed bulk-create. | P1 | Octo, ADS | **planned** |
+| Profile templates | Named presets: engine + OS + OS-version policy + fingerprint constraints + default tags/proxy/cookies/extensions behavior. Feed create-profile and bulk-create. | P1 | Octo, ADS | **planned** (tracked as `TPL-1`) |
 | Quick / disposable profiles | One-click ephemeral profile (random coherent fingerprint, no persistence, auto-deleted on close). | P2 | Kameleo, GL | **planned** |
 | Single-instance lock | A profile can be **running** in only one place at a time; launching a locked profile is refused (prevents cookie/state corruption). Enforced in desktop core via status + lock. | P0 | all | **partial** (`ProfileStatus` state machine present; hard lock enforcement **planned**) |
 | Status | `ProfileStatus = idle \| launching \| running \| stopping \| error`; surfaced in list + API `list/status`. | P0 | all | **done** (type + API); live transitions **partial** |
@@ -115,11 +115,11 @@ JS-safe surfaces are applied via clean CDP on the interim Chromium. **Full param
 | Real-system source | Values drawn from real-device datasets (fingerprint-suite + pools); statistically real, internally coherent. | P0 | Octo, ML, Kameleo | **done** (`generateFingerprint`, pools, coherence tests) |
 | Deterministic + stable | Per-profile hex **seed** → deterministic fingerprint; stable across restarts. | P0 | all | **done** (`FingerprintSeed`, seeded PRNG) |
 | Coherence enforcement | UA ↔ OS ↔ WebGL ↔ screen ↔ hardware ↔ fonts ↔ locale all describe one machine; validated by coherence rules + CI detector gate. | P0 | Octo, ML | **partial** (rules + tests **done**; CI detector gate **partial**) |
-| 50+ configurable params | One shared config model (`Fingerprint`/`FingerprintOverrides`) consumed by editor UI, sidecar, and the Lobium config channel. Groups: navigator/UA-CH, screen, WebGL, fonts, hardware, locale/timezone, audio, WebRTC, canvas, TLS/JA4, WebGPU, media/codecs. | P0 | Octo, ML, Kameleo | **partial** (JS-safe surfaces modeled; deep/native surfaces **planned** via Lobium) |
+| 50+ configurable params | One shared config model (`Fingerprint`/`FingerprintOverrides`) consumed by editor UI, sidecar, and the Lobium config channel. Groups: navigator/UA-CH, screen, WebGL, fonts, hardware, locale/timezone, audio, WebRTC, canvas, TLS/JA4, WebGPU, media/codecs. | P0 | Octo, ML, Kameleo | **partial** (JS-safe + several native deep surfaces implemented; host calibration/TLS/WebGPU/mobile still open) |
 | Fingerprint editor UI | Per-group form; blank field = "no override" (keep seed-derived); parses non-blank into `FingerprintOverrides`. Currently: engine, OS, `navigator.platform`, languages, locale, timezone, hardwareConcurrency (+ growing). | P0 | all | **partial** (`FingerprintEditor.tsx` first params) |
 | Overrides layer | User overrides applied on top of seed-derived values (`FingerprintOverrides` = partial navigator/screen/locale/fonts). | P0 | all | **done** (`overrides.ts` + tests) |
-| Mobile / Android | Mobile fingerprint profile type: mobile UA, `maxTouchPoints`, mobile GPU, screen/orientation, `deviceMemory`, `uaMobile=true`. | P1 | Dolphin, GL, Kameleo | **planned** (fields exist in navigator model; profile type + native mobile variant **planned**) |
-| Deep surfaces native (Lobium) | Canvas farbling, WebGL vendor/renderer + pixel hash, AudioContext DSP, font metrics, TLS JA3/JA4 + HTTP/2 — enforced natively, no JS tell. | P0 (moat) | Octo, ML | **planned** (Lobium track; interim = best-effort) |
+| Android | Android fingerprint profile type: mobile UA, `maxTouchPoints`, mobile GPU, screen/orientation, `deviceMemory`, `uaMobile=true`. | P1 | Dolphin, GL, Kameleo | **partial** (TS catalog/types/derive/coherence done; launchable profile type + Android APK/device runner **planned**) |
+| Deep surfaces native (Lobium) | Canvas farbling, WebGL vendor/renderer + pixel hash, AudioContext DSP, font metrics, TLS JA3/JA4 + HTTP/2 — enforced natively, no JS tell. | P0 (moat) | Octo, ML | **partial** (canvas/WebGL/audio/screen/native navigator done on dev path; real-GPU/host calibration/TLS still open) |
 | WebRTC leak policy | ICE public IP == proxy IP (native in Lobium; policy on interim). | P0 | all | **partial** |
 | Regenerate fingerprint | Re-seed a profile (new coherent identity) while keeping name/tags/proxy. | P1 | all | **planned** |
 
@@ -295,30 +295,34 @@ edge — but **packaging, auto-update, onboarding, i18n, and licensing** are sti
 
 ## 10. UX / UI
 
-Fully custom design system (not derived from any competitor). Sidebar shell already scaffolds the
-top-level information architecture: **Profiles · Proxies · Automation · Team · Settings**.
+Fully custom design system (not derived from any competitor). The declared product direction is a
+**light** interface with a **red** primary accent, a top header using the Lobster image logo, and the
+four-item app IA: **Profiles · Proxies · Templates · Pricing**. The current dark scaffold is not the target
+design system.
 
 ### 10.1 Screen inventory
 
 | Screen | Purpose | Status |
 |---|---|---|
-| App shell / sidebar nav | Profiles · Proxies · Automation · Team · Settings; active-view routing. | **done** |
-| Profiles list | Grid/table of profiles: name, engine, OS, status, proxy geo, tags; row actions (launch/stop/clone/edit/delete). | **partial** (`ProfileList` + `ProfilesView`) |
-| New / edit profile | Create + edit form; engine/OS pickers, proxy attach, tags/folder/notes. | **partial** (`NewProfileForm`) |
-| Fingerprint editor | Per-group param editor; blank = seed-derived. | **partial** (`FingerprintEditor`) |
-| Proxy manager | Proxy store, add/paste, test button + geo result, quality warnings. | **planned** (nav item exists) |
-| Automation | API key management, local API status/port, connect recipes, SDK links. | **planned** (nav item exists) |
-| Team | Members, roles, invitations, sharing, audit log. | **planned** (nav item exists) |
-| Settings | App/engine/API/telemetry/theme/language. | **planned** (nav item exists) |
+| App shell / sidebar nav | Light/red shell; header logo image; notification/profile buttons; sidebar: Profiles, Proxies, Templates, Pricing. | **planned** (`UX-1`; current shell is dark scaffold with different nav) |
+| Profiles list | Scalable table/list of profiles: name, engine, OS/version, status, proxy geo, tags; row actions (launch/stop/clone/edit/delete). | **partial** (`ProfileList` + `ProfilesView`; redesign tracked as `UX-2`) |
+| New / edit profile | Wizard with General, Fingerprint, Cookies, Extensions, Review. | **planned** (`UX-3`; current `NewProfileForm` is a narrow inline form) |
+| Fingerprint editor | Requested fields: UA, OS/version, screen, fonts, languages, timezone, geolocation, WebRTC, CPU/RAM, renderer, hardware noise, media devices. | **partial** (`FingerprintEditor` first slice; full surface tracked as `UX-4`) |
+| Proxy manager | Two tabs: My Proxies and Hive Proxy; each has Add Proxy. My Proxies supports add/paste/test/list and quality warnings. | **planned** (`PROX-UI-1`) |
+| Templates | Template list, Add Template, reusable presets for profile creation. | **planned** (`TPL-1`) |
+| Pricing / plan | Current plan, usage vs limits, plan cards, upgrade/checkout. | **planned** (`PRICE-1`) |
+| Automation / API access | Local API status/key/connect recipes should move to Settings or a later advanced area, not the primary four-item sidebar. | **planned** |
+| Team / account | Members, roles, invitations, sharing, audit log should be reachable from profile/account settings or a later workspace. | **planned** |
+| Settings | App/engine/API/telemetry/language; not part of the requested four primary sidebar items. | **planned** |
 | Onboarding / sign-in | Auth + first-profile wizard. | **planned** |
-| Billing / plan | Current plan, usage vs limits, upgrade/checkout. | **planned** |
 
 ### 10.2 Key user flows
 
 1. **Onboarding:** launch → sign-in/register (`/auth`) → create team → create first profile → attach
    proxy → launch → connected browser. (Auth **done**; wizard **planned**.)
-2. **Create profile:** New profile → name/engine/OS → (auto seed) → optional overrides in fingerprint
-   editor → attach proxy (geo auto-derived) → save. (**partial**.)
+2. **Create profile:** Create Profile -> General -> Fingerprint -> Cookies -> Extensions -> Review ->
+   save. The wizard must persist the fields it enables and surface unsupported engine fields. (**planned
+   beyond current narrow form**.)
 3. **Launch:** select profile → launch → status `launching→running`; single-instance lock; stop.
    (**partial** — API + status **done**, UI wiring **partial**.)
 4. **Proxy-attach:** add/select proxy → test (`ProxyTestResult`) → geo drives locale/timezone/languages
@@ -330,7 +334,9 @@ top-level information architecture: **Profiles · Proxies · Automation · Team 
 
 ### 10.3 Design-system principles
 
-- **Own system, not a clone:** custom tokens (color/spacing/typography), components, and iconography.
+- **Own system, not a clone:** custom tokens (color/spacing/typography), components, image logo, and
+  iconography.
+- **Light/red first:** the production app theme is light; red is the primary accent.
 - **Coherence-forward UI:** surface the "one device story" — show when fingerprint + proxy geo agree
   (green) or drift (warning).
 - **Density with clarity:** power-user tables (hundreds of profiles) + calm defaults; keyboard-first.
@@ -362,15 +368,16 @@ sharing; Stripe billing metered on profiles; Windows installer + engine download
 detector-matrix CI gate; **Lobium build pipeline + first native patch + config-channel POC**.
 
 ### Phase 2 — Depth & teams
-Extensions + bookmarks + history + passwords persistence/sync; profile templates + folders/search/
-filters UI; granular RBAC + tag-scoped access + per-profile passwords + immutable audit export;
+Light/red shell; Profiles/Proxies/Templates/Pricing IA; create-profile wizard; extensions +
+bookmarks + history + passwords persistence/sync; profile templates + folders/search/filters UI;
+granular RBAC + tag-scoped access + per-profile passwords + immutable audit export;
 proxy store + rotation + provider integrations; per-key API rate limiting + profile CRUD over API +
 C# SDK + **MCP server**; multi-axis billing (seats/RPM) + trials/dunning + usage UI; macOS + Linux
 packaging + auto-update + onboarding wizard + Settings/i18n; conflict-resolution UX + backup/restore.
 **Lobium:** progressive native coverage (canvas/WebGL/audio farbling), becomes selectable default.
 
 ### Phase 3 — Scale & moat
-Cloud-run profiles + simultaneous-launch metering + cloud phones; mobile/Android Lobium variant;
+Cloud-run profiles + simultaneous-launch metering + cloud phones; Android Lobium APK/device runner;
 human-like input library + no-code RPA/scenario builder + sync automation; disposable profiles +
 cookie robot/warm-up; proxy marketplace/rotation pools; per-team KMS / zero-knowledge sync;
 full native 50+ param enforcement + TLS/JA3/JA4 + HTTP/2 + WebGPU; multi-OS signed Lobium builds +
@@ -384,16 +391,16 @@ notarization + continuous Chrome-stable rebase → **Lobium is the default engin
 |---|---|---|---|---|
 | **Profiles** | create, read/update/delete, clone, bulk-create, import, export, transfer, tags, folders, search, filters, notes, templates, quick/disposable, single-instance lock, status, cookie-robot/warm-up | P0–P2 | Octo/ML/ADS/GL/Dolphin/Kameleo | **partial** (CRUD **done**; bulk/import/export/templates/warm-up **planned**) |
 | **Browser data** | cookies, localStorage, IndexedDB, bookmarks, extensions, history, passwords/autofill — persist + sync | P0–P2 | all | **partial** (cookies **done**; storage **partial**; rest **planned**) |
-| **Fingerprints** | real-system source, seed-stable, coherence, 50+ params, editor UI, overrides, mobile/Android, native deep surfaces, WebRTC policy, regenerate | P0–P1 | Octo/ML/Kameleo (depth) | **partial** (JS-safe **done/partial**; native/mobile **planned**) |
+| **Fingerprints** | real-system source, seed-stable, coherence, 50+ params, editor UI, overrides, Android, native deep surfaces, WebRTC policy, regenerate | P0–P1 | Octo/ML/Kameleo (depth) | **partial** (catalog/CDP + major native deep surfaces done; host calibration/Android/TLS still open) |
 | **Proxy** | types, per-profile attach, test/IP-check, geo-sync, quality signals, store/library, rotation, providers, marketplace | P0–P2 | all | **partial** (parse+geo **done**; store/rotation/providers **planned**) |
 | **Teams** | teams, roles, invitations, membership mgmt, granular RBAC, tag-scoped access, per-profile sharing/password, transfer, seats, audit log | P0–P1 | Octo/ML/ADS | **partial** (teams+admin/member+sharing field **done**; RBAC/audit/seats **planned**) |
 | **Automation** | local API, core endpoints, profile CRUD over API, auth+rate limits, Selenium/Playwright/Puppeteer, SDKs (Py/JS/C#), MCP, headless, cloud-run, human-like input, RPA, sync automation | P0–P2 | Octo/ADS/GL/Dolphin | **partial** (API+connect+Py/JS SDK **done**; MCP/RPA/cloud-run/C# **planned**) |
 | **Cloud/sync** | encrypted sync, push/pull, versioning/conflict, conflict UX, backup/restore, cloud-run, per-team KMS | P0–P2 | Octo/ML/ADS/GL | **partial** (sync+versioning **done**; backup/cloud-run/KMS **planned**) |
 | **Billing & plans** | tier matrix (free/pro/team/enterprise), feature gates, metering (profiles/RPM/seats/cloud-min), checkout, webhooks, trials, upgrade/downgrade, dunning, usage UI | P0–P1 | all | **partial** (types+plan model **done**; Stripe **stubbed/planned**) |
 | **Desktop app** | multi-OS, installer, auto-update, onboarding, settings, i18n, accessibility, telemetry, licensing, single-instance | P0–P2 | all | **partial** (shell **done**; packaging/update/onboarding/i18n/licensing **planned**) |
-| **UX/UI** | screen inventory, key flows, custom design system | P0–P1 | (differentiator) | **partial** (shell + profiles/fp editor **partial**; proxy/team/automation/settings/billing screens **planned**) |
+| **UX/UI** | light/red design system, header logo, Profiles/Proxies/Templates/Pricing IA, profile wizard, proxy/template/pricing screens | P0–P1 | (differentiator) | **partial** (current shell + profiles/fp editor are partial; declared target tracked in `product-ui-ux-plan.md`) |
 | **QA/validation** | detector matrix CI gate, WebRTC-leak, coherence | P0 | (guarantee) | **partial** |
-| **Lobium (engine)** | native build pipeline, quilt patch series, config channel, native deep-surface enforcement, TLS/JA4, mobile variant, multi-OS signed builds | P0 (moat) | Octo/ML | **planned/partial** (build-env + first-patch tickets; native coverage **planned**) |
+| **Lobium (engine)** | native build pipeline, quilt patch series, config channel, native deep-surface enforcement, TLS/JA4, mobile variant, multi-OS signed builds | P0 (moat) | Octo/ML | **partial** (build + config channel + major native surfaces done on dev path; real-GPU/host-calibration/multi-OS/TLS open) |
 
 ---
 
@@ -408,14 +415,13 @@ parsing + exit-IP geo derivation; and Python + JS SDKs. The desktop shell and th
 editor and profiles screens exist. This is a genuinely usable core, honest about running on the interim
 Chromium.
 
-**Where the gaps are.** The bulk of Octo-parity **breadth** is still **planned**: bulk-create / clone /
-templates / import-export of profiles; extensions / bookmarks / history / passwords persistence;
-proxy store / rotation / providers; granular RBAC + tag-scoped access + per-profile passwords +
-immutable audit; MCP / RPA / human-like input / cloud-run; multi-axis billing (Stripe is currently a
-**stub**) with trials/dunning; desktop packaging / auto-update / onboarding / i18n / licensing; and the
-Proxy/Team/Automation/Settings/Billing screens. The **depth** that is the moat — **native deep-surface
-fingerprinting in Lobium** (canvas/WebGL/audio farbling + TLS/JA4 + HTTP/2, mobile variant) — is on the
-parallel Lobium track, currently at build-environment + first-patch + config-channel-POC stage.
+**Where the gaps are.** The bulk of Octo-parity **breadth** is still **planned**: profile templates /
+warm-up; extensions / bookmarks / history / passwords persistence; proxy store / rotation / providers;
+granular RBAC + tag-scoped access; MCP / RPA / cloud-run; billing (Stripe is currently a **stub**) with
+trials/dunning; desktop packaging / auto-update / onboarding / i18n / licensing; and the
+Proxy/Team/Automation/Settings/Billing screens. The **depth** that is the moat is no longer just a POC:
+major native Lobium surfaces are built on the dev path, but **real-GPU host calibration, TLS/JA4/HTTP2,
+mobile, multi-OS signing, and detector breadth** remain open.
 
 **Net:** foundations and the highest-friction integration surfaces (fingerprint coherence, dual-mode
 automation connect, encrypted sync) are **done or partial and solid**; the remaining work is

@@ -12,12 +12,13 @@
 # core/build-gn.patch — ✅ registers the added //components/lobium_fp module in the build graph
 #   (blink core dep + core/DEPS include-rule).
 core/build-gn.patch
-# core/config-channel.patch — ✅ BUILT + PROVEN on Chromium 152. Browser reads --lobium-fp-config and
+# core/config-channel.patch — ✅ BUILT + DEV-PROVEN on Chromium 152. Browser reads --lobium-fp-config and
 #   forwards base64 --lobium-fp-data to the renderer (cached, size-guarded, logged); the renderer's
-#   LobiumFpConfig::Current() serves it. Surfaces hooked here (all proven): hardwareConcurrency,
-#   deviceMemory (+ client-hint header), maxTouchPoints, WebGL unmasked vendor/renderer, and canvas 2D
-#   farbling (getImageData/toDataURL/toBlob/OffscreenCanvas.convertToBlob). The single-value --lobium-hwc
-#   POC switch is retained as a fallback. See hooks.md for the per-surface hook points + code.
+#   LobiumFpConfig::Current() serves it. Surfaces folded here now include hardwareConcurrency,
+#   deviceMemory (+ client-hint header), maxTouchPoints, native UA/platform/UA-CH/header plumbing,
+#   WebGL unmasked vendor/renderer, scalar WebGL caps, WebGL pixel farbling, canvas 2D farbling,
+#   audio byte helpers, and screen integration helpers. The single-value --lobium-hwc POC switch is
+#   retained as a fallback. Read "proven" as SwiftShader/dev proof until RG-1 real-GPU validation.
 core/config-channel.patch
 # core/navigator-ua-ch.patch          # NOT YET AUTHORED — navigator.* + Sec-CH-UA from config (userAgent/platform/langs/hw)
 #
@@ -41,18 +42,15 @@ fingerprint/audio-worklet-tap.patch
 #   through BOTH window.devicePixelRatio and the CSS media-query path (MediaValues) so matchMedia agrees.
 #   Removes the headless 800x600 tell. See hooks.md for hook points + deferred limitations.
 fingerprint/screen-dpr.patch
-# Still to author:
-# fingerprint/webgl-pixel-farbling.patch   # seeded WebGL readPixels/toDataURL noise + capability alignment
-# fingerprint/audio-worklet-tap.patch # AudioWorklet/ScriptProcessorNode upstream sample taps (offline-deterministic)
-# fonts: NOT a Blink patch — a PACKAGING task (scouted). The dominant vector is the permissionless
-#   measureText/offsetWidth metrics probe, which reads real glyph advances off a font FILE; no
-#   config->fonts C++ hook can synthesize those. The coherent additive win is: bundle a metric-compatible
-#   substitute pack (Liberation->Arial/Times/Courier, Carlito->Calibri/Segoe UI, Caladea->Cambria, Noto),
-#   ship a private fontconfig aliasing them, inject FONTCONFIG_FILE via a new launch.ts `env` field, and
-#   constrain pools.ts cfg.fonts to the pack's resolvable set. Only THEN add a subtract-only allowlist gate
-#   (FontCache::GetFontData + FontAccessManager enumeration + FontFaceSet::check, one predicate) as
-#   consistency insurance. A queryLocalFonts filter alone is a TRAP (FontMetadata.blob() throws for
-#   host-absent fonts -> cross-surface incoherence). See docs/tickets for the packaging follow-up.
+# Still to author / prove:
+# host-gpu-profile.patch or equivalent config extension — captured getSupportedExtensions(),
+#   getShaderPrecisionFormat(), VERSION / SHADING_LANGUAGE_VERSION, and renderer normalization policy
+#   from the real host (HC-1/HC-4/HC-5). The old per-GPU database idea is superseded by
+#   host-calibration.
+# fonts: NOT a Blink patch. The launcher can already write a private fontconfig and set FONTCONFIG_FILE
+#   when LOBSTER_FONTS_DIR is provisioned; production still needs licensed metric-compatible bundles
+#   shipped as app resources. A queryLocalFonts filter alone remains a trap (FontMetadata.blob() throws
+#   for host-absent fonts -> cross-surface incoherence).
 # fingerprint/webgpu-adapter.patch    # coherent WebGPU adapter
 #
 # --- Network (Phase 2 — TLS/JA4 parity) ---

@@ -37,8 +37,15 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Stable profile / session identifiers.
 uuid = { version = "1", features = ["v4"] }
 
+# Password hashing for local profile lock metadata.
+argon2 = "0.5"
+password-hash = { version = "0.5", features = ["rand_core"] }
+
 # ISO-8601 / RFC3339 timestamps for profile rows.
 chrono = "0.4"
+
+# HTTP client used for proxy testing from the Tauri core.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
 
 # Ergonomic error handling across the core.
 anyhow = "1"

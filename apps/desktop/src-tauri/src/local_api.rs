@@ -23,6 +23,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::profile_store;
+use crate::proxy_check;
+use crate::proxy_store;
 use crate::sidecar::SidecarClient;
 
 const API_OK: i32 = 0;
@@ -133,24 +135,36 @@ pub async fn start_profile_via_sidecar(
     sidecar: &SidecarClient,
     profiles_dir: &Path,
     profile_id: &str,
+    password: Option<&str>,
     headless: bool,
 ) -> Result<Value, StartError> {
     let profile = {
         let conn = db
             .lock()
             .map_err(|_| StartError::Failed(anyhow::anyhow!("profile store lock poisoned")))?;
-        profile_store::get(&conn, profile_id)
+        let profile = profile_store::get(&conn, profile_id)
             .map_err(StartError::Failed)?
-            .ok_or_else(|| StartError::NotFound(profile_id.to_string()))?
+            .ok_or_else(|| StartError::NotFound(profile_id.to_string()))?;
+        if !profile_store::verify_password(&conn, profile_id, password)
+            .map_err(StartError::Failed)?
+        {
+            return Err(StartError::Failed(anyhow::anyhow!(
+                "profile password is required or incorrect"
+            )));
+        }
+        profile
     };
     let user_data_dir = profiles_dir.join(&profile.id);
     let params = json!({
         "profileId": profile.id,
         "engine": profile.engine,
         "os": profile.os,
+        "osVersion": profile.os_version,
         "fingerprintSeed": profile.fingerprint_seed,
         "fingerprintOverrides": profile.fingerprint_overrides,
         "proxy": profile.proxy,
+        "cookiesImport": profile.cookies_import,
+        "extensions": profile.extensions,
         "userDataDir": user_data_dir.to_string_lossy(),
         "headless": headless,
     });
@@ -184,12 +198,22 @@ struct StartProfileBody {
     /// `headless` option instead of silently ignoring it.
     #[serde(default)]
     headless: Option<bool>,
+    #[serde(default)]
+    password: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct StatusQuery {
     #[serde(rename = "profileId")]
     profile_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyTestBody {
+    #[serde(default)]
+    id: Option<String>,
+    config: Value,
 }
 
 pub async fn serve(port: u16, state: Arc<LocalApiState>) -> anyhow::Result<()> {
@@ -199,6 +223,7 @@ pub async fn serve(port: u16, state: Arc<LocalApiState>) -> anyhow::Result<()> {
         .route("/api/v1/profile/stop", post(profile_stop))
         .route("/api/v1/profile/list", get(profile_list))
         .route("/api/v1/profile/status", get(profile_status))
+        .route("/api/v1/proxy/test", post(proxy_test))
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -228,6 +253,7 @@ async fn profile_start(
         &state.sidecar,
         &state.profiles_dir,
         &body.profile_id,
+        body.password.as_deref(),
         body.headless.unwrap_or(false),
     )
     .await
@@ -311,5 +337,192 @@ async fn profile_status(
             StatusCode::INTERNAL_SERVER_ERROR,
             ApiResponse::err(e.to_string()),
         ),
+    }
+}
+
+async fn proxy_test(
+    State(state): State<Arc<LocalApiState>>,
+    headers: HeaderMap,
+    Json(body): Json<ProxyTestBody>,
+) -> (StatusCode, Json<ApiResponse>) {
+    if !authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, ApiResponse::err("unauthorized"));
+    }
+
+    let result = proxy_check::run_proxy_check(body.config).await;
+    if let Some(id) = body.id.as_deref() {
+        let location = result.geo.as_ref().map(|geo| {
+            [
+                geo.country_code.as_str(),
+                geo.region.as_deref().unwrap_or_default(),
+                geo.city.as_deref().unwrap_or_default(),
+            ]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+        });
+        let timezone = result.geo.as_ref().map(|geo| geo.timezone.clone());
+        let conn = match state.db.lock() {
+            Ok(conn) => conn,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ApiResponse::err("db lock"),
+                )
+            }
+        };
+        if let Err(err) = proxy_store::update_test_result(
+            &conn,
+            id,
+            result.ok,
+            result.latency_ms,
+            location,
+            timezone,
+            result.error.clone(),
+        ) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiResponse::err(err.to_string()),
+            );
+        }
+    }
+
+    (
+        StatusCode::OK,
+        ApiResponse::ok(serde_json::to_value(result).unwrap_or(Value::Null)),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_input(name: &str) -> profile_store::CreateProfileInput {
+        profile_store::CreateProfileInput {
+            name: name.to_string(),
+            engine: "chromium".to_string(),
+            os: "windows".to_string(),
+            os_version: Some("Windows 11 23H2".to_string()),
+            fingerprint_seed: None,
+            fingerprint_overrides: None,
+            proxy: None,
+            proxy_id: None,
+            template_id: None,
+            cookies_import: None,
+            extensions: None,
+            tags: Some(vec!["e2e".to_string()]),
+            folder: None,
+            notes: None,
+        }
+    }
+
+    fn mem_db() -> Arc<Mutex<Connection>> {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(profile_store::SCHEMA).unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    fn sidecar_path() -> String {
+        std::env::var("LOBSTER_SIDECAR").unwrap_or_else(|_| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../packages/engine-runner/dist/index.js")
+                .to_string_lossy()
+                .into_owned()
+        })
+    }
+
+    #[tokio::test]
+    async fn start_profile_missing_profile_returns_not_found() {
+        let db = mem_db();
+        let sidecar = SidecarClient::spawn("true", "")
+            .await
+            .expect("spawn fake sidecar");
+        let profiles_dir = std::env::temp_dir();
+        let err = start_profile_via_sidecar(
+            &db,
+            &sidecar,
+            &profiles_dir,
+            "missing",
+            Some("secret"),
+            true,
+        )
+        .await
+        .expect_err("missing profile should fail");
+        assert!(matches!(err, StartError::NotFound(id) if id == "missing"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn product_launch_connect_stop_e2e_when_enabled() {
+        if std::env::var("LOBSTER_PRODUCT_E2E").as_deref() != Ok("1") {
+            return;
+        }
+
+        // The sidecar inherits env at spawn. Headless CI/container runs need the Chromium sandbox off.
+        std::env::set_var("LOBSTER_NO_SANDBOX", "1");
+
+        let root = std::env::temp_dir().join(format!(
+            "lobster-product-e2e-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let profiles_dir = root.join("profiles");
+        std::fs::create_dir_all(&profiles_dir).unwrap();
+
+        let conn = profile_store::init(root.join("profiles.sqlite")).unwrap();
+        let mut input = test_input("Product E2E");
+        input.engine = "lobium".to_string();
+        let profile = profile_store::create(&conn, input).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let sidecar = SidecarClient::spawn("node", &sidecar_path())
+            .await
+            .expect("spawn real sidecar");
+
+        let launched =
+            start_profile_via_sidecar(&db, &sidecar, &profiles_dir, &profile.id, None, true)
+                .await
+                .expect("launch profile through sidecar");
+        let cfg_path = profiles_dir.join(&profile.id).join("lobium-fp.json");
+        let cfg_raw = std::fs::read_to_string(&cfg_path).expect("native Lobium config should exist");
+        let cfg: Value = serde_json::from_str(&cfg_raw).expect("native Lobium config should be JSON");
+        assert_eq!(cfg.get("version").and_then(Value::as_i64), Some(1));
+        assert_eq!(
+            cfg.pointer("/net/webrtcPolicy").and_then(Value::as_str),
+            Some("default_public_interface_only")
+        );
+        assert!(
+            cfg.pointer("/navigator/userAgent")
+                .and_then(Value::as_str)
+                .is_some_and(|ua| ua.contains("Chrome/")),
+            "native config should carry the UA"
+        );
+        assert!(
+            cfg.pointer("/seeds/canvas").and_then(Value::as_u64).is_some(),
+            "native config should carry per-profile farbling seeds"
+        );
+        let debugger_address = launched
+            .get("debuggerAddress")
+            .and_then(Value::as_str)
+            .expect("debuggerAddress");
+        let version_url = format!("http://{debugger_address}/json/version");
+        let version = reqwest::get(version_url)
+            .await
+            .expect("fetch CDP version")
+            .json::<Value>()
+            .await
+            .expect("parse CDP version");
+        assert!(
+            version.get("Browser").and_then(Value::as_str).is_some()
+                || version
+                    .get("webSocketDebuggerUrl")
+                    .and_then(Value::as_str)
+                    .is_some(),
+            "CDP /json/version should expose a browser identity or websocket URL"
+        );
+
+        stop_profile_via_sidecar(&sidecar, &profile.id)
+            .await
+            .expect("stop profile");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

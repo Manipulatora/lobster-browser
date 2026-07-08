@@ -195,9 +195,11 @@ Only metadata + the deterministic seed + a reference to the encrypted blob live 
 | `createdAt` | TIMESTAMP(3) | DEFAULT now() | |
 | `updatedAt` | TIMESTAMP(3) | @updatedAt | |
 | `engine` | TEXT | *(planned promote from metadata)* | `lobium` \| `chromium` — promote to a column to index/filter. |
-| `os` | TEXT | *(planned promote)* | `windows` \| `macos` \| `linux`. |
+| `os` | TEXT | *(planned promote)* | `windows` \| `macos` \| `linux`; Android planned in a separate mobile profile/runner model; iOS discarded. |
+| `osVersion` | TEXT NULL | *(planned)* | Explicit OS/platform version selected by the profile wizard. |
 | `status` | TEXT | *(planned)* | `idle` \| `launching` \| `running` \| `stopping` \| `error` — runtime status is really a **desktop/local** concern; cloud may keep a cached last-known value. |
-| `proxyId` | TEXT NULL | FK → proxies.id, *(planned)* | Replaces inline proxy for shared/reusable proxies. |
+| `proxyId` | TEXT NULL | FK → proxies.id, *(local done, cloud planned)* | Replaces inline proxy for shared/reusable proxies. |
+| `templateId` | TEXT NULL | FK → profile_templates.id, *(local done, cloud planned)* | Records which template seeded the profile, if any. |
 | `blobVersion` | INT | DEFAULT 0, *(planned)* | Denormalized current blob version (mirror of blob store head). |
 | `deletedAt` | TIMESTAMP(3) NULL | *(planned)* | Soft-delete tombstone; sync propagates. |
 
@@ -209,20 +211,29 @@ Only metadata + the deterministic seed + a reference to the encrypted blob live 
 {
   "engine": "chromium",                 // EngineKind
   "os": "windows",                      // OsFamily
+  "osVersion": "Windows 11 23H2",        // optional explicit platform version
   "tags": ["us", "fb-ads"],             // string[]
   "folder": "Client A",                 // string | null
   "notes": "warm-up done 2026-06",      // string | null
+  "templateId": "tpl_1",                // optional template source
   "sharing": { "visibleToRoles": ["admin", "member"] },  // ProfileSharing
   "fingerprintOverrides": {             // FingerprintOverrides — see §2.6
     "navigator": { "hardwareConcurrency": 8 },
     "screen": { "devicePixelRatio": 2 },
     "locale": { "timezone": "America/New_York" },
-    "fonts": ["Arial", "Helvetica"]
+    "fonts": ["Arial", "Helvetica"],
+    "webrtc": { "mode": "proxy" },
+    "hardwareNoise": { "webgl": true, "canvas": true, "audio": true, "clientRects": false },
+    "mediaDevices": { "cameras": 1, "microphones": 1, "speakers": 2 }
   },
-  "proxy": {                            // inline ProxyConfig (until proxies table lands)
+  "proxy": {                            // inline ProxyConfig is still allowed for launch convenience
     "id": "px_1", "type": "socks5", "host": "…", "port": 1080,
     "username": "…", "password": "…", "label": "US residential"
-  }
+  },
+  "extensions": [
+    { "source": "chromeWebStore", "url": "https://chromewebstore.google.com/detail/..." }
+  ],
+  "cookiesImport": { "source": "file", "format": "json", "status": "pending" }
 }
 ```
 
@@ -244,7 +255,7 @@ The fingerprint engine (`packages/fingerprint`, consuming `@lobster/shared-types
 |---|---|---|
 | `NavigatorFingerprint` | `userAgent`, `platform`, `languages[]`, `hardwareConcurrency`, `deviceMemory`, `maxTouchPoints`, `uaBrands[]`, `uaPlatform`, `uaPlatformVersion`, `uaMobile`, `uaFullVersion` | JS-safe (CDP) interim / native Lobium |
 | `ScreenFingerprint` | `width`, `height`, `availWidth`, `availHeight`, `colorDepth`, `devicePixelRatio` | JS-safe / native |
-| `WebGlFingerprint` | `vendor`, `renderer`, `unmaskedVendor`, `unmaskedRenderer` (+ params/extensions/pixel hash natively) | native Lobium / best-effort interim |
+| `WebGlFingerprint` | `vendor`, `renderer`, `unmaskedVendor`, `unmaskedRenderer`, optional scalar `caps`, captured `extensions[]`, `shaderPrecision`, `version`, `shadingLanguageVersion` | native Lobium / best-effort interim; host-calibration probe still pending |
 | `LocaleFingerprint` | `timezone`, `locale`, `acceptLanguage`, `geolocation{lat,lon,accuracy}` | derived from proxy exit IP (network + JS-safe) |
 | `fonts` | `string[]` matched to OS | native / best-effort |
 | deep surfaces (not in override model) | canvas farbling, audio DSP hash, TLS/JA3/JA4, HTTP/2, WebRTC policy | **native only** (Lobium); never spoofed from JS |
@@ -253,14 +264,25 @@ The fingerprint engine (`packages/fingerprint`, consuming `@lobster/shared-types
 `FingerprintOverrides` = `Partial<{ navigator, screen, locale }>` + `fonts: string[]`. Deep surfaces
 are intentionally **not** user-overridable (coherence guarantee).
 
+The 2026-07-07 product UI requirements add new override/policy clusters that should be modeled before
+their controls become enabled in the UI:
+
+- `osVersion` / platform-version policy.
+- `webgl` renderer policy and host-calibrated renderer mode.
+- `webrtc` mode and leak policy.
+- `hardwareNoise` for WebGL, canvas, audio, and client rects.
+- `mediaDevices` counts and stable generated IDs.
+- extension references and cookie import draft/result metadata.
+
 > **If a future feature needs to pin exact resolved values** (e.g. imported real-device captures),
 > add a `fingerprint_snapshots` table: `id, profileId FK, seed, resolvedConfig JSONB, source, createdAt`
 > — but treat it as a cache, not the source of truth. *(planned, optional)*
 
-### 2.7 `proxies` — team-scoped reusable proxies *(planned; today inline in profile)*
+### 2.7 `proxies` — team-scoped reusable proxies *(local done; cloud planned)*
 
-Currently a proxy is stored inline (`ProxyConfig`) inside `Profile.metadata` (cloud) /
-`profiles.proxy` TEXT (local). Promoting to a table enables reuse, testing history, and rotation.
+Cloud profiles can still store an inline `ProxyConfig` in `Profile.metadata`. The desktop app now also
+has a local `proxies` table and `Profile.proxyId`, which enables local reuse, testing history, and profile
+assignment. Cloud/team-scoped proxies remain planned.
 
 | Column | Type | Key / Constraint | Notes |
 |---|---|---|---|
@@ -464,13 +486,20 @@ CREATE TABLE IF NOT EXISTS profiles (
     name                   TEXT NOT NULL,
     engine                 TEXT NOT NULL,             -- EngineKind: lobium | chromium
     os                     TEXT NOT NULL,             -- OsFamily: windows | macos | linux
+    os_version             TEXT,
     fingerprint_seed       TEXT NOT NULL,             -- lowercase hex (32 chars), immutable
     fingerprint_overrides  TEXT,                      -- JSON: FingerprintOverrides
     proxy                  TEXT,                      -- JSON: ProxyConfig (incl. credentials — see §4.4)
+    proxy_id               TEXT,
+    template_id            TEXT,
+    cookies_import         TEXT,                      -- JSON: CookieImportDraft
+    extensions             TEXT,                      -- JSON: BrowserExtensionRef[]
     tags                   TEXT NOT NULL DEFAULT '[]',-- JSON: string[]
     folder                 TEXT,
     notes                  TEXT,
     status                 TEXT NOT NULL DEFAULT 'idle', -- ProfileStatus
+    password_hash          TEXT,                      -- Argon2 hash; never serialized
+    trashed_at             TEXT,                      -- soft-delete marker; active lists filter NULL
     created_at             TEXT NOT NULL,             -- ISO-8601
     updated_at             TEXT NOT NULL              -- ISO-8601
 );
@@ -478,10 +507,58 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 **Differences vs cloud `profiles`:** local **flattens** `engine`/`os`/`status`/`tags`/`proxy` into
 columns (cloud folds most into `metadata` JSON); local keeps `status` (runtime) while cloud does not;
-local has no `ownerTeamId`/`encryptedBlobRef` yet (added when sync lands). Both share the immutable
-`fingerprint_seed` contract and the unique-seed-per-profile rule.
+local has no `ownerTeamId`/`encryptedBlobRef` yet (added when sync lands). Active local profile lists
+filter `trashed_at IS NULL`; move-to-trash is a soft delete, and desktop now exposes trash listing,
+restore, and permanent-delete paths over Tauri IPC. Profile password protection stores only an Argon2 hash
+and serializes `passwordProtected: boolean`. Both share the immutable `fingerprint_seed` contract and the
+unique-seed-per-profile rule.
 
-### 3.2 Cached encrypted blobs (local) *(planned)*
+### 3.2 `proxies` (local) *(done; credentials still need encryption)*
+
+```sql
+CREATE TABLE IF NOT EXISTS proxies (
+    id               TEXT PRIMARY KEY,
+    source           TEXT NOT NULL,             -- mine | hive
+    label            TEXT NOT NULL,
+    config           TEXT NOT NULL,             -- JSON: ProxyConfig (incl. credentials — see §4.4)
+    location         TEXT,
+    timezone         TEXT,
+    latency_ms       INTEGER,
+    status           TEXT NOT NULL,             -- ready | warning | testing | error
+    rotate_url       TEXT,
+    last_checked_at  TEXT,
+    last_error       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+```
+
+The desktop `test_proxy` command updates `status`, latency, location/timezone, and last error for stored
+rows after an HTTP/HTTPS/SOCKS5 check.
+
+### 3.3 `profile_templates` (local) *(done)*
+
+```sql
+CREATE TABLE IF NOT EXISTS profile_templates (
+    id                      TEXT PRIMARY KEY,
+    name                    TEXT NOT NULL,
+    engine                  TEXT NOT NULL,
+    os                      TEXT NOT NULL,
+    os_version              TEXT,
+    preset_parameters       TEXT NOT NULL DEFAULT '[]',
+    proxy_id                TEXT,
+    proxy_label             TEXT,
+    proxy_detail            TEXT,
+    fingerprint_overrides   TEXT,
+    cookies_import          TEXT,
+    extensions              TEXT,
+    tags                    TEXT NOT NULL DEFAULT '[]',
+    created_at              TEXT NOT NULL,
+    updated_at              TEXT NOT NULL
+);
+```
+
+### 3.4 Cached encrypted blobs (local) *(planned)*
 
 The user-data-dir / cookies / storage are the actual browser payload. Plan:
 
@@ -502,7 +579,7 @@ CREATE TABLE IF NOT EXISTS blob_cache (
 );
 ```
 
-### 3.3 `settings` / `kv` (local) *(planned)*
+### 3.5 `settings` / `kv` (local) *(planned)*
 
 App-level key/value: signed-in user + JWT (stored in OS keychain, not SQLite), backend base URL,
 selected team, local automation API port (default `127.0.0.1:53211`), engine paths, last sync cursor,
@@ -516,7 +593,7 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 ```
 
-### 3.4 Reconciliation / sync with cloud *(design; client planned, server done)*
+### 3.6 Reconciliation / sync with cloud *(design; client planned, server done)*
 
 The backend sync endpoint (`POST /profiles/:id/sync`, `SyncProfileDto`) is **built**: push/pull an
 opaque base64 client-encrypted blob with optimistic concurrency (`baseVersion` → 409 on mismatch).
@@ -692,20 +769,21 @@ cloud side. Required fix (tracked here, not yet implemented):
 `profiles` (seed + JSON metadata + encrypted-blob ref), `api_keys` (prefix + hash), `subscriptions`
 (profile-count limit enforced) — plus the **zero-knowledge blob sync** path (push/pull, monotonic
 versions, optimistic-concurrency 409), bcrypt password hashing, stateless 7-day JWTs, and the local
-SQLite profile catalog (WAL, unique-seed contract, immutable seed). Migration baseline `0001_init` is
-in place. Encryption boundaries are correctly drawn for the profile blob (client-encrypted, server
-never decrypts).
+SQLite profile/proxy/template catalog (WAL, unique-seed contract, immutable seed, profile soft-delete,
+Argon2 local profile password flag). Migration baseline `0001_init` is in place. Encryption boundaries are
+correctly drawn for the profile blob (client-encrypted, server never decrypts).
 
 **Partial:** blob versions live in the blob store but not as an indexed Postgres table; usage is
 computed live rather than metered into rows; S3 is a stub (in-memory store active); blob GC on profile
 delete is a `TODO`; local↔cloud sync client is unbuilt (server endpoint done); local store lacks
-`ownerTeamId`/`encryptedBlobRef`/blob cache.
+`ownerTeamId`/`encryptedBlobRef`/blob cache; local proxy credentials are not encrypted yet.
 
-**Planned (specced here, not yet built):** `invitations` (true pending invites), `proxies` table,
-`profile_blob_versions`, `usage_meters` (+ `plans`), `audit_logs`, `sessions`, `devices`,
+**Planned (specced here, not yet built):** `invitations` (true pending invites), cloud/team `proxies` table,
+cloud `profile_templates`, `profile_blob_versions`, `usage_meters` (+ `plans`), `audit_logs`, `sessions`, `devices`,
 `webhook_endpoints`; soft-delete + tombstone sync; retention/GDPR jobs; per-team KMS zero-knowledge
 keys; granular RBAC.
 
-**Known gap to close:** proxy credentials are stored plaintext in profile metadata/JSON (§4.4) — they
-are secrets and must move into the encrypted blob or an encrypted column before team-shared proxies
-ship. This is the one place the current model breaches the zero-knowledge posture.
+**Known gap to close:** proxy credentials are stored plaintext in profile metadata/JSON and local
+`proxies.config` (§4.4) — they are secrets and must move into the encrypted blob or an encrypted column
+before team-shared proxies ship. This is the one place the current model breaches the zero-knowledge
+posture.

@@ -25,7 +25,7 @@ Build **Lobium** — our own Chromium-based browser build — as a first-class, 
   params **natively** — no JS tell.
 - **Real-system fingerprints:** Lobium's values come from real-device datasets, kept coherent and stable
   per profile.
-- **Mobile:** an Android/mobile Lobium variant follows once the desktop build is solid.
+- **Android:** an Android Lobium APK/device-runner variant follows once the desktop build is solid.
 
 ## v1 (10-day) scope for Lobium
 Build environment up, first successful Chromium build, quilt series initialized, first native patch

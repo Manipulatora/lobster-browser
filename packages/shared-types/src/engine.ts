@@ -13,6 +13,15 @@ export type EngineKind = (typeof ENGINE_KINDS)[number];
 export const OS_FAMILIES = ['windows', 'macos', 'linux'] as const;
 export type OsFamily = (typeof OS_FAMILIES)[number];
 
+/**
+ * Android is a product target, but not launchable by the current desktop Lobium/Chromium engine path.
+ * Keep it separate from `OsFamily` so UI/specs can discuss the future mobile engine without allowing
+ * incoherent desktop launches. iOS is intentionally absent: Lobster is not pursuing an iOS/WebKit path.
+ */
+export const PLANNED_MOBILE_OS_FAMILIES = ['android'] as const;
+export type PlannedMobileOsFamily = (typeof PLANNED_MOBILE_OS_FAMILIES)[number];
+export type ProfileOsTarget = OsFamily | PlannedMobileOsFamily;
+
 /** CPU architecture a profile presents. */
 export type CpuArch = 'x86_64' | 'arm64';
 

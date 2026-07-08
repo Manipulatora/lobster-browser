@@ -53,10 +53,10 @@ export async function buildLaunchers(opts: BuildLaunchersOptions = {}): Promise<
     );
   }
   return {
-    // Lobium is the flagship custom Chromium build. When its binary is provisioned
-    // (`LOBSTER_LOBIUM_BIN`), `lobium` launches spawn it with the native config channel wired up
-    // (`--lobium-fp-config`); otherwise it falls back to the interim patched Chromium so dev/CI still
-    // works — deep surfaces are then interim-only until the native binary ships.
+    // Lobium is the flagship custom Chromium build. When its binary is provisioned/discovered,
+    // `lobium` launches spawn it with the native config channel wired up (`--lobium-fp-config`);
+    // otherwise it falls back to the interim patched Chromium so dev/CI still works — deep surfaces
+    // are then interim-only until the native binary ships.
     lobium: lobiumReady
       ? createLobiumLauncher(opts)
       : chromiumReady

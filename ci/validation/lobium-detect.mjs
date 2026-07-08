@@ -25,9 +25,10 @@ import {
   lobiumConfigArg,
   applyCdpFingerprint,
   buildLaunchOptions,
+  resolveLobiumBinary,
 } from '@lobster/engine-runner';
 
-const LOBIUM = process.env.LOBSTER_LOBIUM_BIN || '/home/ivyhfx/lobium-build/src/out/Lobium/chrome';
+const LOBIUM = resolveLobiumBinary();
 const DETECTOR_URL = 'https://bot.sannysoft.com/';
 
 async function readCdpEndpoint(userDataDir, retries = 150) {
@@ -231,8 +232,10 @@ async function measureCreepjs(page) {
 }
 
 async function main() {
-  if (!existsSync(LOBIUM)) {
-    process.stderr.write(`Lobium binary not found at ${LOBIUM} (set LOBSTER_LOBIUM_BIN)\n`);
+  if (!LOBIUM || !existsSync(LOBIUM)) {
+    process.stderr.write(
+      'Lobium binary not found (set LOBSTER_LOBIUM_BIN, LOBSTER_LOBIUM_DIR, or place it in a known engine directory)\n',
+    );
     process.exitCode = 2;
     return;
   }

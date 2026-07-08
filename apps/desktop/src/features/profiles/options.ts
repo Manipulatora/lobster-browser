@@ -13,6 +13,13 @@ export const OS_OPTIONS: ReadonlyArray<{ value: OsFamily; label: string }> = [
   { value: 'linux', label: 'Linux' },
 ];
 
+/** Selectable OS version labels exposed in profile create/edit flows. */
+export const OS_VERSION_OPTIONS: Readonly<Record<OsFamily, string[]>> = {
+  windows: ['Windows 11 23H2', 'Windows 11 22H2', 'Windows 10 22H2'],
+  macos: ['macOS 15 Sequoia', 'macOS 14 Sonoma', 'macOS 13 Ventura'],
+  linux: ['Ubuntu 24.04', 'Ubuntu 22.04', 'Fedora 40', 'Debian 12'],
+};
+
 /** Short label for an engine value (falls back to the raw value if unknown). */
 export function engineLabel(engine: EngineKind): string {
   return ENGINE_OPTIONS.find((o) => o.value === engine)?.label ?? engine;

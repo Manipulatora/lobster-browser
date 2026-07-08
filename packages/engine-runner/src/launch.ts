@@ -1,6 +1,20 @@
 import type { Fingerprint, LaunchParams } from '@lobster/shared-types';
 import { toEnginePlaywrightProxy } from '@lobster/proxy';
 
+function chromeWebRtcFlagPolicy(params: LaunchParams): string {
+  switch (params.webrtcPolicy) {
+    case 'disabled':
+    case 'proxy_only':
+    case 'disable_non_proxied_udp':
+      return 'disable_non_proxied_udp';
+    case 'default_public_interface_only':
+      return 'default_public_interface_only';
+    case undefined:
+      return params.proxy ? 'disable_non_proxied_udp' : 'default_public_interface_only';
+  }
+  return params.proxy ? 'disable_non_proxied_udp' : 'default_public_interface_only';
+}
+
 /** Options for launching a persistent browser context (patchright / Playwright compatible). */
 export interface PersistentLaunchOptions {
   userDataDir: string;
@@ -32,9 +46,7 @@ export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOption
     // the proxy, so it can never reach a STUN server directly and the real public IP cannot leak
     // (WebRTC IP == proxy IP — the §6 coherence bar). Without a proxy we still restrict enumeration
     // to the default public interface so multi-homed hosts don't expose extra interfaces.
-    `--force-webrtc-ip-handling-policy=${
-      params.proxy ? 'disable_non_proxied_udp' : 'default_public_interface_only'
-    }`,
+    `--force-webrtc-ip-handling-policy=${chromeWebRtcFlagPolicy(params)}`,
   ];
   const options: PersistentLaunchOptions = {
     userDataDir: params.userDataDir,
@@ -107,7 +119,7 @@ export function buildCdpEmulation(fp: Fingerprint): CdpEmulation {
       platform: nav.uaPlatform,
       platformVersion: nav.uaPlatformVersion,
       architecture: fp.arch === 'arm64' ? 'arm' : 'x86',
-      model: '',
+      model: nav.uaModel ?? '',
       mobile: nav.uaMobile,
       bitness: '64',
       wow64: false,

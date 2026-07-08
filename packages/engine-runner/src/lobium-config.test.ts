@@ -43,6 +43,9 @@ function fp(): Fingerprint {
       renderer: 'ANGLE (NVIDIA, RTX 3060 Direct3D11)',
       unmaskedVendor: 'Google Inc. (NVIDIA)',
       unmaskedRenderer: 'ANGLE (NVIDIA, RTX 3060 Direct3D11)',
+      version: 'WebGL 1.0 (OpenGL ES 2.0 Chromium)',
+      shadingLanguageVersion: 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)',
+      extensions: ['ANGLE_instanced_arrays', 'WEBGL_debug_renderer_info'],
     },
     locale: { timezone: 'Europe/Berlin', locale: 'de-DE', acceptLanguage: 'de-DE,de;q=0.9' },
     fonts: ['Arial', 'Calibri'],
@@ -54,8 +57,23 @@ test('buildLobiumConfig carries the fingerprint surfaces + a version', () => {
   assert.equal(config.version, LOBIUM_CONFIG_VERSION);
   assert.equal(config.navigator.userAgent, fp().navigator.userAgent);
   assert.equal(config.webgl.renderer, fp().webgl.renderer);
+  assert.equal(config.webgl.version, 'WebGL 1.0 (OpenGL ES 2.0 Chromium)');
+  assert.deepEqual(config.webgl.extensions, ['ANGLE_instanced_arrays', 'WEBGL_debug_renderer_info']);
   assert.equal(config.locale.timezone, 'Europe/Berlin');
   assert.deepEqual(config.fonts, ['Arial', 'Calibri']);
+  assert.deepEqual(config.policy.renderer, { mode: 'host' });
+  assert.deepEqual(config.policy.hardwareNoise, {
+    webgl: true,
+    canvas: true,
+    audio: true,
+    clientRects: false,
+  });
+  assert.deepEqual(config.policy.mediaDevices, {
+    cameras: 1,
+    microphones: 1,
+    speakers: 2,
+    stableDeviceIds: true,
+  });
 });
 
 test('farbling seeds are deterministic per (seed) and differ across seeds', () => {
@@ -86,6 +104,34 @@ test('WebRTC policy is proxy-aware, and proxy config carries NO credentials', ()
   assert.deepEqual(withProxy.net.proxy, { type: 'socks5', host: 'h.example', port: 1080 });
   // The credential must never reach the config document.
   assert.ok(!JSON.stringify(withProxy).includes('secret'), 'proxy password must not be serialized');
+});
+
+test('buildLobiumConfig carries explicit profile launch policy', () => {
+  const config = buildLobiumConfig(fp(), {
+    seed: 'policy',
+    osVersion: 'Windows 11 23H2',
+    webrtcPolicy: 'proxy_only',
+    rendererPolicy: { mode: 'normalized_host' },
+    hardwareNoise: { canvas: false, clientRects: true },
+    mediaDevices: { cameras: 2, microphones: 1, speakers: 3, stableDeviceIds: false },
+  });
+
+  assert.equal(config.policy.osVersion, 'Windows 11 23H2');
+  assert.equal(config.net.webrtcPolicy, 'proxy_only');
+  assert.equal(config.policy.webrtc, 'proxy_only');
+  assert.deepEqual(config.policy.renderer, { mode: 'normalized_host' });
+  assert.deepEqual(config.policy.hardwareNoise, {
+    webgl: true,
+    canvas: false,
+    audio: true,
+    clientRects: true,
+  });
+  assert.deepEqual(config.policy.mediaDevices, {
+    cameras: 2,
+    microphones: 1,
+    speakers: 3,
+    stableDeviceIds: false,
+  });
 });
 
 test('writeLobiumConfig writes owner-only JSON that round-trips, and the flag points at it', async () => {

@@ -39,7 +39,7 @@ The full target — and where each piece lands.
 | **Dedicated Chromium-based engine (Lobium)** | Build pipeline + first native patches + per-profile config channel (POC) | Full native 50+ param coverage + TLS/JA4 + multi-OS, becomes default engine |
 | **Real-system fingerprints** | Real-device datasets drive generated profiles; coherent + stable per profile | Lobium presents them natively (no JS tell) |
 | **50+ configurable fingerprint parameters** | Full parameter model + editor UI over safe/interim surfaces | All params enforced natively by Lobium |
-| **Android / mobile fingerprints** | Mobile fingerprint profiles (UA/screen/touch/GPU/deviceMemory) at config level | Mobile Lobium variant / device emulation |
+| **Android fingerprints** | Android profile model at config level, kept non-launchable until a mobile runner exists | Android Lobium APK + device runner |
 | **Profile export / import / transfer** | JSON/CSV export/import + encrypted transfer package | Cross-account transfer + org migration |
 | **Encrypted cloud storage** | AES-encrypted profile blobs in S3; versioned sync | Zero-knowledge / per-team KMS keys |
 | **Team roles** | Admin/member roles enforced end-to-end | Granular RBAC (tag-scoped, per-profile perms) |
@@ -115,7 +115,8 @@ The **Rust desktop core is the single privileged control plane**: it owns the pr
 - Profile CRUD + **clone** + **bulk-create** + **import/export/transfer** (JSON/CSV + encrypted transfer package) with tags/folders.
 - **Real-system fingerprints**: values sourced from real-device datasets; per-profile **seed** → deterministic, **coherent, stable** fingerprint persisted with the profile.
 - **50+ configurable parameters** exposed in a **fully custom fingerprint editor UI** (navigator/UA-CH, screen, WebGL, fonts, hardware, locale/timezone, audio, WebRTC policy, and more).
-- **Android / mobile fingerprint profiles** (mobile UA, touch, screen, GPU, deviceMemory).
+- **Android fingerprint profiles** (mobile UA, touch, screen, GPU, deviceMemory), gated behind the
+  Android Lobium APK/device-runner track.
 - Per-profile **persistent user-data-dir**; cookie/localStorage/session persistence; **single-active-instance locking**.
 - Engine selectable per profile: **Lobium** (flagship, as it comes online) / **Chromium** (interim, default).
 
@@ -165,7 +166,7 @@ The **Rust desktop core is the single privileged control plane**: it owns the pr
 | Fonts enumeration + metrics matched to OS | `native` (Lobium) · `best-effort` interim | **P1** |
 | screen/window/DPR/matchMedia/color depth | `native` (Lobium) · `JS-safe` interim | **P1** |
 | hardwareConcurrency/deviceMemory/maxTouchPoints/platform | `native` (Lobium) · `JS-safe` interim | **P1** |
-| Mobile/Android set (mobile UA, touch, mobile GPU, orientation) | `native` (Lobium mobile variant) · `JS-safe` profile interim | **P1** |
+| Android set (mobile UA, touch, mobile GPU, orientation) | `native` (Android Lobium APK/device runner) · modeled only until runner exists | **P1** |
 | WebGPU adapter/limits/features | `native` (Lobium) | **P2** |
 | Battery/Sensors/speech voices/codecs/permissions shape | `native` (Lobium) · `JS-safe` interim | **P2** |
 | Human-like input (mouse non-linearity, timing) | automation-layer | **P1** |
@@ -258,9 +259,9 @@ Trunk-based, one PR per ticket, squash merge, Conventional Commits + co-author t
 ## 10. The plan (parallel tracks + milestones)
 
 > **Live execution status is tracked in [`PROJECT-STATUS.md`](PROJECT-STATUS.md)**, not in this
-> day-numbered plan. The Day 0–10 schedule below is the original strategy; the actual state (Lobium built
-> with six native surfaces + a live-detector gate; the prioritized remaining work E‑1..E‑10 + Phases A–D)
-> is in PROJECT-STATUS. Update PROJECT-STATUS as work moves.
+> day-numbered plan. The Day 0–10 schedule below is the original strategy; the actual state (native Lobium
+> launch path wired, major native surfaces dev-proven, real-GPU/host-calibration still open) is in
+> PROJECT-STATUS. Update PROJECT-STATUS as work moves.
 
 `[C]` Claude · `[X]` Codex · `[C+X]` paired. Claude reviews all P0/engine/Lobium PRs.
 **Track A** Desktop Core · **Track B** Engine runner & Fingerprint · **Track C** Backend/SaaS · **Track D** Automation API + SDK · **Track E** QA/Validation · **Track F** Lobium (parallel, longer horizon).
@@ -284,7 +285,7 @@ Repo, npm workspaces, foundational packages (`shared-types`, `fingerprint`, `pro
 ### Day 3
 - B `[C]`: inject JS-safe surfaces via patchright isolated contexts; clean CDP; expose the `lobium` engine path (served by the interim patched Chromium).
 - Proxy `[X]`: per-profile HTTP/SOCKS5 + test + geo/timezone auto-sync.
-- A `[X]`: profile UI (create/clone/list/delete, tags/folders); mobile fingerprint profile type.
+- A `[X]`: profile UI (create/clone/list/delete, tags/folders); Android fingerprint profile model.
 - C `[X]`: teams + roles; encrypted blob storage (S3).
 - **F `[C]`: first native patch builds (navigator/UA-CH); design the per-profile config channel.**
 
@@ -328,7 +329,8 @@ Full native coverage of all 50+ params, TLS/JA3/JA4 + HTTP/2 matching, audio/Web
 
 1. **Lobium to production**: complete native 50+ param enforcement, BoringSSL TLS/JA4 + HTTP/2, canvas/WebGL/audio/WebGPU farbling across frames/workers/OffscreenCanvas; make it the default engine.
 2. **Multi-OS signed Lobium builds** + notarization + auto-update; continuous Chrome-stable rebase.
-3. **Mobile Lobium / Android emulation** for true mobile fingerprints.
+3. **Android Lobium / device runner** for true Android fingerprints. Emulators are smoke-only;
+   production proof requires physical Android devices.
 4. **Granular RBAC** (tag-scoped, per-profile perms) + full immutable audit.
 5. **Cloud-run profiles** (browser in the cloud), simultaneous-launch metering, cloud phones.
 6. Proxy marketplace / rotation; official SDKs (Py/JS/C#); **MCP server**; disposable profiles; cookie collector / warm-up; human-like input library; higher-scale billing (seats, API RPM, annual).
@@ -367,11 +369,13 @@ item **done · partial · planned** against today's code, closing with a *Status
 | Spec | What it locks down |
 |---|---|
 | [`specs/feature-catalog.md`](specs/feature-catalog.md) | Every feature (11 areas + Lobium) with priority + competitor-parity + status; billing plan/tier matrix; screen inventory + key flows; the phased Phase 1→2→3 roadmap |
+| [`specs/product-ui-ux-plan.md`](specs/product-ui-ux-plan.md) | 2026-07-07 product UI declaration: light/red shell, header logo, Profiles/Proxies/Templates/Pricing IA, create-profile wizard, proxy/template/pricing screens, OS/mobile policy, and data/engine implications |
 | [`specs/fingerprint-parameters.md`](specs/fingerprint-parameters.md) | The **~90-param** catalog (18 surfaces) — the concrete "50+"; the 29-rule coherence engine; seed→config pipeline; native-vs-interim mapping; the editor UI grouping |
 | [`specs/data-model.md`](specs/data-model.md) | Cloud Postgres schema (6 built + 9 planned tables, DDL-level) + local SQLite; encryption boundaries; data lifecycle (retention/export/erasure); migration strategy |
 | [`specs/api-reference.md`](specs/api-reference.md) | Local automation API + cloud REST API (per-endpoint schemas, error codes, connect recipes) + webhooks + SDKs + MCP server + versioning policy |
 | [`specs/security.md`](specs/security.md) | 3-tier key hierarchy + AES-GCM blob envelope + zero-knowledge; auth upgrade path (refresh rotation, 2FA, SSO, API-key scoping); RBAC matrix; threat model; supply-chain |
 | [`specs/lobium-build.md`](specs/lobium-build.md) | Build pipeline (toolchain/pinned-ref/rebase); the ordered native **patch series** (incl. TLS/JA4 + HTTP/2); the config-channel wire protocol; multi-OS signing + auto-update; Android variant |
+| [`specs/android.md`](specs/android.md) | Android-only mobile engine track after the iOS drop: APK build, device bridge, mobile fingerprint family, config channel, device validation matrix, and AND-0..AND-9 roadmap |
 | [`specs/proxy.md`](specs/proxy.md) | Proxy type matrix; chaining + rotation + pools; providers; testing + IP-quality; geo-coherence pipeline; leak protection; the SOCKS-in-launcher fix |
 | [`specs/qa-testing.md`](specs/qa-testing.md) | 7-layer testing pyramid; detector matrix + `thresholds.json` schema; live anti-bot testing; the coherence validator rule set; **the NFR / SLO targets** (source for §15); release-gate → CI mapping |
 | [`specs/observability-ops.md`](specs/observability-ops.md) | Logging/metrics/tracing/error-tracking; backend deployment; backups/DR; rate limiting + queues; desktop signing + auto-update; release process; monitoring/alerting; billing ops |
@@ -419,7 +423,7 @@ the spec named. **G-priority:** G0 = blocks Octo-class parity · G1 = needed for
 | R7 | **Observability / ops / deploy** — no logging/metrics/tracing/error-tracking/deploy pipeline/backups | Operable, reliable SaaS | Full stack → [`specs/observability-ops.md`](specs/observability-ops.md) | G1 |
 | R8 | **Testing breadth** — strong unit/integration + one detector (Sannysoft); no CreepJS/live-anti-bot/load/perf/security tests | Confidence the quality bar holds | 7-layer pyramid + detector matrix + NFRs → [`specs/qa-testing.md`](specs/qa-testing.md) | G1 |
 | R9 | **Browser data breadth** — cookies done; localStorage/IndexedDB, extensions, bookmarks, history, autofill not | Profile realism + parity | Enumerated in [`specs/feature-catalog.md`](specs/feature-catalog.md) §2 | G2 |
-| R10 | **Mobile/Android fingerprints** — not started | Mobile multi-accounting segment | Config model now; mobile Lobium variant → [`specs/lobium-build.md`](specs/lobium-build.md) §8 | G2 |
+| R10 | **Android fingerprints** — catalog/coherence exists, launch path not started | Android multi-accounting segment | Android Lobium APK/device runner → [`specs/android.md`](specs/android.md), [`specs/lobium-build.md`](specs/lobium-build.md) §8 | G2 |
 | R11 | **Automation breadth** — local API done; official SDKs (Py/JS/C#), MCP, cloud-run, human-like input not | Developer + enterprise reach | SDK + MCP surface → [`specs/api-reference.md`](specs/api-reference.md) §4–§5 | G2 |
 
 **Priority read:** **R1 (Lobium)** is the one true moat and the largest single effort — it runs on the

@@ -15,17 +15,26 @@ export interface Profile {
   name: string;
   engine: EngineKind;
   os: OsFamily;
+  /** OS build/version label, e.g. Windows 11 23H2 or macOS 14. */
+  osVersion?: string;
   /** Deterministic seed → stable coherent fingerprint. */
   fingerprintSeed: FingerprintSeed;
   fingerprintOverrides?: FingerprintOverrides;
   /** Inline proxy, or a reference id resolved from the proxy store. */
   proxy?: ProxyConfig;
+  proxyId?: string;
+  templateId?: string;
+  cookiesImport?: CookieImportDraft;
+  extensions?: BrowserExtensionRef[];
   tags: string[];
   folder?: string;
   notes?: string;
   status: ProfileStatus;
+  passwordProtected?: boolean;
   ownerTeamId?: string;
   sharing?: ProfileSharing;
+  /** Store-owned soft-delete marker; active profile lists omit rows where this is set. */
+  trashedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -35,12 +44,70 @@ export interface CreateProfileInput {
   name: string;
   engine: EngineKind;
   os: OsFamily;
+  osVersion?: string;
   fingerprintSeed?: FingerprintSeed;
   fingerprintOverrides?: FingerprintOverrides;
   proxy?: ProxyConfig;
+  proxyId?: string;
+  templateId?: string;
+  cookiesImport?: CookieImportDraft;
+  extensions?: BrowserExtensionRef[];
   tags?: string[];
   folder?: string;
   notes?: string;
+}
+
+export interface ProfileTemplate {
+  id: string;
+  name: string;
+  engine: EngineKind;
+  os: OsFamily;
+  osVersion?: string;
+  presetParameters: string[];
+  proxyId?: string;
+  proxyLabel?: string;
+  proxyDetail?: string;
+  fingerprintOverrides?: FingerprintOverrides;
+  cookiesImport?: CookieImportDraft;
+  extensions?: BrowserExtensionRef[];
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateProfileTemplateInput {
+  name: string;
+  engine: EngineKind;
+  os: OsFamily;
+  osVersion?: string;
+  presetParameters?: string[];
+  proxyId?: string;
+  proxyLabel?: string;
+  proxyDetail?: string;
+  fingerprintOverrides?: FingerprintOverrides;
+  cookiesImport?: CookieImportDraft;
+  extensions?: BrowserExtensionRef[];
+  tags?: string[];
+}
+
+export type CookieImportMode = 'merge' | 'replace' | 'empty';
+export type CookieImportSource = 'file' | 'plain_text';
+
+export interface CookieImportDraft {
+  mode: CookieImportMode;
+  source?: CookieImportSource;
+  fileName?: string;
+  rawText?: string;
+  parsedCount?: number;
+  errors?: Array<{ line?: number; message: string }>;
+}
+
+export interface BrowserExtensionRef {
+  source: 'chrome_web_store' | 'unpacked';
+  enabled: boolean;
+  id?: string;
+  name?: string;
+  url?: string;
 }
 
 /**
@@ -53,8 +120,13 @@ export interface ProfileExport {
   name: string;
   engine: EngineKind;
   os: OsFamily;
+  osVersion?: string;
   fingerprintSeed: FingerprintSeed;
   fingerprintOverrides?: FingerprintOverrides;
+  proxyId?: string;
+  templateId?: string;
+  cookiesImport?: CookieImportDraft;
+  extensions?: BrowserExtensionRef[];
   tags: string[];
   folder?: string;
   notes?: string;

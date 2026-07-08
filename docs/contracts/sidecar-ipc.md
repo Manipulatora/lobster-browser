@@ -13,7 +13,7 @@ the source of truth; this doc is the human-readable spec.
 ## Request
 
 ```jsonc
-{ "id": "uuid", "method": "launch" | "stop" | "status" | "ping", "params": { ... } }
+{ "id": "uuid", "method": "startProfile" | "launch" | "stop" | "status" | "ping", "params": { ... } }
 ```
 
 ## Response
@@ -31,11 +31,18 @@ the source of truth; this doc is the human-readable spec.
 - params: `{}` → result: `{ "pong": true }`. Health/handshake.
 
 ### `startProfile`
-- params (`StartProfileParams`): `{ profileId, engine, os, fingerprintSeed, fingerprintOverrides?, proxy?, userDataDir, headless? }`
+- params (`StartProfileParams`):
+  `{ profileId, engine, os, osVersion?, hostCalibration?, fingerprintSeed, fingerprintOverrides?, proxy?, cookiesImport?, extensions?, userDataDir, headless? }`
 - result: `LaunchResult` (`{ profileId, pid, ws, debuggerAddress }`).
 - The high-level launch the Rust local API uses: the sidecar **derives** the fingerprint from the seed
   (+ overrides + best-effort proxy-exit geo via `deriveGeoFromExitIp`), then launches. The Rust core
   never computes fingerprints — it only forwards the profile's stored fields.
+- When `hostCalibration` is present, the sidecar validates it and derives from the captured host
+  hardware instead of the fallback catalog. The host OS must match `os`; software-rendered host
+  snapshots are rejected before launch.
+- `fingerprintOverrides` may include policy fields (`renderer`, `webrtc`, `hardwareNoise`,
+  `mediaDevices`). The sidecar resolves these into `fingerprintPolicy`/`webrtcPolicy` and writes them to
+  `lobium-fp.json` on native Lobium launches.
 
 ### `launch`
 - params (`LaunchParams`): the low-level form, carrying an already-resolved `fingerprint`.
@@ -43,9 +50,19 @@ the source of truth; this doc is the human-readable spec.
   {
     "profileId": "string",
     "engine": "lobium" | "chromium",
+    "osVersion": "Windows 11 23H2",
     "userDataDir": "/abs/path/to/profile",   // persistent per-profile dir
     "fingerprint": { /* fully-resolved coherent Fingerprint (post-geo) */ },
+    "fingerprintPolicy": {
+      "renderer": { "mode": "host" },
+      "webrtc": "default_public_interface_only",
+      "hardwareNoise": { "webgl": true, "canvas": true, "audio": true, "clientRects": false },
+      "mediaDevices": { "cameras": 1, "microphones": 1, "speakers": 2, "stableDeviceIds": true }
+    },
+    "webrtcPolicy": "default_public_interface_only",
     "proxy": { "type": "http|https|socks5", "host": "...", "port": 8080, "username?": "", "password?": "" },
+    "cookiesImport": { /* stored cookie draft metadata */ },
+    "extensions": [{ "source": "chrome_web_store", "enabled": true, "url": "https://..." }],
     "headless": false
   }
   ```
@@ -54,9 +71,10 @@ the source of truth; this doc is the human-readable spec.
   { "profileId": "string", "pid": 12345, "ws": "ws://127.0.0.1:PORT/devtools/browser/...", "debuggerAddress": "127.0.0.1:PORT" }
   ```
 - Behavior: launch the engine with the per-profile `userDataDir` + proxy; apply the **JS-safe**
-  fingerprint surfaces via patchright isolated init scripts; deep surfaces are native on **Lobium**
-  (best-effort on the interim Chromium until Lobium ships). Return the CDP endpoints. Enforce
-  single-active-instance per `profileId`.
+  fingerprint surfaces through CDP; deep surfaces are native on **Lobium**. When native Lobium is
+  discovered, the launcher writes `<userDataDir>/lobium-fp.json` and passes
+  `--lobium-fp-config=<path>`; otherwise `lobium` falls back to the interim Chromium path for dev/CI.
+  Return the CDP endpoints. Enforce single-active-instance per `profileId`.
 
 ### `stop`
 - params (`StopParams`): `{ "profileId": "string" }` → result: `{}` (ok). Gracefully close the engine.
@@ -72,6 +90,6 @@ the source of truth; this doc is the human-readable spec.
 
 ## Notes
 
-- Day 0 ships the loop + `ping`; `launch`/`stop`/`status` return `not implemented` until Day 1.
 - Both engines speak this one contract: `chromium` is the interim prebuilt engine; `lobium` is our
-  flagship custom build (served by a patched Chromium via patchright until the native build ships).
+  flagship custom build when a binary is provided/discovered, with a clean fallback to interim Chromium
+  for developer environments without the native artifact.

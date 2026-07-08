@@ -78,6 +78,6 @@ each finding adversarially verified, surfaced **10 confirmed** issues (3 refuted
 ## Follow-ups
 
 - **T-018a:** q-weighted `Accept-Language` **HTTP header** (keep clean `navigator.languages`) via a header channel.
-- **T-012 / mobile:** Android/mobile device class (`uaMobile=true`, touch > 0, mobile platform) — the coherence
+- **T-012 / Android:** Android device class (`uaMobile=true`, touch > 0, mobile platform) — the coherence
   rules already branch on form factor.
 - **Lobium:** make `deviceMemory`/`maxTouchPoints` (and the deep surfaces) native + authoritative.

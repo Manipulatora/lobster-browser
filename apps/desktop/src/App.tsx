@@ -1,26 +1,42 @@
 import { invoke } from '@tauri-apps/api/core';
+import {
+  BellIcon,
+  CreditCardIcon,
+  DocumentDuplicateIcon,
+  ServerStackIcon,
+  UserCircleIcon,
+  UserGroupIcon,
+} from '@heroicons/react/24/outline';
 import { useEffect, useState } from 'react';
 
 import { isDesktopRuntime } from './api/tauri';
+import { PricingView } from './features/pricing/PricingView';
 import { ProfilesView } from './features/profiles/ProfilesView';
+import { ProxiesView } from './features/proxies/ProxiesView';
+import { TemplatesView } from './features/templates/TemplatesView';
+import octiumMainIcon from './assets/brand/octium-main-icon.png';
 
-/**
- * Dashboard shell. The sidebar switches between top-level sections; the Profiles section is
- * live (list + fingerprint editor, see src/features/profiles). The remaining sections are
- * scaffolding fleshed out on later days (see docs/MASTER_PLAN.md). In a plain dev browser the
- * UI runs against an in-memory mock (see src/api/tauri.ts); inside Tauri it uses the Rust core.
- */
-
-// Sidebar sections. `key` doubles as the active-view discriminator.
 const NAV_ITEMS = [
-  { key: 'profiles', label: 'Profiles', icon: '🦞' },
-  { key: 'proxies', label: 'Proxies', icon: '🌐' },
-  { key: 'automation', label: 'Automation', icon: '🤖' },
-  { key: 'team', label: 'Team', icon: '👥' },
-  { key: 'settings', label: 'Settings', icon: '⚙️' },
+  { key: 'profiles', label: 'Profiles', icon: UserGroupIcon },
+  { key: 'proxies', label: 'Proxies', icon: ServerStackIcon },
+  { key: 'templates', label: 'Templates', icon: DocumentDuplicateIcon },
+  { key: 'pricing', label: 'Pricing', icon: CreditCardIcon },
 ] as const;
 
 type NavKey = (typeof NAV_ITEMS)[number]['key'];
+
+function ActiveView({ active }: { active: NavKey }): JSX.Element {
+  switch (active) {
+    case 'profiles':
+      return <ProfilesView />;
+    case 'proxies':
+      return <ProxiesView />;
+    case 'templates':
+      return <TemplatesView />;
+    case 'pricing':
+      return <PricingView />;
+  }
+}
 
 export function App(): JSX.Element {
   const [active, setActive] = useState<NavKey>('profiles');
@@ -34,53 +50,56 @@ export function App(): JSX.Element {
       .catch(() => setVersion('unknown'));
   }, []);
 
-  const activeItem = NAV_ITEMS.find((item) => item.key === active);
-
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark">🦞</span>
-          <span className="brand-name">Lobster</span>
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="topbar__brand">
+          <img className="topbar__logo" src={octiumMainIcon} alt="" aria-hidden />
+          <span>Lobster</span>
         </div>
-        <nav className="nav">
-          {NAV_ITEMS.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              className={item.key === active ? 'nav-item nav-item--active' : 'nav-item'}
-              onClick={() => setActive(item.key)}
-            >
-              <span className="nav-item__icon" aria-hidden>
-                {item.icon}
-              </span>
-              <span className="nav-item__label">{item.label}</span>
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-footer">v{version}</div>
-      </aside>
+        <div className="topbar__spacer" />
+        <div className="topbar__actions">
+          <button type="button" className="icon-button" aria-label="Notifications">
+            <BellIcon aria-hidden />
+          </button>
+          <button type="button" className="icon-button" aria-label="Profile">
+            <UserCircleIcon aria-hidden />
+          </button>
+        </div>
+      </header>
 
-      <main className="main">
-        <header className="main-header">
-          <h1>{activeItem?.label}</h1>
-          <span className="pill">{isDesktopRuntime() ? 'desktop' : 'dev · mock data'}</span>
-        </header>
+      <div className="workspace">
+        <aside className="sidebar" aria-label="Primary navigation">
+          <div className="account-switcher">
+            <img className="account-avatar" src={octiumMainIcon} alt="" aria-hidden />
+            <span className="account-name">Lobster</span>
+            <span className="account-version">{version}</span>
+          </div>
+          <nav className="nav">
+            {NAV_ITEMS.map((item) => {
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={item.key === active ? 'nav-item nav-item--active' : 'nav-item'}
+                  onClick={() => setActive(item.key)}
+                >
+                  <Icon className="nav-item__icon" aria-hidden />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+          <div className="sidebar-footer">
+            <span>{isDesktopRuntime() ? 'Desktop runtime' : 'Dev mock runtime'}</span>
+          </div>
+        </aside>
 
-        <section className="content">
-          {active === 'profiles' ? (
-            <ProfilesView />
-          ) : (
-            <div className="placeholder-card">
-              <h2>{activeItem?.label}</h2>
-              <p>
-                This section is scaffolding. Its real UI ships on a later day of the plan — see{' '}
-                <code>docs/MASTER_PLAN.md</code>.
-              </p>
-            </div>
-          )}
-        </section>
-      </main>
+        <main className="main">
+          <ActiveView active={active} />
+        </main>
+      </div>
     </div>
   );
 }

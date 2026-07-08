@@ -100,6 +100,14 @@ before(async () => {
         });
       }
 
+      if (req.method === 'POST' && path === '/api/v1/proxy/test') {
+        return ok({
+          ok: true,
+          latencyMs: 42,
+          geo: { ip: '203.0.113.42', countryCode: 'US', timezone: 'America/New_York' },
+        });
+      }
+
       return fail(404, `no route for ${req.method} ${path}`);
     });
   });
@@ -124,7 +132,7 @@ test('health() hits GET /health and unwraps data (works without requiring auth)'
 });
 
 test('start() sends Bearer auth, POSTs the right body, and unwraps StartProfileResult', async () => {
-  const data = await client.start('alpha', { headless: true });
+  const data = await client.start('alpha', { headless: true, password: 'secret-pass' });
   assert.equal(data.profileId, 'alpha');
   assert.equal(data.ws, 'ws://127.0.0.1:9222/devtools/browser/abc');
   assert.equal(data.debuggerAddress, '127.0.0.1:9222');
@@ -134,7 +142,7 @@ test('start() sends Bearer auth, POSTs the right body, and unwraps StartProfileR
   assert.equal(last?.method, 'POST');
   assert.equal(last?.path, '/api/v1/profile/start');
   assert.equal(last?.authorization, `Bearer ${API_KEY}`); // <-- Authorization: Bearer is sent
-  assert.deepEqual(last?.body, { profileId: 'alpha', headless: true });
+  assert.deepEqual(last?.body, { profileId: 'alpha', headless: true, password: 'secret-pass' });
 });
 
 test('stop() POSTs to /profile/stop and unwraps { profileId, stopped }', async () => {
@@ -163,6 +171,24 @@ test('list() GETs /profile/list and unwraps the array', async () => {
   const last = requests.at(-1);
   assert.equal(last?.method, 'GET');
   assert.equal(last?.path, '/api/v1/profile/list');
+});
+
+test('testProxy() POSTs to /proxy/test and unwraps the proxy result', async () => {
+  const data = await client.testProxy(
+    { id: 'px-1', type: 'socks5', host: 'proxy.example.test', port: 1080 },
+    { id: 'px-1' },
+  );
+  assert.equal(data.ok, true);
+  assert.equal(data.latencyMs, 42);
+  assert.equal(data.geo.timezone, 'America/New_York');
+  const last = requests.at(-1);
+  assert.equal(last?.method, 'POST');
+  assert.equal(last?.path, '/api/v1/proxy/test');
+  assert.equal(last?.authorization, `Bearer ${API_KEY}`);
+  assert.deepEqual(last?.body, {
+    id: 'px-1',
+    config: { id: 'px-1', type: 'socks5', host: 'proxy.example.test', port: 1080 },
+  });
 });
 
 test('a non-zero envelope throws LobsterApiError and is NOT retried', async () => {

@@ -1,12 +1,61 @@
 import {
   applyGeoToFingerprint,
   applyOverrides,
+  deriveFingerprintFromHost,
   deriveFingerprint,
+  validateHostCalibrationProfile,
   validateFingerprintCoherence,
 } from '@lobster/fingerprint';
 import { deriveGeoFromExitIp } from '@lobster/proxy';
-import type { LaunchParams, LaunchResult, StartProfileParams } from '@lobster/shared-types';
+import type {
+  Fingerprint,
+  FingerprintLaunchPolicy,
+  HardwareNoisePolicy,
+  LaunchParams,
+  LaunchResult,
+  MediaDeviceProfile,
+  RendererPolicy,
+  StartProfileParams,
+  WebRtcPolicy,
+} from '@lobster/shared-types';
 import type { EngineRunner } from './runner.js';
+
+const DEFAULT_HARDWARE_NOISE: HardwareNoisePolicy = {
+  webgl: true,
+  canvas: true,
+  audio: true,
+  clientRects: false,
+};
+
+const DEFAULT_MEDIA_DEVICES: MediaDeviceProfile = {
+  cameras: 1,
+  microphones: 1,
+  speakers: 2,
+  stableDeviceIds: true,
+};
+
+const DEFAULT_RENDERER_POLICY: RendererPolicy = { mode: 'host' };
+
+function resolveWebRtcPolicy(params: StartProfileParams): WebRtcPolicy {
+  const requested = params.fingerprintOverrides?.webrtc;
+  if (requested) return requested;
+  return params.proxy ? 'disable_non_proxied_udp' : 'default_public_interface_only';
+}
+
+function resolveLaunchPolicy(params: StartProfileParams): FingerprintLaunchPolicy {
+  return {
+    renderer: params.fingerprintOverrides?.renderer ?? DEFAULT_RENDERER_POLICY,
+    webrtc: resolveWebRtcPolicy(params),
+    hardwareNoise: {
+      ...DEFAULT_HARDWARE_NOISE,
+      ...params.fingerprintOverrides?.hardwareNoise,
+    },
+    mediaDevices: {
+      ...DEFAULT_MEDIA_DEVICES,
+      ...params.fingerprintOverrides?.mediaDevices,
+    },
+  };
+}
 
 /**
  * High-level launch used by the desktop core: derive the profile's fingerprint from its seed
@@ -17,10 +66,30 @@ export async function startProfile(
   runner: EngineRunner,
   params: StartProfileParams,
 ): Promise<LaunchResult> {
-  let fingerprint = deriveFingerprint(params.fingerprintSeed, {
-    os: params.os,
-    engine: params.engine,
-  });
+  let fingerprint: Fingerprint;
+  if (params.hostCalibration) {
+    if (params.hostCalibration.os !== params.os) {
+      throw new Error(
+        `refusing to launch profile ${params.profileId}: host calibration OS ` +
+          `"${params.hostCalibration.os}" does not match profile OS "${params.os}"`,
+      );
+    }
+    const hostIssues = validateHostCalibrationProfile(params.hostCalibration);
+    if (hostIssues.length > 0) {
+      throw new Error(
+        `refusing to launch profile ${params.profileId}: invalid host calibration ` +
+          `(${hostIssues.length} issue${hostIssues.length === 1 ? '' : 's'}) — ${hostIssues.join('; ')}`,
+      );
+    }
+    fingerprint = deriveFingerprintFromHost(params.fingerprintSeed, params.hostCalibration, {
+      engine: params.engine,
+    });
+  } else {
+    fingerprint = deriveFingerprint(params.fingerprintSeed, {
+      os: params.os,
+      engine: params.engine,
+    });
+  }
   fingerprint = applyOverrides(fingerprint, params.fingerprintOverrides);
 
   if (params.proxy) {
@@ -54,11 +123,16 @@ export async function startProfile(
   const launchParams: LaunchParams = {
     profileId: params.profileId,
     engine: params.engine,
+    ...(typeof params.osVersion === 'string' ? { osVersion: params.osVersion } : {}),
     userDataDir: params.userDataDir,
     fingerprint,
+    fingerprintPolicy: resolveLaunchPolicy(params),
+    webrtcPolicy: resolveWebRtcPolicy(params),
     // Thread the seed so native farbling seeds are unique per profile (not per device class).
     fingerprintSeed: params.fingerprintSeed,
     ...(params.proxy ? { proxy: params.proxy } : {}),
+    ...(params.cookiesImport ? { cookiesImport: params.cookiesImport } : {}),
+    ...(Array.isArray(params.extensions) ? { extensions: params.extensions } : {}),
     ...(params.headless !== undefined ? { headless: params.headless } : {}),
   };
   return runner.launch(launchParams);

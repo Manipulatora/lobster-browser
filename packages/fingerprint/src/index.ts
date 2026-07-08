@@ -14,6 +14,10 @@ export { SeededRandom, hashStringToUint32, mulberry32 } from './prng.js';
 export { generateSeed, isValidSeed } from './seed.js';
 export { deriveFingerprint, deriveFromPools } from './derive.js';
 export {
+  deriveAndroidFingerprint,
+  validateAndroidFingerprintCoherence,
+} from './android.js';
+export {
   applyGeoToFingerprint,
   validateFingerprintCoherence,
   normalizeDeviceMemory,
@@ -22,4 +26,10 @@ export {
   DESKTOP_MIN_DEVICE_MEMORY,
 } from './coherence.js';
 export { applyOverrides } from './overrides.js';
+export {
+  deriveFingerprintFromHost,
+  validateHostCalibrationProfile,
+} from './host-calibration.js';
 export type { DeriveOptions } from './derive.js';
+export type { DeriveAndroidOptions } from './android.js';
+export type { DeriveFromHostOptions } from './host-calibration.js';

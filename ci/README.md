@@ -8,13 +8,11 @@
   pass/fail bar; `run.mjs` derives a fingerprint, launches it headful under Xvfb via the real launcher
   code path, drives it against a live detector (bot.sannysoft.com), and asserts our fingerprint applied
   with no automation tell. `--stub` verifies wiring where no browser is installed.
-- [`validation/lobium-detect.mjs`](validation/lobium-detect.mjs) — the **native-engine** gate. Launches
-  the REAL Lobium binary with a full coherent persona (native config channel for the deep surfaces +
-  navigator hardware, PLUS the CDP JS-safe surfaces), connects over CDP, scores it against
-  bot.sannysoft.com, AND directly asserts every native surface applied (WebGL unmasked vendor/renderer
-  match the claim; per-profile canvas/audio farbling). Where `run.mjs` measures the interim engine's
-  deep-surface gap, this proves Lobium closes it. Verified: 8/8 surfaces applied, sannysoft 0-failed,
-  per-profile-diverse GPU/canvas/audio across seeds.
+- [`validation/lobium-detect.mjs`](validation/lobium-detect.mjs) — the **native-engine** gate script.
+  Launches a real Lobium binary with a coherent persona (native config channel for deep surfaces +
+  navigator hardware, plus CDP JS-safe surfaces), connects over CDP, scores bot.sannysoft.com, and
+  directly asserts native surfaces. This is **not yet a blocking CI job** and currently runs in the
+  dev/SwiftShader mode unless RG-1 changes the launch flags/environment.
 
 Run locally:
 
@@ -23,8 +21,11 @@ npx tsc -b packages/shared-types packages/proxy packages/fingerprint packages/en
 xvfb-run -a node ci/validation/run.mjs      # real interim-engine gate (needs patchright's Chromium)
 node ci/validation/run.mjs --stub           # wiring-only
 
-# native-engine gate — needs a built Lobium binary (out/Lobium/chrome) + network:
-LOBSTER_LOBIUM_BIN=/path/to/out/Lobium/chrome node ci/validation/lobium-detect.mjs [seed]
+# native-engine gate — needs a built Lobium binary (out/Lobium/chrome) + network.
+# Today this is a local/dev proof; RG-1 promotes it to real-GPU proof. The script resolves
+# LOBSTER_LOBIUM_BIN, LOBSTER_LOBIUM_DIR, common dev layouts such as ~/lobium-build/src/out/Lobium/chrome,
+# and future packaged engine-resource dirs.
+node ci/validation/lobium-detect.mjs [seed]
 ```
 
 Per [`../docs/agent-protocol.md`](../docs/agent-protocol.md) §4, fingerprint-surface/engine changes

@@ -101,6 +101,22 @@ const GL_CAPS: WebGlCaps = {
   aliasedPointSizeRange: [1, 2047],
 };
 
+const MOBILE_GLES_CAPS: WebGlCaps = {
+  maxTextureSize: 16384,
+  maxCubeMapTextureSize: 16384,
+  maxRenderbufferSize: 16384,
+  maxViewportDims: [16384, 16384],
+  maxVertexAttribs: 16,
+  maxVertexUniformVectors: 1024,
+  maxFragmentUniformVectors: 1024,
+  maxVaryingVectors: 31,
+  maxTextureImageUnits: 16,
+  maxVertexTextureImageUnits: 16,
+  maxCombinedTextureImageUnits: 32,
+  aliasedLineWidthRange: [1, 1],
+  aliasedPointSizeRange: [1, 1024],
+};
+
 /** Windows GPU renderer string in ANGLE Direct3D11 form (the only backend real Windows Chrome uses). */
 function winGpu(vendor: 'NVIDIA' | 'Intel' | 'AMD', model: string): DeviceProfile['webgl'] {
   const v = `Google Inc. (${vendor})`;
@@ -319,6 +335,157 @@ export const DEVICE_TEMPLATES: Record<OsFamily, OsTemplate> = {
   windows: WINDOWS,
   macos: MACOS,
   linux: LINUX,
+};
+
+export interface AndroidDeviceProfile {
+  /** Stable id for tests/telemetry; never surfaced to the page. */
+  id: string;
+  brand: string;
+  manufacturer: string;
+  model: string;
+  /** Android build/device codename. */
+  device: string;
+  androidVersion: string;
+  apiLevel: number;
+  buildId: string;
+  buildFingerprint: string;
+  webgl: DeviceProfile['webgl'];
+  /** CSS screen dimensions as exposed by Chrome Android, not physical pixels. */
+  screen: { width: number; height: number; dpr: number };
+  hardwareConcurrency: number;
+  /** Spec value from the navigator.deviceMemory ladder. */
+  deviceMemory: number;
+  maxTouchPoints: number;
+}
+
+export interface AndroidTemplate {
+  platform: string;
+  uaPlatform: 'Android';
+  fonts: string[];
+  devices: readonly AndroidDeviceProfile[];
+}
+
+function androidGpu(vendor: 'Qualcomm' | 'ARM', model: string): DeviceProfile['webgl'] {
+  const v = `Google Inc. (${vendor})`;
+  const r = `ANGLE (${vendor}, ${model}, OpenGL ES 3.2)`;
+  return { vendor: v, renderer: r, unmaskedVendor: v, unmaskedRenderer: r, caps: MOBILE_GLES_CAPS };
+}
+
+export const ANDROID_TEMPLATE: AndroidTemplate = {
+  platform: 'Linux armv81',
+  uaPlatform: 'Android',
+  fonts: [
+    'Roboto',
+    'Noto Sans',
+    'Noto Color Emoji',
+    'Droid Sans',
+    'Google Sans',
+    'sans-serif',
+  ],
+  devices: [
+    {
+      id: 'pixel-8-android-14',
+      brand: 'Google',
+      manufacturer: 'Google',
+      model: 'Pixel 8',
+      device: 'shiba',
+      androidVersion: '14',
+      apiLevel: 34,
+      buildId: 'UQ1A.240205.004',
+      buildFingerprint:
+        'google/shiba/shiba:14/UQ1A.240205.004/11269751:user/release-keys',
+      webgl: androidGpu('ARM', 'Mali-G715'),
+      screen: { width: 412, height: 915, dpr: 2.625 },
+      hardwareConcurrency: 8,
+      deviceMemory: 8,
+      maxTouchPoints: 5,
+    },
+    {
+      id: 'pixel-7-android-14',
+      brand: 'Google',
+      manufacturer: 'Google',
+      model: 'Pixel 7',
+      device: 'panther',
+      androidVersion: '14',
+      apiLevel: 34,
+      buildId: 'UQ1A.240205.002',
+      buildFingerprint:
+        'google/panther/panther:14/UQ1A.240205.002/11269751:user/release-keys',
+      webgl: androidGpu('ARM', 'Mali-G710'),
+      screen: { width: 412, height: 915, dpr: 2.625 },
+      hardwareConcurrency: 8,
+      deviceMemory: 8,
+      maxTouchPoints: 5,
+    },
+    {
+      id: 'galaxy-s23-android-14',
+      brand: 'Samsung',
+      manufacturer: 'samsung',
+      model: 'SM-S911B',
+      device: 'dm1q',
+      androidVersion: '14',
+      apiLevel: 34,
+      buildId: 'UP1A.231005.007',
+      buildFingerprint:
+        'samsung/dm1qxx/dm1q:14/UP1A.231005.007/S911BXXS3BXAD:user/release-keys',
+      webgl: androidGpu('Qualcomm', 'Adreno (TM) 740'),
+      screen: { width: 360, height: 780, dpr: 3 },
+      hardwareConcurrency: 8,
+      deviceMemory: 8,
+      maxTouchPoints: 5,
+    },
+    {
+      id: 'galaxy-a54-android-14',
+      brand: 'Samsung',
+      manufacturer: 'samsung',
+      model: 'SM-A546B',
+      device: 'a54x',
+      androidVersion: '14',
+      apiLevel: 34,
+      buildId: 'UP1A.231005.007',
+      buildFingerprint:
+        'samsung/a54x/a54x:14/UP1A.231005.007/A546BXXS8CXA2:user/release-keys',
+      webgl: androidGpu('ARM', 'Mali-G68'),
+      screen: { width: 384, height: 854, dpr: 2.8125 },
+      hardwareConcurrency: 8,
+      deviceMemory: 4,
+      maxTouchPoints: 5,
+    },
+    {
+      id: 'oneplus-11-android-14',
+      brand: 'OnePlus',
+      manufacturer: 'OnePlus',
+      model: 'CPH2449',
+      device: 'OP594DL1',
+      androidVersion: '14',
+      apiLevel: 34,
+      buildId: 'UKQ1.230924.001',
+      buildFingerprint:
+        'OnePlus/CPH2449/OP594DL1:14/UKQ1.230924.001/R.1733:user/release-keys',
+      webgl: androidGpu('Qualcomm', 'Adreno (TM) 740'),
+      screen: { width: 412, height: 919, dpr: 3.5 },
+      hardwareConcurrency: 8,
+      deviceMemory: 8,
+      maxTouchPoints: 5,
+    },
+    {
+      id: 'redmi-note-12-android-13',
+      brand: 'Xiaomi',
+      manufacturer: 'Xiaomi',
+      model: '22111317G',
+      device: 'sunstone',
+      androidVersion: '13',
+      apiLevel: 33,
+      buildId: 'TKQ1.221114.001',
+      buildFingerprint:
+        'xiaomi/sunstone_global/sunstone:13/TKQ1.221114.001/V14.0.8.0.TMQMIXM:user/release-keys',
+      webgl: androidGpu('Qualcomm', 'Adreno (TM) 619'),
+      screen: { width: 393, height: 873, dpr: 2.75 },
+      hardwareConcurrency: 8,
+      deviceMemory: 4,
+      maxTouchPoints: 5,
+    },
+  ],
 };
 
 /**

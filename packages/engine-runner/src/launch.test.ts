@@ -92,6 +92,33 @@ test('buildLaunchOptions applies a proxy-aware WebRTC IP-handling policy (leak p
   );
 });
 
+test('buildLaunchOptions honors an explicit WebRTC launch policy', () => {
+  const explicitProxyOnly = buildLaunchOptions({
+    profileId: 'p',
+    engine: 'chromium',
+    userDataDir: '/d',
+    fingerprint: sampleFingerprint(),
+    webrtcPolicy: 'proxy_only',
+  });
+  assert.ok(
+    explicitProxyOnly.args.includes('--force-webrtc-ip-handling-policy=disable_non_proxied_udp'),
+  );
+
+  const explicitDefault = buildLaunchOptions({
+    profileId: 'p',
+    engine: 'chromium',
+    userDataDir: '/d',
+    fingerprint: sampleFingerprint(),
+    proxy: { id: 'x', type: 'http', host: 'h', port: 8080 },
+    webrtcPolicy: 'default_public_interface_only',
+  });
+  assert.ok(
+    explicitDefault.args.includes(
+      '--force-webrtc-ip-handling-policy=default_public_interface_only',
+    ),
+  );
+});
+
 test('buildCdpEmulation carries UA, UA-CH metadata, timezone/locale, and geolocation', () => {
   const e = buildCdpEmulation(sampleFingerprint());
   assert.match(e.userAgent, /Chrome\//);

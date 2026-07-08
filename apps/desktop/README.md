@@ -4,13 +4,16 @@ The Lobster Browser **desktop agent**: a Tauri 2 (Rust) core that manages profil
 launches browser engines, with a React + TypeScript + Vite UI and an Axum-based **local automation
 API** (loopback-only) for Playwright/Puppeteer/Selenium integrations.
 
-> **Day 0 scaffold.** Structure and contracts are in place; most behavior is stubbed. See
-> [`docs/MASTER_PLAN.md`](../../docs/MASTER_PLAN.md) for what each day fleshes out.
+> **Current state:** profile CRUD, SQLite storage, launch/stop IPC, the shared sidecar path, and the
+> loopback local automation API are wired. The current React UI is still a dark scaffold; the production
+> target is the light/red shell and create-profile wizard in
+> [`docs/specs/product-ui-ux-plan.md`](../../docs/specs/product-ui-ux-plan.md).
 
 ## Prerequisites
 
 - **Node** `>=22 <25` and **npm** `>=10` (repo root `.nvmrc`).
-- **Rust** `1.83.0` — the TS packages don't need it, but this app does. Install via `rustup`:
+- **Rust** pinned by the root `rust-toolchain.toml` — the TS packages don't need it, but this app does.
+  Install via `rustup`:
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -40,14 +43,14 @@ Other scripts:
 
 ```
 apps/desktop/
-  package.json            @lobster/desktop — deps + scripts (joins root workspaces on Day 1)
+  package.json            @lobster/desktop — deps + scripts
   index.html              Vite entry document; mounts #root
   vite.config.ts          React plugin, port 5173, clearScreen off (Tauri-friendly)
   tsconfig.json           Standalone TS config: DOM libs + react-jsx + bundler resolution
   src/
     main.tsx              React 18 client entrypoint
-    App.tsx               Dashboard shell (Profiles/Proxies/Automation/Team/Settings)
-    styles.css            Minimal dark UI
+    App.tsx               Current dashboard shell; target IA is Profiles/Proxies/Templates/Pricing
+    styles.css            Current dark scaffold; target is light/red production UI
   src-tauri/
     Cargo.toml            Crate `lobster-desktop`, lib `lobster_desktop_lib`
     build.rs              tauri_build::build()
@@ -64,12 +67,12 @@ apps/desktop/
 
 ## Architecture notes
 
-- **IPC (UI → Rust):** the UI calls `invoke('app_version')` / `invoke('list_profiles')`; commands
-  are registered in `src-tauri/src/lib.rs`.
+- **IPC (UI → Rust):** the UI calls `invoke('app_version')`, profile CRUD commands, and
+  `launch_profile`/`stop_profile`; commands are registered in `src-tauri/src/lib.rs`.
 - **Local automation API:** runs on a background Tokio runtime (`127.0.0.1:53211`), separate from
   the Tauri event loop. The `{ code, data, msg }` envelope mirrors `@lobster/shared-types`
-  `ApiResponse`. Bearer API-key auth + rate limiting arrive on **Day 4**.
+  `ApiResponse`. Bearer API-key auth is wired; rate limiting remains planned.
 - **Profile store:** `profile_store.rs` mirrors the shared `Profile` type. Encryption of
-  cookie/storage blobs and cloud sync arrive later (Days 6–7).
+  cookie/storage blobs and cloud sync remain planned productization work.
 - **Domain types:** imported from `@lobster/shared-types` so the desktop never drifts from the
   backend/sidecar wire contracts.

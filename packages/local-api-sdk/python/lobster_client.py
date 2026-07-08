@@ -88,6 +88,27 @@ class LocalApiListItem(TypedDict):
     running: bool
 
 
+class ProxyConfig(TypedDict, total=False):
+    """Proxy config accepted by ``POST /proxy/test``."""
+
+    id: str
+    type: str
+    host: str
+    port: int
+    username: str
+    password: str
+    label: str
+
+
+class ProxyTestResult(TypedDict, total=False):
+    """``data`` of ``POST /proxy/test``."""
+
+    ok: bool
+    latencyMs: int
+    geo: dict[str, Any]
+    error: str
+
+
 # --- Errors ----------------------------------------------------------------------------------------
 
 
@@ -196,12 +217,17 @@ class LobsterClient:
         """``GET /health`` — liveness probe. **No auth required.**"""
         return self._call("GET", "/health")
 
-    def start(self, profile_id: str, headless: bool = False) -> StartProfileResult:
+    def start(
+        self, profile_id: str, headless: bool = False, password: str | None = None
+    ) -> StartProfileResult:
         """``POST /profile/start`` — launch a profile and return its live CDP endpoints."""
+        body: dict[str, Any] = {"profileId": profile_id, "headless": headless}
+        if password is not None:
+            body["password"] = password
         return self._call(
             "POST",
             "/profile/start",
-            body={"profileId": profile_id, "headless": headless},
+            body=body,
         )
 
     def stop(self, profile_id: str) -> StopProfileResult:
@@ -217,15 +243,24 @@ class LobsterClient:
         """``GET /profile/list`` — all known profiles and their running state."""
         return self._call("GET", "/profile/list")
 
+    def test_proxy(self, config: ProxyConfig, id: str | None = None) -> ProxyTestResult:
+        """``POST /proxy/test`` — test a proxy endpoint and return exit-IP geo/latency."""
+        body: dict[str, Any] = {"config": config}
+        if id is not None:
+            body["id"] = id
+        return self._call("POST", "/proxy/test", body=body)
+
     # --- Convenience -------------------------------------------------------------------------------
 
-    def connect_playwright(self, profile_id: str, headless: bool = False) -> dict[str, str]:
+    def connect_playwright(
+        self, profile_id: str, headless: bool = False, password: str | None = None
+    ) -> dict[str, str]:
         """Start a profile and return just the two endpoints an automation framework needs.
 
         Deliberately does not import Playwright/Selenium — pass ``ws`` to
         ``chromium.connect_over_cdp(ws)`` or ``debuggerAddress`` to Selenium yourself.
         """
-        data = self.start(profile_id, headless=headless)
+        data = self.start(profile_id, headless=headless, password=password)
         return {"ws": data["ws"], "debuggerAddress": data["debuggerAddress"]}
 
     # --- Internals ---------------------------------------------------------------------------------

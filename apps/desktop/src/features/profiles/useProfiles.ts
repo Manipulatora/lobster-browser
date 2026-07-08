@@ -13,8 +13,12 @@ export interface UseProfiles {
   create: (input: CreateProfileInput) => Promise<void>;
   clone: (id: string) => Promise<void>;
   update: (id: string, patch: ProfilePatch) => Promise<Profile>;
-  remove: (id: string) => Promise<void>;
-  launch: (id: string) => Promise<LaunchInfo>;
+  moveToTrash: (id: string) => Promise<void>;
+  listTrash: () => Promise<Profile[]>;
+  restore: (id: string) => Promise<void>;
+  permanentlyDelete: (id: string) => Promise<void>;
+  setPassword: (id: string, password: string | null) => Promise<void>;
+  launch: (id: string, password?: string) => Promise<LaunchInfo>;
   stop: (id: string) => Promise<void>;
 }
 
@@ -66,6 +70,11 @@ export function useProfiles(): UseProfiles {
       };
       if (src.fingerprintOverrides) input.fingerprintOverrides = src.fingerprintOverrides;
       if (src.proxy) input.proxy = src.proxy;
+      if (src.proxyId) input.proxyId = src.proxyId;
+      if (src.templateId) input.templateId = src.templateId;
+      if (src.osVersion) input.osVersion = src.osVersion;
+      if (src.cookiesImport) input.cookiesImport = src.cookiesImport;
+      if (src.extensions) input.extensions = src.extensions;
       if (src.folder) input.folder = src.folder;
       if (src.notes) input.notes = src.notes;
       await profilesClient.create_profile(input);
@@ -83,7 +92,7 @@ export function useProfiles(): UseProfiles {
     [refresh],
   );
 
-  const remove = useCallback(
+  const moveToTrash = useCallback(
     async (id: string) => {
       await profilesClient.delete_profile(id);
       await refresh();
@@ -91,9 +100,37 @@ export function useProfiles(): UseProfiles {
     [refresh],
   );
 
-  const launch = useCallback(
+  const listTrash = useCallback(async () => {
+    return profilesClient.list_trashed_profiles();
+  }, []);
+
+  const restore = useCallback(
     async (id: string) => {
-      const info = await profilesClient.launch_profile(id);
+      await profilesClient.restore_profile(id);
+      await refresh();
+    },
+    [refresh],
+  );
+
+  const permanentlyDelete = useCallback(
+    async (id: string) => {
+      await profilesClient.permanently_delete_profile(id);
+      await refresh();
+    },
+    [refresh],
+  );
+
+  const setPassword = useCallback(
+    async (id: string, password: string | null) => {
+      await profilesClient.set_profile_password(id, password);
+      await refresh();
+    },
+    [refresh],
+  );
+
+  const launch = useCallback(
+    async (id: string, password?: string) => {
+      const info = await profilesClient.launch_profile(id, password);
       await refresh();
       return info;
     },
@@ -108,5 +145,20 @@ export function useProfiles(): UseProfiles {
     [refresh],
   );
 
-  return { profiles, loading, error, refresh, create, clone, update, remove, launch, stop };
+  return {
+    profiles,
+    loading,
+    error,
+    refresh,
+    create,
+    clone,
+    update,
+    moveToTrash,
+    listTrash,
+    restore,
+    permanentlyDelete,
+    setPassword,
+    launch,
+    stop,
+  };
 }

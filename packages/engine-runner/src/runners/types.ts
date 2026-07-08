@@ -1,12 +1,23 @@
-import type { EngineKind, Fingerprint } from '@lobster/shared-types';
+import type {
+  EngineKind,
+  Fingerprint,
+  FingerprintLaunchPolicy,
+  WebRtcPolicy,
+} from '@lobster/shared-types';
 import type { CdpEmulation, PersistentLaunchOptions } from '../launch.js';
 
 /** Everything a concrete engine launcher needs — prepared by the CompositeRunner from a profile. */
 export interface LaunchContext {
   profileId: string;
   engine: EngineKind;
+  /** Profile-selected OS build/version label, when present. */
+  osVersion?: string;
   /** The fully-resolved fingerprint — used to apply CDP overrides on each page. */
   fingerprint: Fingerprint;
+  /** Native policy fields resolved from profile overrides and proxy state. */
+  fingerprintPolicy?: FingerprintLaunchPolicy;
+  /** Final WebRTC policy used by launch flags and native config. */
+  webrtcPolicy?: WebRtcPolicy;
   /** The profile's fingerprint seed — the native launcher derives per-profile farbling seeds from it. */
   fingerprintSeed?: string;
   options: PersistentLaunchOptions;

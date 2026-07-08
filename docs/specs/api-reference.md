@@ -90,15 +90,15 @@ store directly.
 | `POST` | `/api/v1/profile/create` | Bearer | Create a profile locally | ⬜ planned |
 | `PATCH`| `/api/v1/profile/update` | Bearer | Edit profile fields/overrides | ⬜ planned |
 | `POST` | `/api/v1/profile/delete` | Bearer | Delete a local profile | ⬜ planned |
-| `POST` | `/api/v1/proxy/test` | Bearer | Test a proxy, return exit-IP geo | ⬜ planned |
+| `POST` | `/api/v1/proxy/test` | Bearer | Test a proxy, return exit-IP geo | ✅ done |
 | `POST` | `/api/v1/cookie/import` | Bearer | Import cookies into a profile | ⬜ planned |
 | `GET`  | `/api/v1/cookie/export` | Bearer | Export a profile's cookies | ⬜ planned |
 | `GET`  | `/api/v1/ws` (WebSocket) | Bearer | Live status/event stream | ⬜ planned |
 
-> **Honest status:** the four `profile/*` runtime routes + `health` are live today. Local profile
-> **CRUD**, **proxy test**, and **cookie import/export** are performed through the desktop UI /
-> Tauri commands now; exposing them on the loopback HTTP surface (below) is the next increment so
-> headless automation can manage profiles without the GUI.
+> **Honest status:** the four `profile/*` runtime routes, `proxy/test`, and `health` are live today.
+> Local profile **CRUD** and **cookie import/export** are still performed through the desktop UI / Tauri
+> commands; exposing them on the loopback HTTP surface remains a follow-up so headless automation can
+> manage profiles without the GUI.
 
 ### 1.3 `GET /api/v1/health` ✅
 
@@ -120,9 +120,10 @@ both connect styles.
 |---|---|---|---|
 | `profileId` | string | ✅ | Local profile id |
 | `headless` | boolean | ⬜ | Default `false`; forwarded to sidecar |
+| `password` | string | ⬜ | Required only when the profile has password protection enabled |
 
 ```json
-{ "profileId": "b1e5…", "headless": false }
+{ "profileId": "b1e5…", "headless": false, "password": "optional-profile-password" }
 ```
 
 **Response** `200` — `data` is `StartProfileResult` (`shared-types/src/api.ts`):
@@ -190,15 +191,17 @@ Errors: `401 unauthorized`; `500 db lock`.
 **`PATCH /api/v1/profile/update`** — `{ "profileId", ...partial fields }` (seed immutable, as cloud).
 **`POST /api/v1/profile/delete`** — `{ "profileId" }` → `{ "profileId", "deleted": true }`.
 
-**`POST /api/v1/proxy/test`** — validate a proxy before attaching (wraps `@lobster/proxy`):
+**`POST /api/v1/proxy/test`** — validate a proxy before attaching:
 ```jsonc
 // body
-{ "type": "socks5", "host": "1.2.3.4", "port": 1080, "username": "u", "password": "p" }
+{ "id": "px_1", "config": { "id": "px_1", "type": "socks5", "host": "1.2.3.4", "port": 1080, "username": "u", "password": "p" } }
 // data → ProxyTestResult
 { "ok": true, "latencyMs": 312,
   "geo": { "ip": "1.2.3.4", "countryCode": "US", "city": "Ashburn",
            "timezone": "America/New_York", "asn": "AS7922", "isDatacenter": false } }
 ```
+
+If `id` is supplied, the desktop updates that stored local proxy row's latest test status.
 
 **`POST /api/v1/cookie/import`** — `{ "profileId", "cookies": [ /* Netscape/JSON cookie objects */ ] }`.
 **`GET  /api/v1/cookie/export?profileId=<id>`** — `data: { "profileId", "cookies": [...] }`.
@@ -712,7 +715,7 @@ Phase-2 item in the local-API contract and the MASTER_PLAN roadmap.)
 | Tool | Args | Returns | Backed by |
 |---|---|---|---|
 | `lobster_list_profiles` | — | `[{ profileId, name, running }]` | `GET /profile/list` |
-| `lobster_start_profile` | `{ profileId, headless? }` | `{ ws, debuggerAddress, pid }` | `POST /profile/start` |
+| `lobster_start_profile` | `{ profileId, headless?, password? }` | `{ ws, debuggerAddress, pid }` | `POST /profile/start` |
 | `lobster_stop_profile` | `{ profileId }` | `{ stopped }` | `POST /profile/stop` |
 | `lobster_profile_status` | `{ profileId? }` | status object | `GET /profile/status` |
 | `lobster_create_profile` | `CreateProfileInput` | `Profile` | `POST /profile/create` |

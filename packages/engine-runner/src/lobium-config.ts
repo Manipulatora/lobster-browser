@@ -1,7 +1,15 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hashStringToUint32 } from '@lobster/fingerprint';
-import type { Fingerprint, ProxyConfig } from '@lobster/shared-types';
+import type {
+  Fingerprint,
+  FingerprintLaunchPolicy,
+  HardwareNoisePolicy,
+  MediaDeviceProfile,
+  ProxyConfig,
+  RendererPolicy,
+  WebRtcPolicy,
+} from '@lobster/shared-types';
 
 /**
  * The **Lobium config channel** (per `lobium/config-channel.md`, ticket T-011).
@@ -32,9 +40,14 @@ export interface LobiumFarblingSeeds {
 
 export interface LobiumNetConfig {
   /** WebRTC IP-handling policy — matches the interim engine's flag (see launch.ts). */
-  webrtcPolicy: 'disable_non_proxied_udp' | 'default_public_interface_only';
+  webrtcPolicy: WebRtcPolicy;
   /** Non-secret proxy summary (type/host/port only — never credentials). */
   proxy?: { type: string; host: string; port: number };
+}
+
+export interface LobiumPolicyConfig extends FingerprintLaunchPolicy {
+  /** Profile-selected OS build/version label, when present. */
+  osVersion?: string;
 }
 
 /** The exact JSON document written to `lobium-fp.json` and parsed by the native config-channel patch. */
@@ -48,6 +61,7 @@ export interface LobiumConfig {
   locale: Fingerprint['locale'];
   fonts: string[];
   seeds: LobiumFarblingSeeds;
+  policy: LobiumPolicyConfig;
   net: LobiumNetConfig;
 }
 
@@ -56,7 +70,28 @@ export interface BuildLobiumConfigOptions {
   proxy?: Pick<ProxyConfig, 'type' | 'host' | 'port'>;
   /** The profile's fingerprint seed; farbling seeds derive from it (else from a fingerprint signature). */
   seed?: string;
+  osVersion?: string;
+  webrtcPolicy?: WebRtcPolicy;
+  rendererPolicy?: RendererPolicy;
+  hardwareNoise?: Partial<HardwareNoisePolicy>;
+  mediaDevices?: Partial<MediaDeviceProfile>;
 }
+
+const DEFAULT_HARDWARE_NOISE: HardwareNoisePolicy = {
+  webgl: true,
+  canvas: true,
+  audio: true,
+  clientRects: false,
+};
+
+const DEFAULT_MEDIA_DEVICES: MediaDeviceProfile = {
+  cameras: 1,
+  microphones: 1,
+  speakers: 2,
+  stableDeviceIds: true,
+};
+
+const DEFAULT_RENDERER_POLICY: RendererPolicy = { mode: 'host' };
 
 /** A stable signature of a fingerprint — the fallback basis for farbling seeds when no seed is given. */
 function fingerprintSignature(fp: Fingerprint): string {
@@ -75,13 +110,22 @@ export function buildLobiumConfig(
   opts: BuildLobiumConfigOptions = {},
 ): LobiumConfig {
   const base = opts.seed ?? fingerprintSignature(fp);
+  const webrtcPolicy =
+    opts.webrtcPolicy ?? (opts.proxy ? 'disable_non_proxied_udp' : 'default_public_interface_only');
   const net: LobiumNetConfig = {
-    webrtcPolicy: opts.proxy ? 'disable_non_proxied_udp' : 'default_public_interface_only',
+    webrtcPolicy,
   };
   if (opts.proxy) {
     // type/host/port only — credentials are handled out-of-band and never persisted here.
     net.proxy = { type: opts.proxy.type, host: opts.proxy.host, port: opts.proxy.port };
   }
+  const policy: LobiumPolicyConfig = {
+    renderer: opts.rendererPolicy ?? DEFAULT_RENDERER_POLICY,
+    webrtc: webrtcPolicy,
+    hardwareNoise: { ...DEFAULT_HARDWARE_NOISE, ...opts.hardwareNoise },
+    mediaDevices: { ...DEFAULT_MEDIA_DEVICES, ...opts.mediaDevices },
+  };
+  if (opts.osVersion) policy.osVersion = opts.osVersion;
   return {
     version: LOBIUM_CONFIG_VERSION,
     arch: fp.arch,
@@ -95,6 +139,7 @@ export function buildLobiumConfig(
       webgl: hashStringToUint32(`${base}:webgl`),
       audio: hashStringToUint32(`${base}:audio`),
     },
+    policy,
     net,
   };
 }
