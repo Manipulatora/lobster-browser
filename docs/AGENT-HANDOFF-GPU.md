@@ -259,7 +259,38 @@ The launcher also knows the prior local development layout:
 On the new GPU machine this path may not exist. Prefer explicit `LOBSTER_LOBIUM_BIN` until the new
 layout is clear.
 
-4. Run the native detector on the real GPU.
+4. Transfer native Lobium build artifacts if they are not already on the GPU machine.
+
+The built Chromium/Lobium output is intentionally not committed to this repo. Git carries source,
+patches, docs, launch code, and tests only. The native build output is ignored by `.gitignore` through
+paths such as `out/` and `engines/bin/`.
+
+Do not force-add `out/Lobium` to `lobster-browser`. Transfer the artifact separately with `rsync`,
+`scp`, S3/GCS, or a release asset. Copy the entire output directory, not just the `chrome` executable,
+because Chromium needs adjacent `.so` files, resources, locales, snapshots, and data files.
+
+Recommended Linux-to-Linux transfer:
+
+```bash
+mkdir -p ~/lobium-build/src/out
+rsync -aH --info=progress2 \
+  user@BUILD_MACHINE:/path/to/chromium/src/out/Lobium/ \
+  ~/lobium-build/src/out/Lobium/
+chmod +x ~/lobium-build/src/out/Lobium/chrome
+export LOBSTER_LOBIUM_BIN=$HOME/lobium-build/src/out/Lobium/chrome
+```
+
+Sanity checks:
+
+```bash
+$LOBSTER_LOBIUM_BIN --version
+ldd "$LOBSTER_LOBIUM_BIN" | grep "not found" || true
+git ls-files | grep -E 'out/Lobium|engines/bin|/chrome$|\.so$' || true
+```
+
+The final command should not show native build output tracked by git.
+
+5. Run the native detector on the real GPU.
 
 ```bash
 node ci/validation/lobium-detect.mjs
@@ -281,7 +312,7 @@ dated real-GPU baseline report that proves whether the engine is using the physi
 If the report shows SwiftShader, software rendering, or headless-only signals, stop and fix launch flags
 or GPU environment before tuning fingerprints.
 
-5. Capture host calibration from the same machine.
+6. Capture host calibration from the same machine.
 
 Use the existing scaffold:
 
