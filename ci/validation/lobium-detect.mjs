@@ -13,10 +13,11 @@
 //   LOBSTER_LOBIUM_BIN=/path/to/chrome node ci/validation/lobium-detect.mjs [seed]
 
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { deriveFingerprint, generateSeed, applyGeoToFingerprint } from '@lobster/fingerprint';
 import {
@@ -31,6 +32,8 @@ import {
   resolveGpuMode,
 } from '@lobster/engine-runner';
 
+const here = dirname(fileURLToPath(import.meta.url));
+const REPORTS_DIR = join(here, 'reports');
 const LOBIUM = resolveLobiumBinary();
 const DETECTOR_URL = 'https://bot.sannysoft.com/';
 
@@ -201,35 +204,130 @@ async function probePage(page, claimedRenderer, claimedVendor) {
   );
 }
 
-// CreepJS is the high-signal detector: it computes a trust score and flags "lies" (surfaces whose
-// self-report is internally inconsistent — exactly what a spoofing engine risks). Scrape the score,
-// the lies count, and the specific lied-about surfaces so a coherence tell points at its cause.
-async function measureCreepjs(page) {
+// CreepJS is the high-signal detector: it flags "lies" (internally inconsistent surfaces) and
+// headless/bot ratings. Current CreepJS no longer renders a "trust score" percentage — it exposes
+// `window.Fingerprint` in the page main world instead. Patchright's page.evaluate runs in an
+// isolated world, so we read Fingerprint via CDP Runtime.evaluate and fall back to DOM text.
+async function measureCreepjs(page, cdp) {
   await page.goto('https://abrahamjuliot.github.io/creepjs/', {
     waitUntil: 'networkidle',
     timeout: 60_000,
   });
-  // CreepJS computes asynchronously and renders the trust score late — poll (up to ~40s) until the
-  // "trust score" text appears rather than guessing a fixed wait.
-  const extract = () =>
+  const session = cdp ?? (await page.context().newCDPSession(page));
+
+  const extractFromMainWorld = async () => {
+    try {
+      const { result } = await session.send('Runtime.evaluate', {
+        expression: `(() => {
+          const fp = window.Fingerprint;
+          if (!fp) return null;
+          const lieData = (fp.lies && fp.lies.data) || {};
+          return {
+            lies: fp.lies && typeof fp.lies.totalLies === 'number' ? fp.lies.totalLies : null,
+            lieItems: Object.keys(lieData).slice(0, 40),
+            bot: fp.headless && fp.headless.headlessRating != null
+              ? String(fp.headless.headlessRating)
+              : null,
+            headless: fp.headless
+              ? {
+                  chromium: fp.headless.chromium ?? null,
+                  headlessRating: fp.headless.headlessRating ?? null,
+                  likeHeadlessRating: fp.headless.likeHeadlessRating ?? null,
+                  stealthRating: fp.headless.stealthRating ?? null,
+                }
+              : null,
+            trashItems: ((fp.trash && fp.trash.trashBin) || [])
+              .map((t) => (t && t.name) || String(t))
+              .slice(0, 20),
+          };
+        })()`,
+        returnByValue: true,
+      });
+      return result?.value ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const extractFromDom = () =>
     page.evaluate(() => {
-      const text = (document.documentElement.textContent || '').replace(/\s+/g, ' ');
-      // CreepJS renders e.g. "trust score 72% ..." and "1 lie"/"lies (1)". Try several shapes.
+      const text = (document.body?.innerText || document.documentElement.textContent || '').replace(
+        /\s+/g,
+        ' ',
+      );
+      // Legacy shapes (older CreepJS builds still used these).
       const trust =
         /trust score[:\s]*([\d.]+)\s*%/i.exec(text) || /([\d.]+)\s*%\s*trust/i.exec(text);
       const liesN = /lies?\s*\((\d+)\)/i.exec(text) || /(\d+)\s*lies\b/i.exec(text);
-      const bot = /bot[:\s]*([\d.]+)/i.exec(text);
+      const headlessRating = /(\d+)\s*%\s*headless:/i.exec(text);
+      const likeHeadless = /(\d+)\s*%\s*like headless:/i.exec(text);
+      const stealth = /(\d+)\s*%\s*stealth:/i.exec(text);
+      const fpHeader = (
+        document.getElementById('creep-fingerprint') ||
+        document.querySelector('.fingerprint-header')
+      )?.innerText
+        ?.replace(/\s+/g, ' ')
+        ?.trim();
+      const fuzzyText = document.getElementById('fuzzy-fingerprint')?.innerText?.replace(/\s+/g, ' ');
+      const fingerprintHash = /FP ID:\s*([a-f0-9]{16,})/i.exec(fpHeader || '')?.[1] || null;
+      const fuzzyHash = /Fuzzy:\s*([a-f0-9]+)/i.exec(fuzzyText || '')?.[1] || null;
+      const rejectedSections = Array.from(
+        document.querySelectorAll('.relative.rejected strong, .rejected > strong'),
+      )
+        .map((s) => (s.textContent || '').trim())
+        .filter(Boolean)
+        .slice(0, 30);
       return {
         trustScore: trust ? Number(trust[1]) : null,
         lies: liesN ? Number(liesN[1]) : null,
-        bot: bot ? bot[1] : null,
+        bot: headlessRating ? headlessRating[1] : null,
+        likeHeadlessRating: likeHeadless ? Number(likeHeadless[1]) : null,
+        stealthRating: stealth ? Number(stealth[1]) : null,
+        fingerprintHash,
+        fuzzyHash,
+        rejectedSections,
       };
     });
-  let r = { trustScore: null, lies: null, bot: null, lieItems: [] };
-  for (let i = 0; i < 20; i += 1) {
+
+  let r = {
+    trustScore: null,
+    lies: null,
+    bot: null,
+    lieItems: [],
+    headless: null,
+    trashItems: [],
+    fingerprintHash: null,
+    fuzzyHash: null,
+  };
+  for (let i = 0; i < 25; i += 1) {
     await new Promise((res) => setTimeout(res, 2000));
-    r = await extract();
-    if (r.trustScore !== null || r.lies !== null) break;
+    const [main, dom] = await Promise.all([extractFromMainWorld(), extractFromDom()]);
+    r = {
+      trustScore: dom.trustScore,
+      lies: main?.lies ?? dom.lies,
+      bot: main?.bot ?? dom.bot,
+      lieItems:
+        main?.lieItems?.length > 0
+          ? main.lieItems
+          : dom.rejectedSections?.length
+            ? dom.rejectedSections
+            : [],
+      headless: main?.headless ?? {
+        chromium: null,
+        headlessRating: dom.bot != null ? Number(dom.bot) : null,
+        likeHeadlessRating: dom.likeHeadlessRating,
+        stealthRating: dom.stealthRating,
+      },
+      trashItems: main?.trashItems ?? [],
+      fingerprintHash: dom.fingerprintHash,
+      fuzzyHash: dom.fuzzyHash,
+    };
+    // Ready once Fingerprint landed (lies is a number, including 0) or legacy trust text appeared.
+    if (r.lies !== null || r.trustScore !== null || (main && r.fingerprintHash)) break;
+  }
+  if (r.trustScore === null) {
+    r.trustScoreNote =
+      'CreepJS no longer renders a trust score %; lies/bot come from window.Fingerprint (CDP main world) + headless ratings';
   }
   return r;
 }
@@ -360,7 +458,7 @@ async function main() {
       );
 
       const creepjs = process.env.LOBSTER_CREEPJS
-        ? await measureCreepjs(page).catch((e) => ({ error: String(e).slice(0, 120) }))
+        ? await measureCreepjs(page, cdp).catch((e) => ({ error: String(e).slice(0, 120) }))
         : 'skipped (set LOBSTER_CREEPJS=1)';
 
       const checks = {
@@ -388,6 +486,8 @@ async function main() {
       const softwareRenderer = isSoftwareRenderer(observedRenderer);
 
       report = {
+        kind: 'lobium-detect',
+        capturedAt: new Date().toISOString(),
         engine: 'lobium',
         binary: LOBIUM,
         seed,
@@ -435,7 +535,12 @@ async function main() {
     await rm(userDataDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
   }
 
+  await mkdir(REPORTS_DIR, { recursive: true });
+  const stamp = (report.capturedAt || new Date().toISOString()).replace(/[:.]/g, '-');
+  const outPath = join(REPORTS_DIR, `lobium-detect-${stamp}.json`);
+  await writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  process.stdout.write(`\nsaved: ${outPath}\n`);
   if (report.verdict !== 'pass') process.exitCode = 1;
 }
 

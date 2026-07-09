@@ -106,10 +106,12 @@ async function probeIceCandidates(chromium, extraArgs, useStun) {
 
 /**
  * Best-effort CreepJS measurement (env-gated: `LOBSTER_CREEPJS=1`). Launches a throwaway profile with
- * our fingerprint applied, loads CreepJS, and scrapes the trust score + lies count. Deliberately
+ * our fingerprint applied, loads CreepJS, and scrapes lies + headless/bot ratings. Deliberately
  * defensive — CreepJS is a research page whose DOM shifts — so it returns `{available:false}` rather
- * than throwing. NOTE: CreepJS specifically detects JS-based deep-surface spoofing, so on the interim
- * engine the trust score is expected to be LOW; it becomes meaningful once Lobium's native patches land.
+ * than throwing. Current CreepJS no longer renders "trust score %"; it exposes `window.Fingerprint`
+ * in the page main world (read via CDP — Patchright page.evaluate is isolated). NOTE: CreepJS
+ * specifically detects JS-based deep-surface spoofing, so on the interim engine trust stays low /
+ * null until Lobium's native patches land.
  */
 async function measureCreepjs(chromium, fingerprint, emulation, options) {
   const dir = await mkdtemp(join(tmpdir(), 'lobster-creepjs-'));
@@ -128,15 +130,73 @@ async function measureCreepjs(chromium, fingerprint, emulation, options) {
       waitUntil: 'networkidle',
       timeout: 60_000,
     });
-    // CreepJS computes asynchronously — give it time to render the trust score.
-    await new Promise((r) => setTimeout(r, 15_000));
-    const parsed = await page.evaluate(() => {
-      const text = document.body.innerText || '';
-      const trust = /trust score[:\s]*([\d.]+)\s*%/i.exec(text);
-      const lies = /(\d+)\s*lies?/i.exec(text);
-      return { trustScore: trust ? Number(trust[1]) : null, lies: lies ? Number(lies[1]) : null };
-    });
-    return { available: parsed.trustScore !== null || parsed.lies !== null, ...parsed };
+    let parsed = {
+      trustScore: null,
+      lies: null,
+      bot: null,
+      lieItems: [],
+      fingerprintHash: null,
+    };
+    for (let i = 0; i < 20; i += 1) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const { result } = await cdp
+        .send('Runtime.evaluate', {
+          expression: `(() => {
+            const fp = window.Fingerprint;
+            if (!fp) return null;
+            return {
+              lies: fp.lies && typeof fp.lies.totalLies === 'number' ? fp.lies.totalLies : null,
+              lieItems: Object.keys((fp.lies && fp.lies.data) || {}).slice(0, 40),
+              bot: fp.headless && fp.headless.headlessRating != null
+                ? String(fp.headless.headlessRating) : null,
+              headlessRating: fp.headless?.headlessRating ?? null,
+              likeHeadlessRating: fp.headless?.likeHeadlessRating ?? null,
+              stealthRating: fp.headless?.stealthRating ?? null,
+            };
+          })()`,
+          returnByValue: true,
+        })
+        .catch(() => ({ result: { value: null } }));
+      const main = result?.value;
+      const dom = await page.evaluate(() => {
+        const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
+        const trust = /trust score[:\s]*([\d.]+)\s*%/i.exec(text);
+        const lies = /lies?\s*\((\d+)\)/i.exec(text) || /(\d+)\s*lies\b/i.exec(text);
+        const headless = /(\d+)\s*%\s*headless:/i.exec(text);
+        const fpId = /FP ID:\s*([a-f0-9]{16,})/i.exec(
+          (document.querySelector('.fingerprint-header')?.innerText || '').replace(/\s+/g, ' '),
+        );
+        return {
+          trustScore: trust ? Number(trust[1]) : null,
+          lies: lies ? Number(lies[1]) : null,
+          bot: headless ? headless[1] : null,
+          fingerprintHash: fpId ? fpId[1] : null,
+        };
+      });
+      parsed = {
+        trustScore: dom.trustScore,
+        lies: main?.lies ?? dom.lies,
+        bot: main?.bot ?? dom.bot,
+        lieItems: main?.lieItems ?? [],
+        fingerprintHash: dom.fingerprintHash,
+        headless: main
+          ? {
+              headlessRating: main.headlessRating,
+              likeHeadlessRating: main.likeHeadlessRating,
+              stealthRating: main.stealthRating,
+            }
+          : null,
+      };
+      if (parsed.lies !== null || parsed.trustScore !== null) break;
+    }
+    if (parsed.trustScore === null) {
+      parsed.trustScoreNote =
+        'CreepJS no longer renders a trust score %; lies/bot from window.Fingerprint via CDP';
+    }
+    return {
+      available: parsed.lies !== null || parsed.trustScore !== null || parsed.bot !== null,
+      ...parsed,
+    };
   } finally {
     await context.close();
     await rm(dir, { recursive: true, force: true });
