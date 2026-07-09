@@ -1,4 +1,5 @@
 import {
+  DocumentDuplicateIcon,
   LockClosedIcon,
   MagnifyingGlassIcon,
   PlayIcon,
@@ -17,6 +18,7 @@ import type {
 
 import { profilesClient, templatesClient } from '../../api/tauri';
 import octiumMainIcon from '../../assets/brand/octium-main-icon.png';
+import { EmptyState, Skeleton, useToast } from '../../ui';
 import { ENGINE_OPTIONS, OS_OPTIONS, OS_VERSION_OPTIONS } from '../profiles/options';
 
 interface TemplateFormState {
@@ -234,12 +236,12 @@ function CreateTemplateModal({
 }
 
 export function TemplatesView(): JSX.Element {
+  const toast = useToast();
   const [query, setQuery] = useState('');
   const [templates, setTemplates] = useState<ProfileTemplate[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const rows = templates.filter((template) =>
     [template.name, template.os, presetText(template), proxyTitle(template), ...template.tags]
       .join(' ')
@@ -266,7 +268,7 @@ export function TemplatesView(): JSX.Element {
   async function handleCreate(input: CreateProfileTemplateInput): Promise<void> {
     const created = await templatesClient.create_template(input);
     setTemplates((prev) => [created, ...prev]);
-    setNotice(`Created template "${created.name}".`);
+    toast.success(`Created template "${created.name}".`);
   }
 
   async function handleCreateProfile(template: ProfileTemplate): Promise<void> {
@@ -283,7 +285,7 @@ export function TemplatesView(): JSX.Element {
     if (template.cookiesImport) input.cookiesImport = template.cookiesImport;
     if (template.extensions) input.extensions = template.extensions;
     await profilesClient.create_profile(input);
-    setNotice(`Created profile from "${template.name}".`);
+    toast.success(`Created profile from "${template.name}".`);
   }
 
   return (
@@ -308,98 +310,121 @@ export function TemplatesView(): JSX.Element {
         </button>
       </header>
 
-      {notice ? <p className="notice notice--info">{notice}</p> : null}
       {error ? <p className="notice notice--error">Could not load templates: {error}</p> : null}
-      {loading ? <p className="notice">Loading templates...</p> : null}
+      {loading ? (
+        <div className="skeleton-stack" aria-busy="true" aria-label="Loading templates">
+          <Skeleton height={40} />
+          <Skeleton height={40} />
+          <Skeleton height={40} />
+        </div>
+      ) : null}
 
-      <div className="data-panel">
-        <table className="data-table templates-table">
-          <thead>
-            <tr>
-              <th className="check-cell">
-                <input type="checkbox" aria-label="Select all templates" />
-              </th>
-              <th>Title</th>
-              <th>OS</th>
-              <th>Preset parameters</th>
-              <th>Proxy</th>
-              <th>Tags</th>
-              <th>Password</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((template) => (
-              <tr key={template.id}>
-                <td className="check-cell">
-                  <input type="checkbox" aria-label={`Select ${template.name}`} />
-                </td>
-                <td>
-                  <div className="profile-title-cell profile-title-cell--compact">
-                    <img className="row-mark" src={octiumMainIcon} alt="" aria-hidden />
-                    <div className="table-title">{template.name}</div>
-                  </div>
-                </td>
-                <td>
-                  <span className="os-glyph" title={template.osVersion ?? osName(template.os)}>
-                    ⊞
-                  </span>
-                </td>
-                <td className="muted">{presetText(template)}</td>
-                <td>
-                  <div className="proxy-cell">
-                    <span className="proxy-refresh">C</span>
-                    <div>
-                      <div>{proxyTitle(template)}</div>
-                      <div className="table-subtitle">{proxyDetail(template)}</div>
-                    </div>
-                  </div>
-                </td>
-                <td>
-                  <div className="tag-row tag-row--compact">
-                    {template.tags.map((tag) => (
-                      <span key={tag} className="tag">
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                </td>
-                <td>
-                  <LockClosedIcon className="table-lock" aria-hidden />
-                </td>
-                <td>
-                  <button
-                    type="button"
-                    className="btn btn--outline btn--compact"
-                    onClick={() => {
-                      void handleCreateProfile(template);
-                    }}
-                  >
-                    <PlayIcon aria-hidden />
-                    Create Profile
-                  </button>
-                </td>
+      {!loading && rows.length === 0 ? (
+        <EmptyState
+          icon={<DocumentDuplicateIcon aria-hidden />}
+          title="No templates yet"
+          description="Save a reusable profile preset — engine, OS, proxy, and fingerprint policy."
+          action={
+            <button type="button" className="btn btn--primary" onClick={() => setShowCreate(true)}>
+              <SparklesIcon aria-hidden />
+              Create Template
+            </button>
+          }
+        />
+      ) : null}
+
+      {!loading && rows.length > 0 ? (
+        <div className="data-panel">
+          <table className="data-table templates-table">
+            <thead>
+              <tr>
+                <th className="check-cell">
+                  <input type="checkbox" aria-label="Select all templates" />
+                </th>
+                <th>Title</th>
+                <th>OS</th>
+                <th>Preset parameters</th>
+                <th>Proxy</th>
+                <th>Tags</th>
+                <th>Password</th>
+                <th>Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {rows.map((template) => (
+                <tr key={template.id}>
+                  <td className="check-cell">
+                    <input type="checkbox" aria-label={`Select ${template.name}`} />
+                  </td>
+                  <td>
+                    <div className="profile-title-cell profile-title-cell--compact">
+                      <img className="row-mark" src={octiumMainIcon} alt="" aria-hidden />
+                      <div className="table-title">{template.name}</div>
+                    </div>
+                  </td>
+                  <td>
+                    <span className="os-glyph" title={template.osVersion ?? osName(template.os)}>
+                      ⊞
+                    </span>
+                  </td>
+                  <td className="muted">{presetText(template)}</td>
+                  <td>
+                    <div className="proxy-cell">
+                      <span className="proxy-refresh">C</span>
+                      <div>
+                        <div>{proxyTitle(template)}</div>
+                        <div className="table-subtitle">{proxyDetail(template)}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="tag-row tag-row--compact">
+                      {template.tags.map((tag) => (
+                        <span key={tag} className="tag">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                  <td>
+                    <LockClosedIcon className="table-lock" aria-hidden />
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      className="btn btn--outline btn--compact"
+                      onClick={() => {
+                        void handleCreateProfile(template);
+                      }}
+                    >
+                      <PlayIcon aria-hidden />
+                      Create Profile
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
 
-      <footer className="pagination">
-        <button type="button" className="pagination-arrow" aria-label="Previous page">
-          ‹
-        </button>
-        <button type="button" className="pagination-page">
-          1
-        </button>
-        <button type="button" className="pagination-arrow" aria-label="Next page">
-          ›
-        </button>
-        <select className="pagination-size" defaultValue="10">
-          <option value="10">10 / page</option>
-          <option value="25">25 / page</option>
-        </select>
-      </footer>
+      {!loading && rows.length > 0 ? (
+        <footer className="pagination">
+          <button type="button" className="pagination-arrow" aria-label="Previous page">
+            ‹
+          </button>
+          <button type="button" className="pagination-page">
+            1
+          </button>
+          <button type="button" className="pagination-arrow" aria-label="Next page">
+            ›
+          </button>
+          <select className="pagination-size" defaultValue="10">
+            <option value="10">10 / page</option>
+            <option value="25">25 / page</option>
+          </select>
+        </footer>
+      ) : null}
 
       {showCreate ? (
         <CreateTemplateModal onCreate={handleCreate} onClose={() => setShowCreate(false)} />

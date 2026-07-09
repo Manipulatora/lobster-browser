@@ -1,53 +1,205 @@
 import { Injectable } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
+import {
+  GetObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 
-import type { BlobHead, BlobPutMeta, BlobPutResult, BlobRecord, BlobStore } from './blob-store';
+import {
+  BlobVersionConflictError,
+  type BlobHead,
+  type BlobPutMeta,
+  type BlobPutResult,
+  type BlobRecord,
+  type BlobStore,
+} from './blob-store';
 
 /**
- * Production `BlobStore` backed by S3 (or an S3-compatible object store). The module selects this
- * implementation only when `S3_BUCKET` is set; without it the in-memory store is used, mirroring
- * the auth repo-factory (Prisma when DATABASE_URL is set, in-memory otherwise).
+ * How many times an UNCONDITIONAL put (no `expectedVersion`) re-reads the current version and
+ * retries after losing a conditional-create race before giving up. Conditional puts never retry —
+ * losing the race IS the conflict the caller asked us to detect.
+ */
+const MAX_PUT_ATTEMPTS = 5;
+
+/**
+ * True when an S3 error is a conditional-write rejection: HTTP 412 `PreconditionFailed` (the
+ * object already exists so `If-None-Match: *` failed) or HTTP 409 `ConditionalRequestConflict`
+ * (S3 detected a concurrent conditional write on the same key). Both mean "another writer got
+ * this version first".
+ */
+function isConditionalWriteRejection(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) {
+    return false;
+  }
+  const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+  return (
+    e.name === 'PreconditionFailed' ||
+    e.name === 'ConditionalRequestConflict' ||
+    e.$metadata?.httpStatusCode === 412 ||
+    e.$metadata?.httpStatusCode === 409
+  );
+}
+
+/**
+ * Production `BlobStore` backed by S3 or any S3-compatible object store (MinIO, R2, …) via the
+ * AWS SDK v3. The module selects this implementation only when `S3_BUCKET` is set; without it the
+ * in-memory store is used, mirroring the auth repo-factory (Prisma when DATABASE_URL is set).
  *
- * STUB — the constructor reads and validates the `S3_*` config so misconfiguration fails fast at
- * boot, but the read/write methods are not yet implemented.
+ * Layout: each version of a blob stream is its own IMMUTABLE object at
+ * `<keyPrefix><key>/<version>.enc` (matching the `blobRef` URIs ProfilesService hands out).
+ * The current version of a key is the highest `<version>.enc` under its prefix — there is no
+ * separate mutable "latest" pointer that could drift from the objects themselves.
  *
- * Day 2: wire the AWS SDK. `put` -> PutObject at `<keyPrefix>/<key>/<version>.enc` with a version
- * derived from object metadata / a version marker; `getLatest`/`head` -> GetObject/HeadObject.
+ * Atomicity: `put` creates the next version object with `If-None-Match: *`, so S3 itself
+ * guarantees exactly one writer can create a given version — two racing pushes at the same base
+ * can never both win. A conditional put (`expectedVersion` set) maps the lost race to
+ * {@link BlobVersionConflictError} (the caller's 409); an unconditional put re-reads and retries.
+ *
  * The bytes stay CLIENT-encrypted end to end — this class never decrypts.
+ *
+ * Config (env): `S3_BUCKET` (required), `S3_REGION`, `S3_ENDPOINT` (MinIO/R2), `S3_ACCESS_KEY_ID`
+ * + `S3_SECRET_ACCESS_KEY` (omit to use the SDK's default credential chain), `S3_KEY_PREFIX`,
+ * `S3_FORCE_PATH_STYLE` (defaults to true when a custom endpoint is set — MinIO needs it).
  */
 @Injectable()
 export class S3BlobStore implements BlobStore {
+  private readonly client: S3Client;
   private readonly bucket: string;
-  private readonly region: string;
-  /** Optional custom endpoint for S3-compatible stores (MinIO, R2, …). */
-  private readonly endpoint: string | undefined;
+  /** Optional key namespace inside the bucket, e.g. `profiles/`. Always ''-or-`…/`-terminated. */
+  private readonly keyPrefix: string;
 
-  constructor(config: ConfigService) {
+  /**
+   * `client` is injectable for tests (a fake `send` exercises the conflict/versioning logic with
+   * no network); when omitted, a real S3Client is built from the `S3_*` env config.
+   */
+  constructor(config: ConfigService, client?: S3Client) {
     const bucket = config.get<string>('S3_BUCKET');
     if (!bucket) {
       // Should be unreachable: the module only instantiates S3BlobStore when S3_BUCKET is set.
       throw new Error('S3BlobStore requires S3_BUCKET to be configured');
     }
     this.bucket = bucket;
-    this.region = config.get<string>('S3_REGION') ?? 'us-east-1';
-    this.endpoint = config.get<string>('S3_ENDPOINT');
+    const rawPrefix = config.get<string>('S3_KEY_PREFIX') ?? '';
+    this.keyPrefix = rawPrefix && !rawPrefix.endsWith('/') ? `${rawPrefix}/` : rawPrefix;
+
+    if (client) {
+      this.client = client;
+      return;
+    }
+    const endpoint = config.get<string>('S3_ENDPOINT');
+    const accessKeyId = config.get<string>('S3_ACCESS_KEY_ID');
+    const secretAccessKey = config.get<string>('S3_SECRET_ACCESS_KEY');
+    this.client = new S3Client({
+      region: config.get<string>('S3_REGION') ?? 'us-east-1',
+      ...(endpoint ? { endpoint } : {}),
+      // MinIO (and most S3-compatibles) serve buckets at /<bucket>, not <bucket>.<host>.
+      forcePathStyle: config.get<string>('S3_FORCE_PATH_STYLE')
+        ? config.get<string>('S3_FORCE_PATH_STYLE') !== 'false'
+        : Boolean(endpoint),
+      ...(accessKeyId && secretAccessKey
+        ? { credentials: { accessKeyId, secretAccessKey } }
+        : {}),
+    });
   }
 
-  async put(_key: string, _bytes: Buffer, _meta: BlobPutMeta): Promise<BlobPutResult> {
-    // Day 2: PutObject to `${this.bucket}` (region ${this.region}, endpoint ${this.endpoint}).
-    // When `_meta.expectedVersion` is set it MUST be enforced atomically — e.g. a conditional
-    // PutObject (If-Match on the version marker's ETag) — throwing BlobVersionConflictError on a
-    // 412 so racing pushes at the same base can't clobber each other.
-    throw new Error('S3BlobStore.put not configured — TODO(Day 2): implement S3 PutObject');
+  async put(key: string, bytes: Buffer, meta: BlobPutMeta): Promise<BlobPutResult> {
+    let current = await this.currentVersion(key);
+    if (meta.expectedVersion !== undefined && meta.expectedVersion !== current) {
+      throw new BlobVersionConflictError(key, meta.expectedVersion, current);
+    }
+    for (let attempt = 1; attempt <= MAX_PUT_ATTEMPTS; attempt += 1) {
+      const nextVersion = current + 1;
+      try {
+        await this.client.send(
+          new PutObjectCommand({
+            Bucket: this.bucket,
+            Key: this.objectKey(key, nextVersion),
+            Body: bytes,
+            ContentType: 'application/octet-stream',
+            // The atomic compare-and-set: S3 rejects this put (412) unless it CREATES the
+            // object, so exactly one writer can ever own a given version number.
+            IfNoneMatch: '*',
+            // Non-secret tagging for auditing/lifecycle rules; never the blob plaintext.
+            Metadata: { 'team-id': meta.teamId, 'profile-id': meta.profileId },
+          }),
+        );
+        return { version: nextVersion };
+      } catch (err) {
+        if (!isConditionalWriteRejection(err)) {
+          throw err;
+        }
+        // Another writer created `nextVersion` first. For a conditional put that is exactly the
+        // lost-update conflict the caller wants surfaced; unconditionally we re-read and retry.
+        if (meta.expectedVersion !== undefined) {
+          throw new BlobVersionConflictError(
+            key,
+            meta.expectedVersion,
+            await this.currentVersion(key),
+          );
+        }
+        current = await this.currentVersion(key);
+      }
+    }
+    throw new Error(
+      `S3BlobStore.put: gave up on ${key} after ${MAX_PUT_ATTEMPTS} contended attempts`,
+    );
   }
 
-  async getLatest(_key: string): Promise<BlobRecord | null> {
-    // Day 2: GetObject the latest version marker from `${this.bucket}`.
-    throw new Error('S3BlobStore.getLatest not configured — TODO(Day 2): implement S3 GetObject');
+  async getLatest(key: string): Promise<BlobRecord | null> {
+    const version = await this.currentVersion(key);
+    if (version === 0) {
+      return null;
+    }
+    const res = await this.client.send(
+      new GetObjectCommand({ Bucket: this.bucket, Key: this.objectKey(key, version) }),
+    );
+    if (!res.Body) {
+      throw new Error(`S3BlobStore.getLatest: empty body for ${this.objectKey(key, version)}`);
+    }
+    return {
+      bytes: Buffer.from(await res.Body.transformToByteArray()),
+      version,
+      updatedAt: (res.LastModified ?? new Date()).toISOString(),
+    };
   }
 
-  async head(_key: string): Promise<BlobHead | null> {
-    // Day 2: HeadObject the latest version marker from `${this.bucket}`.
-    throw new Error('S3BlobStore.head not configured — TODO(Day 2): implement S3 HeadObject');
+  async head(key: string): Promise<BlobHead | null> {
+    const version = await this.currentVersion(key);
+    return version > 0 ? { version } : null;
+  }
+
+  /** Object key for one immutable stored version, e.g. `<prefix><teamId>/<profileId>/3.enc`. */
+  private objectKey(key: string, version: number): string {
+    return `${this.keyPrefix}${key}/${version}.enc`;
+  }
+
+  /**
+   * The highest stored version under `key` (0 when nothing exists yet), by listing the key's
+   * prefix and parsing the `<version>.enc` object names. S3 ListObjectsV2 is strongly consistent,
+   * so a completed put is always visible here.
+   */
+  private async currentVersion(key: string): Promise<number> {
+    const prefix = `${this.keyPrefix}${key}/`;
+    let max = 0;
+    let continuationToken: string | undefined;
+    do {
+      const page = await this.client.send(
+        new ListObjectsV2Command({
+          Bucket: this.bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      );
+      for (const obj of page.Contents ?? []) {
+        const match = obj.Key?.slice(prefix.length).match(/^(\d+)\.enc$/);
+        if (match) {
+          max = Math.max(max, Number(match[1]));
+        }
+      }
+      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (continuationToken);
+    return max;
   }
 }

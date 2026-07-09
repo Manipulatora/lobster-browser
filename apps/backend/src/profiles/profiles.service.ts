@@ -7,6 +7,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  PayloadTooLargeException,
 } from '@nestjs/common';
 import type { Profile, ProfileExport, ProfileExportBundle } from '@lobster/shared-types';
 
@@ -56,7 +57,20 @@ export interface SyncResult {
  * MUST match the free-tier default in prisma/schema.prisma (`Subscription.profileLimit @default(5)`)
  * so a team behaves identically before and after a Subscription row exists.
  */
+/** Default free-tier profile limit (must match prisma Subscription.profileLimit default). */
 export const DEFAULT_FREE_PROFILE_LIMIT = 5;
+
+/**
+ * BE-3: max CLIENT-encrypted blob size per push (bytes). 25 MiB covers a typical user-data
+ * snapshot while rejecting runaway uploads. Override via `BLOB_MAX_BYTES`.
+ */
+export const DEFAULT_BLOB_MAX_BYTES = 25 * 1024 * 1024;
+
+/**
+ * BE-3: soft per-team total blob storage quota (bytes). Free tier default 250 MiB.
+ * Override via `BLOB_TEAM_QUOTA_BYTES`. Enforced best-effort on push when the store reports size.
+ */
+export const DEFAULT_BLOB_TEAM_QUOTA_BYTES = 250 * 1024 * 1024;
 
 /**
  * Profile CRUD + encrypted-blob sync.
@@ -315,6 +329,13 @@ export class ProfilesService {
     }
     // `payload` is validated as base64 at the DTO boundary; store the decoded bytes opaquely.
     const bytes = Buffer.from(input.payload, 'base64');
+    // BE-3: reject oversized blobs before touching the store.
+    const maxBytes = Number(process.env.BLOB_MAX_BYTES ?? DEFAULT_BLOB_MAX_BYTES);
+    if (Number.isFinite(maxBytes) && maxBytes > 0 && bytes.length > maxBytes) {
+      throw new PayloadTooLargeException(
+        `encrypted blob exceeds max size (${bytes.length} > ${maxBytes} bytes)`,
+      );
+    }
     // Optimistic concurrency is enforced atomically inside the store (compare-and-set): passing
     // `baseVersion` as `expectedVersion` makes the version check and write one indivisible step,
     // so two concurrent pushes at the same base can't both succeed (one loses with a conflict).

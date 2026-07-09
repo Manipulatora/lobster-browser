@@ -43,6 +43,45 @@ npm run typecheck
 npm test
 ```
 
+## Postgres integration (opt-in, roadmap BE-2)
+
+The default `npm test` gate needs no database — the one Prisma integration spec
+(`src/prisma/prisma-repositories.integration.spec.ts`) is **skipped cleanly** when `DATABASE_URL`
+is unset. When it IS set, the spec first runs `prisma migrate deploy` (applying
+`prisma/migrations/`) and then drives every Prisma-backed repository (users, teams, profiles,
+api-keys, audit) through the same behavioural assertions the in-memory suites make. To prove the
+path locally:
+
+```bash
+docker run -d --name lobster-pg -e POSTGRES_PASSWORD=lobster -e POSTGRES_DB=lobster \
+  -p 5432:5432 postgres:16
+DATABASE_URL=postgresql://postgres:lobster@localhost:5432/lobster npm run test:integration
+# or run the FULL suite against Postgres (the e2e specs then use the Prisma repositories too):
+DATABASE_URL=postgresql://postgres:lobster@localhost:5432/lobster npm test
+docker rm -f lobster-pg
+```
+
+The spec creates all rows under one throwaway user/team and deletes them afterwards, so it is
+re-runnable against a persistent database. In CI, point `DATABASE_URL` at a Postgres service
+container and run the same command.
+
+## Encrypted blob storage (S3 / MinIO, roadmap BE-1)
+
+`ProfilesService` stores CLIENT-encrypted profile blobs behind the `BLOB_STORE` token. Setting
+`S3_BUCKET` selects the real `S3BlobStore` (AWS SDK v3); unset, the in-memory store is used (dev /
+tests). Each version is an immutable object at `<prefix><teamId>/<profileId>/<version>.enc`;
+pushes create the next version with `If-None-Match: *`, so S3 itself arbitrates racing pushes —
+exactly one wins, the loser surfaces as a 409 conflict. Config: `S3_BUCKET`, `S3_REGION`,
+`S3_ENDPOINT` (MinIO/R2), `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY` (omit for the default AWS
+credential chain), `S3_KEY_PREFIX`, `S3_FORCE_PATH_STYLE` — see `.env.example`. MinIO in dev:
+
+```bash
+docker run -d --name lobster-minio -p 9000:9000 -e MINIO_ROOT_USER=lobster \
+  -e MINIO_ROOT_PASSWORD=lobster123 minio/minio server /data
+S3_ENDPOINT=http://localhost:9000 S3_BUCKET=lobster-profiles \
+  S3_ACCESS_KEY_ID=lobster S3_SECRET_ACCESS_KEY=lobster123 npm run start:dev
+```
+
 Quick smoke test once running: `curl http://localhost:8080/health` → `{"code":0,"data":{"status":"ok"},"msg":"success"}`.
 
 ## Scripts
@@ -54,6 +93,7 @@ Quick smoke test once running: `curl http://localhost:8080/health` → `{"code":
 | `start:dev` | `nest start --watch` | Dev server with hot reload |
 | `typecheck` | `prisma generate && tsc --noEmit` | Type-check (regenerates the Prisma client first) |
 | `test` | `prisma generate && tsc && node --test` | Unit + e2e (`*.spec.js`) — no DB required |
+| `test:integration` | `node --test dist/prisma/…integration.spec.js` | Postgres/Prisma proof — needs `DATABASE_URL`, skips without it |
 | `prisma:generate` | `prisma generate` | Regenerate the Prisma client |
 
 ## HTTP surface
@@ -81,6 +121,7 @@ Quick smoke test once running: `curl http://localhost:8080/health` → `{"code":
 ## Deferred to Track C
 
 - Wire teams/profiles services to Prisma (persistence + team-scoped authorization).
-- S3 streaming for encrypted profile blobs (presigned URLs; plaintext never touches the server).
+- Presigned-URL streaming for encrypted profile blobs (the S3 store itself is implemented; large
+  blobs still round-trip through the API today).
 - Live Stripe: Checkout, raw-body webhook verification, usage metering on profile count.
 - Email OTP; admin-only mutation guards.

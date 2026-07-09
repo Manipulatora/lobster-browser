@@ -21,6 +21,8 @@ export interface TeamsRepository {
   /** Every team the user belongs to (via a membership). */
   findTeamsForUser(userId: string): Promise<Team[]>;
   getMembership(teamId: string, userId: string): Promise<Membership | null>;
+  /** Remove a membership. Returns false when the membership did not exist. */
+  removeMember(teamId: string, userId: string): Promise<boolean>;
 }
 
 /**

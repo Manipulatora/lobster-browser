@@ -45,6 +45,7 @@ export class CompositeRunner implements EngineRunner {
         : {}),
       ...(params.webrtcPolicy !== undefined ? { webrtcPolicy: params.webrtcPolicy } : {}),
       ...(params.fingerprintSeed !== undefined ? { fingerprintSeed: params.fingerprintSeed } : {}),
+      ...(params.cookiesImport !== undefined ? { cookiesImport: params.cookiesImport } : {}),
       options: buildLaunchOptions(params),
       emulation: buildCdpEmulation(params.fingerprint),
       initScript: buildFingerprintInitScript(params.fingerprint),

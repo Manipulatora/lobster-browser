@@ -1,5 +1,10 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
+
+const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
 // Vite config for the Lobster desktop UI. Tuned for Tauri 2: Tauri runs `beforeDevCommand`
 // (`npm run dev`) and points its webview at `devUrl` (http://localhost:5173), so the dev
@@ -10,6 +15,13 @@ export default defineConfig({
 
   // Tauri owns the terminal output; don't let Vite wipe Rust/tauri logs on rebuild.
   clearScreen: false,
+
+  resolve: {
+    // Avoid pulling `seed.ts` → `node:crypto` into the browser bundle (UI-4 coherence preview).
+    alias: {
+      '@lobster/fingerprint': path.resolve(rootDir, '../../packages/fingerprint/src/browser.ts'),
+    },
+  },
 
   server: {
     // Must match `build.devUrl` in src-tauri/tauri.conf.json.

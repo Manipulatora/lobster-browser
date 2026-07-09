@@ -119,6 +119,30 @@ test('buildLaunchOptions honors an explicit WebRTC launch policy', () => {
   );
 });
 
+test('buildLaunchOptions omits GPU flags by default and adds ANGLE flags when LOBSTER_GPU=gpu', () => {
+  const base = {
+    profileId: 'p',
+    engine: 'lobium' as const,
+    userDataDir: '/d',
+    fingerprint: sampleFingerprint(),
+  };
+  const prev = process.env.LOBSTER_GPU;
+  try {
+    delete process.env.LOBSTER_GPU;
+    const off = buildLaunchOptions(base);
+    assert.ok(!off.args.some((a) => a.startsWith('--use-angle=')));
+
+    process.env.LOBSTER_GPU = 'gpu';
+    const on = buildLaunchOptions(base);
+    assert.ok(on.args.includes('--use-gl=angle'));
+    assert.ok(on.args.includes('--use-angle=vulkan'));
+    assert.ok(!on.args.some((a) => a.includes('swiftshader')));
+  } finally {
+    if (prev === undefined) delete process.env.LOBSTER_GPU;
+    else process.env.LOBSTER_GPU = prev;
+  }
+});
+
 test('buildCdpEmulation carries UA, UA-CH metadata, timezone/locale, and geolocation', () => {
   const e = buildCdpEmulation(sampleFingerprint());
   assert.match(e.userAgent, /Chrome\//);

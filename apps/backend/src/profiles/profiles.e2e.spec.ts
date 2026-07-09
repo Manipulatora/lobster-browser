@@ -1,6 +1,12 @@
 import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import test, { after, before } from 'node:test';
+import {
+  decryptProfileBlob,
+  encryptProfileBlob,
+  generateProfileContentKey,
+  isLBv1Envelope,
+} from '@lobster/crypto';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -250,6 +256,63 @@ test('push then pull round-trips the exact encrypted payload (server stores opaq
     Buffer.from(pull.body.data.payload, 'base64').toString(),
     'cipher-v1-🔒-опаковый-blob',
   );
+});
+
+test('SEC-1: real LBv1 envelope syncs opaquely and decrypts only client-side', async () => {
+  const token = await registerToken('profiles-lbv1@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+  const id = await createProfile(auth, 'LBv1 profile');
+
+  const cookieDomain = 'accounts.example.com';
+  const cookieValue = 'session-token-hunter2-secret';
+  const key = generateProfileContentKey();
+  const envelope = encryptProfileBlob(
+    {
+      v: 1,
+      profileId: id,
+      exportedAt: '2026-07-09T00:00:00.000Z',
+      fingerprintSeed: '0123456789abcdef0123456789abcdef',
+      cookies: [
+        {
+          name: 'session',
+          value: cookieValue,
+          domain: cookieDomain,
+          path: '/',
+          httpOnly: true,
+          secure: true,
+        },
+      ],
+    },
+    { key },
+  );
+  assert.equal(isLBv1Envelope(envelope), true);
+  // Wire bytes must not contain cleartext cookie/domain (SEC-1 acceptance).
+  const wireLatin1 = envelope.toString('latin1');
+  assert.equal(wireLatin1.includes(cookieValue), false);
+  assert.equal(wireLatin1.includes(cookieDomain), false);
+
+  const payload = envelope.toString('base64');
+  const push = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'push', payload });
+  assert.ok([200, 201].includes(push.status), `push status ${push.status}`);
+  assert.equal(push.body.data.version, 1);
+
+  const pull = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'pull' });
+  assert.equal(pull.body.data.payload, payload);
+
+  // Server response body must also stay free of cleartext secrets.
+  const responseJson = JSON.stringify(pull.body);
+  assert.equal(responseJson.includes(cookieValue), false);
+  assert.equal(responseJson.includes(cookieDomain), false);
+
+  const restored = decryptProfileBlob(Buffer.from(pull.body.data.payload, 'base64'), key);
+  assert.equal(restored.profileId, id);
+  assert.equal((restored.cookies as Array<{ value: string }>)[0]?.value, cookieValue);
 });
 
 test('version increments across pushes and pull returns the latest', async () => {

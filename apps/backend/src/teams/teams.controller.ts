@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { IsEmail, IsIn, IsString, MaxLength } from 'class-validator';
 import type { Membership, Role, Team, User } from '@lobster/shared-types';
 
@@ -81,5 +81,24 @@ export class TeamsController {
     @Body() dto: SetRoleDto,
   ): Promise<ApiResponse<Membership>> {
     return ok(await this.teamsService.setRole(teamId, user.id, userId, dto.role));
+  }
+
+  /** Remove a member (admin-only). */
+  @Delete(':teamId/members/:userId')
+  async removeMember(
+    @CurrentUser() user: User,
+    @Param('teamId') teamId: string,
+    @Param('userId') userId: string,
+  ): Promise<ApiResponse<{ teamId: string; userId: string; removed: true }>> {
+    return ok(await this.teamsService.removeMember(teamId, user.id, userId));
+  }
+
+  /** Leave a team (self). */
+  @Post(':teamId/leave')
+  async leaveTeam(
+    @CurrentUser() user: User,
+    @Param('teamId') teamId: string,
+  ): Promise<ApiResponse<{ teamId: string; userId: string; left: true }>> {
+    return ok(await this.teamsService.leaveTeam(teamId, user.id));
   }
 }

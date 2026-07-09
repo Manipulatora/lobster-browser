@@ -9,6 +9,8 @@ import 'reflect-metadata';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
 
 import { AppModule } from './app.module';
 import { configureBodyLimit } from './body-limit';
@@ -18,6 +20,19 @@ async function bootstrap(): Promise<void> {
   // run; the default ~100kb limit would otherwise 413 realistic encrypted profile blobs on sync.
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
   configureBodyLimit(app);
+
+  // SEC-3b / SEC-6: baseline hardening — helmet headers + per-IP rate limit.
+  app.use(helmet({ contentSecurityPolicy: false }));
+  const windowMs = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000);
+  const max = Number(process.env.RATE_LIMIT_MAX ?? 120);
+  app.use(
+    rateLimit({
+      windowMs: Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 60_000,
+      max: Number.isFinite(max) && max > 0 ? max : 120,
+      standardHeaders: true,
+      legacyHeaders: false,
+    }),
+  );
 
   // Global request validation. `whitelist` strips properties not declared on the DTO,
   // and `transform` coerces payloads into their DTO class instances.

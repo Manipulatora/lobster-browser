@@ -1,5 +1,7 @@
 import type { Profile } from '@lobster/shared-types';
 import {
+  ChevronDownIcon,
+  ChevronUpIcon,
   EllipsisVerticalIcon,
   LockClosedIcon,
   PlayIcon,
@@ -9,7 +11,11 @@ import { useEffect, useRef, useState } from 'react';
 
 import type { LaunchInfo } from '../../api/tauri';
 import octiumMainIcon from '../../assets/brand/octium-main-icon.png';
-import { osLabel } from './options';
+import { Badge, EmptyState, type BadgeTone } from '../../ui';
+import { osLabel, STATUS_META } from './options';
+
+export type ProfileSortKey = 'name' | 'updatedAt' | 'status' | 'proxy';
+export type SortDir = 'asc' | 'desc';
 
 interface ProfileListProps {
   profiles: Profile[];
@@ -17,6 +23,12 @@ interface ProfileListProps {
   busyIds: ReadonlySet<string>;
   /** Connection endpoints for profiles launched in this session. */
   launchInfo: ReadonlyMap<string, LaunchInfo>;
+  selectedIds: ReadonlySet<string>;
+  sortKey: ProfileSortKey;
+  sortDir: SortDir;
+  onSort: (key: ProfileSortKey) => void;
+  onToggleSelect: (id: string) => void;
+  onToggleSelectAll: () => void;
   onLaunch: (id: string) => void;
   onStop: (id: string) => void;
   onClone: (id: string) => void;
@@ -49,11 +61,56 @@ function proxyLabel(profile: Profile): { title: string; detail: string } {
   };
 }
 
+function statusTone(status: Profile['status']): BadgeTone {
+  switch (status) {
+    case 'running':
+      return 'success';
+    case 'launching':
+    case 'stopping':
+      return 'warning';
+    case 'error':
+      return 'danger';
+    default:
+      return 'neutral';
+  }
+}
+
+function SortHeader({
+  label,
+  active,
+  dir,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  dir: SortDir;
+  onClick: () => void;
+}): JSX.Element {
+  return (
+    <button type="button" className="sort-header" onClick={onClick}>
+      <span>{label}</span>
+      {active ? (
+        dir === 'asc' ? (
+          <ChevronUpIcon aria-hidden />
+        ) : (
+          <ChevronDownIcon aria-hidden />
+        )
+      ) : null}
+    </button>
+  );
+}
+
 /** Dense profile table with per-profile lifecycle + management actions. */
 export function ProfileList({
   profiles,
   busyIds,
   launchInfo,
+  selectedIds,
+  sortKey,
+  sortDir,
+  onSort,
+  onToggleSelect,
+  onToggleSelectAll,
   onLaunch,
   onStop,
   onClone,
@@ -63,6 +120,8 @@ export function ProfileList({
 }: ProfileListProps): JSX.Element {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const allSelected = profiles.length > 0 && profiles.every((p) => selectedIds.has(p.id));
+  const someSelected = profiles.some((p) => selectedIds.has(p.id));
 
   useEffect(() => {
     if (openMenuId === null) return undefined;
@@ -87,10 +146,11 @@ export function ProfileList({
 
   if (profiles.length === 0) {
     return (
-      <div className="empty-state empty-state--compact">
-        <h3>No matching profiles</h3>
-        <p>Adjust the current filters to see more profiles.</p>
-      </div>
+      <EmptyState
+        icon={<LockClosedIcon aria-hidden />}
+        title="No matching profiles"
+        description="Adjust the current filters to see more profiles."
+      />
     );
   }
 
@@ -100,11 +160,41 @@ export function ProfileList({
         <thead>
           <tr>
             <th className="check-cell">
-              <input type="checkbox" aria-label="Select all profiles" />
+              <input
+                type="checkbox"
+                aria-label="Select all profiles"
+                checked={allSelected}
+                ref={(el) => {
+                  if (el) el.indeterminate = someSelected && !allSelected;
+                }}
+                onChange={onToggleSelectAll}
+              />
             </th>
-            <th>Title</th>
+            <th>
+              <SortHeader
+                label="Title"
+                active={sortKey === 'name'}
+                dir={sortDir}
+                onClick={() => onSort('name')}
+              />
+            </th>
+            <th>
+              <SortHeader
+                label="Status"
+                active={sortKey === 'status'}
+                dir={sortDir}
+                onClick={() => onSort('status')}
+              />
+            </th>
             <th>Description</th>
-            <th>Proxy</th>
+            <th>
+              <SortHeader
+                label="Proxy"
+                active={sortKey === 'proxy'}
+                dir={sortDir}
+                onClick={() => onSort('proxy')}
+              />
+            </th>
             <th>Tags</th>
           </tr>
         </thead>
@@ -114,10 +204,16 @@ export function ProfileList({
             const live = isLive(profile.status);
             const info = launchInfo.get(profile.id);
             const proxy = proxyLabel(profile);
+            const meta = STATUS_META[profile.status];
             return (
-              <tr key={profile.id}>
+              <tr key={profile.id} className={selectedIds.has(profile.id) ? 'row--selected' : undefined}>
                 <td className="check-cell">
-                  <input type="checkbox" aria-label={`Select ${profile.name}`} />
+                  <input
+                    type="checkbox"
+                    aria-label={`Select ${profile.name}`}
+                    checked={selectedIds.has(profile.id)}
+                    onChange={() => onToggleSelect(profile.id)}
+                  />
                 </td>
                 <td>
                   <div className="profile-title-cell">
@@ -219,6 +315,11 @@ export function ProfileList({
                       </div>
                     </div>
                   </div>
+                </td>
+                <td>
+                  <Badge tone={statusTone(profile.status)} dot>
+                    {meta.label}
+                  </Badge>
                 </td>
                 <td>
                   <span className="muted">{profile.notes ?? info?.debuggerAddress ?? ''}</span>

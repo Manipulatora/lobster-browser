@@ -292,9 +292,28 @@ The final command should not show native build output tracked by git.
 
 5. Run the native detector on the real GPU.
 
+IMPORTANT (updated 2026-07-08): the detector and product launch path used to pass NO GPU flags, so a
+headless box silently rendered with SwiftShader/llvmpipe — the exact software trap this doc warns about,
+which made a real-GPU baseline impossible. GPU selection is now explicit via `LOBSTER_GPU`
+(`gpu`|`software`|`auto`) and `LOBSTER_ANGLE_BACKEND` (default `vulkan`), centralized in
+`@lobster/engine-runner` `buildGpuArgs`. On a headless Linux/NVIDIA host the reachable path is ANGLE over
+Vulkan; if the distro shipped no NVIDIA Vulkan ICD, provide one:
+
 ```bash
-node ci/validation/lobium-detect.mjs
+# nvidia_icd.json: {"file_format_version":"1.0.0","ICD":{"library_path":"libGLX_nvidia.so.0"}}
+export VK_ICD_FILENAMES=/abs/path/nvidia_icd.json
+export LOBSTER_GPU=gpu LOBSTER_ANGLE_BACKEND=vulkan
+
+node ci/validation/gpu-baseline.mjs         # engine+GPU baseline; archives to ci/validation/reports/
+node ci/validation/lobium-detect.mjs        # full native detector (needs the Lobium binary)
 ```
+
+Verify the run did NOT fall back to software: `gpu-baseline.mjs` sets `softwareRenderer:false` /
+`verdict:ok` and `isSoftwareRenderer()` gates it. On 2026-07-08 this produced the first real-GPU
+baseline on an RTX 5090 (`ANGLE (NVIDIA, Vulkan 1.4.312 ... RTX 5090)`), using the interim Chromium
+because no Lobium binary is built on this host — see `ci/validation/reports/README.md`. Note the RTX 5090
+is data-center-class; still capture a mid-range consumer-GPU (RTX 3060 / GTX 1660) baseline for realistic
+user-device signals, and rerun through native Lobium once built.
 
 Expected outcome for the next phase is not "perfect score immediately." The first goal is to produce a
 dated real-GPU baseline report that proves whether the engine is using the physical GPU and records true:

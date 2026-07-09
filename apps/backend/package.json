@@ -9,9 +9,12 @@
     "start:dev": "nest start --watch",
     "typecheck": "prisma generate && tsc --noEmit",
     "test": "prisma generate && tsc --outDir dist && node --test \"dist/**/*.spec.js\"",
+    "test:integration": "prisma generate && tsc --outDir dist && node --test dist/prisma/prisma-repositories.integration.spec.js",
     "prisma:generate": "prisma generate"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1083.0",
+    "@lobster/crypto": "*",
     "@lobster/shared-types": "*",
     "@nestjs/common": "^10.4.0",
     "@nestjs/config": "^3.2.0",
@@ -22,6 +25,8 @@
     "bcryptjs": "^2.4.3",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.0",
+    "express-rate-limit": "^8.5.2",
+    "helmet": "^8.2.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.0",
     "stripe": "^17.0.0"
@@ -30,6 +35,7 @@
     "@nestjs/cli": "^10.4.0",
     "@nestjs/testing": "^10.4.0",
     "@types/bcryptjs": "^2.4.6",
+    "@types/express-rate-limit": "^5.1.3",
     "@types/node": "^22.9.0",
     "@types/supertest": "^6.0.2",
     "prisma": "^5.20.0",

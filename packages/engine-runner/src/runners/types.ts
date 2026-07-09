@@ -1,4 +1,5 @@
 import type {
+  CookieImportDraft,
   EngineKind,
   Fingerprint,
   FingerprintLaunchPolicy,
@@ -20,6 +21,8 @@ export interface LaunchContext {
   webrtcPolicy?: WebRtcPolicy;
   /** The profile's fingerprint seed — the native launcher derives per-profile farbling seeds from it. */
   fingerprintSeed?: string;
+  /** Imported cookies to load into the launched context so the profile opens logged-in (PROX-1/2). */
+  cookiesImport?: CookieImportDraft;
   options: PersistentLaunchOptions;
   emulation: CdpEmulation;
   initScript: string;

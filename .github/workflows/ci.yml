@@ -76,6 +76,36 @@ jobs:
         working-directory: apps/desktop/src-tauri
         run: cargo test --lib
 
+  # QA-1: native Lobium detector gate. Skip-clean on github-hosted runners (no Lobium binary /
+  # real GPU). On a self-hosted GPU runner set LOBSTER_LOBIUM_BIN + LOBSTER_GPU=gpu and remove
+  # the `if:` skip so this job becomes blocking.
+  lobium-detect:
+    name: Native Lobium detector (opt-in GPU)
+    runs-on: ubuntu-latest
+    # Default CI has no Lobium binary — skip without failing the suite.
+    if: ${{ vars.LOBSTER_ENABLE_LOBIUM_DETECT == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: npx tsc -b packages/shared-types packages/proxy packages/fingerprint packages/engine-runner
+      - name: Run lobium-detect gate
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_GPU: gpu
+          LOBSTER_ANGLE_BACKEND: ${{ vars.LOBSTER_ANGLE_BACKEND || 'vulkan' }}
+          VK_ICD_FILENAMES: ${{ vars.VK_ICD_FILENAMES }}
+          DISPLAY: ${{ vars.DISPLAY || ':0' }}
+        run: |
+          if [ -z "${LOBSTER_LOBIUM_BIN:-}" ] || [ ! -x "$LOBSTER_LOBIUM_BIN" ]; then
+            echo "LOBSTER_LOBIUM_BIN unset or not executable — skipping lobium-detect (QA-1 opt-in)."
+            exit 0
+          fi
+          node ci/validation/lobium-detect.mjs
+
   engine-launch:
     name: Engine launch (patchright live Chromium)
     runs-on: ubuntu-latest

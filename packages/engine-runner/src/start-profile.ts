@@ -19,6 +19,7 @@ import type {
   WebRtcPolicy,
 } from '@lobster/shared-types';
 import type { EngineRunner } from './runner.js';
+import { loadHostCalibration, resolveHostCalibrationPath } from './host-calibration-store.js';
 
 const DEFAULT_HARDWARE_NOISE: HardwareNoisePolicy = {
   webgl: true,
@@ -66,22 +67,34 @@ export async function startProfile(
   runner: EngineRunner,
   params: StartProfileParams,
 ): Promise<LaunchResult> {
+  // HC-3: host-calibrated derivation is the DEFAULT whenever a host profile has been captured. An
+  // explicit `params.hostCalibration` (passed by the control plane) wins; otherwise, if a persisted
+  // host profile exists (LOBSTER_HOST_CALIBRATION_FILE) and its OS matches this profile, use it. When
+  // neither is present we fall back to the catalog path — unchanged behavior for CI/headless.
+  let hostCalibration = params.hostCalibration;
+  if (!hostCalibration) {
+    const persisted = await loadHostCalibration(resolveHostCalibrationPath());
+    if (persisted && persisted.os === params.os) {
+      hostCalibration = persisted;
+    }
+  }
+
   let fingerprint: Fingerprint;
-  if (params.hostCalibration) {
-    if (params.hostCalibration.os !== params.os) {
+  if (hostCalibration) {
+    if (hostCalibration.os !== params.os) {
       throw new Error(
         `refusing to launch profile ${params.profileId}: host calibration OS ` +
-          `"${params.hostCalibration.os}" does not match profile OS "${params.os}"`,
+          `"${hostCalibration.os}" does not match profile OS "${params.os}"`,
       );
     }
-    const hostIssues = validateHostCalibrationProfile(params.hostCalibration);
+    const hostIssues = validateHostCalibrationProfile(hostCalibration);
     if (hostIssues.length > 0) {
       throw new Error(
         `refusing to launch profile ${params.profileId}: invalid host calibration ` +
           `(${hostIssues.length} issue${hostIssues.length === 1 ? '' : 's'}) — ${hostIssues.join('; ')}`,
       );
     }
-    fingerprint = deriveFingerprintFromHost(params.fingerprintSeed, params.hostCalibration, {
+    fingerprint = deriveFingerprintFromHost(params.fingerprintSeed, hostCalibration, {
       engine: params.engine,
     });
   } else {

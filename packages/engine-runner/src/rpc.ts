@@ -8,6 +8,7 @@ import type {
 } from '@lobster/shared-types';
 import type { EngineRunner } from './runner.js';
 import { startProfile } from './start-profile.js';
+import { ensureHostCalibration } from './ensure-host-calibration.js';
 
 /** Dispatch one sidecar request to the runner and produce a response. Never throws. */
 export async function dispatch(
@@ -31,6 +32,15 @@ export async function dispatch(
         return { id: req.id, ok: true };
       case 'status':
         return { id: req.id, ok: true, result: await runner.status(req.params as StatusParams) };
+      case 'ensureHostCalibration': {
+        // Persistence + load path. Live GPU probe is supplied by the desktop/CI harness when
+        // available; without a probe this returns source=missing and startProfile falls back
+        // to the catalog (safe for headless CI).
+        const result = await ensureHostCalibration(
+          (req.params as { path?: string } | undefined) ?? {},
+        );
+        return { id: req.id, ok: true, result };
+      }
       default:
         return {
           id: req.id,

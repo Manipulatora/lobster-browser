@@ -468,7 +468,7 @@ export function NewProfileForm({
                       {option.label}
                     </option>
                   ))}
-                  <option disabled>Android (separate mobile engine planned)</option>
+                  <option disabled>Android (separate mobile target planned)</option>
                 </select>
               </label>
 

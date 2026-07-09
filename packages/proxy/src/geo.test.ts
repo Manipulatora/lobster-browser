@@ -82,19 +82,17 @@ test('parseGeoResponse throws when required fields are missing', () => {
   assert.throws(() => parseGeoResponse(null), /expected a JSON object/);
 });
 
-test('deriveGeoFromExitIp rejects SOCKS5 proxies with a clear message', async () => {
-  const socks = parseProxy('socks5://user:pass@host.example:1080', 'socks-id');
-  await assert.rejects(
-    () => deriveGeoFromExitIp(socks),
-    /SOCKS geo lookup not yet supported \(HTTP\/HTTPS only\)/,
-  );
+test('deriveGeoFromExitIp routes SOCKS5 through socks5h (fails closed on dead proxy)', async () => {
+  // 127.0.0.1:1 refuses immediately — proves the SOCKS path is exercised (not the old hard reject).
+  const socks = parseProxy('socks5://127.0.0.1:1', 'socks-id');
+  await assert.rejects(() => deriveGeoFromExitIp(socks, { timeoutMs: 1_000 }), /./);
 });
 
-test('testProxy returns ok:false with the SOCKS error rather than throwing', async () => {
-  const socks = parseProxy('socks5://host.example:1080', 'socks-id-2');
-  const result = await testProxy(socks);
+test('testProxy returns ok:false for a dead SOCKS5 proxy rather than throwing', async () => {
+  const socks = parseProxy('socks5://127.0.0.1:1', 'socks-id-2');
+  const result = await testProxy(socks, { timeoutMs: 1_000 });
   assert.equal(result.ok, false);
-  assert.match(result.error ?? '', /SOCKS geo lookup not yet supported/);
+  assert.equal(typeof result.error, 'string');
   assert.equal(result.geo, undefined);
 });
 

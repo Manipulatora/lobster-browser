@@ -26,6 +26,9 @@ import {
   applyCdpFingerprint,
   buildLaunchOptions,
   resolveLobiumBinary,
+  buildGpuArgs,
+  isSoftwareRenderer,
+  resolveGpuMode,
 } from '@lobster/engine-runner';
 
 const LOBIUM = resolveLobiumBinary();
@@ -261,11 +264,17 @@ async function main() {
     fingerprint: fp,
     headless: true,
   });
+  // GPU policy: on a real GPU host set LOBSTER_GPU=gpu (optionally LOBSTER_ANGLE_BACKEND=vulkan) to
+  // render the deep WebGL surfaces on the physical driver. In that mode we must NOT force SwiftShader —
+  // doing so is exactly the software-rendering trap that makes a "real-GPU" baseline meaningless. The
+  // product launch path (buildLaunchOptions -> launch.args) already appends the ANGLE flags for `gpu`
+  // mode, so we only add the SwiftShader fallback for `auto`/`software` (CI / no-GPU).
+  const gpuMode = resolveGpuMode();
   const args = [
     '--headless=new',
     '--no-sandbox',
     '--disable-dev-shm-usage',
-    '--enable-unsafe-swiftshader',
+    ...(gpuMode === 'gpu' ? [] : ['--enable-unsafe-swiftshader']),
     `--user-data-dir=${userDataDir}`,
     lobiumConfigArg(cfgPath),
     '--remote-debugging-port=0',
@@ -273,6 +282,11 @@ async function main() {
     '--no-default-browser-check',
     ...launch.args,
   ];
+  // When launch.args did not carry GPU flags (e.g. this harness is run standalone), still honor an
+  // explicit gpu request so the detector alone can produce a real-GPU report.
+  if (gpuMode === 'gpu' && !args.some((a) => a.startsWith('--use-angle='))) {
+    args.push(...buildGpuArgs({ mode: 'gpu' }));
+  }
   const proc = spawn(LOBIUM, args, { stdio: 'ignore' });
 
   let report;
@@ -368,10 +382,17 @@ async function main() {
       };
       const surfacesApplied = Object.values(checks).filter((v) => v === true).length;
 
+      // Software-rendering guard: a real-GPU run whose renderer is SwiftShader/llvmpipe is a false
+      // baseline. Flag it explicitly so it can never masquerade as real-GPU evidence.
+      const observedRenderer = nat.webgl?.renderer ?? nat.webgl?.vendor ?? null;
+      const softwareRenderer = isSoftwareRenderer(observedRenderer);
+
       report = {
         engine: 'lobium',
         binary: LOBIUM,
         seed,
+        gpuMode,
+        softwareRenderer,
         detector: DETECTOR_URL,
         claimed: {
           userAgent: fp.navigator.userAgent,
@@ -395,8 +416,13 @@ async function main() {
         },
         webrtc,
         creepjs,
+        // In an explicit real-GPU run, a software renderer invalidates the baseline — never let it pass.
         verdict:
-          Object.values(checks).every((v) => v === true) && failed.length === 0 ? 'pass' : 'review',
+          Object.values(checks).every((v) => v === true) &&
+          failed.length === 0 &&
+          !(gpuMode === 'gpu' && softwareRenderer)
+            ? 'pass'
+            : 'review',
       };
     } finally {
       await browser.close();

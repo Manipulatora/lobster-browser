@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import type {
   EngineKind,
@@ -15,7 +15,23 @@ import type {
 } from '@lobster/shared-types';
 
 import type { ProfilePatch } from '../../api/tauri';
+import { Badge, type BadgeTone } from '../../ui';
 import { ENGINE_OPTIONS, OS_OPTIONS, OS_VERSION_OPTIONS } from '../profiles/options';
+import { FIELD_SUPPORT, previewPersona, type SupportLevel } from './coherence';
+
+function supportTone(level: SupportLevel): BadgeTone {
+  if (level === 'native') return 'success';
+  if (level === 'cdp') return 'info';
+  return 'warning';
+}
+
+function SupportBadge({ field }: { field: string }): JSX.Element | null {
+  const support = FIELD_SUPPORT[field];
+  if (!support) return null;
+  return (
+    <Badge tone={supportTone(support.level)}>{support.level}</Badge>
+  );
+}
 
 interface FingerprintEditorProps {
   profile: Profile;
@@ -206,13 +222,27 @@ export function FingerprintEditor({
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
+  const overrides = useMemo(() => toOverrides(form, profile), [form, profile]);
+  const preview = useMemo(
+    () => previewPersona(profile.fingerprintSeed, form.os, form.engine, overrides),
+    [profile.fingerprintSeed, form.os, form.engine, overrides],
+  );
+  const blocked = preview.issues.length > 0 || Boolean(preview.error);
+
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
+    if (blocked) {
+      setError(
+        preview.error ??
+          'Fix coherence issues before saving — the engine would refuse this combination at launch.',
+      );
+      return;
+    }
     const patch: ProfilePatch = {
       engine: form.engine,
       os: form.os,
       osVersion: form.osVersion,
-      fingerprintOverrides: toOverrides(form, profile),
+      fingerprintOverrides: overrides,
     };
     setError(null);
     try {
@@ -231,6 +261,66 @@ export function FingerprintEditor({
         default. Deep surfaces — canvas, WebGL, audio — are spoofed natively by the engine and are
         not edited here.
       </p>
+
+      <div className="persona-preview" aria-live="polite">
+        <div className="persona-preview__header">
+          <strong>Live persona preview</strong>
+          {preview.ok ? (
+            <Badge tone="success" dot>
+              Coherent
+            </Badge>
+          ) : (
+            <Badge tone="danger" dot>
+              Issues
+            </Badge>
+          )}
+        </div>
+        {preview.fingerprint ? (
+          <dl className="persona-preview__grid">
+            <div>
+              <dt>User-Agent</dt>
+              <dd title={preview.fingerprint.navigator.userAgent}>
+                {preview.fingerprint.navigator.userAgent}
+              </dd>
+            </div>
+            <div>
+              <dt>
+                Platform <SupportBadge field="platform" />
+              </dt>
+              <dd>{preview.fingerprint.navigator.platform}</dd>
+            </div>
+            <div>
+              <dt>
+                WebGL renderer <SupportBadge field="webglRenderer" />
+              </dt>
+              <dd>
+                {preview.fingerprint.webgl.vendor} / {preview.fingerprint.webgl.renderer}
+              </dd>
+            </div>
+            <div>
+              <dt>
+                Cores <SupportBadge field="hardwareConcurrency" />
+              </dt>
+              <dd>{preview.fingerprint.navigator.hardwareConcurrency}</dd>
+            </div>
+            <div>
+              <dt>
+                Memory <SupportBadge field="deviceMemory" />
+              </dt>
+              <dd>{preview.fingerprint.navigator.deviceMemory} GB</dd>
+            </div>
+          </dl>
+        ) : (
+          <p className="notice notice--error">{preview.error ?? 'Could not derive persona.'}</p>
+        )}
+        {preview.issues.length > 0 ? (
+          <ul className="coherence-warnings">
+            {preview.issues.map((issue) => (
+              <li key={issue}>{issue}</li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
 
       <fieldset className="fp-group">
         <legend>Identity</legend>
@@ -264,7 +354,7 @@ export function FingerprintEditor({
                   {o.label}
                 </option>
               ))}
-              <option disabled>Android (separate mobile engine planned)</option>
+              <option disabled>Android (separate mobile target planned)</option>
             </select>
           </label>
           <label className="field">
@@ -282,7 +372,9 @@ export function FingerprintEditor({
             </select>
           </label>
           <label className="field field--wide">
-            <span className="field__label">navigator.platform</span>
+            <span className="field__label">
+              navigator.platform <SupportBadge field="platform" />
+            </span>
             <input
               className="input"
               type="text"
@@ -308,7 +400,9 @@ export function FingerprintEditor({
             />
           </label>
           <label className="field">
-            <span className="field__label">Locale (BCP-47)</span>
+            <span className="field__label">
+              Locale (BCP-47) <SupportBadge field="locale" />
+            </span>
             <input
               className="input"
               type="text"
@@ -318,7 +412,9 @@ export function FingerprintEditor({
             />
           </label>
           <label className="field">
-            <span className="field__label">Timezone (IANA)</span>
+            <span className="field__label">
+              Timezone (IANA) <SupportBadge field="timezone" />
+            </span>
             <input
               className="input"
               type="text"
@@ -328,7 +424,9 @@ export function FingerprintEditor({
             />
           </label>
           <label className="field">
-            <span className="field__label">Geolocation latitude</span>
+            <span className="field__label">
+              Geolocation latitude <SupportBadge field="geolocation" />
+            </span>
             <input
               className="input"
               type="number"
@@ -356,7 +454,9 @@ export function FingerprintEditor({
         <legend>Hardware</legend>
         <div className="field-grid">
           <label className="field">
-            <span className="field__label">hardwareConcurrency</span>
+            <span className="field__label">
+              hardwareConcurrency <SupportBadge field="hardwareConcurrency" />
+            </span>
             <input
               className="input"
               type="number"
@@ -367,7 +467,9 @@ export function FingerprintEditor({
             />
           </label>
           <label className="field">
-            <span className="field__label">deviceMemory (GB)</span>
+            <span className="field__label">
+              deviceMemory (GB) <SupportBadge field="deviceMemory" />
+            </span>
             <input
               className="input"
               type="number"
@@ -396,7 +498,9 @@ export function FingerprintEditor({
         <legend>Display</legend>
         <div className="field-grid">
           <label className="field">
-            <span className="field__label">screen.width</span>
+            <span className="field__label">
+              screen.width <SupportBadge field="screen" />
+            </span>
             <input
               className="input"
               type="number"
@@ -436,7 +540,9 @@ export function FingerprintEditor({
         <legend>Native policy</legend>
         <div className="field-grid">
           <label className="field">
-            <span className="field__label">Renderer</span>
+            <span className="field__label">
+              Renderer <SupportBadge field="webglRenderer" />
+            </span>
             <select
               className="input"
               value={form.renderer}
@@ -450,7 +556,9 @@ export function FingerprintEditor({
             </select>
           </label>
           <label className="field">
-            <span className="field__label">WebRTC</span>
+            <span className="field__label">
+              WebRTC <SupportBadge field="webrtc" />
+            </span>
             <select
               className="input"
               value={form.webrtc}
@@ -466,25 +574,29 @@ export function FingerprintEditor({
         <div className="support-grid">
           {(
             [
-              ['noiseWebgl', 'WebGL'],
-              ['noiseCanvas', 'Canvas'],
-              ['noiseAudio', 'Audio'],
-              ['noiseClientRects', 'Client Rects'],
+              ['noiseWebgl', 'WebGL', 'webglDeep'],
+              ['noiseCanvas', 'Canvas', 'canvasNoise'],
+              ['noiseAudio', 'Audio', 'audioNoise'],
+              ['noiseClientRects', 'Client Rects', 'clientRects'],
             ] as const
-          ).map(([key, label]) => (
+          ).map(([key, label, supportKey]) => (
             <label key={key} className="check-row">
               <input
                 type="checkbox"
                 checked={form[key]}
                 onChange={(e) => set(key, e.target.checked)}
               />
-              <span>{label}</span>
+              <span>
+                {label} <SupportBadge field={supportKey} />
+              </span>
             </label>
           ))}
         </div>
         <div className="field-grid">
           <label className="field">
-            <span className="field__label">Cameras</span>
+            <span className="field__label">
+              Cameras <SupportBadge field="mediaDevices" />
+            </span>
             <input
               className="input"
               type="number"
@@ -525,12 +637,17 @@ export function FingerprintEditor({
       </fieldset>
 
       {error ? <p className="notice notice--error">{error}</p> : null}
+      {blocked && !error ? (
+        <p className="notice notice--error" role="alert">
+          Save is blocked until coherence issues are resolved.
+        </p>
+      ) : null}
 
       <div className="form-actions">
         <button type="button" className="btn btn--ghost" onClick={onClose} disabled={saving}>
           Cancel
         </button>
-        <button type="submit" className="btn btn--primary" disabled={saving}>
+        <button type="submit" className="btn btn--primary" disabled={saving || blocked}>
           {saving ? 'Saving…' : 'Save fingerprint'}
         </button>
       </div>

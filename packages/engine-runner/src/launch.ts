@@ -1,5 +1,7 @@
 import type { Fingerprint, LaunchParams } from '@lobster/shared-types';
 import { toEnginePlaywrightProxy } from '@lobster/proxy';
+import { buildGpuArgs } from './gpu.js';
+import { buildProxyHardeningArgs } from './proxy-hardening.js';
 
 function chromeWebRtcFlagPolicy(params: LaunchParams): string {
   switch (params.webrtcPolicy) {
@@ -47,6 +49,12 @@ export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOption
     // (WebRTC IP == proxy IP — the §6 coherence bar). Without a proxy we still restrict enumeration
     // to the default public interface so multi-homed hosts don't expose extra interfaces.
     `--force-webrtc-ip-handling-policy=${chromeWebRtcFlagPolicy(params)}`,
+    // GPU policy. Default (`auto`, no env) emits nothing and preserves prior behavior; on a GPU host
+    // set LOBSTER_GPU=gpu so the deep WebGL surfaces render on the real driver instead of silently
+    // degrading to SwiftShader/llvmpipe (a headless tell — see gpu.ts / roadmap RG-0).
+    ...buildGpuArgs(),
+    // PROX-7/8: when proxied, disable QUIC/AsyncDns so UDP/DoH cannot bypass the tunnel.
+    ...buildProxyHardeningArgs(params.proxy),
   ];
   const options: PersistentLaunchOptions = {
     userDataDir: params.userDataDir,

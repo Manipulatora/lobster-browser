@@ -126,6 +126,56 @@ test('startProfile derives from host calibration when one is supplied', async ()
   assert.equal(launched.fingerprint.navigator.uaFullVersion, '152.0.7928.0');
 });
 
+test('startProfile uses a PERSISTED host profile as the default when captured (HC-3)', async () => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'hc-store-'));
+  const file = join(dir, 'host-calibration.json');
+  await writeFile(file, JSON.stringify(hostCalibration()));
+  const prev = process.env.LOBSTER_HOST_CALIBRATION_FILE;
+  process.env.LOBSTER_HOST_CALIBRATION_FILE = file;
+  try {
+    const runner = new RecordingRunner();
+    // No explicit hostCalibration in params — the persisted file must become the default source.
+    await startProfile(runner, base);
+    const launched = runner.launched[0];
+    assert.ok(launched);
+    assert.equal(launched.fingerprint.webgl.renderer, hostCalibration().webgl.renderer);
+    assert.deepEqual(launched.fingerprint.webgl.extensions, [
+      'WEBGL_debug_renderer_info',
+      'ANGLE_instanced_arrays',
+    ]);
+  } finally {
+    if (prev === undefined) delete process.env.LOBSTER_HOST_CALIBRATION_FILE;
+    else process.env.LOBSTER_HOST_CALIBRATION_FILE = prev;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('startProfile ignores a persisted host profile whose OS differs (falls back to catalog)', async () => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'hc-store-'));
+  const file = join(dir, 'host-calibration.json');
+  const host = hostCalibration();
+  host.os = 'linux'; // profile is windows → must NOT use this host profile
+  await writeFile(file, JSON.stringify(host));
+  const prev = process.env.LOBSTER_HOST_CALIBRATION_FILE;
+  process.env.LOBSTER_HOST_CALIBRATION_FILE = file;
+  try {
+    const runner = new RecordingRunner();
+    await startProfile(runner, base); // windows profile
+    const launched = runner.launched[0];
+    assert.ok(launched, 'falls back to the catalog path and still launches');
+  } finally {
+    if (prev === undefined) delete process.env.LOBSTER_HOST_CALIBRATION_FILE;
+    else process.env.LOBSTER_HOST_CALIBRATION_FILE = prev;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('startProfile rejects a host calibration for the wrong desktop OS', async () => {
   const runner = new RecordingRunner();
   const host = hostCalibration();

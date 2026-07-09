@@ -1,6 +1,9 @@
 import { performance } from 'node:perf_hooks';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import type { GeoInfo, ProxyConfig, ProxyTestResult } from '@lobster/shared-types';
 import { ProxyAgent, request } from 'undici';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 import { formatProxyUrl } from './parse.js';
 
 /**
@@ -92,23 +95,70 @@ export function parseGeoResponse(raw: unknown): GeoInfo {
   return geo;
 }
 
+/** Fetch JSON through a SOCKS5 proxy (remote DNS via socks5h) using socks-proxy-agent. */
+async function fetchJsonViaSocks(
+  endpoint: string,
+  proxy: ProxyConfig,
+  timeoutMs: number,
+): Promise<unknown> {
+  // socks5h = resolve DNS on the proxy side (PROX-4 / PROX-7).
+  const uri = formatProxyUrl(proxy).replace(/^socks5:\/\//i, 'socks5h://');
+  const agent = new SocksProxyAgent(uri);
+  const url = new URL(endpoint);
+  const transport = url.protocol === 'https:' ? httpsRequest : httpRequest;
+
+  return new Promise((resolve, reject) => {
+    const req = transport(
+      endpoint,
+      {
+        method: 'GET',
+        agent,
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          const status = res.statusCode ?? 0;
+          if (status < 200 || status >= 300) {
+            reject(new Error(`deriveGeoFromExitIp: geo endpoint returned HTTP ${status}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      },
+    );
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error(`deriveGeoFromExitIp: SOCKS geo lookup timed out after ${timeoutMs}ms`));
+    });
+    req.end();
+  });
+}
+
 /**
- * Derive the exit-IP geo by routing an IP-geo lookup THROUGH the proxy with undici's
- * {@link ProxyAgent}. This reports where the proxy exits, not the local machine.
+ * Derive the exit-IP geo by routing an IP-geo lookup THROUGH the proxy.
  *
- * undici's ProxyAgent tunnels over HTTP CONNECT only, so SOCKS5 is rejected here.
- * Follow-up: add a SOCKS-capable dispatcher (e.g. a socks-proxy-agent bridge) for SOCKS5.
+ * HTTP/HTTPS proxies use undici's {@link ProxyAgent}. SOCKS5 uses `socks-proxy-agent` with
+ * socks5h (remote DNS) so locale/tz can match the exit IP on the launch path (PROX-4).
  */
 export async function deriveGeoFromExitIp(
   proxy: ProxyConfig,
   opts: DeriveGeoOptions = {},
 ): Promise<GeoInfo> {
-  if (proxy.type === 'socks5') {
-    throw new Error('SOCKS geo lookup not yet supported (HTTP/HTTPS only)');
-  }
-
   const endpoint = opts.endpoint ?? DEFAULT_GEO_ENDPOINT;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_GEO_TIMEOUT_MS;
+
+  if (proxy.type === 'socks5') {
+    const body = await fetchJsonViaSocks(endpoint, proxy, timeoutMs);
+    return parseGeoResponse(body);
+  }
+
   // ProxyAgent parses the userinfo from the URL and sets Proxy-Authorization for us.
   const dispatcher = new ProxyAgent({ uri: formatProxyUrl(proxy) });
 

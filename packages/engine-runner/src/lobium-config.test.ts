@@ -58,7 +58,10 @@ test('buildLobiumConfig carries the fingerprint surfaces + a version', () => {
   assert.equal(config.navigator.userAgent, fp().navigator.userAgent);
   assert.equal(config.webgl.renderer, fp().webgl.renderer);
   assert.equal(config.webgl.version, 'WebGL 1.0 (OpenGL ES 2.0 Chromium)');
-  assert.deepEqual(config.webgl.extensions, ['ANGLE_instanced_arrays', 'WEBGL_debug_renderer_info']);
+  assert.deepEqual(config.webgl.extensions, [
+    'ANGLE_instanced_arrays',
+    'WEBGL_debug_renderer_info',
+  ]);
   assert.equal(config.locale.timezone, 'Europe/Berlin');
   assert.deepEqual(config.fonts, ['Arial', 'Calibri']);
   assert.deepEqual(config.policy.renderer, { mode: 'host' });
@@ -74,6 +77,40 @@ test('buildLobiumConfig carries the fingerprint surfaces + a version', () => {
     speakers: 2,
     stableDeviceIds: true,
   });
+});
+
+test('buildLobiumConfig round-trips the deep WebGL surfaces the native reader consumes (HC-4)', () => {
+  // These are the surfaces a detector cross-checks against the spoofed renderer: gl.VERSION,
+  // SHADING_LANGUAGE_VERSION, getSupportedExtensions(), getShaderPrecisionFormat(). The sidecar must
+  // serialize them verbatim so the native config-channel reader (lobium_fp_config) can apply them and
+  // close the host-leak the battle test confirmed. A host-calibrated fingerprint carries all of them.
+  const precisionStage = {
+    lowFloat: { rangeMin: 127, rangeMax: 127, precision: 23 },
+    mediumFloat: { rangeMin: 127, rangeMax: 127, precision: 23 },
+    highFloat: { rangeMin: 127, rangeMax: 127, precision: 23 },
+    lowInt: { rangeMin: 31, rangeMax: 30, precision: 0 },
+    mediumInt: { rangeMin: 31, rangeMax: 30, precision: 0 },
+    highInt: { rangeMin: 31, rangeMax: 30, precision: 0 },
+  };
+  const withDeep: Fingerprint = {
+    ...fp(),
+    webgl: {
+      ...fp().webgl,
+      shadingLanguageVersion: 'WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)',
+      shaderPrecision: { vertex: precisionStage, fragment: precisionStage },
+    },
+  };
+  const config = buildLobiumConfig(withDeep, { seed: 'deep' });
+  assert.equal(
+    config.webgl.shadingLanguageVersion,
+    'WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)',
+  );
+  assert.deepEqual(config.webgl.shaderPrecision, {
+    vertex: precisionStage,
+    fragment: precisionStage,
+  });
+  // The whole webgl block must survive JSON serialization unchanged (what the native reader parses).
+  assert.deepEqual(JSON.parse(JSON.stringify(config.webgl)), config.webgl);
 });
 
 test('farbling seeds are deterministic per (seed) and differ across seeds', () => {

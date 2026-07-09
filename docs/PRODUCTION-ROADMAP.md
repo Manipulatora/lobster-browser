@@ -214,8 +214,8 @@ field.
 
 | ID | Task | Acceptance | Eff |
 |---|---|---|---|
-| SEC-1 | **Client-side blob encryption** (AES-256-GCM, LBv1 envelope) — profiles are live sessions; today plaintext | wire/store bytes contain no cleartext cookie/domain (grep test); tamper fails decrypt | L |
-| SEC-2 | **Key hierarchy + OS keychain** (Argon2id → wrapped team/profile keys; DPAPI/Keychain/Secret-Service) | two members unwrap the same team key; member-removal re-wraps | XL |
+| SEC-1 | **Client-side blob encryption** (AES-256-GCM, LBv1 envelope) | wire/store bytes contain no cleartext cookie/domain (grep test); tamper fails decrypt | L | **done (envelope)** — `@lobster/crypto` + Rust `blob_crypto`; sync e2e green |
+| SEC-2 | **Key hierarchy + OS keychain** (Argon2id → wrapped team/profile keys; DPAPI/Keychain/Secret-Service) | two members unwrap the same team key; member-removal re-wraps | XL | **partial** — TS hierarchy + Rust LSK keychain/file + Tauri encrypt/decrypt; membership TDK re-wrap + sync UI remain |
 | SEC-12 | Local SQLite at-rest encryption (proxy creds today plaintext) | on-disk DB has no cleartext proxy password | L |
 | UX-1 | **Light/red product shell**: image logo in header, notification/profile controls, sidebar with Profiles/Proxies/Templates/Pricing | app no longer uses dark scaffold/emoji branding; required IA exists | M |
 | UX-2 | **Profiles workspace**: scalable list/table, search, filters, create action, launch/stop/edit/clone/delete | existing lifecycle actions preserved in the new UI | M |
@@ -240,6 +240,37 @@ field.
 
 **Exit:** a signed installer that installs on a clean VM per OS, runs the GUI, launches a coherent profile
 behind a proxy with encrypted sync — a real, safe product.
+
+**2026-07-09 packaging progress (DSK-5/11 partial):** the **Windows installer pipeline is proven from
+Linux**. A Windows x64 NSIS installer (`Lobster Browser_..._x64-setup.exe`) + `lobster-desktop.exe` are
+cross-built on the Linux box with no Windows machine (Rust `x86_64-pc-windows-msvc` via `cargo-xwin` +
+LLVM `clang-cl`/`lld-link` + a Linux-hosted `makensis`). Full recipe + honest scope in
+[`specs/windows-cross-build.md`](specs/windows-cross-build.md). **Remaining for a shippable Windows
+product:** bundle the Node sidecar + a Windows Lobium engine as Tauri `externalBin`/`resources`
+(DSK-5/11), Authenticode signing (SEC-14a), and a clean-VM launch E2E. The current artifact installs and
+runs the **UI shell**; it does not yet bundle the engine/sidecar, and there is no Windows Lobium build.
+
+### Phase 3a — Premium UI/UX (Octo-class) — a dedicated design track
+
+**Objective:** move the desktop UI from "functional" (it already implements Profiles/Proxies/Templates/
+Pricing, a create-profile wizard, and a fingerprint editor in ~5k lines of React) to **premium, Octo-tier
+polish**. This is its own workstream because retrofitting polish onto ad-hoc CSS later is more expensive
+than laying a design-system foundation first. Runs in parallel with Phases 1–3; no GPU needed.
+
+| ID | Task | Acceptance | Eff |
+|---|---|---|---|
+| UI-1 | **Design-system foundation**: replace the single hand-rolled `styles.css` with tokens (color/spacing/typography/elevation/radii/motion) + a small component library (Button, Input, Select, Modal, Table, Tabs, Toast, Tooltip, Badge, Menu, EmptyState, Skeleton) | every screen consumes tokens/components; no ad-hoc hex/spacing; light/red theme centralized; dark theme togglable | L | **done** (tokens + `ui/` lib + theme toggle; legacy views still mix class names) |
+| UI-2 | **Profiles workspace at scale**: virtualized table for 1k–10k rows, multi-select bulk actions (launch/stop/tag/move/delete), column sort/filter, saved views, per-row live status (running/stopped, proxy health, last-used) | 10k-row grid scrolls at 60fps; bulk launch/stop works; status reflects real runner state | L | **partial** (bulk + sort + status badges; virtualization open) |
+| UI-3 | **Folders/tags + search**: organize profiles into folders/tags with fast fuzzy search and quick-launch (⌘K/Ctrl-K palette) | profiles are findable/organizable at scale; command palette launches by name | M | **partial** (palette + search/filters; folders open) |
+| UI-4 | **Fingerprint editor with live coherence**: surface the existing `validateFingerprintCoherence` in the UI — per-field support badges (native/CDP/unsupported), inline warnings, block impossible combinations, live persona preview | impossible combos are blocked pre-launch; unsupported fields visibly disabled; preview matches the launched persona | M | **done** |
+| UI-5 | **Onboarding + first-run**: welcome flow that runs the host-calibration step (HC), explains proxy setup, and seeds a first profile; in-app update prompts | a new user reaches a launchable profile in <2 min; calibration is a guided step | M | **done** (welcome + create CTA; live HC step still Phase 1) |
+| UI-6 | **Automation panel**: a polished "Connect Selenium/Playwright/Puppeteer" surface with copy-paste snippets, the profile's `debuggerAddress`/`ws` endpoint, and SDK links (the local API + SDK examples already exist) | user can copy a working automation snippet per profile | S | **done** |
+| UI-7 | **Motion, empty states, feedback**: skeleton loaders, optimistic updates, toasts for every async action, empty-state illustrations, keyboard shortcuts, focus/aria accessibility pass | no blank/janky states; all async actions give feedback; keyboard-navigable | M | **done** (toasts/empty/skeleton/palette; deeper a11y pass open) |
+| UI-8 | **i18n + crash/telemetry + branding polish**: string extraction/i18n scaffold, opt-in crash reporting, final icon/brand assets and installer artwork (NSIS header/sidebar images) | UI strings externalized; crashes reported; installer shows brand artwork | M | **partial** (`t()` + error hooks; reporter/artwork open) |
+
+**Exit:** the app *feels* like a premium product — consistent, fast, forgiving, and legible at the scale
+(hundreds–thousands of profiles) Octo users operate at, with the fingerprint editor honestly reflecting
+what the engine can and cannot do.
 
 ### Phase 4 — Prove it beats real detectors (2–4 wks; needs: residential proxies + anti-bot test tenants + all 3 OS machines)
 
@@ -273,8 +304,10 @@ personas, human-input library, cookie warm-up/robot.
 RG-0 (Linux+GPU box) ─▶ RG-1 real baseline ─▶ HC-1..6 host-calibration ─▶ RG-3 real-hardware coherence
                                                        │
    (parallel, no GPU) SEC-1/2 crypto · BE-1/2 durable · DSK-1/2 GUI · PROX-1/3/4 ─────────────┐
+                       UI-1..8 premium UI/UX design track (parallel, no GPU) ─────────────────┤
                                                        │                                       │
    ENG-7a..d multi-OS build + SEC-14 signing (needs certs + per-OS build hosts) ──────────────┤
+   (Windows installer cross-build from Linux already proven — specs/windows-cross-build.md) ──┤
                                                        ▼                                       ▼
                                    Phase 4 detector matrix + live anti-bot (needs proxies + tenants)
                                                        ▼
@@ -321,7 +354,18 @@ then build the host-calibrated path from that evidence.
   (overlaps 1), **Phase 3** 3–5 wks (parallel), **Phase 4** 2–4 wks → a **credible private beta in ~2 months,
   GA in ~3–4 months**, given the machines/certs/proxies are procured up front.
 
-**Immediate next actions:** (1) rent the **Linux + RTX 3060** box and do **RG-0/RG-1** (real baseline); (2)
-start **code-signing cert** acquisition; (3) begin **HC-1..3 host-calibration**; (4) begin **UX-1/UX-2** and
-**DATA-UX-1** so the declared light/red UI and profile wizard are backed by real contracts, not mock-only
-fields. Acquire the Windows laptop + Mac mini as Phase 1 progresses.
+**Immediate next actions:** (1) rent the **Linux + RTX 3060** box and do **RG-0/RG-1** (real baseline) — a
+real-GPU baseline on native Lobium already exists on an RTX 5090, but a mid-range consumer GPU is still
+needed; (2) start **code-signing cert** acquisition (Authenticode + Apple Developer ID) — longest lead
+time and gates GA; (3) close **HC-4** (the deep-GPU host leak) by authoring `host-gpu-profile.patch` and
+rebuilding Lobium when a rebuild is authorized, and finish the desktop first-run host-calibration probe
+(HC-1..3); (4) **SEC-2** key hierarchy + OS-keychain wrap on top of the landed SEC-1 LBv1 envelope;
+(5) bundle the sidecar + a Windows engine into the now-proven Windows installer (DSK-5/11). Acquire the
+Windows laptop + Mac mini as Phase 1 progresses.
+
+**Biggest unknowns / risks to plan around (productive view):** (a) **behavioral** anti-bot detection
+(mouse/timing) can block even a perfect fingerprint — budget for the human-input library, not just
+fingerprint parity; (b) the RTX 5090 proof GPU is data-center-class — validate on a real consumer GPU +
+a real Windows laptop before any "Octo-class" claim; (c) the **rebase treadmill** (Chrome ships ~every 4
+weeks) is a permanent operational cost of owning a Chromium fork; (d) same-machine profiles correlate at
+the GPU-class level (accepted trade-off; true per-profile hardware needs cloud-run, Phase 5).

@@ -71,6 +71,17 @@ export class PrismaTeamsRepository implements TeamsRepository {
     return row ? this.toMembership(row) : null;
   }
 
+  async removeMember(teamId: string, userId: string): Promise<boolean> {
+    try {
+      await this.prisma.membership.delete({
+        where: { userId_teamId: { userId, teamId } },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private toTeam(row: TeamRow): Team {
     return {
       id: row.id,

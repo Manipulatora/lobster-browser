@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { applyCdpFingerprint, type CdpSession } from '../cdp-fingerprint.js';
+import { applyCookieImport } from '../cookie-inject.js';
 import type { Launcher, LaunchContext, LaunchHandle } from './types.js';
 
 /**
@@ -133,12 +134,22 @@ export async function configureLaunchedContext(
       const cdp = await context.newCDPSession(page);
       await applyCdpFingerprint(cdp, ctx.fingerprint);
     };
-    for (const page of context.pages()) {
+    const pages = context.pages();
+    for (const page of pages) {
       await applyToPage(page);
     }
     context.on('page', (page) => {
       void applyToPage(page);
     });
+
+    // Load the profile's imported cookies into the context BEFORE the app navigates, so it opens
+    // already logged-in (PROX-1). Uses a CDP session on an existing page; `Network.setCookies` applies
+    // to the whole browser context. No-op when the profile has no cookie import.
+    if (ctx.cookiesImport) {
+      const cookiePage = pages[0] ?? (await context.newPage());
+      const cdp = await context.newCDPSession(cookiePage);
+      await applyCookieImport(cdp, ctx.cookiesImport);
+    }
 
     const { port, ws } = await readCdpEndpoint(ctx.options.userDataDir);
     return {

@@ -2,6 +2,7 @@ import {
   ArrowPathIcon,
   ClipboardDocumentIcon,
   PlusIcon,
+  ServerStackIcon,
   SignalIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
@@ -17,6 +18,7 @@ import type {
 } from '@lobster/shared-types';
 
 import { proxiesClient } from '../../api/tauri';
+import { EmptyState, Skeleton, useToast } from '../../ui';
 
 type ProxyTab = ProxySource;
 
@@ -328,6 +330,7 @@ function AddProxyModal({
 }
 
 export function ProxiesView(): JSX.Element {
+  const toast = useToast();
   const [tab, setTab] = useState<ProxyTab>('mine');
   const [showAddProxy, setShowAddProxy] = useState(false);
   const [rows, setRows] = useState<StoredProxy[]>([]);
@@ -364,6 +367,7 @@ export function ProxiesView(): JSX.Element {
     const created = await proxiesClient.create_proxy(input);
     if (created.source === tab) setRows((prev) => [created, ...prev]);
     else setTab(created.source);
+    toast.success('Proxy added.');
   }
 
   async function handleCheckProxy(proxy: StoredProxy): Promise<void> {
@@ -391,6 +395,11 @@ export function ProxiesView(): JSX.Element {
           return updated;
         }),
       );
+      if (result.ok) {
+        toast.success(`Proxy OK · ${result.latencyMs ?? 0} ms`);
+      } else {
+        toast.error(`Proxy failed: ${result.error ?? 'Unknown error'}`);
+      }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       setRows((prev) =>
@@ -398,6 +407,7 @@ export function ProxiesView(): JSX.Element {
           item.id === proxy.id ? { ...item, status: 'error', lastError: message } : item,
         ),
       );
+      toast.error(`Proxy failed: ${message}`);
     } finally {
       setChecking(proxy.id, false);
     }
@@ -438,64 +448,90 @@ export function ProxiesView(): JSX.Element {
       </div>
 
       {error ? <p className="notice notice--error">Could not load proxies: {error}</p> : null}
-      {loading ? <p className="notice">Loading proxies...</p> : null}
+      {loading ? (
+        <div className="skeleton-stack" aria-busy="true" aria-label="Loading proxies">
+          <Skeleton height={40} />
+          <Skeleton height={40} />
+          <Skeleton height={40} />
+        </div>
+      ) : null}
 
-      <div className="data-panel">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Proxy</th>
-              <th>Type</th>
-              <th>Endpoint</th>
-              <th>Location</th>
-              <th>Timezone</th>
-              <th>Latency</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((proxy) => {
-              const checking = checkingIds.has(proxy.id);
-              const status = statusLabel(proxy, checking);
-              return (
-                <tr key={proxy.id}>
-                  <td>
-                    <div className="table-title">{proxy.label}</div>
-                    {proxy.lastError ? (
-                      <div className="table-subtitle">{proxy.lastError}</div>
-                    ) : null}
-                  </td>
-                  <td>{typeLabel(proxy.config.type)}</td>
-                  <td>{endpointLabel(proxy)}</td>
-                  <td>{locationLabel(proxy)}</td>
-                  <td>{timezoneLabel(proxy)}</td>
-                  <td>{checking ? 'Checking...' : latencyLabel(proxy)}</td>
-                  <td>
-                    <span className={`status status--${status.toLowerCase()}`}>
-                      <span className="status__dot" aria-hidden />
-                      {status}
-                    </span>
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      className="btn btn--outline btn--compact"
-                      onClick={() => {
-                        void handleCheckProxy(proxy);
-                      }}
-                      disabled={checking}
-                    >
-                      <ArrowPathIcon aria-hidden />
-                      Check
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+      {!loading && rows.length === 0 ? (
+        <EmptyState
+          icon={<ServerStackIcon aria-hidden />}
+          title={tab === 'hive' ? 'No Hive proxies yet' : 'No proxies yet'}
+          description={
+            tab === 'hive'
+              ? 'Hive Proxy allocations will appear here once provisioned.'
+              : 'Add a SOCKS5 or HTTP(S) proxy to assign it to profiles.'
+          }
+          action={
+            <button type="button" className="btn btn--primary" onClick={() => setShowAddProxy(true)}>
+              <PlusIcon aria-hidden />
+              Add Proxy
+            </button>
+          }
+        />
+      ) : null}
+
+      {!loading && rows.length > 0 ? (
+        <div className="data-panel">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Proxy</th>
+                <th>Type</th>
+                <th>Endpoint</th>
+                <th>Location</th>
+                <th>Timezone</th>
+                <th>Latency</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((proxy) => {
+                const checking = checkingIds.has(proxy.id);
+                const status = statusLabel(proxy, checking);
+                return (
+                  <tr key={proxy.id}>
+                    <td>
+                      <div className="table-title">{proxy.label}</div>
+                      {proxy.lastError ? (
+                        <div className="table-subtitle">{proxy.lastError}</div>
+                      ) : null}
+                    </td>
+                    <td>{typeLabel(proxy.config.type)}</td>
+                    <td>{endpointLabel(proxy)}</td>
+                    <td>{locationLabel(proxy)}</td>
+                    <td>{timezoneLabel(proxy)}</td>
+                    <td>{checking ? 'Checking...' : latencyLabel(proxy)}</td>
+                    <td>
+                      <span className={`status status--${status.toLowerCase()}`}>
+                        <span className="status__dot" aria-hidden />
+                        {status}
+                      </span>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn--outline btn--compact"
+                        onClick={() => {
+                          void handleCheckProxy(proxy);
+                        }}
+                        disabled={checking}
+                      >
+                        <ArrowPathIcon aria-hidden />
+                        Check
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
 
       <div className="info-strip">
         <SignalIcon aria-hidden />

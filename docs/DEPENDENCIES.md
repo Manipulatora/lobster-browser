@@ -103,7 +103,7 @@ graph TB
 | QA-1 | beta confidence, regression gate | RG-3, self-hosted GPU runners | YES |
 | QA-3 | GA convergence | DSK-2/5/11, BE-1/2, PROX live proxy, QA-1; opt-in native local E2E exists | YES |
 | ENG-7/SEC-14 | signed release | build hosts, certs, rebase proof | YES |
-| SEC-1/2/12 | safe sync/local storage | key hierarchy decisions | no |
+| SEC-1/2/12 | safe sync/local storage | SEC-1 LBv1 envelope + SEC-12 field crypto done; SEC-2 key hierarchy/keychain remains | no |
 | BE-1/2 | durable cloud path | MinIO/Postgres CI services | no |
 | UX-1/2 | product-facing app credibility | UX-1 done; UX-2 needs engine/proxy filters + frontend E2E | no |
 | DATA-UX-1 | UX-3/4, ENG-UX-1, template/proxy persistence | shared types + local SQLite partial; backend DTO/metadata and IPC remain | no |

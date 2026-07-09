@@ -1,10 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   EllipsisHorizontalIcon,
   FunnelIcon,
   MagnifyingGlassIcon,
+  PlayIcon,
   PlusIcon,
+  StopIcon,
   TrashIcon,
+  UserGroupIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 
@@ -24,11 +27,19 @@ import {
   type LaunchInfo,
   type ProfilePatch,
 } from '../../api/tauri';
+import { LaunchPanel } from '../automation/LaunchPanel';
 import { FingerprintEditor } from '../fingerprint/FingerprintEditor';
+import {
+  isOnboarded,
+  markOnboarded,
+  OnboardingModal,
+} from '../onboarding/OnboardingModal';
+import { t } from '../../i18n';
+import { Button, EmptyState, Skeleton, useToast } from '../../ui';
 import { EditProfileForm } from './EditProfileForm';
 import { NewProfileForm } from './NewProfileForm';
 import { ENGINE_OPTIONS, OS_OPTIONS, STATUS_META } from './options';
-import { ProfileList } from './ProfileList';
+import { ProfileList, type ProfileSortKey, type SortDir } from './ProfileList';
 import { TrashModal } from './TrashModal';
 import { useProfiles } from './useProfiles';
 
@@ -36,12 +47,26 @@ function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+function isLive(status: Profile['status']): boolean {
+  return status === 'running' || status === 'launching' || status === 'stopping';
+}
+
+function proxySortKey(profile: Profile): string {
+  if (!profile.proxy) return '';
+  return profile.proxy.label ?? `${profile.proxy.host}:${profile.proxy.port}`;
+}
+
 /**
  * The Profiles workspace: list of profiles with create / clone / delete / launch / stop
  * actions, and a modal fingerprint editor. Backed by {@link useProfiles} (real Tauri commands
  * in the desktop shell, an in-memory mock in a dev browser).
  */
-export function ProfilesView(): JSX.Element {
+export function ProfilesView({
+  createProfileSignal = 0,
+}: {
+  createProfileSignal?: number;
+} = {}): JSX.Element {
+  const toast = useToast();
   const {
     profiles,
     loading,
@@ -77,10 +102,31 @@ export function ProfilesView(): JSX.Element {
   const [trashError, setTrashError] = useState<string | null>(null);
   const [trashBusyIds, setTrashBusyIds] = useState<ReadonlySet<string>>(() => new Set());
   const [launchInfo, setLaunchInfo] = useState<ReadonlyMap<string, LaunchInfo>>(() => new Map());
-  const [banner, setBanner] = useState<string | null>(null);
   const [availableProxies, setAvailableProxies] = useState<StoredProxy[]>([]);
   const [availableTemplates, setAvailableTemplates] = useState<ProfileTemplate[]>([]);
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [sortKey, setSortKey] = useState<ProfileSortKey>('updatedAt');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
+  const [launchPanel, setLaunchPanel] = useState<{
+    profileName: string;
+    info: LaunchInfo;
+  } | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const toolbarMenuRef = useRef<HTMLDivElement | null>(null);
+  const prevCreateSignal = useRef(createProfileSignal);
+
+  useEffect(() => {
+    if (createProfileSignal > prevCreateSignal.current) {
+      setShowForm(true);
+    }
+    prevCreateSignal.current = createProfileSignal;
+  }, [createProfileSignal]);
+
+  useEffect(() => {
+    if (!loading && profiles.length === 0 && !isOnboarded()) {
+      setShowOnboarding(true);
+    }
+  }, [loading, profiles.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -168,7 +214,9 @@ export function ProfilesView(): JSX.Element {
   async function handleCreate(input: CreateProfileInput): Promise<void> {
     await create(input);
     setShowForm(false);
-    setBanner(`Created profile “${input.name}”.`);
+    markOnboarded();
+    setShowOnboarding(false);
+    toast.success(`Created profile “${input.name}”.`);
   }
 
   async function handleLaunch(id: string): Promise<void> {
@@ -180,13 +228,13 @@ export function ProfilesView(): JSX.Element {
       password = value;
     }
     setBusy(id, true);
-    setBanner(null);
     try {
       const info = await launch(id, password);
       setLaunchInfo((prev) => new Map(prev).set(id, info));
-      setBanner(`Launched. Connect over CDP at ${info.debuggerAddress}.`);
+      setLaunchPanel({ profileName: target?.name ?? 'Profile', info });
+      toast.success(`Launched. Connect over CDP at ${info.debuggerAddress}.`);
     } catch (e: unknown) {
-      setBanner(`Launch failed: ${errMessage(e)}`);
+      toast.error(`Launch failed: ${errMessage(e)}`);
     } finally {
       setBusy(id, false);
     }
@@ -194,7 +242,6 @@ export function ProfilesView(): JSX.Element {
 
   async function handleStop(id: string): Promise<void> {
     setBusy(id, true);
-    setBanner(null);
     try {
       await stop(id);
       setLaunchInfo((prev) => {
@@ -202,8 +249,12 @@ export function ProfilesView(): JSX.Element {
         next.delete(id);
         return next;
       });
+      if (launchPanel && profiles.find((p) => p.id === id)?.name === launchPanel.profileName) {
+        setLaunchPanel(null);
+      }
+      toast.success('Profile stopped.');
     } catch (e: unknown) {
-      setBanner(`Stop failed: ${errMessage(e)}`);
+      toast.error(`Stop failed: ${errMessage(e)}`);
     } finally {
       setBusy(id, false);
     }
@@ -212,9 +263,9 @@ export function ProfilesView(): JSX.Element {
   async function handleClone(id: string): Promise<void> {
     try {
       await clone(id);
-      setBanner('Profile cloned with a fresh fingerprint seed.');
+      toast.success('Profile cloned with a fresh fingerprint seed.');
     } catch (e: unknown) {
-      setBanner(`Clone failed: ${errMessage(e)}`);
+      toast.error(`Clone failed: ${errMessage(e)}`);
     }
   }
 
@@ -229,9 +280,14 @@ export function ProfilesView(): JSX.Element {
         next.delete(id);
         return next;
       });
-      setBanner('Profile moved to trash.');
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      toast.success('Profile moved to trash.');
     } catch (e: unknown) {
-      setBanner(`Move to trash failed: ${errMessage(e)}`);
+      toast.error(`Move to trash failed: ${errMessage(e)}`);
     }
   }
 
@@ -241,7 +297,7 @@ export function ProfilesView(): JSX.Element {
     try {
       await restore(id);
       setTrashProfiles((prev) => prev.filter((profile) => profile.id !== id));
-      setBanner('Profile restored.');
+      toast.success('Profile restored.');
     } catch (e: unknown) {
       setTrashError(`Restore failed: ${errMessage(e)}`);
     } finally {
@@ -258,7 +314,7 @@ export function ProfilesView(): JSX.Element {
     try {
       await permanentlyDelete(id);
       setTrashProfiles((prev) => prev.filter((profile) => profile.id !== id));
-      setBanner('Profile permanently deleted.');
+      toast.success('Profile permanently deleted.');
     } catch (e: unknown) {
       setTrashError(`Permanent delete failed: ${errMessage(e)}`);
     } finally {
@@ -276,9 +332,9 @@ export function ProfilesView(): JSX.Element {
     try {
       const password = value.trim().length > 0 ? value : null;
       await setPassword(id, password);
-      setBanner(password ? 'Password protection enabled.' : 'Password protection removed.');
+      toast.success(password ? 'Password protection enabled.' : 'Password protection removed.');
     } catch (e: unknown) {
-      setBanner(`Password update failed: ${errMessage(e)}`);
+      toast.error(`Password update failed: ${errMessage(e)}`);
     }
   }
 
@@ -288,7 +344,7 @@ export function ProfilesView(): JSX.Element {
     try {
       await update(editing.id, patch);
       setEditing(null);
-      setBanner('Fingerprint overrides saved.');
+      toast.success('Fingerprint overrides saved.');
     } finally {
       setSaving(false);
     }
@@ -300,9 +356,65 @@ export function ProfilesView(): JSX.Element {
     try {
       await update(editingProfile.id, patch);
       setEditingProfile(null);
-      setBanner('Profile saved.');
+      toast.success('Profile saved.');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleBulkLaunch(): Promise<void> {
+    const ids = [...selectedIds].filter((id) => {
+      const p = profiles.find((x) => x.id === id);
+      return p && !isLive(p.status);
+    });
+    for (const id of ids) {
+      await handleLaunch(id);
+    }
+  }
+
+  async function handleBulkStop(): Promise<void> {
+    const ids = [...selectedIds].filter((id) => {
+      const p = profiles.find((x) => x.id === id);
+      return p && isLive(p.status);
+    });
+    for (const id of ids) {
+      await handleStop(id);
+    }
+  }
+
+  async function handleBulkTrash(): Promise<void> {
+    const ids = [...selectedIds].filter((id) => {
+      const p = profiles.find((x) => x.id === id);
+      return p && !isLive(p.status);
+    });
+    if (ids.length === 0) {
+      toast.info('Stop running profiles before moving them to trash.');
+      return;
+    }
+    if (!window.confirm(`Move ${ids.length} profile(s) to trash?`)) return;
+    for (const id of ids) {
+      try {
+        await moveToTrash(id);
+        setLaunchInfo((prev) => {
+          const next = new Map(prev);
+          next.delete(id);
+          return next;
+        });
+      } catch (e: unknown) {
+        toast.error(`Move to trash failed: ${errMessage(e)}`);
+        return;
+      }
+    }
+    setSelectedIds(new Set());
+    toast.success('Profile moved to trash.');
+  }
+
+  function handleSort(key: ProfileSortKey): void {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir(key === 'name' || key === 'proxy' ? 'asc' : 'desc');
     }
   }
 
@@ -313,25 +425,62 @@ export function ProfilesView(): JSX.Element {
     statusFilter !== 'all' ||
     proxyFilter !== 'all' ||
     tagFilter.trim().length > 0;
-  const filteredProfiles = profiles.filter((profile) => {
-    const needle = query.trim().toLowerCase();
-    const text = [profile.name, profile.folder, profile.notes, ...profile.tags]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase();
-    if (needle !== '' && !text.includes(needle)) return false;
-    if (engineFilter !== 'all' && profile.engine !== engineFilter) return false;
-    if (osFilter !== 'all' && profile.os !== osFilter) return false;
-    if (statusFilter !== 'all' && profile.status !== statusFilter) return false;
-    if (proxyFilter === 'with' && !profile.proxy && !profile.proxyId) return false;
-    if (proxyFilter === 'without' && (profile.proxy || profile.proxyId)) return false;
-    const tagNeedle = tagFilter.trim().toLowerCase();
-    if (tagNeedle && !profile.tags.some((tag) => tag.toLowerCase().includes(tagNeedle))) {
-      return false;
-    }
-    return true;
-  });
+
+  const filteredProfiles = useMemo(() => {
+    const list = profiles.filter((profile) => {
+      const needle = query.trim().toLowerCase();
+      const text = [profile.name, profile.folder, profile.notes, ...profile.tags]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      if (needle !== '' && !text.includes(needle)) return false;
+      if (engineFilter !== 'all' && profile.engine !== engineFilter) return false;
+      if (osFilter !== 'all' && profile.os !== osFilter) return false;
+      if (statusFilter !== 'all' && profile.status !== statusFilter) return false;
+      if (proxyFilter === 'with' && !profile.proxy && !profile.proxyId) return false;
+      if (proxyFilter === 'without' && (profile.proxy || profile.proxyId)) return false;
+      const tagNeedle = tagFilter.trim().toLowerCase();
+      if (tagNeedle && !profile.tags.some((tag) => tag.toLowerCase().includes(tagNeedle))) {
+        return false;
+      }
+      return true;
+    });
+
+    const dir = sortDir === 'asc' ? 1 : -1;
+    list.sort((a, b) => {
+      let cmp = 0;
+      switch (sortKey) {
+        case 'name':
+          cmp = a.name.localeCompare(b.name);
+          break;
+        case 'status':
+          cmp = a.status.localeCompare(b.status);
+          break;
+        case 'proxy':
+          cmp = proxySortKey(a).localeCompare(proxySortKey(b));
+          break;
+        case 'updatedAt':
+        default:
+          cmp = a.updatedAt.localeCompare(b.updatedAt);
+          break;
+      }
+      return cmp * dir;
+    });
+    return list;
+  }, [
+    profiles,
+    query,
+    engineFilter,
+    osFilter,
+    statusFilter,
+    proxyFilter,
+    tagFilter,
+    sortKey,
+    sortDir,
+  ]);
+
   const runningCount = profiles.filter((profile) => profile.status === 'running').length;
+  const selectedCount = selectedIds.size;
 
   return (
     <section className="page profiles-view">
@@ -486,30 +635,90 @@ export function ProfilesView(): JSX.Element {
         </div>
       ) : null}
 
-      {banner ? (
-        <p className="notice notice--info" role="status">
-          {banner}
-        </p>
+      {selectedCount > 0 ? (
+        <div className="bulk-bar" role="toolbar" aria-label="Bulk profile actions">
+          <span>
+            <strong>{selectedCount}</strong> selected
+          </span>
+          <Button
+            variant="secondary"
+            size="sm"
+            leadingIcon={<PlayIcon aria-hidden />}
+            onClick={() => {
+              void handleBulkLaunch();
+            }}
+          >
+            Launch
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            leadingIcon={<StopIcon aria-hidden />}
+            onClick={() => {
+              void handleBulkStop();
+            }}
+          >
+            Stop
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            leadingIcon={<TrashIcon aria-hidden />}
+            onClick={() => {
+              void handleBulkTrash();
+            }}
+          >
+            Move to trash
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setSelectedIds(new Set())}>
+            Clear
+          </Button>
+        </div>
       ) : null}
 
       {error ? <p className="notice notice--error">Could not load profiles: {error}</p> : null}
 
       {loading ? (
-        <p className="notice">Loading profiles…</p>
-      ) : isEmpty ? (
-        <div className="empty-state">
-          <h3>No profiles yet</h3>
-          <p>Create the first profile identity for this workspace.</p>
-          <button type="button" className="btn btn--primary" onClick={() => setShowForm(true)}>
-            <PlusIcon aria-hidden />
-            Create Profile
-          </button>
+        <div className="skeleton-stack" aria-busy="true" aria-label="Loading profiles">
+          <Skeleton height={48} />
+          <Skeleton height={48} />
+          <Skeleton height={48} />
+          <Skeleton height={48} />
         </div>
+      ) : isEmpty ? (
+        <EmptyState
+          icon={<UserGroupIcon aria-hidden />}
+          title={t('profiles.empty.title')}
+          description={t('profiles.empty.desc')}
+          action={
+            <button type="button" className="btn btn--primary" onClick={() => setShowForm(true)}>
+              <PlusIcon aria-hidden />
+              Create Profile
+            </button>
+          }
+        />
       ) : (
         <ProfileList
           profiles={filteredProfiles}
           busyIds={busyIds}
           launchInfo={launchInfo}
+          selectedIds={selectedIds}
+          sortKey={sortKey}
+          sortDir={sortDir}
+          onSort={handleSort}
+          onToggleSelect={(id) => {
+            setSelectedIds((prev) => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            });
+          }}
+          onToggleSelectAll={() => {
+            const ids = filteredProfiles.map((p) => p.id);
+            const allOn = ids.length > 0 && ids.every((id) => selectedIds.has(id));
+            setSelectedIds(allOn ? new Set() : new Set(ids));
+          }}
           onLaunch={handleLaunch}
           onStop={handleStop}
           onClone={handleClone}
@@ -619,6 +828,26 @@ export function ProfilesView(): JSX.Element {
           </div>
         </div>
       ) : null}
+
+      <LaunchPanel
+        open={launchPanel !== null}
+        onClose={() => setLaunchPanel(null)}
+        profileName={launchPanel?.profileName ?? ''}
+        info={launchPanel?.info ?? null}
+      />
+
+      <OnboardingModal
+        open={showOnboarding}
+        onSkip={() => {
+          markOnboarded();
+          setShowOnboarding(false);
+        }}
+        onGetStarted={() => {
+          markOnboarded();
+          setShowOnboarding(false);
+          setShowForm(true);
+        }}
+      />
     </section>
   );
 }

@@ -41,6 +41,17 @@ uuid = { version = "1", features = ["v4"] }
 argon2 = "0.5"
 password-hash = { version = "0.5", features = ["rand_core"] }
 
+# SEC-12: authenticated at-rest encryption (AES-256-GCM) for secrets in the SQLite stores.
+aes-gcm = "0.10"
+# Encoding for ciphertext blobs + the persisted key file.
+base64 = "0.22"
+# SEC-2: OS keychain wrap for the Local Store Key (LSK) — Secret Service / DPAPI / Keychain.
+# Falls back to the 0600 secrets.key file when no keyring backend is available (headless CI).
+keyring = "3"
+# HKDF for deriving Profile Content Keys from a Team Data Key (mirrors @lobster/crypto).
+hkdf = "0.12"
+sha2 = "0.10"
+
 # ISO-8601 / RFC3339 timestamps for profile rows.
 chrono = "0.4"
 
@@ -53,6 +64,11 @@ anyhow = "1"
 # Structured logging.
 tracing = "0.1"
 tracing-subscriber = "0.3"
+
+# DSK-3: a second app launch focuses the first instance instead of contending on the
+# local-API port / SQLite. Desktop-only plugin (no mobile support).
+[target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
+tauri-plugin-single-instance = "2"
 
 [features]
 # Enabled by tauri-cli in production builds; keeps custom-protocol assets embedded.

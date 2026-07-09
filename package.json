@@ -9,6 +9,7 @@
   },
   "workspaces": [
     "packages/shared-types",
+    "packages/crypto",
     "packages/fingerprint",
     "packages/proxy",
     "packages/cookies",
@@ -24,7 +25,7 @@
     "lint": "npm run lint --workspaces --if-present",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json}\"",
-    "typecheck:core": "tsc -b packages/shared-types packages/fingerprint packages/proxy"
+    "typecheck:core": "tsc -b packages/shared-types packages/crypto packages/fingerprint packages/proxy"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

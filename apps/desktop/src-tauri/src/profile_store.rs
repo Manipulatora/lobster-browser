@@ -4,8 +4,10 @@
 //! without the cloud. Columns mirror `@lobster/shared-types` `Profile`; the JSON-shaped fields
 //! (fingerprint overrides, proxy, tags) are stored as TEXT and (de)serialized at the boundary.
 //!
-//! LATER: cookie/localStorage/IndexedDB blobs are encrypted at rest with a per-install AES key,
-//! and rows sync to the backend for team sharing. This module owns schema + CRUD.
+//! SEC-12: secret material is encrypted at rest with the per-install AES-256-GCM key
+//! (`crate::secrets`): proxy credentials inside the `proxy` JSON, and the whole `cookies_import`
+//! payload (imported cookies are live session secrets). Legacy plaintext rows still read fine.
+//! LATER: rows sync to the backend for team sharing. This module owns schema + CRUD.
 
 use std::path::Path;
 
@@ -14,6 +16,8 @@ use argon2::Argon2;
 use password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
+
+use crate::secrets::{SecretCipher, PROXY_SECRET_FIELDS};
 
 /// SQLite schema for the local profile catalog. `IF NOT EXISTS` keeps `init` idempotent.
 pub const SCHEMA: &str = "
@@ -201,13 +205,24 @@ fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn row_to_profile(row: &Row) -> rusqlite::Result<Profile> {
+fn row_to_profile(cipher: &SecretCipher, row: &Row) -> rusqlite::Result<Profile> {
     let overrides_json: Option<String> = row.get("fingerprint_overrides")?;
     let proxy_json: Option<String> = row.get("proxy")?;
     let cookies_json: Option<String> = row.get("cookies_import")?;
     let extensions_json: Option<String> = row.get("extensions")?;
     let tags_json: String = row.get("tags")?;
     let password_hash: Option<String> = row.get("password_hash")?;
+    // SEC-12: decrypt at the store boundary — proxy credentials are field-encrypted inside the
+    // JSON; the cookies_import cell is encrypted as a whole (legacy plaintext passes through).
+    let proxy = proxy_json
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .map(|mut value| {
+            cipher.decrypt_json_fields(&mut value, PROXY_SECRET_FIELDS);
+            value
+        });
+    let cookies_import = cookies_json
+        .map(|s| cipher.decrypt_str(&s))
+        .and_then(|s| serde_json::from_str(&s).ok());
     Ok(Profile {
         id: row.get("id")?,
         name: row.get("name")?,
@@ -216,10 +231,10 @@ fn row_to_profile(row: &Row) -> rusqlite::Result<Profile> {
         os_version: row.get("os_version")?,
         fingerprint_seed: row.get("fingerprint_seed")?,
         fingerprint_overrides: overrides_json.and_then(|s| serde_json::from_str(&s).ok()),
-        proxy: proxy_json.and_then(|s| serde_json::from_str(&s).ok()),
+        proxy,
         proxy_id: row.get("proxy_id")?,
         template_id: row.get("template_id")?,
-        cookies_import: cookies_json.and_then(|s| serde_json::from_str(&s).ok()),
+        cookies_import,
         extensions: extensions_json.and_then(|s| serde_json::from_str(&s).ok()),
         tags: serde_json::from_str(&tags_json).unwrap_or_default(),
         folder: row.get("folder")?,
@@ -241,10 +256,36 @@ fn to_text(value: &Option<serde_json::Value>) -> Option<String> {
     value.as_ref().map(|v| v.to_string())
 }
 
-pub fn list(conn: &Connection) -> Result<Vec<Profile>> {
+/// SEC-12 write path for the `proxy` column: serialize with credentials field-encrypted.
+fn proxy_to_text(
+    cipher: &SecretCipher,
+    value: &Option<serde_json::Value>,
+) -> Result<Option<String>> {
+    match value {
+        Some(v) => {
+            let mut v = v.clone();
+            cipher.encrypt_json_fields(&mut v, PROXY_SECRET_FIELDS)?;
+            Ok(Some(v.to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// SEC-12 write path for the `cookies_import` column: the whole payload is ciphertext on disk.
+fn cookies_to_text(
+    cipher: &SecretCipher,
+    value: &Option<serde_json::Value>,
+) -> Result<Option<String>> {
+    value
+        .as_ref()
+        .map(|v| cipher.encrypt_str(&v.to_string()))
+        .transpose()
+}
+
+pub fn list(conn: &Connection, cipher: &SecretCipher) -> Result<Vec<Profile>> {
     let mut stmt =
         conn.prepare("SELECT * FROM profiles WHERE trashed_at IS NULL ORDER BY created_at DESC")?;
-    let rows = stmt.query_map([], row_to_profile)?;
+    let rows = stmt.query_map([], |row| row_to_profile(cipher, row))?;
     let mut profiles = Vec::new();
     for row in rows {
         profiles.push(row?);
@@ -252,10 +293,10 @@ pub fn list(conn: &Connection) -> Result<Vec<Profile>> {
     Ok(profiles)
 }
 
-pub fn list_trashed(conn: &Connection) -> Result<Vec<Profile>> {
+pub fn list_trashed(conn: &Connection, cipher: &SecretCipher) -> Result<Vec<Profile>> {
     let mut stmt = conn
         .prepare("SELECT * FROM profiles WHERE trashed_at IS NOT NULL ORDER BY trashed_at DESC")?;
-    let rows = stmt.query_map([], row_to_profile)?;
+    let rows = stmt.query_map([], |row| row_to_profile(cipher, row))?;
     let mut profiles = Vec::new();
     for row in rows {
         profiles.push(row?);
@@ -263,16 +304,20 @@ pub fn list_trashed(conn: &Connection) -> Result<Vec<Profile>> {
     Ok(profiles)
 }
 
-pub fn get(conn: &Connection, id: &str) -> Result<Option<Profile>> {
+pub fn get(conn: &Connection, cipher: &SecretCipher, id: &str) -> Result<Option<Profile>> {
     let mut stmt = conn.prepare("SELECT * FROM profiles WHERE id = ?1 AND trashed_at IS NULL")?;
-    let mut rows = stmt.query_map([id], row_to_profile)?;
+    let mut rows = stmt.query_map([id], |row| row_to_profile(cipher, row))?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),
         None => Ok(None),
     }
 }
 
-pub fn create(conn: &Connection, input: CreateProfileInput) -> Result<Profile> {
+pub fn create(
+    conn: &Connection,
+    cipher: &SecretCipher,
+    input: CreateProfileInput,
+) -> Result<Profile> {
     let id = format!("prf_{}", uuid::Uuid::new_v4().simple());
     // Every profile gets a UNIQUE seed unless one is explicitly supplied — never a shared constant.
     let seed = input.fingerprint_seed.unwrap_or_else(new_seed);
@@ -291,10 +336,10 @@ pub fn create(conn: &Connection, input: CreateProfileInput) -> Result<Profile> {
             input.os_version,
             seed,
             to_text(&input.fingerprint_overrides),
-            to_text(&input.proxy),
+            proxy_to_text(cipher, &input.proxy)?,
             input.proxy_id,
             input.template_id,
-            to_text(&input.cookies_import),
+            cookies_to_text(cipher, &input.cookies_import)?,
             to_text(&input.extensions),
             serde_json::to_string(&tags)?,
             input.folder,
@@ -306,11 +351,16 @@ pub fn create(conn: &Connection, input: CreateProfileInput) -> Result<Profile> {
         ],
     )?;
 
-    Ok(get(conn, &id)?.expect("row was just inserted"))
+    Ok(get(conn, cipher, &id)?.expect("row was just inserted"))
 }
 
-pub fn update(conn: &Connection, id: &str, patch: UpdateProfilePatch) -> Result<Option<Profile>> {
-    let existing = match get(conn, id)? {
+pub fn update(
+    conn: &Connection,
+    cipher: &SecretCipher,
+    id: &str,
+    patch: UpdateProfilePatch,
+) -> Result<Option<Profile>> {
+    let existing = match get(conn, cipher, id)? {
         Some(profile) => profile,
         None => return Ok(None),
     };
@@ -377,10 +427,10 @@ pub fn update(conn: &Connection, id: &str, patch: UpdateProfilePatch) -> Result<
             os,
             os_version,
             to_text(&overrides),
-            to_text(&proxy),
+            proxy_to_text(cipher, &proxy)?,
             proxy_id,
             template_id,
-            to_text(&cookies_import),
+            cookies_to_text(cipher, &cookies_import)?,
             to_text(&extensions),
             serde_json::to_string(&tags)?,
             folder,
@@ -389,7 +439,7 @@ pub fn update(conn: &Connection, id: &str, patch: UpdateProfilePatch) -> Result<
         ],
     )?;
 
-    get(conn, id)
+    get(conn, cipher, id)
 }
 
 pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
@@ -471,6 +521,10 @@ mod tests {
         conn
     }
 
+    fn test_cipher() -> SecretCipher {
+        SecretCipher::new(&[42u8; 32])
+    }
+
     fn input(name: &str) -> CreateProfileInput {
         CreateProfileInput {
             name: name.to_string(),
@@ -493,20 +547,22 @@ mod tests {
     #[test]
     fn create_assigns_unique_seeds() {
         let conn = mem();
-        let a = create(&conn, input("A")).unwrap();
-        let b = create(&conn, input("B")).unwrap();
+        let cipher = test_cipher();
+        let a = create(&conn, &cipher, input("A")).unwrap();
+        let b = create(&conn, &cipher, input("B")).unwrap();
         assert_eq!(a.fingerprint_seed.len(), 32);
         assert_ne!(
             a.fingerprint_seed, b.fingerprint_seed,
             "each profile needs its own seed"
         );
-        assert_eq!(list(&conn).unwrap().len(), 2);
+        assert_eq!(list(&conn, &cipher).unwrap().len(), 2);
     }
 
     #[test]
     fn update_persists_engine_os_and_overrides() {
         let conn = mem();
-        let created = create(&conn, input("C")).unwrap();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("C")).unwrap();
         let patch = UpdateProfilePatch {
             name: None,
             engine: Some("lobium".to_string()),
@@ -526,7 +582,7 @@ mod tests {
             folder: None,
             notes: None,
         };
-        let updated = update(&conn, &created.id, patch).unwrap().unwrap();
+        let updated = update(&conn, &cipher, &created.id, patch).unwrap().unwrap();
         assert_eq!(updated.engine, "lobium");
         assert_eq!(updated.os, "macos");
         assert_eq!(updated.os_version.as_deref(), Some("macOS 14 Sonoma"));
@@ -544,11 +600,12 @@ mod tests {
     #[test]
     fn delete_moves_the_row_to_trash() {
         let conn = mem();
-        let created = create(&conn, input("D")).unwrap();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("D")).unwrap();
         assert!(delete(&conn, &created.id).unwrap());
-        assert!(get(&conn, &created.id).unwrap().is_none());
-        assert_eq!(list(&conn).unwrap().len(), 0);
-        let trashed = list_trashed(&conn).unwrap();
+        assert!(get(&conn, &cipher, &created.id).unwrap().is_none());
+        assert_eq!(list(&conn, &cipher).unwrap().len(), 0);
+        let trashed = list_trashed(&conn, &cipher).unwrap();
         assert_eq!(trashed.len(), 1);
         assert_eq!(trashed[0].id, created.id);
         assert!(trashed[0].trashed_at.is_some());
@@ -566,10 +623,11 @@ mod tests {
     #[test]
     fn set_password_hashes_and_removes_profile_password() {
         let conn = mem();
-        let created = create(&conn, input("P")).unwrap();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("P")).unwrap();
         assert!(!created.password_protected);
         assert!(set_password(&conn, &created.id, Some("secret".to_string())).unwrap());
-        let protected = get(&conn, &created.id).unwrap().unwrap();
+        let protected = get(&conn, &cipher, &created.id).unwrap().unwrap();
         assert!(protected.password_protected);
         let stored_hash: Option<String> = conn
             .query_row(
@@ -583,7 +641,7 @@ mod tests {
         assert!(stored_hash.starts_with("$argon2"));
         assert!(set_password(&conn, &protected.id, None).unwrap());
         assert!(
-            !get(&conn, &protected.id)
+            !get(&conn, &cipher, &protected.id)
                 .unwrap()
                 .unwrap()
                 .password_protected
@@ -593,7 +651,8 @@ mod tests {
     #[test]
     fn verify_password_blocks_wrong_or_missing_password() {
         let conn = mem();
-        let created = create(&conn, input("Locked")).unwrap();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("Locked")).unwrap();
         assert!(verify_password(&conn, &created.id, None).unwrap());
         assert!(set_password(&conn, &created.id, Some("secret".to_string())).unwrap());
         assert!(!verify_password(&conn, &created.id, None).unwrap());
@@ -605,25 +664,71 @@ mod tests {
     #[test]
     fn restore_returns_a_profile_to_active_lists() {
         let conn = mem();
-        let created = create(&conn, input("E")).unwrap();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("E")).unwrap();
         assert!(delete(&conn, &created.id).unwrap());
         assert!(restore(&conn, &created.id).unwrap());
-        assert!(list_trashed(&conn).unwrap().is_empty());
-        assert!(get(&conn, &created.id).unwrap().is_some());
-        assert_eq!(list(&conn).unwrap().len(), 1);
+        assert!(list_trashed(&conn, &cipher).unwrap().is_empty());
+        assert!(get(&conn, &cipher, &created.id).unwrap().is_some());
+        assert_eq!(list(&conn, &cipher).unwrap().len(), 1);
         assert!(!restore(&conn, &created.id).unwrap());
     }
 
     #[test]
     fn purge_permanently_removes_only_trashed_profiles() {
         let conn = mem();
-        let active = create(&conn, input("F")).unwrap();
-        let trashed = create(&conn, input("G")).unwrap();
+        let cipher = test_cipher();
+        let active = create(&conn, &cipher, input("F")).unwrap();
+        let trashed = create(&conn, &cipher, input("G")).unwrap();
         assert!(!purge(&conn, &active.id).unwrap());
         assert!(delete(&conn, &trashed.id).unwrap());
         assert!(purge(&conn, &trashed.id).unwrap());
-        assert_eq!(list(&conn).unwrap().len(), 1);
-        assert_eq!(list(&conn).unwrap()[0].id, active.id);
-        assert!(list_trashed(&conn).unwrap().is_empty());
+        assert_eq!(list(&conn, &cipher).unwrap().len(), 1);
+        assert_eq!(list(&conn, &cipher).unwrap()[0].id, active.id);
+        assert!(list_trashed(&conn, &cipher).unwrap().is_empty());
+    }
+
+    /// SEC-12: profile proxy credentials and the cookie-import payload must be ciphertext in the
+    /// raw SQLite cells, while the store API round-trips the original plaintext.
+    #[test]
+    fn profile_proxy_and_cookie_secrets_are_encrypted_at_rest() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let mut new_profile = input("Secret");
+        new_profile.proxy = Some(serde_json::json!({
+            "type": "http", "host": "proxy.example", "port": 8080,
+            "username": "alice-user", "password": "hunter2-topsecret"
+        }));
+        new_profile.cookies_import = Some(serde_json::json!({
+            "mode": "replace",
+            "cookies": [{ "name": "session", "value": "super-secret-session-token" }]
+        }));
+        let created = create(&conn, &cipher, new_profile).unwrap();
+
+        let (raw_proxy, raw_cookies): (String, String) = conn
+            .query_row(
+                "SELECT proxy, cookies_import FROM profiles WHERE id = ?1",
+                params![created.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(!raw_proxy.contains("hunter2-topsecret"));
+        assert!(!raw_proxy.contains("alice-user"));
+        assert!(raw_proxy.contains("lbsec1:"));
+        assert!(
+            raw_proxy.contains("proxy.example"),
+            "non-secret fields stay readable"
+        );
+        assert!(!raw_cookies.contains("super-secret-session-token"));
+        assert!(raw_cookies.starts_with("lbsec1:"));
+
+        let fetched = get(&conn, &cipher, &created.id).unwrap().unwrap();
+        let proxy = fetched.proxy.unwrap();
+        assert_eq!(proxy["username"], "alice-user");
+        assert_eq!(proxy["password"], "hunter2-topsecret");
+        assert_eq!(
+            fetched.cookies_import.unwrap()["cookies"][0]["value"],
+            "super-secret-session-token"
+        );
     }
 }

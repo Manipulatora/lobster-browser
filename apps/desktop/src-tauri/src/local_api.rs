@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 use crate::profile_store;
 use crate::proxy_check;
 use crate::proxy_store;
+use crate::secrets::SecretCipher;
 use crate::sidecar::SidecarClient;
 
 const API_OK: i32 = 0;
@@ -34,6 +35,8 @@ const API_ERR: i32 = 1;
 /// user-data-dir root, and the optional Bearer key.
 pub struct LocalApiState {
     pub db: Arc<Mutex<Connection>>,
+    /// SEC-12: decrypts at-rest secrets (proxy creds, cookie imports) at the store boundary.
+    pub cipher: Arc<SecretCipher>,
     pub sidecar: Arc<SidecarClient>,
     pub profiles_dir: PathBuf,
     pub api_key: Option<String>,
@@ -132,6 +135,7 @@ impl std::fmt::Display for StartError {
 /// result (`{ profileId, pid, ws, debuggerAddress }`); `NotFound` for an unknown profile.
 pub async fn start_profile_via_sidecar(
     db: &Arc<Mutex<Connection>>,
+    cipher: &SecretCipher,
     sidecar: &SidecarClient,
     profiles_dir: &Path,
     profile_id: &str,
@@ -142,7 +146,7 @@ pub async fn start_profile_via_sidecar(
         let conn = db
             .lock()
             .map_err(|_| StartError::Failed(anyhow::anyhow!("profile store lock poisoned")))?;
-        let profile = profile_store::get(&conn, profile_id)
+        let profile = profile_store::get(&conn, cipher, profile_id)
             .map_err(StartError::Failed)?
             .ok_or_else(|| StartError::NotFound(profile_id.to_string()))?;
         if !profile_store::verify_password(&conn, profile_id, password)
@@ -250,6 +254,7 @@ async fn profile_start(
 
     match start_profile_via_sidecar(
         &state.db,
+        &state.cipher,
         &state.sidecar,
         &state.profiles_dir,
         &body.profile_id,
@@ -307,7 +312,7 @@ async fn profile_list(
             )
         }
     };
-    match profile_store::list(&conn) {
+    match profile_store::list(&conn, &state.cipher) {
         Ok(profiles) => (
             StatusCode::OK,
             ApiResponse::ok(serde_json::to_value(profiles).unwrap_or(Value::Null)),
@@ -435,12 +440,14 @@ mod tests {
     #[tokio::test]
     async fn start_profile_missing_profile_returns_not_found() {
         let db = mem_db();
+        let cipher = SecretCipher::new(&[42u8; 32]);
         let sidecar = SidecarClient::spawn("true", "")
             .await
             .expect("spawn fake sidecar");
         let profiles_dir = std::env::temp_dir();
         let err = start_profile_via_sidecar(
             &db,
+            &cipher,
             &sidecar,
             &profiles_dir,
             "missing",
@@ -470,21 +477,31 @@ mod tests {
         std::fs::create_dir_all(&profiles_dir).unwrap();
 
         let conn = profile_store::init(root.join("profiles.sqlite")).unwrap();
+        let cipher = SecretCipher::new(&[42u8; 32]);
         let mut input = test_input("Product E2E");
         input.engine = "lobium".to_string();
-        let profile = profile_store::create(&conn, input).unwrap();
+        let profile = profile_store::create(&conn, &cipher, input).unwrap();
         let db = Arc::new(Mutex::new(conn));
         let sidecar = SidecarClient::spawn("node", &sidecar_path())
             .await
             .expect("spawn real sidecar");
 
-        let launched =
-            start_profile_via_sidecar(&db, &sidecar, &profiles_dir, &profile.id, None, true)
-                .await
-                .expect("launch profile through sidecar");
+        let launched = start_profile_via_sidecar(
+            &db,
+            &cipher,
+            &sidecar,
+            &profiles_dir,
+            &profile.id,
+            None,
+            true,
+        )
+        .await
+        .expect("launch profile through sidecar");
         let cfg_path = profiles_dir.join(&profile.id).join("lobium-fp.json");
-        let cfg_raw = std::fs::read_to_string(&cfg_path).expect("native Lobium config should exist");
-        let cfg: Value = serde_json::from_str(&cfg_raw).expect("native Lobium config should be JSON");
+        let cfg_raw =
+            std::fs::read_to_string(&cfg_path).expect("native Lobium config should exist");
+        let cfg: Value =
+            serde_json::from_str(&cfg_raw).expect("native Lobium config should be JSON");
         assert_eq!(cfg.get("version").and_then(Value::as_i64), Some(1));
         assert_eq!(
             cfg.pointer("/net/webrtcPolicy").and_then(Value::as_str),
@@ -497,7 +514,9 @@ mod tests {
             "native config should carry the UA"
         );
         assert!(
-            cfg.pointer("/seeds/canvas").and_then(Value::as_u64).is_some(),
+            cfg.pointer("/seeds/canvas")
+                .and_then(Value::as_u64)
+                .is_some(),
             "native config should carry per-profile farbling seeds"
         );
         let debugger_address = launched

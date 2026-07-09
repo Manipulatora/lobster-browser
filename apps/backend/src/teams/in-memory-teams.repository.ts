@@ -65,6 +65,10 @@ export class InMemoryTeamsRepository implements TeamsRepository {
     return this.memberships.get(this.key(teamId, userId)) ?? null;
   }
 
+  async removeMember(teamId: string, userId: string): Promise<boolean> {
+    return this.memberships.delete(this.key(teamId, userId));
+  }
+
   private key(teamId: string, userId: string): string {
     return `${teamId}::${userId}`;
   }

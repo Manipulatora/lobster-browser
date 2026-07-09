@@ -88,6 +88,57 @@ export class TeamsService {
     return this.teams.setRole(teamId, targetUserId, role);
   }
 
+  /**
+   * Remove a member (admin-only). Cannot remove the last admin.
+   * TODO(SEC-2): after removal, re-wrap a fresh Team Data Key to remaining members so the
+   * departed member cannot decrypt future blob versions (forward secrecy).
+   */
+  async removeMember(
+    teamId: string,
+    actorUserId: string,
+    targetUserId: string,
+  ): Promise<{ teamId: string; userId: string; removed: true }> {
+    await this.assertAdmin(teamId, actorUserId);
+    const target = await this.teams.getMembership(teamId, targetUserId);
+    if (!target) {
+      throw new NotFoundException('target user is not a member of this team');
+    }
+    if (target.role === 'admin') {
+      const members = await this.teams.listMembers(teamId);
+      const adminCount = members.filter((m) => m.role === 'admin').length;
+      if (adminCount <= 1) {
+        throw new ForbiddenException('a team must have at least one admin');
+      }
+    }
+    const removed = await this.teams.removeMember(teamId, targetUserId);
+    if (!removed) {
+      throw new NotFoundException('target user is not a member of this team');
+    }
+    return { teamId, userId: targetUserId, removed: true };
+  }
+
+  /**
+   * Leave a team (self-removal). Cannot leave as the last admin — transfer admin first.
+   * TODO(SEC-2): same TDK re-wrap as {@link removeMember}.
+   */
+  async leaveTeam(
+    teamId: string,
+    actorUserId: string,
+  ): Promise<{ teamId: string; userId: string; left: true }> {
+    const membership = await this.assertMember(teamId, actorUserId);
+    if (membership.role === 'admin') {
+      const members = await this.teams.listMembers(teamId);
+      const adminCount = members.filter((m) => m.role === 'admin').length;
+      if (adminCount <= 1) {
+        throw new ForbiddenException(
+          'the last admin cannot leave; promote another admin or delete the team',
+        );
+      }
+    }
+    await this.teams.removeMember(teamId, actorUserId);
+    return { teamId, userId: actorUserId, left: true };
+  }
+
   /** Throw unless the caller is a member of the team; returns the membership when they are. */
   private async assertMember(teamId: string, userId: string): Promise<Membership> {
     const membership = await this.teams.getMembership(teamId, userId);

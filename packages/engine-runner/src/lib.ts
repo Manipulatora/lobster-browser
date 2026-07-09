@@ -25,8 +25,21 @@ export {
 export { buildFontConfig, hasFontPersona, writeFontConfig } from './fonts.js';
 export { buildCdpEmulation, buildFingerprintInitScript, buildLaunchOptions } from './launch.js';
 export type { CdpEmulation, PersistentLaunchOptions, UserAgentMetadata } from './launch.js';
+export { buildGpuArgs, isSoftwareRenderer, resolveGpuMode } from './gpu.js';
+export { buildProxyHardeningArgs } from './proxy-hardening.js';
+export type { ProxyHardeningOptions } from './proxy-hardening.js';
+export type { AngleBackend, GpuArgsOptions, GpuMode } from './gpu.js';
 export { applyCdpFingerprint } from './cdp-fingerprint.js';
 export type { CdpSession } from './cdp-fingerprint.js';
+export {
+  applyCookieImport,
+  cdpCookiesFromDraft,
+  exportCookies,
+  exportCookiesJson,
+  parseCookieText,
+  toCdpCookie,
+} from './cookie-inject.js';
+export type { CdpCookieParam } from './cookie-inject.js';
 export {
   mousePath,
   moveTimings,
@@ -98,6 +111,19 @@ export {
   normalizeHostCalibrationSnapshot,
   probeHostCalibration,
 } from './host-calibration-probe.js';
+export {
+  loadHostCalibration,
+  persistHostCalibration,
+  resolveHostCalibrationPath,
+} from './host-calibration-store.js';
+export {
+  defaultHostCalibrationPath,
+  ensureHostCalibration,
+} from './ensure-host-calibration.js';
+export type {
+  EnsureHostCalibrationOptions,
+  EnsureHostCalibrationResult,
+} from './ensure-host-calibration.js';
 export type {
   HostCalibrationRawNavigator,
   HostCalibrationRawSnapshot,

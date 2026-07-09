@@ -7,8 +7,8 @@
  * version — the store owns version assignment, so callers push new bytes and read back the version.
  *
  * Implementations:
- *   - InMemoryBlobStore — a Map; the active provider until an object store is provisioned.
- *   - S3BlobStore       — production persistence via S3 (stub until Day 2 wiring lands).
+ *   - InMemoryBlobStore — a Map; the default provider for dev/tests (no object store needed).
+ *   - S3BlobStore       — production persistence via S3/MinIO (selected when S3_BUCKET is set).
  */
 
 /** Non-secret metadata recorded alongside a blob (for future S3 tagging / auditing). */

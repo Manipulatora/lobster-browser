@@ -22,7 +22,7 @@ around protecting that asset and the credentials (proxy, account, API) that orbi
 
 | Data class | Contains | Plaintext allowed on | Encryption | Status |
 |---|---|---|---|---|
-| **Profile blob** | cookies, localStorage, IndexedDB, session storage, user-data-dir snapshot, fingerprint seed | desktop agent (in memory + local disk) only | **client-side AES-256-GCM before upload**; server stores opaque bytes | `partial` (server broker `done`; client crypto `planned`) |
+| **Profile blob** | cookies, localStorage, IndexedDB, session storage, user-data-dir snapshot, fingerprint seed | desktop agent (in memory + local disk) only | **client-side AES-256-GCM before upload**; server stores opaque bytes | `partial` (server broker `done`; **LBv1 client envelope `done`** in `@lobster/crypto` + Rust `blob_crypto`; SEC-2 hierarchy helpers `done`; membership TDK re-wrap + sync UI `planned`) |
 | **Fingerprint seed** | 128-bit deterministic seed → whole fingerprint | desktop + server metadata (non-secret by itself) | stored in Postgres as metadata; also inside the encrypted blob | `done` (stored), seed is not a secret on its own |
 | **Local profile catalog** | profile metadata, proxy config (incl. proxy password), fingerprint overrides | desktop disk (SQLite) | **SQLCipher / field-level AES-GCM**, key in OS keychain | `partial` (SQLite `done`, encryption `planned` — see `profile_store.rs` "LATER") |
 | **Passwords** | account credentials | never stored plaintext | **bcrypt** (cost 10) one-way hash | `done` |
@@ -58,11 +58,11 @@ key without re-encrypting every blob, and revoke access at team or profile granu
 
 | Key | Derivation / source | Lifetime | Wrapped by | Status |
 |---|---|---|---|---|
-| **UMK** — User Master Key | `Argon2id(password, salt, m=64MiB, t=3, p=1)` → 32 bytes | ephemeral (session only, never persisted) | — | `planned` |
-| **UKWK** — User Key-Wrapping Key | random 32 bytes at signup | account life (rotates on password change) | UMK (AES-256-GCM key-wrap) | `planned` |
-| **TDK** — Team Data Key | random 32 bytes per team | team life | **each member's** UKWK (one wrapped copy per membership row) | `planned` |
-| **PCK** — Profile Content Key | random 32 bytes per profile, OR `HKDF(TDK, profileId)` | profile life | TDK | `planned` |
-| **Local Store Key (LSK)** | random 32 bytes, per install | install life | **OS keychain** | `planned` |
+| **UMK** — User Master Key | `Argon2id(password, salt, m=64MiB, t=3, p=1)` → 32 bytes | ephemeral (session only, never persisted) | — | `partial` (`@lobster/crypto` `deriveUserMasterKey`) |
+| **UKWK** — User Key-Wrapping Key | random 32 bytes at signup | account life (rotates on password change) | UMK (AES-256-GCM key-wrap) | `partial` (`wrapKey`/`bootstrapTeamKeys`) |
+| **TDK** — Team Data Key | random 32 bytes per team | team life | **each member's** UKWK (one wrapped copy per membership row) | `partial` (wrap helpers done; server membership rows + re-wrap on remove `planned`) |
+| **PCK** — Profile Content Key | random 32 bytes per profile, OR `HKDF(TDK, profileId)` | profile life | TDK | `partial` (`deriveProfileContentKey` TS+Rust) |
+| **Local Store Key (LSK)** | random 32 bytes, per install | install life | **OS keychain** | `partial` (`keychain.rs` keyring + file fallback) |
 
 **Sharing model:** when a profile is shared with a teammate, we do **not** re-encrypt the blob. The
 teammate already holds the **TDK** (a copy wrapped to their UKWK was created when they joined the team),
@@ -330,7 +330,7 @@ primary defense; the `Origin`/`Host` allowlist is defense in depth.
 | **Fingerprint leak / correlation** | native deep-surface fingerprinting (Lobium), coherent real-system params, WebRTC-behind-proxy, clean CDP, CI detector gate (see MASTER_PLAN §5–6) | tracked in fingerprint spec |
 | **WebRTC/DNS IP leak** | ICE == proxy IP (native Lobium / policy interim); DNS via proxy | `partial` |
 | **Token theft** | short access TTL + rotating refresh + reuse detection + revocation; HttpOnly/Secure cookies; keychain on desktop | `planned` |
-| **Blob exfiltration from server** | **client-side AES-GCM (zero-knowledge)** — stolen S3/PG bytes are useless without team keys | `partial` (server-opaque `done`; client crypto `planned`) |
+| **Blob exfiltration from server** | **client-side AES-GCM (zero-knowledge)** — stolen S3/PG bytes are useless without team keys | `partial` (server-opaque `done`; LBv1 envelope `done`; SEC-2 key hierarchy `planned`) |
 | **Blob exfiltration from disk** | local store encryption + keychain-held LSK; single-active-instance lock | `planned` |
 | **Proxy-cred theft** | credentials only inside encrypted blob + encrypted local store; never logged | `partial` |
 | **Credential stuffing / brute force** | bcrypt (slow), rate limit + lockout on login, 2FA, generic error messages (already generic in `auth.service.ts`) | `partial` |

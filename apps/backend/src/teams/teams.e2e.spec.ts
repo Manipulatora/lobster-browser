@@ -123,3 +123,45 @@ test('unauthenticated create is 401', async () => {
   const res = await request(app.getHttpServer()).post('/teams').send({ name: 'nope' });
   assert.equal(res.status, 401);
 });
+
+test('BE-7: admin can remove a member; member can leave after promotion', async () => {
+  const adminToken = await registerToken('admin-remove@example.com');
+  const memberToken = await registerToken('member-remove@example.com');
+  const auth = (t: string) => ({ Authorization: `Bearer ${t}` });
+
+  const create = await request(app.getHttpServer())
+    .post('/teams')
+    .set(auth(adminToken))
+    .send({ name: 'Removable Team' });
+  const teamId: string = create.body.data.id;
+
+  const invite = await request(app.getHttpServer())
+    .post(`/teams/${teamId}/members`)
+    .set(auth(adminToken))
+    .send({ email: 'member-remove@example.com', role: 'member' });
+  assert.ok([200, 201].includes(invite.status));
+  const memberId: string = invite.body.data.userId;
+
+  const remove = await request(app.getHttpServer())
+    .delete(`/teams/${teamId}/members/${memberId}`)
+    .set(auth(adminToken));
+  assert.equal(remove.status, 200);
+  assert.equal(remove.body.data.removed, true);
+
+  // Re-invite, promote to admin, then leave as that admin (another admin remains).
+  const invite2 = await request(app.getHttpServer())
+    .post(`/teams/${teamId}/members`)
+    .set(auth(adminToken))
+    .send({ email: 'member-remove@example.com', role: 'member' });
+  const memberId2: string = invite2.body.data.userId;
+  await request(app.getHttpServer())
+    .patch(`/teams/${teamId}/members/${memberId2}/role`)
+    .set(auth(adminToken))
+    .send({ role: 'admin' });
+
+  const leave = await request(app.getHttpServer())
+    .post(`/teams/${teamId}/leave`)
+    .set(auth(memberToken));
+  assert.ok([200, 201].includes(leave.status), `leave status ${leave.status}`);
+  assert.equal(leave.body.data.left, true);
+});

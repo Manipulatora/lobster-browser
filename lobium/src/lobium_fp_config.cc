@@ -82,11 +82,44 @@ void ReadScreen(const base::DictValue& dict, ScreenConfig& s) {
   s.device_pixel_ratio = dict.FindDouble("devicePixelRatio").value_or(1);
 }
 
+ShaderPrecisionFormat ReadPrecisionFormat(const base::DictValue* dict) {
+  ShaderPrecisionFormat f;
+  if (!dict) {
+    return f;
+  }
+  f.range_min = dict->FindInt("rangeMin").value_or(0);
+  f.range_max = dict->FindInt("rangeMax").value_or(0);
+  f.precision = dict->FindInt("precision").value_or(0);
+  return f;
+}
+
+void ReadPrecisionStage(const base::DictValue* dict, ShaderPrecisionStage& stage) {
+  if (!dict) {
+    return;
+  }
+  stage.low_float = ReadPrecisionFormat(dict->FindDict("lowFloat"));
+  stage.medium_float = ReadPrecisionFormat(dict->FindDict("mediumFloat"));
+  stage.high_float = ReadPrecisionFormat(dict->FindDict("highFloat"));
+  stage.low_int = ReadPrecisionFormat(dict->FindDict("lowInt"));
+  stage.medium_int = ReadPrecisionFormat(dict->FindDict("mediumInt"));
+  stage.high_int = ReadPrecisionFormat(dict->FindDict("highInt"));
+}
+
 void ReadWebGl(const base::DictValue& dict, WebGlConfig& w) {
   if (const std::string* s = dict.FindString("vendor")) w.vendor = *s;
   if (const std::string* s = dict.FindString("renderer")) w.renderer = *s;
   if (const std::string* s = dict.FindString("unmaskedVendor")) w.unmasked_vendor = *s;
   if (const std::string* s = dict.FindString("unmaskedRenderer")) w.unmasked_renderer = *s;
+  // Deep surfaces (HC-4). Present JSON keys override; absent keys leave the host value.
+  if (const std::string* s = dict.FindString("version")) w.version = *s;
+  if (const std::string* s = dict.FindString("shadingLanguageVersion"))
+    w.shading_language_version = *s;
+  w.extensions = ReadStringList(dict.FindList("extensions"));
+  if (const base::DictValue* prec = dict.FindDict("shaderPrecision")) {
+    w.shader_precision.present = true;
+    ReadPrecisionStage(prec->FindDict("vertex"), w.shader_precision.vertex);
+    ReadPrecisionStage(prec->FindDict("fragment"), w.shader_precision.fragment);
+  }
   if (const base::DictValue* c = dict.FindDict("caps")) {
     WebGlCaps& caps = w.caps;
     caps.present = true;

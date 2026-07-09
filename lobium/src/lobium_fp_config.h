@@ -76,12 +76,45 @@ struct WebGlCaps {
   float aliased_point_size_range[2] = {0, 0};
 };
 
+// One getShaderPrecisionFormat() result (rangeMin/rangeMax/precision).
+struct ShaderPrecisionFormat {
+  int range_min = 0;
+  int range_max = 0;
+  int precision = 0;
+};
+
+// getShaderPrecisionFormat() buckets for one shader stage (vertex or fragment).
+struct ShaderPrecisionStage {
+  ShaderPrecisionFormat low_float;
+  ShaderPrecisionFormat medium_float;
+  ShaderPrecisionFormat high_float;
+  ShaderPrecisionFormat low_int;
+  ShaderPrecisionFormat medium_int;
+  ShaderPrecisionFormat high_int;
+};
+
+// Captured shader precision for both shader stages. `present` gates the getShaderPrecisionFormat hook.
+struct ShaderPrecisionProfile {
+  bool present = false;
+  ShaderPrecisionStage vertex;
+  ShaderPrecisionStage fragment;
+};
+
 struct WebGlConfig {
   std::string vendor;
   std::string renderer;
   std::string unmasked_vendor;
   std::string unmasked_renderer;
   WebGlCaps caps;
+  // Deep surfaces that must agree with the spoofed renderer or a detector cross-checks them against the
+  // real host GPU (HC-4). Empty/absent = leave the host value (fall back), so a config that omits them
+  // never blanks a real surface. `version`/`shading_language_version` back getParameter(VERSION|
+  // SHADING_LANGUAGE_VERSION); `extensions` backs getSupportedExtensions()/getExtension(); precision
+  // backs getShaderPrecisionFormat().
+  std::string version;
+  std::string shading_language_version;
+  std::vector<std::string> extensions;
+  ShaderPrecisionProfile shader_precision;
 };
 
 struct LocaleConfig {

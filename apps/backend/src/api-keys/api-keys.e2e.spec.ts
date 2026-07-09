@@ -225,6 +225,31 @@ test('a revoked secret no longer verifies', async () => {
   assert.equal(await service.verify(secret), null, 'a revoked secret must not verify');
 });
 
+test('BE-5: GET /automation/whoami accepts a live key and 401s after revoke', async () => {
+  const token = await registerToken('api-keys-automation@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+
+  const create = await request(app.getHttpServer())
+    .post('/api-keys')
+    .set(auth)
+    .send({ name: 'automation' });
+  const { apiKey, secret } = create.body.data;
+
+  const whoami = await request(app.getHttpServer())
+    .get('/automation/whoami')
+    .set({ Authorization: `Bearer ${secret}` });
+  assert.equal(whoami.status, 200);
+  assert.equal(whoami.body.code, 0);
+  assert.equal(whoami.body.data.apiKeyId, apiKey.id);
+  assert.equal(whoami.body.data.teamId, apiKey.teamId);
+
+  await request(app.getHttpServer()).delete(`/api-keys/${apiKey.id}`).set(auth);
+  const after = await request(app.getHttpServer())
+    .get('/automation/whoami')
+    .set({ Authorization: `Bearer ${secret}` });
+  assert.equal(after.status, 401);
+});
+
 test('unauthenticated create is 401', async () => {
   const res = await request(app.getHttpServer()).post('/api-keys').send({ name: 'nope' });
   assert.equal(res.status, 401);

@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@lobster/shared-types": "*",
+    "socks-proxy-agent": "^10.1.0",
     "undici": "^6.21.0"
   }
 }

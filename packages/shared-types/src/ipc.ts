@@ -18,7 +18,14 @@ import type { ProxyConfig } from './proxy.js';
  * See docs/contracts/sidecar-ipc.md for the full spec.
  */
 
-export type SidecarMethod = 'startProfile' | 'launch' | 'stop' | 'status' | 'ping';
+export type SidecarMethod =
+  | 'startProfile'
+  | 'launch'
+  | 'stop'
+  | 'status'
+  | 'ping'
+  | 'ensureHostCalibration';
+
 
 export interface SidecarRequest<M extends SidecarMethod = SidecarMethod, P = unknown> {
   /** Correlation id echoed back in the response. */
