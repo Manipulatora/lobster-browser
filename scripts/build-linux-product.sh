@@ -147,6 +147,11 @@ cp -a "$DIST/lobium-runtime/." "$INSTALL_ROOT/lobium/"
   echo "export LOBSTER_LOBIUM_DIR=\"$INSTALL_ROOT/lobium\""
   echo "export LOBSTER_GPU=\"${LOBSTER_GPU}\""
   echo "export LOBSTER_NO_SANDBOX=\"${LOBSTER_NO_SANDBOX:-1}\""
+  # Inert Google API keys: their presence suppresses the "Google API keys are missing"
+  # infobar without enabling any Google service call.
+  echo "export GOOGLE_API_KEY=\"no\""
+  echo "export GOOGLE_DEFAULT_CLIENT_ID=\"no\""
+  echo "export GOOGLE_DEFAULT_CLIENT_SECRET=\"no\""
   if [[ -n "${LOBSTER_ANGLE_BACKEND:-}" ]]; then
     echo "export LOBSTER_ANGLE_BACKEND=\"${LOBSTER_ANGLE_BACKEND}\""
   fi

@@ -17,12 +17,21 @@ New Tab Page result (the real `chrome://newtab`, not an injected mock):
 Brand image sources live in `apps/desktop/src/assets/brand/`; the transparent variants are produced by
 `scripts/make-brand-transparent.mjs` (corner flood-fill background removal).
 
-## 2. `toolbar-profile-chip.patch` (native C++ — a real toolbar element)
+## 2. `omnibox-profile-chip.patch` (native C++ — profile chip inside the omnibox)
 
-Adds a profile-name chip (brand-colored dot + name) as a rounded pill **immediately left of the
-omnibox** in `ToolbarView`. It reads the per-profile name from the `--lobium-profile-name` command-line
-switch that the launcher passes (`packages/engine-runner/src/runners/lobium-launcher.ts`). Absent
-switch → no chip. This replaces the old in-page profile chip that the removed injected NTP used to draw.
+Adds a profile-name chip (brand-red dot + name) as the **leftmost leading decoration inside the
+LocationBarView** — i.e. inside the same rounded omnibox box that holds the URL and the zoom/page-action
+icons, not a separate pill in the toolbar. Reads the per-profile name from the `--lobium-profile-name`
+command-line switch the launcher passes (`packages/engine-runner/src/runners/lobium-launcher.ts`);
+absent switch → no chip. Touches only
+`chrome/browser/ui/views/location_bar/location_bar_view.{cc,h}`.
 
-Apply after the resource edits (it only touches `chrome/browser/ui/views/toolbar/toolbar_view.{cc,h}`),
-then rebuild `chrome`.
+## 3. `suppress-sandbox-infobar.patch` (native C++ — product polish)
+
+Skips `--no-sandbox` in `ShowBadFlagsPrompt` so the "unsupported command-line flag" security-warning
+infobar is not shown. `--no-sandbox` is required by our packaged launch env and is not web-observable.
+The companion "Google API keys are missing" infobar is suppressed **without a patch** by inert
+`GOOGLE_API_KEY`/`GOOGLE_DEFAULT_CLIENT_ID`/`GOOGLE_DEFAULT_CLIENT_SECRET` env vars set by the launcher
+and the installed `env` file.
+
+Apply patches after the resource edits, then rebuild `chrome`.

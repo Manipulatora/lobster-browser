@@ -1,0 +1,119 @@
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+index 0353e3f0ae..e562868f38 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
+@@ -16,6 +16,7 @@
+ #include "base/functional/callback_helpers.h"
+ #include "base/i18n/rtl.h"
+ #include "base/metrics/field_trial_params.h"
++#include "base/command_line.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/trace_event/trace_event.h"
+ #include "base/trace_event/typed_macros.h"
+@@ -185,7 +186,10 @@
+ #include "ui/views/controls/button/image_button_factory.h"
+ #include "ui/views/controls/focus_ring.h"
+ #include "ui/views/controls/highlight_path_generator.h"
++#include "third_party/skia/include/core/SkColor.h"
+ #include "ui/views/controls/label.h"
++#include "ui/views/layout/flex_layout.h"
++#include "ui/views/layout/layout_types.h"
+ #include "ui/views/interaction/element_tracker_views.h"
+ #include "ui/views/property_effects.h"
+ #include "ui/views/style/typography.h"
+@@ -340,6 +344,42 @@ void LocationBarView::Init() {
+   location_icon_view->set_drag_controller(this);
+   location_icon_view_ = AddChildView(std::move(location_icon_view));
+ 
++  // Lobium: per-profile name chip shown INSIDE the omnibox box, at its leading
++  // (left) edge — a small brand dot + the profile name. Populated from the
++  // --lobium-profile-name switch the launcher passes per profile; absent switch
++  // => no chip. Laid out as a leading decoration in Layout().
++  {
++    const std::string lobium_profile_name =
++        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++            "lobium-profile-name");
++    if (!lobium_profile_name.empty()) {
++      auto chip = std::make_unique<views::View>();
++      auto* chip_layout =
++          chip->SetLayoutManager(std::make_unique<views::FlexLayout>());
++      chip_layout->SetOrientation(views::LayoutOrientation::kHorizontal)
++          .SetMainAxisAlignment(views::LayoutAlignment::kCenter)
++          .SetCrossAxisAlignment(views::LayoutAlignment::kCenter)
++          .SetCollapseMargins(true);
++      chip->SetBackground(views::CreateRoundedRectBackground(
++          SkColorSetA(SkColorSetRGB(0xD7, 0x19, 0x20), 0x1F), 10));
++      chip->SetBorder(views::CreateEmptyBorder(gfx::Insets::VH(1, 8)));
++
++      auto* dot = chip->AddChildView(std::make_unique<views::View>());
++      dot->SetPreferredSize(gfx::Size(8, 8));
++      dot->SetBackground(views::CreateRoundedRectBackground(
++          SkColorSetRGB(0xD7, 0x19, 0x20), 4));
++      dot->SetProperty(views::kMarginsKey, gfx::Insets::TLBR(0, 0, 0, 6));
++
++      auto* label = chip->AddChildView(std::make_unique<views::Label>(
++          base::UTF8ToUTF16(lobium_profile_name)));
++      label->SetElideBehavior(gfx::ELIDE_TAIL);
++      label->SetMaximumWidthSingleLine(160);
++      label->SetEnabledColor(SkColorSetRGB(0xD7, 0x19, 0x20));
++
++      lobium_profile_chip_ = AddChildView(std::move(chip));
++    }
++  }
++
+   // Initialize the Omnibox view. browser_ can be nullptr on ChromeOS in the
+   // case of simple_web_view_dialog. Or it can be nulltpr on ChromeOS and on
+   // other desktop platforms in the case of presentation_receiver_window_view.
+@@ -923,6 +963,15 @@ void LocationBarView::Layout(PassKey) {
+                 !ShouldShowKeywordBubble()
+           : chip_controller_->chip()->GetVisible() &&
+                 !ShouldShowKeywordBubble();
++  // Lobium: profile-name chip is the leftmost leading decoration inside the omnibox.
++  if (lobium_profile_chip_) {
++    lobium_profile_chip_->SetVisible(true);
++    leading_decorations.AddDecoration(vertical_padding, location_height,
++                                      /*auto_collapse=*/false, 0,
++                                      /*intra_item_padding=*/0, icon_left,
++                                      lobium_profile_chip_);
++  }
++
+   if (show_overriding_permission_chip) {
+     if (base::FeatureList::IsEnabled(
+             content_settings::features::kLeftHandSideActivityIndicators)) {
+@@ -1509,11 +1558,19 @@ int LocationBarView::GetMinimumLeadingWidth() const {
+     return 0;
+   }
+ 
++  // Lobium: reserve room for the leading profile chip when present.
++  int lobium_chip_width = 0;
++  if (lobium_profile_chip_) {
++    lobium_chip_width = lobium_profile_chip_->GetPreferredSize().width() +
++                        GetLayoutConstant(LayoutConstant::kLocationBarElementPadding);
++  }
++
+   if (location_icon_view_->GetShowText()) {
+-    return location_icon_view_->GetMinimumLabelTextWidth();
++    return lobium_chip_width + location_icon_view_->GetMinimumLabelTextWidth();
+   }
+ 
+-  return GetLayoutConstant(LayoutConstant::kLocationBarElementPadding) +
++  return lobium_chip_width +
++         GetLayoutConstant(LayoutConstant::kLocationBarElementPadding) +
+          location_icon_view_->GetMinimumSize().width();
+ }
+ 
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.h b/chrome/browser/ui/views/location_bar/location_bar_view.h
+index 62b5f976ff..d467d84e5e 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.h
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
+@@ -569,6 +569,10 @@ class LocationBarView
+   // search icon, EV HTTPS bubble, etc.
+   raw_ptr<LocationIconView> location_icon_view_ = nullptr;
+ 
++  // Lobium: optional per-profile name chip at the omnibox's leading edge. Null
++  // when no --lobium-profile-name switch is present.
++  raw_ptr<views::View> lobium_profile_chip_ = nullptr;
++
+   // Views to show inline autocompletion when an IME is active.  In this case,
+   // we shouldn't change the text or selection inside the OmniboxView itself,
+   // since this will conflict with the IME's control over the text.  So instead

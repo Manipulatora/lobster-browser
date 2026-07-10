@@ -299,8 +299,8 @@ async function patchNativeBrandingFiles() {
   display: block;
   width: auto;
   height: auto;
-  max-width: min(300px, 64vw);
-  max-height: var(--ntp-logo-height, 168px);
+  max-width: min(440px, 74vw);
+  max-height: 260px;
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
@@ -337,8 +337,8 @@ async function patchNativeBrandingFiles() {
         '#lobiumSubBrand {\n  display: flex;\n  justify-content: center;\n  align-items: center;\n' +
         '  margin: 4px auto 16px;\n  width: var(--ntp-search-box-width, min(337px, 80vw));\n}\n' +
         '#lobiumSubBrand[hidden] {\n  display: none;\n}\n' +
-        '#lobiumSubBrand img {\n  display: block;\n  width: auto;\n  height: auto;\n' +
-        '  max-width: min(240px, 60vw);\n  max-height: 96px;\n  object-fit: contain;\n' +
+        '#lobiumSubBrand img {\n  display: block;\n  width: 100%;\n  height: auto;\n' +
+        '  max-width: var(--ntp-search-box-width, min(337px, 80vw));\n  object-fit: contain;\n' +
         '  user-select: none;\n  -webkit-user-drag: none;\n}\n';
       await writeFile(appCssPath, appCss, 'utf8');
     }

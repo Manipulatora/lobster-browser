@@ -126,12 +126,22 @@ export function resolveFontsBaseDir(): string | undefined {
 export async function buildLobiumLaunchEnv(
   ctx: LaunchContext,
 ): Promise<Record<string, string> | undefined> {
+  // Dummy Google API keys so Chromium does not show the "Google API keys are missing"
+  // infobar. Values are intentionally inert (we do not want profiles calling Google
+  // services); their mere presence suppresses the warning. Applied on every launch.
+  const env: Record<string, string> = {
+    GOOGLE_API_KEY: 'no',
+    GOOGLE_DEFAULT_CLIENT_ID: 'no',
+    GOOGLE_DEFAULT_CLIENT_SECRET: 'no',
+  };
   const base = resolveFontsBaseDir();
-  if (!base) {
-    return undefined;
+  if (base) {
+    const conf = await writeFontConfig(ctx.options.userDataDir, ctx.fingerprint.os, base);
+    if (conf) {
+      env.FONTCONFIG_FILE = conf;
+    }
   }
-  const conf = await writeFontConfig(ctx.options.userDataDir, ctx.fingerprint.os, base);
-  return conf ? { FONTCONFIG_FILE: conf } : undefined;
+  return env;
 }
 
 /** True when the native Lobium binary is provisioned in this environment. */
