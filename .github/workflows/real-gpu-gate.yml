@@ -1,0 +1,108 @@
+name: Real-GPU stealth gate
+
+# QA-1 blocking gate. Runs the native Lobium detector + the CreepJS battle matrix on a SELF-HOSTED
+# runner that has a real consumer GPU and a built Lobium binary, then applies ci/validation/gate.mjs
+# as a strict referee: it FAILS unless the run used real hardware (not SwiftShader) AND every scored
+# CreepJS situation had zero lies. This converts "proven on SwiftShader" into a real, falsifiable claim.
+#
+# This is NOT the ubuntu-latest CI (github-hosted runners have no GPU/Lobium binary). Set up the
+# self-hosted GPU runner per docs/specs/real-gpu-ci.md, then:
+#   - label it `gpu`
+#   - set repo variables: LOBSTER_LOBIUM_BIN, DISPLAY, and (optional) LOBSTER_ANGLE_BACKEND / VK_ICD_FILENAMES
+# The job is manual + nightly by default so a missing/asleep GPU box never blocks normal PR CI. Flip
+# `pull_request` on once the runner is reliably online to make it a true per-PR merge gate.
+
+on:
+  workflow_dispatch:
+    inputs:
+      creepjs_limit:
+        description: 'Max CreepJS situations to run'
+        required: false
+        default: '120'
+      min_situations:
+        description: 'Minimum situations the gate requires'
+        required: false
+        default: '100'
+  schedule:
+    # 05:00 UTC nightly — records a real-GPU zero-lies datapoint each day.
+    - cron: '0 5 * * *'
+  # Uncomment to make this a per-PR merge gate once the self-hosted GPU runner is reliably online:
+  # pull_request:
+  #   branches: [main]
+
+concurrency:
+  group: real-gpu-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+  PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+  PUPPETEER_SKIP_DOWNLOAD: '1'
+
+jobs:
+  real-gpu-gate:
+    name: Native Lobium real-GPU zero-lies gate
+    # Requires a self-hosted runner tagged `gpu` with a physical GPU + a built Lobium binary.
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm install --no-audit --no-fund
+
+      # Build the packages the validation scripts + gate import (their dist output).
+      - name: Build validation deps
+        run: npx tsc -b packages/shared-types packages/proxy packages/fingerprint packages/engine-runner
+
+      - name: Preflight — confirm real GPU + Lobium binary
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+        run: |
+          if [ -z "${LOBSTER_LOBIUM_BIN:-}" ] || [ ! -x "$LOBSTER_LOBIUM_BIN" ]; then
+            echo "::error::LOBSTER_LOBIUM_BIN unset or not executable ($LOBSTER_LOBIUM_BIN)."
+            echo "Set the repo variable LOBSTER_LOBIUM_BIN to the built Lobium chrome binary on this runner."
+            exit 1
+          fi
+          echo "Lobium binary: $LOBSTER_LOBIUM_BIN"
+
+      - name: Native Lobium detector (real GPU)
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_GPU: gpu
+          LOBSTER_ANGLE_BACKEND: ${{ vars.LOBSTER_ANGLE_BACKEND || 'vulkan' }}
+          VK_ICD_FILENAMES: ${{ vars.VK_ICD_FILENAMES }}
+          DISPLAY: ${{ vars.DISPLAY || ':0' }}
+        run: node ci/validation/lobium-detect.mjs
+
+      - name: CreepJS battle matrix (real GPU)
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_GPU: gpu
+          LOBSTER_ANGLE_BACKEND: ${{ vars.LOBSTER_ANGLE_BACKEND || 'vulkan' }}
+          VK_ICD_FILENAMES: ${{ vars.VK_ICD_FILENAMES }}
+          DISPLAY: ${{ vars.DISPLAY || ':0' }}
+          LOBSTER_CREEPJS_LIMIT: ${{ github.event.inputs.creepjs_limit || '120' }}
+          LOBSTER_CREEPJS_CONCURRENCY: '1'
+        run: node ci/validation/creepjs-battle.mjs
+
+      # The strict referee. FAILS unless real-hardware AND every situation zero-lies. This is what makes
+      # the SwiftShader 120/120 false-pass impossible to merge.
+      - name: Strict gate (real-GPU + zero lies)
+        env:
+          LOBSTER_GATE_MIN_SITUATIONS: ${{ github.event.inputs.min_situations || '100' }}
+          LOBSTER_GATE_REQUIRE_DETECT: '1'
+        run: node ci/validation/gate.mjs
+
+      - name: Upload validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-gpu-reports-${{ github.run_id }}
+          path: ci/validation/reports/
+          if-no-files-found: warn
+          retention-days: 30
