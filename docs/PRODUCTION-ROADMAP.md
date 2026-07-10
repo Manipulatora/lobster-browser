@@ -13,6 +13,34 @@
 
 ---
 
+## Sequencing law (decisive — read before picking up any packaging/billing task)
+
+> **Nothing ships until the engine's stealth is proven on real hardware.** Packaging, code-signing,
+> notarization, auto-update, installer polish, Stripe/billing, and cloud durability are **BLOCKED** on a
+> recorded `GATE PASS` from the real-GPU zero-lies gate (`ci/validation/gate.mjs` via
+> `.github/workflows/real-gpu-gate.yml` — see [`specs/real-gpu-ci.md`](specs/real-gpu-ci.md)) on at least
+> a **mid-range consumer GPU**, on Windows and macOS baselines, not just the RTX 5090 dev box.
+>
+> **Why:** signing and shipping an installer for an engine whose stealth is unproven on the median target
+> device is polishing the box of a product that might not work. A signed, auto-updating app that gets
+> every profile flagged is worth less than an unsigned binary that passes. Order is not a suggestion
+> here — it is the difference between an R&D prototype and a product.
+>
+> **The gate to unblock packaging/billing (all must be true):**
+> 1. `GATE PASS` on the real-GPU runner (real renderer, `gpuMode:gpu`, every CreepJS situation zero-lies)
+>    on a mid-range consumer GPU — not only the data-center RTX 5090.
+> 2. Windows and macOS real-hardware baselines through the same gate (Linux alone is not "multi-OS proof").
+> 3. At least one real, authorized commercial-WAF target through the anti-bot exam
+>    ([`specs/antibot-exam.md`](specs/antibot-exam.md)) recorded as `passed` (not `challenged`/`blocked`).
+>
+> **State (2026-07-10):** HC-4 proven compiled+functional in the binary (`hc4-probe.mjs` 5/5); the
+> real-GPU zero-lies gate is authored and verified to reject the SwiftShader false-pass; the anti-bot
+> exam exists and recorded its first (provisional) datapoint. **The one remaining unlock** is to
+> provision the self-hosted consumer-GPU runner, run the gate on Windows/macOS/consumer-Linux, and
+> record `GATE PASS` + a clean WAF datapoint. That — not more Blink hooks — gates everything downstream.
+
+---
+
 ## 0. The architectural pivot: host-calibrated + farbled (read this first)
 
 Because every profile runs on the **user's own real hardware**, the correct model is **not** "claim an
