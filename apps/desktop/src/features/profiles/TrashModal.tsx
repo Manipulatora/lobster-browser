@@ -6,7 +6,7 @@ import {
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 
-import octiumMainIcon from '../../assets/brand/octium-main-icon.png';
+import lobsterIcon from '../../assets/brand/lobster-icon.png';
 import { osLabel } from './options';
 
 interface TrashModalProps {
@@ -88,7 +88,7 @@ export function TrashModal({
               return (
                 <article className="trash-row" key={profile.id}>
                   <div className="profile-title-cell profile-title-cell--compact">
-                    <img className="row-mark" src={octiumMainIcon} alt="" aria-hidden />
+                    <img className="row-mark" src={lobsterIcon} alt="" aria-hidden />
                     <div className="profile-title-text">
                       <div className="table-title">{profile.name}</div>
                       <div className="table-subtitle">

@@ -1,12 +1,9 @@
 /**
- * Which browser engine backs a profile. The runtime array is the single source of truth — backend
- * validation, the desktop UI, and the fingerprint engine all derive from it, so the set never drifts.
- * Both engines are Chromium-based, so profiles always present a Chrome fingerprint.
- * - `lobium`   — Lobium, our custom-built Chromium engine (flagship, ADR-0004). Until the custom
- *                build ships it is served by a patched Chromium via patchright.
- * - `chromium` — a prebuilt (ungoogled) Chromium driven via patchright (interim / everyday).
+ * Which browser engine backs a profile. Lobium is the only product engine: every profile launches the
+ * custom Chromium build and receives the native config channel. Chromium may still appear in external
+ * automation examples as Playwright/Selenium API terminology, but it is not a Lobster engine choice.
  */
-export const ENGINE_KINDS = ['lobium', 'chromium'] as const;
+export const ENGINE_KINDS = ['lobium'] as const;
 export type EngineKind = (typeof ENGINE_KINDS)[number];
 
 /** The OS a fingerprint claims to be. Must stay coherent with UA, fonts, and WebGL. */
@@ -14,13 +11,23 @@ export const OS_FAMILIES = ['windows', 'macos', 'linux'] as const;
 export type OsFamily = (typeof OS_FAMILIES)[number];
 
 /**
- * Android is a product target, but not launchable by the current desktop Lobium/Chromium engine path.
- * Keep it separate from `OsFamily` so UI/specs can discuss the future mobile engine without allowing
- * incoherent desktop launches. iOS is intentionally absent: Lobster is not pursuing an iOS/WebKit path.
+ * User-facing profile OS targets. macOS Intel and Apple Silicon are distinct product personas, even
+ * though Chrome's reduced UA still reports `MacIntel` for both; the engine maps them to coherent
+ * arch/GPU/font presets. Android is a mobile Lobium target, not a desktop Chromium disguise. iOS is
+ * intentionally absent: Lobster is not pursuing an iOS/WebKit path.
  */
 export const PLANNED_MOBILE_OS_FAMILIES = ['android'] as const;
 export type PlannedMobileOsFamily = (typeof PLANNED_MOBILE_OS_FAMILIES)[number];
-export type ProfileOsTarget = OsFamily | PlannedMobileOsFamily;
+export const PROFILE_OS_TARGETS = [
+  'windows',
+  /** Legacy persisted value; the product UI now creates macOS Intel / macOS Arm explicitly. */
+  'macos',
+  'macos_intel',
+  'macos_arm',
+  'linux',
+  'android',
+] as const;
+export type ProfileOsTarget = (typeof PROFILE_OS_TARGETS)[number];
 
 /** CPU architecture a profile presents. */
 export type CpuArch = 'x86_64' | 'arm64';

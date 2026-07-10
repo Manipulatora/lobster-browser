@@ -188,6 +188,24 @@ std::optional<LobiumFpConfig> ParseConfig(std::string_view contents) {
     cfg.seeds.canvas = static_cast<uint32_t>(seeds->FindDouble("canvas").value_or(0));
     cfg.seeds.webgl = static_cast<uint32_t>(seeds->FindDouble("webgl").value_or(0));
     cfg.seeds.audio = static_cast<uint32_t>(seeds->FindDouble("audio").value_or(0));
+    cfg.seeds.client_rects =
+        static_cast<uint32_t>(seeds->FindDouble("clientRects").value_or(0));
+  }
+  // Prefer policy.mediaDevices (sidecar shape); accept a top-level mediaDevices for forward-compat.
+  if (const base::DictValue* policy = root.FindDict("policy")) {
+    if (const base::DictValue* md = policy->FindDict("mediaDevices")) {
+      cfg.media_devices.present = true;
+      cfg.media_devices.cameras = md->FindInt("cameras").value_or(0);
+      cfg.media_devices.microphones = md->FindInt("microphones").value_or(0);
+      cfg.media_devices.speakers = md->FindInt("speakers").value_or(0);
+      cfg.media_devices.stable_device_ids = md->FindBool("stableDeviceIds").value_or(true);
+    }
+  } else if (const base::DictValue* md = root.FindDict("mediaDevices")) {
+    cfg.media_devices.present = true;
+    cfg.media_devices.cameras = md->FindInt("cameras").value_or(0);
+    cfg.media_devices.microphones = md->FindInt("microphones").value_or(0);
+    cfg.media_devices.speakers = md->FindInt("speakers").value_or(0);
+    cfg.media_devices.stable_device_ids = md->FindBool("stableDeviceIds").value_or(true);
   }
   if (const base::DictValue* net = root.FindDict("net")) {
     if (const std::string* p = net->FindString("webrtcPolicy")) cfg.net.webrtc_policy = *p;

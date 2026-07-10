@@ -96,7 +96,9 @@ async function main() {
 
   const site = await startSite();
   const sitePort = site.address().port;
-  const siteHost = '127.0.0.1';
+  // Use localhost (not 127.0.0.1): Chromium often refuses to persist cookies for raw IP hosts,
+  // which falsely fails the cookie-injection proof even when Network.setCookie succeeded.
+  const siteHost = 'localhost';
   const siteUrl = `http://${siteHost}:${sitePort}/`;
 
   const root = await mkdtemp(join(tmpdir(), 'lobster-product-e2e-'));
@@ -159,7 +161,25 @@ async function main() {
     try {
       const context = browser.contexts()[0];
       const page = context.pages()[0] ?? (await context.newPage());
-      await page.goto(siteUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      // Lobium branding may still be navigating the initial tab to about:blank + setDocumentContent.
+      // Wait briefly, then retry goto if that race interrupts the first navigation.
+      await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {});
+      let navigated = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await page.goto(siteUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+          navigated = true;
+          break;
+        } catch (err) {
+          const msg = String(err?.message || err);
+          const interrupted =
+            msg.includes('interrupted by another navigation') || msg.includes('net::ERR_ABORTED');
+          if (!interrupted || attempt === 3) throw err;
+          process.stderr.write(`goto interrupted (attempt ${attempt}), retrying…\n`);
+          await new Promise((r) => setTimeout(r, 400 * attempt));
+        }
+      }
+      if (!navigated) throw new Error('navigation to e2e site failed after retries');
 
       const observed = await page.evaluate(() => ({
         title: document.title,

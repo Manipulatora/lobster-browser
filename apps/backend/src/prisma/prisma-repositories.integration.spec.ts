@@ -107,7 +107,7 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
       const created = await profiles.create({
         ownerTeamId: teamId,
         name: 'IT Profile',
-        engine: 'chromium',
+        engine: 'lobium',
         os: 'linux',
         fingerprintSeed: `seed-${runId}`,
         tags: ['it', 'prisma'],

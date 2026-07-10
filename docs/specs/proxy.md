@@ -91,10 +91,10 @@ whatever Tor gives — coherence still runs, but users are warned exits are vola
 - Binding is **1:1 at launch** but a proxy row may be **shared** across profiles (pool semantics, §8).
 - The proxy is attached at the **browser-context** level so every request from that profile —
   including subresources and workers — egresses through it. No per-profile OS-level routing.
-- Auth is passed to the engine via Playwright's `{server, username, password}`
-  (`toEnginePlaywrightProxy`). **Chromium SOCKS5 auth caveat:** Chromium does not support
-  authenticated SOCKS5; for authed SOCKS we must front it with a **local HTTP→SOCKS shim** (§7) and
-  attach the profile to the shim. **planned**.
+- Unauthenticated proxy binding is passed to native Lobium as launch policy/flags. Authenticated proxies
+  use a **local HTTP→SOCKS/HTTP shim** (`proxy-chain` in `engine-runner` / §7.2): Lobium attaches to
+  `http://127.0.0.1:<ephemeral>` with no credentials; the shim holds upstream auth. TCP reachability is
+  fail-closed before spawn. **done**.
 
 ### 1.6 Auth methods
 
@@ -285,25 +285,26 @@ providers give city-level precision.
 
 ### 5.3 Handoff to fingerprint spec
 
-The consuming side (how each field is *enforced* on the engine — `native` on Lobium vs `JS-safe`
-CDP on interim Chromium) is owned by [`docs/specs/fingerprint-parameters.md`](fingerprint-parameters.md) (MASTER_PLAN §5 method legend). This
-spec owns the **source** (`GeoInfo`); the fingerprint spec owns the **application**.
+The consuming side (how each field is *enforced* on the engine) is owned by
+[`docs/specs/fingerprint-parameters.md`](fingerprint-parameters.md). Production enforcement is native
+Lobium; CDP appears only as a control/internal-harness mechanism. This spec owns the **source**
+(`GeoInfo`); the fingerprint spec owns the **application**.
 
 ---
 
 ## 6. Leak protection
 
-The whole point of a proxy is defeated by a leak. Target coverage (mostly **planned**; interim
-Chromium does best-effort, Lobium enforces natively):
+The whole point of a proxy is defeated by a leak. Target coverage is Lobium-native, with launch flags and
+local proxy adapters as defense-in-depth:
 
-| Leak vector | Target behavior | v1 (interim Chromium) | Lobium (native) |
+| Leak vector | Target behavior | Current/direct path | Lobium target |
 |---|---|---|---|
-| **WebRTC** (STUN reveals local/real IP via ICE candidates) | ICE candidates == proxy exit IP only; no host/srflx local candidates | **done (T-019)** — proxy-aware `--force-webrtc-ip-handling-policy` (`disable_non_proxied_udp` when proxied); gate proves STUN public-IP srflx suppression (v4+v6) + mDNS local masking. `srflx == exit IP` assertion = T-019a (needs a live proxy) | **native** — force all UDP through proxy or return only the exit srflx |
-| **DNS** | resolve at the exit (remote DNS), never the local resolver | **planned** — SOCKS5h + `socks5h://`; for HTTP the proxy resolves; block Chromium async DNS bypass | **native** remote DNS |
-| **Local-IP enumeration** (mDNS `.local` candidate hides real IP but still enumerable) | no local candidates leaked | **planned** — obfuscate/disable mDNS host candidates | **native** |
-| **Kill-switch** (proxy dies mid-session → traffic falls back to direct) | on proxy failure, block all egress / freeze the profile, never leak direct | **planned** — health monitor (§8) detects, forces context offline / kills tabs | **native** hard-fail closed |
-| **IPv6 leak** | if proxy is IPv4-only, disable IPv6 egress so v6 requests don't bypass | **planned** | **native** |
-| **Timezone/geo JS leak** | JS `Date`/`Intl`/Geolocation match exit (already via §5) | **done** (via `applyGeoToFingerprint`) | **native** |
+| **WebRTC** (STUN reveals local/real IP via ICE candidates) | ICE candidates == proxy exit IP only; no host/srflx local candidates | proxy-aware `--force-webrtc-ip-handling-policy`; live `srflx == exit IP` assertion still needs proxy CI | **native** — force all UDP through proxy or return only the exit srflx |
+| **DNS** | resolve at the exit (remote DNS), never the local resolver | partial launch hardening; SOCKS5h/local adapter still planned | **native** remote DNS |
+| **Local-IP enumeration** (mDNS `.local` candidate hides real IP but still enumerable) | no local candidates leaked | planned | **native** |
+| **Kill-switch** (proxy dies mid-session → traffic falls back to direct) | on proxy failure, block all egress / freeze the profile, never leak direct | planned local adapter/health monitor (§8) | **native** hard-fail closed |
+| **IPv6 leak** | if proxy is IPv4-only, disable IPv6 egress so v6 requests don't bypass | planned | **native** |
+| **Timezone/geo JS leak** | JS `Date`/`Intl`/Geolocation match exit (already via §5) | modeled/configured; native consumption still incomplete | **native** |
 
 **WebRTC verification (CI, MASTER_PLAN §6 "No WebRTC/DNS leak"):** the QA harness launches a profile
 behind a proxy and asserts every ICE candidate IP equals `geo.ip`. This is the acceptance gate for
@@ -352,7 +353,8 @@ SOCKS creds. This also gives us a natural place for the **kill-switch** (§6) an
 - A SOCKS profile launches with locale/timezone matching the exit (parity with HTTP).
 - Authed SOCKS works via the shim; browser never sees raw creds.
 
-**Status: planned** (both 7.1 and 7.2).
+**Status:** 7.1 SOCKS geo lookup **done** (`socks-proxy-agent` / socks5h). 7.2 authenticated SOCKS
+shim **done** (`packages/engine-runner/src/proxy-auth-adapter.ts` via `proxy-chain`).
 
 ---
 

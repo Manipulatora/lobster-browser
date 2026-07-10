@@ -23,6 +23,8 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
+    "generate:fingerprint-catalog": "node scripts/generate-fingerprint-catalog.mjs",
+    "apply:lobium-branding": "node scripts/apply-lobium-branding.mjs",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json}\"",
     "typecheck:core": "tsc -b packages/shared-types packages/crypto packages/fingerprint packages/proxy"

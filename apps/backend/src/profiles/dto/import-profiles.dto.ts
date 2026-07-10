@@ -9,8 +9,8 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { ENGINE_KINDS, OS_FAMILIES } from '@lobster/shared-types';
-import type { EngineKind, FingerprintOverrides, OsFamily } from '@lobster/shared-types';
+import { ENGINE_KINDS, PROFILE_OS_TARGETS } from '@lobster/shared-types';
+import type { EngineKind, FingerprintOverrides, ProfileOsTarget } from '@lobster/shared-types';
 
 /** Upper bound on a single import bundle. */
 export const MAX_IMPORT_PROFILES = 200;
@@ -27,8 +27,8 @@ export class ProfileImportItemDto {
   @IsIn([...ENGINE_KINDS])
   engine!: EngineKind;
 
-  @IsIn([...OS_FAMILIES])
-  os!: OsFamily;
+  @IsIn([...PROFILE_OS_TARGETS])
+  os!: ProfileOsTarget;
 
   @IsString()
   @MaxLength(256)

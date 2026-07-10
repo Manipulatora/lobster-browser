@@ -118,6 +118,7 @@ for (const name of ['shared-types', 'proxy', 'fingerprint', 'cookies', 'crypto',
 }
 
 // 6. Third-party runtime deps (and their transitive deps) from the hoisted root node_modules.
+// proxy-chain (+ tslib) backs the authenticated SOCKS/HTTP local shim (docs/specs/proxy.md §7.2).
 for (const name of [
   'patchright',
   'patchright-core',
@@ -129,6 +130,8 @@ for (const name of [
   'ms',
   'ip-address',
   'smart-buffer',
+  'proxy-chain',
+  'tslib',
 ]) {
   try {
     copyPkg(name);

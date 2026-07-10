@@ -12,19 +12,19 @@ import type {
   CreateProfileInput,
   CreateProfileTemplateInput,
   EngineKind,
-  OsFamily,
+  ProfileOsTarget,
   ProfileTemplate,
 } from '@lobster/shared-types';
 
 import { profilesClient, templatesClient } from '../../api/tauri';
-import octiumMainIcon from '../../assets/brand/octium-main-icon.png';
+import lobsterIcon from '../../assets/brand/lobster-icon.png';
 import { EmptyState, Skeleton, useToast } from '../../ui';
 import { ENGINE_OPTIONS, OS_OPTIONS, OS_VERSION_OPTIONS } from '../profiles/options';
 
 interface TemplateFormState {
   name: string;
   engine: EngineKind;
-  os: OsFamily;
+  os: ProfileOsTarget;
   osVersion: string;
   preset: string;
   proxy: string;
@@ -33,7 +33,7 @@ interface TemplateFormState {
 
 const initialForm: TemplateFormState = {
   name: '',
-  engine: 'chromium',
+  engine: 'lobium',
   os: 'windows',
   osVersion: OS_VERSION_OPTIONS.windows[0],
   preset: 'User Agent, Extensions',
@@ -55,7 +55,7 @@ function parsePreset(raw: string): string[] {
     .filter(Boolean);
 }
 
-function osName(value: OsFamily): string {
+function osName(value: ProfileOsTarget): string {
   return OS_OPTIONS.find((option) => option.value === value)?.label ?? value;
 }
 
@@ -165,7 +165,7 @@ function CreateTemplateModal({
                 className="input"
                 value={form.os}
                 onChange={(e) => {
-                  const os = e.target.value as OsFamily;
+                  const os = e.target.value as ProfileOsTarget;
                   setForm((prev) => ({ ...prev, os, osVersion: OS_VERSION_OPTIONS[os][0] }));
                 }}
               >
@@ -358,7 +358,7 @@ export function TemplatesView(): JSX.Element {
                   </td>
                   <td>
                     <div className="profile-title-cell profile-title-cell--compact">
-                      <img className="row-mark" src={octiumMainIcon} alt="" aria-hidden />
+                      <img className="row-mark" src={lobsterIcon} alt="" aria-hidden />
                       <div className="table-title">{template.name}</div>
                     </div>
                   </td>

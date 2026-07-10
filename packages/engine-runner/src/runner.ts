@@ -7,10 +7,10 @@ import type {
 } from '@lobster/shared-types';
 
 /**
- * The engine-runner contract. Implemented by CompositeRunner + the patchright launcher: launch a
- * real engine (chromium | lobium) with a per-profile user-data-dir + proxy, inject the JS-safe
- * fingerprint surfaces via isolated init scripts, and return the CDP endpoints. Deep surfaces
- * (canvas/webgl/audio) are handled natively by Lobium.
+ * The engine-runner contract. Implemented by CompositeRunner + the direct native Lobium launcher:
+ * launch a real Lobium engine with a per-profile user-data-dir + proxy, write the native fingerprint
+ * config, and return CDP endpoints for automation/control. Production fingerprinting belongs in
+ * Lobium's native config channel, not Patchright/JS spoofing.
  */
 export interface EngineRunner {
   launch(params: LaunchParams): Promise<LaunchResult>;

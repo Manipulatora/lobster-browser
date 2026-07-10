@@ -6,15 +6,15 @@ import test from 'node:test';
 import type { StartProfileParams } from '@lobster/shared-types';
 import { CompositeRunner } from './runners/composite.js';
 import { buildLaunchers } from './runners/default-launchers.js';
-import { isChromiumAvailable } from './runners/patchright-launcher.js';
+import { isLobiumAvailable } from './runners/lobium-launcher.js';
 import { startProfile } from './start-profile.js';
 
-// Runs only where a patched Chromium is installed; skipped (green) elsewhere.
-const chromiumReady = await isChromiumAvailable();
+// Runs only where native Lobium is installed; skipped (green) elsewhere.
+const lobiumReady = isLobiumAvailable();
 
 test(
-  'startProfile derives a fingerprint from the seed and launches a real Chromium (no proxy)',
-  { skip: chromiumReady ? false : 'patched Chromium not installed' },
+  'startProfile derives a fingerprint from the seed and launches native Lobium (no proxy)',
+  { skip: lobiumReady ? false : 'native Lobium not installed' },
   async () => {
     const runner = new CompositeRunner(
       await buildLaunchers({
@@ -25,7 +25,7 @@ test(
     const userDataDir = await mkdtemp(join(tmpdir(), 'lobster-sp-'));
     const params: StartProfileParams = {
       profileId: 'sp1',
-      engine: 'chromium',
+      engine: 'lobium',
       os: 'windows',
       fingerprintSeed: 'abc123def456abc1',
       userDataDir,

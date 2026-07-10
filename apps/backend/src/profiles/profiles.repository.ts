@@ -1,4 +1,4 @@
-import type { EngineKind, FingerprintOverrides, OsFamily, Profile } from '@lobster/shared-types';
+import type { EngineKind, FingerprintOverrides, Profile, ProfileOsTarget } from '@lobster/shared-types';
 
 /**
  * Fields required to create a profile row. The repository owns `id`, `status`, and the
@@ -9,7 +9,7 @@ export interface CreateProfileRecord {
   ownerTeamId: string;
   name: string;
   engine: EngineKind;
-  os: OsFamily;
+  os: ProfileOsTarget;
   fingerprintSeed: string;
   fingerprintOverrides?: FingerprintOverrides;
   tags: string[];
@@ -24,7 +24,7 @@ export interface CreateProfileRecord {
 export interface UpdateProfileRecord {
   name?: string;
   engine?: EngineKind;
-  os?: OsFamily;
+  os?: ProfileOsTarget;
   fingerprintOverrides?: FingerprintOverrides;
   tags?: string[];
   folder?: string;

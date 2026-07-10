@@ -1,5 +1,5 @@
 /**
- * GPU launch policy for the engine (Lobium / interim Chromium).
+ * GPU launch policy for Lobium and internal validation harnesses.
  *
  * WHY THIS EXISTS: the whole "Octo-class" claim rests on the deep GPU surfaces (WebGL
  * vendor/renderer, pixel farbling, caps/precision) being rendered by a REAL consumer GPU. In a

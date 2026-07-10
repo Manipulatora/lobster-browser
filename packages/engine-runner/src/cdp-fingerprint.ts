@@ -7,8 +7,12 @@ export interface CdpSession {
 }
 
 /**
- * Apply the JS-safe fingerprint surfaces to a page via **real CDP overrides** + a **main-world**
- * init script.
+ * Apply legacy/internal-harness fingerprint surfaces to a page via **real CDP overrides** + a
+ * **main-world** init script.
+ *
+ * Production Lobium launches must not call this as their stealth layer. They write `lobium-fp.json`
+ * and rely on native patches; CDP is reserved for automation/control, measurement, and regression
+ * harnesses.
  *
  * This is more reliable than Playwright/patchright `addInitScript`, which patchright runs in an
  * isolated world the page's `navigator` cannot see (so JS-only overrides silently don't take —

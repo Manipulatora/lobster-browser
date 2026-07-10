@@ -14,19 +14,21 @@ tickets; the assigned agent implements; the other agent reviews. Keep this table
 > desktop launch/stop commands call the sidecar, and the local API
 > fail-closes with a key. Still open: real-GPU/host-calibrated proof, native Lobium CI, encrypted blobs,
 > S3/Postgres production durability, packaged sidecar/installer, proxy/cookie product wiring, and broad
-> detector/live anti-bot validation.
+> detector/live anti-bot validation. **ADR-0003 supersedes the old interim-engine plan:** production
+> profiles launch native Lobium only; Patchright/Chromium entries below are historical/internal harness
+> work unless explicitly marked as a current production task.
 
 | ID | Title | Pillar / Track | Assignee | Status |
 |----|-------|----------------|----------|--------|
 | T-001 | Tauri shell boots + loads React UI shell | A · Desktop | Codex | done · desktop crate builds (Rust 1.96.1 + webkit2gtk); SQLite store + Axum local API + IPC commands cargo-tested; GUI window needs a display |
-| T-002 | Sidecar: real engine launch (patchright) | B · Engine | Claude | done · T-002a builders + T-002b orchestration + **T-002c real patchright launch verified**: live Chromium, `connectOverCDP`, `navigator.webdriver` stealth, status/stop; CI `engine-launch` job. Covers `chromium` + `lobium` (interim patched Chromium). JS-safe surfaces applied via **CDP** (main world) |
-| T-002d | Propagate CDP fingerprint overrides to external `connectOverCDP` client pages (Target.setAutoAttach) | B · Engine | Claude | draft · launcher covers its own context's pages; external-client pages need auto-attach |
+| T-002 | Sidecar: real engine launch (historical Patchright harness) | B · Engine | Claude | done · historical harness: live Chromium, `connectOverCDP`, status/stop, CI compatibility plumbing. **Superseded for production by ADR-0003/RUN-3:** product launch is direct native Lobium only; no Patchright stealth/fallback. |
+| T-002d | Historical CDP override propagation | B · Engine | Claude | superseded · production fingerprint values must be native Lobium; CDP auto-attach may be used only for control/measurement tests |
 | T-003 | Fingerprint: integrate Apify fingerprint-suite behind `deriveFingerprint` | Fingerprint | Codex | done |
 | T-004 | Backend: JWT auth + real data layer | C · Backend | Codex | done · bcrypt+JWT, guard, `/auth/me`, e2e; Prisma repo/module + `0001_init` migration + docker-compose (Postgres path via CI/infra), JWT hard-fails in prod |
-| T-005 | Anti-detect validation harness (live detector gate) | E · QA | Claude | done · derive fp → headful (Xvfb) launch → bot.sannysoft.com; asserts UA/hardwareConcurrency/languages/timezone applied + `navigator.webdriver` absent; 2 WebGL fails expected (native surface, Lobium); CI `fingerprint-gate` blocking. Caught+fixed a real bug (CDP override, not isolated-world addInitScript) |
+| T-005 | Anti-detect validation harness (live detector gate) | E · QA | Claude | done · historical harness plus detector plumbing. Current production proof must run native Lobium (`lobium-detect.mjs`) on real GPU and treat CDP as control/measurement only. |
 | T-006 | Add `apps/desktop` + `apps/backend` to root workspaces | infra | Claude | done |
 | T-007 | Profile CRUD Tauri commands + single-instance lock | A · Desktop | Claude | done · real SQLite-backed create/get/update/delete/list commands (cargo-tested); single-instance launch lock lands with T-002c engine wiring |
-| T-008 | Fingerprint editor UI (JS-safe surfaces) | A · Desktop | Codex | done |
+| T-008 | Fingerprint editor UI (legacy support badges) | A · Desktop | Codex | done · superseded by UI-4 native/control-only support language |
 | T-009 | Unit tests: fingerprint determinism/coherence + proxy parse | tests | Claude | done |
 | T-013 | Backend Teams + Profiles (real, JWT-scoped, plan limit) | C · Backend | Codex | done · repos (Prisma+in-memory), @CurrentUser, team scoping, e2e |
 | T-014 | Proxy: exit-IP geo derivation + proxy test (coherence auto-sync) | Proxy | Codex | done · `deriveGeoFromExitIp` (undici ProxyAgent, HTTP/HTTPS; SOCKS follow-up), `parseGeoResponse`, `testProxy`; applied to fingerprint at launch |
@@ -37,7 +39,7 @@ tickets; the assigned agent implements; the other agent reviews. Keep this table
 | T-011 | Lobium: quilt series + native config channel (browser→renderer) | F · Lobium | Claude | **done** · Config channel built; native surfaces now include navigator hardware, UA/platform in all contexts, WebGL vendor/renderer + pixel farbling + scalar caps, canvas, audio, screen/DPR, UA header/Sec-CH-UA, and fontconfig launch env. Proof is still SwiftShader/dev-path unless PROJECT-STATUS says otherwise. Remaining engine work is real-GPU/host-calibrated proof, multi-OS builds, extension/precision host capture, final font bundles, codecs/signing, and native CI. |
 | T-025 | Detector matrix: deep-surface measurement + CreepJS wiring | E · QA | Claude | done · harness now measures canvas/WebGL/audio (claimed-vs-host, **non-blocking** — needs Lobium) + env-gated CreepJS; `detectorMatrix` summary; Sannysoft/WebRTC/coherence stay blocking |
 | T-012 | Fingerprint: 50+ param model + Android profiles | Fingerprint | Codex | draft · Android only; iOS discarded |
-| T-018 | Fingerprint coherence & geolocation-application hardening | Fingerprint | Claude | done · [`setGeolocationOverride`](T-018-fingerprint-coherence-geolocation.md) applied (was computed but never sent) + launcher grants geo permission; clean `navigator.languages` (q-value leak fixed); init-script abort bug fixed; coherence rules incl. Win-NT↔Chrome floor, **HeadlessChrome-brand + 256 MB-desktop tells** (found by adversarial review); 94 unit tests + live gate green |
+| T-018 | Fingerprint coherence & geolocation-application hardening | Fingerprint | Claude | done · coherence fixes remain valid; CDP geolocation work is now internal/control-harness context only. Native Lobium must own production geo/locale behavior. |
 | T-018a | q-weighted `Accept-Language` HTTP header (keep clean `navigator.languages`) | Fingerprint | Claude | draft · follow-up from T-018 |
 | T-019 | WebRTC leak protection + validation-gate integration | Proxy | Claude | done · [proxy-aware `--force-webrtc-ip-handling-policy`](T-019-webrtc-leak-protection.md) (`disable_non_proxied_udp` when proxied); non-vacuous gate proves the policy suppresses the STUN public-IP srflx (v4+v6) + mDNS local masking; hardened after adversarial review; 95 tests + live gate green |
 | T-019a | Assert `srflx == proxy egress IP` against a live test proxy (CI secret) | Proxy · QA | Claude | draft · follow-up from T-019 |

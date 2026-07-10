@@ -4,6 +4,8 @@
  */
 export { CompositeRunner } from './runners/composite.js';
 export { startProfile } from './start-profile.js';
+export { startAndroidProfile } from './start-android-profile.js';
+export type { StartAndroidProfileOptions } from './start-android-profile.js';
 export {
   buildLaunchers,
   defaultLaunchers,
@@ -15,19 +17,30 @@ export type { PatchrightLauncherOptions } from './runners/patchright-launcher.js
 export {
   buildLobiumLaunchArgs,
   buildLobiumLaunchEnv,
+  buildNativeLobiumProcessArgs,
   createLobiumLauncher,
+  ensureChromiumProfileName,
   isLobiumAvailable,
   lobiumBinaryCandidates,
   proxySummaryFromServer,
   resolveFontsBaseDir,
   resolveLobiumBinary,
+  scrubLegacyBrandingSessions,
 } from './runners/lobium-launcher.js';
+export type { NativeLobiumLauncherOptions } from './runners/lobium-launcher.js';
 export { buildFontConfig, hasFontPersona, writeFontConfig } from './fonts.js';
 export { buildCdpEmulation, buildFingerprintInitScript, buildLaunchOptions } from './launch.js';
 export type { CdpEmulation, PersistentLaunchOptions, UserAgentMetadata } from './launch.js';
 export { buildGpuArgs, isSoftwareRenderer, resolveGpuMode } from './gpu.js';
 export { buildProxyHardeningArgs } from './proxy-hardening.js';
 export type { ProxyHardeningOptions } from './proxy-hardening.js';
+export {
+  assertUpstreamReachable,
+  needsLocalProxyAdapter,
+  startLocalProxyAdapter,
+  upstreamProxyUrl,
+} from './proxy-auth-adapter.js';
+export type { LocalProxyAdapter, UpstreamProxy } from './proxy-auth-adapter.js';
 export type { AngleBackend, GpuArgsOptions, GpuMode } from './gpu.js';
 export { applyCdpFingerprint } from './cdp-fingerprint.js';
 export type { CdpSession } from './cdp-fingerprint.js';
@@ -116,10 +129,7 @@ export {
   persistHostCalibration,
   resolveHostCalibrationPath,
 } from './host-calibration-store.js';
-export {
-  defaultHostCalibrationPath,
-  ensureHostCalibration,
-} from './ensure-host-calibration.js';
+export { defaultHostCalibrationPath, ensureHostCalibration } from './ensure-host-calibration.js';
 export type {
   EnsureHostCalibrationOptions,
   EnsureHostCalibrationResult,

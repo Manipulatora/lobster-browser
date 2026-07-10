@@ -3,7 +3,7 @@ import test from 'node:test';
 import { applyOverrides, deriveFingerprint } from './index.js';
 
 test('applyOverrides merges navigator/screen/locale/fonts and leaves the rest untouched', () => {
-  const base = deriveFingerprint('seed-ov', { os: 'windows', engine: 'chromium' });
+  const base = deriveFingerprint('seed-ov', { os: 'windows', engine: 'lobium' });
 
   const out = applyOverrides(base, {
     navigator: { hardwareConcurrency: 16 },

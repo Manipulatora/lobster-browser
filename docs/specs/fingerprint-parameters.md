@@ -3,7 +3,8 @@
 > **Scope:** the definitive, implementation-actionable catalog of every configurable fingerprint
 > parameter Lobster exposes, grouped by browser surface, plus the coherence engine that ties them
 > together, the real-system sourcing model, the seed→config pipeline, the editor-UI grouping, and the
-> per-parameter mapping to **Lobium native patches** vs **interim best-effort**.
+> per-parameter mapping to **Lobium native patches**. Historical/CDP mappings are retained only to explain
+> the internal validation harness and migration gaps.
 > **Read first:** [`docs/MASTER_PLAN.md`](../MASTER_PLAN.md) §5–§6 (fingerprint engine + coherence bar)
 > and the current model in [`packages/shared-types/src/fingerprint.ts`](../../packages/shared-types/src/fingerprint.ts)
 > and [`packages/fingerprint`](../../packages/fingerprint).
@@ -23,8 +24,8 @@ to the proxy exit IP.
 
 | Method | Meaning |
 |---|---|
-| **native-Lobium** | Enforced inside our own Chromium build (Lobium) at the C++/engine layer — no JS tell. The target for every deep surface. Runs on the parallel Lobium track (MASTER_PLAN §10 Track F). |
-| **JS-safe-CDP** | Clean value-substitution over CDP (`Emulation.*`) and/or a main-world init script via `Page.addScriptToEvaluateOnNewDocument`. Only for surfaces where a substituted *value* is not itself a tell. Never used for canvas/WebGL/audio/TLS. |
+| **native-Lobium** | Enforced inside our own Chromium build (Lobium) at the C++/engine layer — no JS tell. This is the production requirement for profile-visible fingerprint values. |
+| **JS-safe-CDP** | Legacy/internal-harness value substitution over CDP (`Emulation.*`) and/or a main-world init script. It can support regression tests and migration comparison, but is **not** a production stealth layer. Never used for canvas/WebGL/audio/TLS. |
 | **network** | Applied at the proxy/header layer (mitmproxy + request-header canonicalization) — e.g. `Accept-Language`, `Sec-CH-UA-*` request headers, TLS. |
 | **real-value** | Left as the engine's real value on purpose (it already matches a coherent real device, or spoofing it is a bigger tell than leaving it). |
 
@@ -32,9 +33,9 @@ to the proxy exit IP.
 
 | Status | Meaning |
 |---|---|
-| **done** | Implemented and exercised end-to-end; the validation harness ([`ci/validation/run.mjs`](../../ci/validation/run.mjs)) asserts it applied. |
+| **done** | Implemented and exercised end-to-end in the path named by the method. A `JS-safe-CDP` row marked done is harness/migration proof, not proof of production native enforcement. |
 | **partial** | Modeled in `@lobster/shared-types` and/or partially wired, but not yet fully enforced or validated. |
-| **planned** | In the parameter model as a target; enforcement lands on the Lobium track (or a later interim ticket). |
+| **planned** | In the parameter model as a target; production enforcement lands on the Lobium native track. |
 
 ### 0.3 Priority
 
@@ -52,17 +53,20 @@ long-tail hardening. Mirrors MASTER_PLAN §5's priority column.
 - **Geo overlay** (`coherence.ts` → `applyGeoToFingerprint`): rewrites timezone/locale/languages/
   Accept-Language (+ geolocation) from the proxy `GeoInfo`.
 - **Coherence gate** (`coherence.ts` → `validateFingerprintCoherence`): 7 hard checks (see §3).
-- **Application** (`engine-runner/src/launch.ts` + `cdp-fingerprint.ts`): `buildCdpEmulation` +
-  `buildFingerprintInitScript` applied via real CDP + a **main-world** init script (patchright's
-  isolated-world `addInitScript` was insufficient — the harness caught it for `hardwareConcurrency`).
+- **Production application** (`engine-runner/src/runners/lobium-launcher.ts` + `lobium-config.ts`):
+  direct-spawn Lobium, write `lobium-fp.json`, pass `--lobium-fp-config`, and let native patches consume
+  profile-visible values.
+- **Internal harness application** (`engine-runner/src/launch.ts` + `cdp-fingerprint.ts`):
+  `buildCdpEmulation` + `buildFingerprintInitScript` can still apply migration values over CDP for
+  regression tests. This path must not be used as the product stealth layer.
 
-**Applied today via CDP (`applyCdpFingerprint`), harness-verified:** `userAgent`,
+**Applied in the legacy/internal CDP harness (`applyCdpFingerprint`), harness-verified:** `userAgent`,
 `Sec-CH-UA` metadata (brands/fullVersion/platform/platformVersion/architecture/model/mobile),
 `languages` (clean list) + `acceptLanguage`, `platform`, `timezone`, `locale` (best-effort),
 `hardwareConcurrency`, and **`geolocation`** (`setGeolocationOverride`, T-018). The residual
-init-script surfaces `deviceMemory`/`maxTouchPoints` are best-effort on the interim engine (patchright
-neutralizes main-world injection) and native-authoritative on Lobium. Everything else in this catalog
-is `partial`/`planned`.
+init-script surfaces `deviceMemory`/`maxTouchPoints` are native-authoritative only when Lobium consumes
+them through its config channel. Everything else in this catalog is `partial`/`planned` until native
+Lobium consumption and detector proof exist.
 
 ---
 
@@ -90,8 +94,8 @@ are targets (Chrome exposes them, so they must be coherent even where we don't y
 | `navigator.languages` ★ | `string[]` BCP-47 | CDP UA-override (clean list) + network | `C-LANG-LOCALE` `C-GEO` | same | P0 | **done** (q-value leak fixed, T-018) |
 | `navigator.language` | string = `languages[0]` | CDP UA-override | must equal `languages[0]` | same | P0 | **done** |
 | `navigator.hardwareConcurrency` ★ | int 2–32 (typ. 4/8/12/16) | JS-safe-CDP (`setHardwareConcurrencyOverride`) | `C-CPU-MEM` `C-CPU-DEVICE` | 4–8 | P1 | **done** |
-| `navigator.deviceMemory` ★ | enum GiB: 0.25/0.5/1/2/4/8 (capped at 8) | JS-safe-CDP (init) | `C-CPU-MEM` | ≤4 | P1 | partial (interim best-effort — patchright neutralizes injection; native-Lobium; value now spec-capped, T-018) |
-| `navigator.maxTouchPoints` ★ | int (0 desktop, 5 mobile) | JS-safe-CDP (init) | `C-TOUCH` (must be >0 iff mobile) | 5 | P1 | partial (interim best-effort; native-Lobium) |
+| `navigator.deviceMemory` ★ | enum GiB: 0.25/0.5/1/2/4/8 (capped at 8) | JS-safe-CDP (init) | `C-CPU-MEM` | ≤4 | P1 | partial (CDP harness only; native Lobium must be authoritative; value now spec-capped, T-018) |
+| `navigator.maxTouchPoints` ★ | int (0 desktop, 5 mobile) | JS-safe-CDP (init) | `C-TOUCH` (must be >0 iff mobile) | 5 | P1 | partial (CDP harness only; native Lobium must be authoritative) |
 | `navigator.oscpu` | string (Firefox only; `undefined` on Chrome) | real-value | must be `undefined` on Chromium | n/a | P2 | planned |
 | `navigator.doNotTrack` | `null` / `"1"` / `"0"` | JS-safe-CDP (init) | stable per profile; usually `null` | same | P2 | planned |
 | `navigator.webdriver` | bool → **must be `false`/absent** | native-Lobium / JS-safe-CDP | hard tell if `true` (`C-AUTOMATION`) | same | P0 | **done** (via `--disable-blink-features=AutomationControlled` + patchright) |
@@ -137,7 +141,7 @@ surface** → native-Lobium; never JS-spoofed (MASTER_PLAN §5 rule 1).
 
 | Parameter | Type / range | Method | Coherence constraints | Mobile variant | Priority | Status |
 |---|---|---|---|---|---|---|
-| `VENDOR` (masked, `getParameter 0x1F00`) | string e.g. `"Google Inc. (NVIDIA)"` | native-Lobium (best-effort interim) | `C-GPU-OS` | mobile GPU vendor | P0 | partial (modeled) |
+| `VENDOR` (masked, `getParameter 0x1F00`) | string e.g. `"Google Inc. (NVIDIA)"` | native-Lobium | `C-GPU-OS` | mobile GPU vendor | P0 | partial (modeled) |
 | `RENDERER` (masked, `0x1F01`) | ANGLE string | native-Lobium | `C-GPU-OS` (`C-D3D`: Direct3D only on Windows) | Adreno/Mali/Apple | P0 | partial (modeled) |
 | `UNMASKED_VENDOR_WEBGL` (`0x9245`) | string | native-Lobium | must equal a coherent real vendor | mobile vendor | P0 | partial (mirrors vendor) |
 | `UNMASKED_RENDERER_WEBGL` (`0x9246`) | string | native-Lobium | `C-GPU-OS` `C-D3D` | mobile renderer | P0 | partial (mirrors renderer) |
@@ -183,7 +187,7 @@ metrics enforcement is native-Lobium.
 
 | Parameter | Type / range | Method | Coherence constraints | Mobile variant | Priority | Status |
 |---|---|---|---|---|---|---|
-| Installed-font list (enumeration) | string[] | native-Lobium (best-effort interim) | `C-FONT-OS` (list matches OS: Segoe/Calibri=Win, Helvetica Neue/SF=mac, DejaVu/Liberation=Linux) | Roboto/Noto (Android) | P1 | partial (modeled) |
+| Installed-font list (enumeration) | string[] | native-Lobium | `C-FONT-OS` (list matches OS: Segoe/Calibri=Win, Helvetica Neue/SF=mac, DejaVu/Liberation=Linux) | Roboto/Noto (Android) | P1 | partial (modeled) |
 | Font-metrics probe (`measureText` per font / `document.fonts.check`) | floats/bool | native-Lobium | present iff font in list (`C-FONT-METRIC`) | mobile fonts | P1 | planned |
 | Font smoothing / subpixel rendering signature | rendered pixels | native-Lobium | consistent with OS + canvas farbling | mobile | P2 | planned |
 
@@ -358,7 +362,7 @@ table below is the **full target constraint set**; the Status column says where 
 | `C-SCREEN-REAL` | realistic screen | width ≥ 1024, height ≥ 600 (desktop) | **yes** (`isSelectable`) |
 | `C-FONT-NONEMPTY` | fonts present | `fonts.length > 0` | **yes** (`isSelectable`) |
 | `C-GEO` | geo cluster ↔ proxy IP | timezone + locale + languages + geolocation all derive from proxy `GeoInfo` | **yes** (`applyGeoToFingerprint` + `setGeolocationOverride`, T-018) |
-| `C-UA-VER` | version alignment | engine version == UA-claimed version == Sec-CH-UA full-version-list major | planned (asserted for interim via generator; native on Lobium) |
+| `C-UA-VER` | version alignment | engine version == UA-claimed version == Sec-CH-UA full-version-list major | planned/native Lobium |
 | `C-ARCH` | arch ↔ UA-CH | `Sec-CH-UA-Arch`/`Bitness` match `fp.arch` | partial (arch mapped; bitness constant) |
 | `C-CPU-MEM` | cores ↔ RAM ↔ device | hardwareConcurrency & deviceMemory plausible together and for the device class | partial (drawn from real-device dist) |
 | `C-GPU-OS` | GPU ↔ OS | renderer backend matches OS (Metal=mac, Mesa/OpenGL=Linux, D3D11=Win) | partial (modeled; `C-D3D` subset enforced) |
@@ -403,11 +407,11 @@ Fingerprint  { os, arch, navigator, screen, webgl, locale, fonts }
         │
         ├── applyOverrides(fp, FingerprintOverrides)  ← user edits from the editor UI
         ▼
-Launch:  buildLaunchOptions(fp) → args (--lang, --window-size, anti-automation)
-         buildCdpEmulation(fp)  → CDP Emulation.* (UA/UA-CH/tz/locale/geo)
-         buildFingerprintInitScript(fp) → main-world navigator patches
-         applyCdpFingerprint(cdp, fp)   ← sends it all to the page
-         [Lobium] → per-profile config channel injects ALL params natively (planned, Track F)
+Launch:  buildLaunchOptions(fp) → non-fingerprint launch policy args
+         buildLobiumConfig(fp, policy) → <userDataDir>/lobium-fp.json
+         createLobiumLauncher(...) → direct-spawn native Lobium
+         --lobium-fp-config=<path> → per-profile config channel consumed natively
+         CDP endpoint returned → automation/control/measurement only
 ```
 
 **Invariants:** (1) same `(seed, os, arch)` ⇒ byte-identical `Fingerprint` (deterministic, tested in
@@ -416,11 +420,11 @@ changes; (3) `FingerprintOverrides` is applied last and is shallow-merged per se
 (`overrides.ts`), so an edit never breaks a section it didn't touch — but the editor must re-run
 `validateFingerprintCoherence` and warn on any override that breaks a `C-*` rule.
 
-**Seed → config channel (Lobium, planned):** the same derived `Fingerprint` (plus the deep-surface
-seed) is serialized and handed to Lobium over the per-profile config channel (MASTER_PLAN §5 Pillar
-5) so canvas/WebGL/audio/rects farbling and all UA-CH/screen/font values are enforced natively with
-no JS tell. The config model is the *same* `@lobster/shared-types` shape consumed by the editor UI,
-the sidecar, and Lobium (MASTER_PLAN §5 rule 5).
+**Seed → config channel (Lobium, production path):** the same derived `Fingerprint` (plus the
+deep-surface seed and launch policy) is serialized and handed to Lobium over the per-profile config
+channel (MASTER_PLAN §5 Pillar 5) so canvas/WebGL/audio/rects farbling and all UA-CH/screen/font values
+are enforced natively with no JS tell. The config model is the *same* `@lobster/shared-types` shape
+consumed by the editor UI, the sidecar, and Lobium (MASTER_PLAN §5 rule 5).
 
 ---
 
@@ -436,7 +440,7 @@ runs live coherence validation.
 | **Operating System** | os, arch, platform, oscpu, uaPlatformVersion | pick OS → cascades platform/fonts/GPU defaults | drives `C-PLAT-OS`, `C-FONT-OS`, `C-GPU-OS` |
 | **Hardware** | hardwareConcurrency, deviceMemory, maxTouchPoints | dropdowns (real-device ranges) | `C-CPU-MEM`, `C-TOUCH` |
 | **Screen & Window** | width/height/avail*, colorDepth/pixelDepth, devicePixelRatio, orientation, inner/outer size, matchMedia scheme/gamut | presets + custom | `C-SCREEN-AVAIL`, `C-SCREEN-DPR` |
-| **WebGL / GPU** | vendor, renderer, unmasked*, version, extensions, params, WebGPU adapter/limits | pick-a-GPU (coherent bundle); read-only individually | native-Lobium enforced; interim best-effort |
+| **WebGL / GPU** | vendor, renderer, unmasked*, version, extensions, params, WebGPU adapter/limits | host-calibrated bundle; read-only individually | native-Lobium enforced |
 | **Canvas / Audio / Rects** | canvas/audio/clientRects noise mode | toggle: off / seeded-native | deep surfaces — no manual values, only on/off + seed |
 | **Fonts** | font list (add/remove), metrics | multi-select from OS-appropriate catalog | `C-FONT-OS` |
 | **Locale & Geo** | timezone, locale, languages, acceptLanguage, geolocation | **auto from proxy** (default) or manual override | `C-GEO` — warns loudly if manually desynced from proxy |
@@ -450,18 +454,19 @@ The 2026-07-07 product UI declaration makes these controls first-class in the cr
 
 | Wizard field | Model status | Engine status | Notes |
 |---|---|---|---|
-| User Agent | modeled in `NavigatorFingerprint` | CDP/native path exists | Must stay pinned to the actual Chrome/Lobium version. |
-| Operating system | desktop `windows/macos/linux`; Android has separate `AndroidFingerprint` model | desktop launchable; Android non-launchable | Android fingerprint catalog/coherence exists, but launch requires the separate APK/device runner; iOS is discarded. |
-| OS version | partial via `uaPlatformVersion` | partial | Needs explicit `osVersion`/platform-version policy in shared types and UI. |
-| Screen resolution | modeled | partial/native screen hooks exist | Needs full window/outer/inner coherence in UI. |
-| Fonts | modeled | conditional fontconfig path | Needs final packs and safer editor UX. |
-| Languages/timezone/geolocation | modeled | CDP/native path exists | Default should derive from proxy exit geo. |
-| WebRTC | not in `Fingerprint` yet | launch policy partial | Needs explicit `WebRtcPolicy` contract. |
-| CPU cores/RAM | modeled | CDP/native path exists | Values must remain spec/coherence bounded. |
-| Renderer/GPU | modeled strings + scalar caps | real-GPU/host calibration pending | Default must be host-calibrated; arbitrary foreign GPU selection is unsafe. |
-| Hardware noise: WebGL/canvas/audio | native seeds exist for main surfaces | dev-proven, real-GPU pending | Expose as supported only for Lobium paths that honor the config. |
-| Hardware noise: Client Rects | target only | absent | Show planned/unsupported until native rect farbling exists. |
-| Media devices | target in WebRTC section | absent | Needs stable `enumerateDevices` model and native/permission coherence. |
+| User Agent | modeled; **product read-only** | native Lobium | Always derived from OS (+ Android type) and `ENGINE_CHROME`. |
+| Operating system | `windows` / `macos_intel` / `macos_arm` / `linux` / `android` | desktop launchable except Android | Android fail-closed on desktop until APK track. |
+| OS version | `Profile.osVersion` + UA-CH platform version | carried in `lobium-fp.json` policy | Win 10/11; macOS 13/14/15/26; Android 13+. |
+| Screen resolution | modeled + Retina DPR | native screen hooks | Hidden for Android; Mac Retina options set DPR=2. |
+| Fonts | verified MS Learn / Apple Support catalogs | fontconfig packs conditional | Modes `real\|manual\|based_ip`; Linux deferred. |
+| Languages/timezone/geolocation | modeled + persona modes | CDP/native locale path | `based_ip` uses proxy geo overlay. |
+| WebRTC | `WebRtcPolicy` + persona mode | launch flags + config `net.webrtcPolicy` | `real` / `manual` / `based_ip` (`proxy_only`). |
+| CPU cores/RAM | modeled | native | Coherence-bounded. |
+| Renderer/GPU | verified PCI/Apple catalogs (`verified_source`) | native vendor/renderer + caps | See [`fingerprint-catalog-provenance.md`](fingerprint-catalog-provenance.md). |
+| Hardware noise: WebGL/canvas/audio | seeds gated by checkboxes | native farbling when seed≠0 | Off → seed 0. |
+| Hardware noise: Client Rects | policy field | planned | UI exposed; native hook absent. |
+| Media devices | policy field | written to config; native consume partial | Counts + stableDeviceIds. |
+| Android device type/model | Play CSV catalog | non-launchable on desktop | Hundreds of verified phones/tablets. |
 
 Android must not be treated as a normal desktop Chromium/Lobium launch target. The TS catalog can now
 derive and validate Android personas, but they become launchable only through the Android APK/device
@@ -469,35 +474,34 @@ runner described in [`android.md`](android.md). iOS is not a Lobster target.
 
 ---
 
-## 6. Native (Lobium) vs interim (best-effort) mapping — summary
+## 6. Native Lobium production mapping — summary
 
-| Surface | Interim Chromium (today) | Lobium (target) |
+| Surface | Internal harness / legacy mapping | Production Lobium mapping |
 |---|---|---|
-| navigator / UA / UA-CH | **JS-safe-CDP + init script (done)** | native, no init script |
-| timezone / locale / languages / Accept-Language | **JS-safe-CDP + network (done)** | native |
-| geolocation | **JS-safe-CDP (done, T-018)** — `setGeolocationOverride` | native |
-| hardwareConcurrency / deviceMemory / maxTouchPoints | **JS-safe-CDP + init (done)** | native |
-| screen / DPR / matchMedia | `--window-size` only (partial) | native |
-| WebGL vendor/renderer/params/extensions | best-effort / modeled only | **native farbling** |
+| navigator / UA / UA-CH | CDP regression harness exists | native, no init script |
+| timezone / locale / languages / Accept-Language | CDP/network regression harness exists | native + network headers |
+| geolocation | CDP control API can grant/test permission | native/configured policy |
+| hardwareConcurrency / deviceMemory / maxTouchPoints | CDP/init regression harness exists | native |
+| screen / DPR / matchMedia | launch/window policy harness only | native |
+| WebGL vendor/renderer/params/extensions | measured/compared only | **native host-calibrated farbling** |
 | Canvas 2D / Offscreen / worker | **not touched** (JS spoof is a tell) | **native farbling (seeded)** |
 | AudioContext DSP | **not touched** | **native (seeded)** |
 | clientRects / DOMRect | **not touched** | **native (seeded)** |
 | fonts enumeration + metrics | modeled list only | native |
 | WebRTC IP/leak | policy (planned) | **native** |
-| TLS / JA3 / JA4 / HTTP-2 / TCP-IP | best-effort (out of scope for this doc — see network spec) | **native (BoringSSL/net)** |
+| TLS / JA3 / JA4 / HTTP-2 / TCP-IP | measured only | **native (BoringSSL/net)** |
 | WebGPU / codecs / speech / battery / sensors / permissions / storage / connection | modeled/planned | native |
 
-Rule (MASTER_PLAN §5 rules 1–2, non-negotiable): **we never spoof canvas/WebGL/audio/TLS from
-JS/CDP** on the interim engine — those are left real (best-effort) until Lobium enforces them
-natively. CDP is used **only** for value-substitution surfaces where a substituted value is not
-itself a tell.
+Rule (MASTER_PLAN §5 rules 1–2, non-negotiable): **we never ship product fingerprint spoofing through
+JS/CDP/Patchright**. CDP may be used to control or measure Lobium, or as an internal regression harness,
+but production profile-visible values must be native Lobium or fail/disable honestly.
 
 ---
 
 ## Status vs target
 
 **Built today:** the deterministic seed→coherent-`Fingerprint` fallback pipeline (`pools.ts`), proxy-geo
-overlay, coherence validator, CDP application for JS-safe surfaces, and native Lobium config/farbling
+overlay, coherence validator, internal CDP regression helpers, and native Lobium config/farbling
 coverage for the main deep surfaces: canvas, WebGL vendor/renderer + pixel farbling + scalar caps, audio
 float/byte/worklet paths, screen/DPR/colorDepth/availTop, navigator hardware fields, UA/platform in workers,
 and UA header/Sec-CH-UA metadata. The launcher can also isolate fonts with private fontconfig when a font
@@ -510,6 +514,7 @@ proof; clientRects/codecs/voices/WebGPU and TLS/JA4 remain future depth; Android
 support but remains absent as a launch path; iOS is discarded; final licensed font bundles are packaging
 work. The parameter model and constraints here remain useful, but the primary production path is now:
 capture the real host -> derive from host -> farble per profile, with `pools.ts` retained as fallback.
-The full create-profile UI requested in
+The direct native launcher now writes the config and launches Lobium without Patchright; still open are
+authenticated proxy handling and cookie pre-injection/export on that direct path. The full create-profile UI requested in
 [`product-ui-ux-plan.md`](product-ui-ux-plan.md) must expose support status rather than pretending all
 fields are already enforced by the engine.

@@ -1,4 +1,5 @@
 import type { OsFamily, WebGlCaps } from '@lobster/shared-types';
+import { MACOS_FONT_NAMES, WINDOWS_FONT_NAMES } from './catalog.generated.js';
 
 /**
  * Lobster's OWN internal coherent device catalog — the source of truth for base device fingerprints.
@@ -129,18 +130,7 @@ const WINDOWS: OsTemplate = {
   uaPlatform: 'Windows',
   uaPlatformVersion: '15.0.0',
   osToken: 'Windows NT 10.0; Win64; x64',
-  fonts: [
-    'Arial',
-    'Calibri',
-    'Cambria',
-    'Consolas',
-    'Segoe UI',
-    'Segoe UI Emoji',
-    'Tahoma',
-    'Times New Roman',
-    'Trebuchet MS',
-    'Verdana',
-  ],
+  fonts: [...WINDOWS_FONT_NAMES],
   devices: [
     {
       id: 'win-nvidia-rtx3060',
@@ -208,23 +198,42 @@ function macGpu(chip: string): DeviceProfile['webgl'] {
   return { vendor: v, renderer: r, unmaskedVendor: v, unmaskedRenderer: r, caps: METAL_CAPS };
 }
 
+/** macOS Intel/AMD GPU renderer string in the modern ANGLE Metal form. */
+function macIntelGpu(vendor: 'Intel' | 'AMD', model: string): DeviceProfile['webgl'] {
+  const v = vendor === 'Intel' ? 'Google Inc. (Intel Inc.)' : 'Google Inc. (ATI Technologies Inc.)';
+  const backendVendor = vendor === 'Intel' ? 'Intel Inc.' : 'ATI Technologies Inc.';
+  const r = `ANGLE (${backendVendor}, ANGLE Metal Renderer: ${model}, Unspecified Version)`;
+  return { vendor: v, renderer: r, unmaskedVendor: v, unmaskedRenderer: r, caps: METAL_CAPS };
+}
+
 const MACOS: OsTemplate = {
   platform: 'MacIntel',
   uaPlatform: 'macOS',
   uaPlatformVersion: '14.5.0',
   osToken: 'Macintosh; Intel Mac OS X 10_15_7',
-  fonts: [
-    'Arial',
-    'Helvetica',
-    'Helvetica Neue',
-    'Menlo',
-    'Monaco',
-    'PingFang SC',
-    'San Francisco',
-    'Times',
-    'Verdana',
-  ],
+  fonts: [...MACOS_FONT_NAMES],
   devices: [
+    {
+      id: 'mac-intel-iris-plus',
+      webgl: macIntelGpu('Intel', 'Intel(R) Iris(TM) Plus Graphics'),
+      screen: { width: 1440, height: 900, dpr: 2 },
+      hardwareConcurrency: 8,
+      deviceMemory: 8,
+    },
+    {
+      id: 'mac-intel-uhd630',
+      webgl: macIntelGpu('Intel', 'Intel(R) UHD Graphics 630'),
+      screen: { width: 1680, height: 1050, dpr: 2 },
+      hardwareConcurrency: 6,
+      deviceMemory: 8,
+    },
+    {
+      id: 'mac-amd-radeon-pro-5500m',
+      webgl: macIntelGpu('AMD', 'AMD Radeon Pro 5500M'),
+      screen: { width: 1792, height: 1120, dpr: 2 },
+      hardwareConcurrency: 8,
+      deviceMemory: 8,
+    },
     {
       id: 'mac-m1',
       webgl: macGpu('M1'),
@@ -374,14 +383,7 @@ function androidGpu(vendor: 'Qualcomm' | 'ARM', model: string): DeviceProfile['w
 export const ANDROID_TEMPLATE: AndroidTemplate = {
   platform: 'Linux armv81',
   uaPlatform: 'Android',
-  fonts: [
-    'Roboto',
-    'Noto Sans',
-    'Noto Color Emoji',
-    'Droid Sans',
-    'Google Sans',
-    'sans-serif',
-  ],
+  fonts: ['Roboto', 'Noto Sans', 'Noto Color Emoji', 'Droid Sans', 'Google Sans', 'sans-serif'],
   devices: [
     {
       id: 'pixel-8-android-14',
@@ -392,8 +394,7 @@ export const ANDROID_TEMPLATE: AndroidTemplate = {
       androidVersion: '14',
       apiLevel: 34,
       buildId: 'UQ1A.240205.004',
-      buildFingerprint:
-        'google/shiba/shiba:14/UQ1A.240205.004/11269751:user/release-keys',
+      buildFingerprint: 'google/shiba/shiba:14/UQ1A.240205.004/11269751:user/release-keys',
       webgl: androidGpu('ARM', 'Mali-G715'),
       screen: { width: 412, height: 915, dpr: 2.625 },
       hardwareConcurrency: 8,
@@ -409,8 +410,7 @@ export const ANDROID_TEMPLATE: AndroidTemplate = {
       androidVersion: '14',
       apiLevel: 34,
       buildId: 'UQ1A.240205.002',
-      buildFingerprint:
-        'google/panther/panther:14/UQ1A.240205.002/11269751:user/release-keys',
+      buildFingerprint: 'google/panther/panther:14/UQ1A.240205.002/11269751:user/release-keys',
       webgl: androidGpu('ARM', 'Mali-G710'),
       screen: { width: 412, height: 915, dpr: 2.625 },
       hardwareConcurrency: 8,
@@ -426,8 +426,7 @@ export const ANDROID_TEMPLATE: AndroidTemplate = {
       androidVersion: '14',
       apiLevel: 34,
       buildId: 'UP1A.231005.007',
-      buildFingerprint:
-        'samsung/dm1qxx/dm1q:14/UP1A.231005.007/S911BXXS3BXAD:user/release-keys',
+      buildFingerprint: 'samsung/dm1qxx/dm1q:14/UP1A.231005.007/S911BXXS3BXAD:user/release-keys',
       webgl: androidGpu('Qualcomm', 'Adreno (TM) 740'),
       screen: { width: 360, height: 780, dpr: 3 },
       hardwareConcurrency: 8,
@@ -443,8 +442,7 @@ export const ANDROID_TEMPLATE: AndroidTemplate = {
       androidVersion: '14',
       apiLevel: 34,
       buildId: 'UP1A.231005.007',
-      buildFingerprint:
-        'samsung/a54x/a54x:14/UP1A.231005.007/A546BXXS8CXA2:user/release-keys',
+      buildFingerprint: 'samsung/a54x/a54x:14/UP1A.231005.007/A546BXXS8CXA2:user/release-keys',
       webgl: androidGpu('ARM', 'Mali-G68'),
       screen: { width: 384, height: 854, dpr: 2.8125 },
       hardwareConcurrency: 8,
@@ -460,8 +458,7 @@ export const ANDROID_TEMPLATE: AndroidTemplate = {
       androidVersion: '14',
       apiLevel: 34,
       buildId: 'UKQ1.230924.001',
-      buildFingerprint:
-        'OnePlus/CPH2449/OP594DL1:14/UKQ1.230924.001/R.1733:user/release-keys',
+      buildFingerprint: 'OnePlus/CPH2449/OP594DL1:14/UKQ1.230924.001/R.1733:user/release-keys',
       webgl: androidGpu('Qualcomm', 'Adreno (TM) 740'),
       screen: { width: 412, height: 919, dpr: 3.5 },
       hardwareConcurrency: 8,

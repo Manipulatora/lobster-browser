@@ -209,7 +209,7 @@ Only metadata + the deterministic seed + a reference to the encrypted blob live 
 
 ```jsonc
 {
-  "engine": "chromium",                 // EngineKind
+  "engine": "lobium",                   // EngineKind; production-only value
   "os": "windows",                      // OsFamily
   "osVersion": "Windows 11 23H2",        // optional explicit platform version
   "tags": ["us", "fb-ads"],             // string[]
@@ -253,11 +253,11 @@ The fingerprint engine (`packages/fingerprint`, consuming `@lobster/shared-types
 
 | Group (shared-types type) | Representative fields | Where enforced (MASTER_PLAN §5) |
 |---|---|---|
-| `NavigatorFingerprint` | `userAgent`, `platform`, `languages[]`, `hardwareConcurrency`, `deviceMemory`, `maxTouchPoints`, `uaBrands[]`, `uaPlatform`, `uaPlatformVersion`, `uaMobile`, `uaFullVersion` | JS-safe (CDP) interim / native Lobium |
-| `ScreenFingerprint` | `width`, `height`, `availWidth`, `availHeight`, `colorDepth`, `devicePixelRatio` | JS-safe / native |
-| `WebGlFingerprint` | `vendor`, `renderer`, `unmaskedVendor`, `unmaskedRenderer`, optional scalar `caps`, captured `extensions[]`, `shaderPrecision`, `version`, `shadingLanguageVersion` | native Lobium / best-effort interim; host-calibration probe still pending |
-| `LocaleFingerprint` | `timezone`, `locale`, `acceptLanguage`, `geolocation{lat,lon,accuracy}` | derived from proxy exit IP (network + JS-safe) |
-| `fonts` | `string[]` matched to OS | native / best-effort |
+| `NavigatorFingerprint` | `userAgent`, `platform`, `languages[]`, `hardwareConcurrency`, `deviceMemory`, `maxTouchPoints`, `uaBrands[]`, `uaPlatform`, `uaPlatformVersion`, `uaMobile`, `uaFullVersion` | native Lobium; CDP harness is internal/test-only |
+| `ScreenFingerprint` | `width`, `height`, `availWidth`, `availHeight`, `colorDepth`, `devicePixelRatio` | native Lobium |
+| `WebGlFingerprint` | `vendor`, `renderer`, `unmaskedVendor`, `unmaskedRenderer`, optional scalar `caps`, captured `extensions[]`, `shaderPrecision`, `version`, `shadingLanguageVersion` | native Lobium; host-calibration probe/consumption still pending |
+| `LocaleFingerprint` | `timezone`, `locale`, `acceptLanguage`, `geolocation{lat,lon,accuracy}` | derived from proxy exit IP, consumed by native Lobium + network headers |
+| `fonts` | `string[]` matched to OS | native Lobium |
 | deep surfaces (not in override model) | canvas farbling, audio DSP hash, TLS/JA3/JA4, HTTP/2, WebRTC policy | **native only** (Lobium); never spoofed from JS |
 
 **Persistence rule:** only the seed + `FingerprintOverrides` (a `Partial<>` of the above) are stored.

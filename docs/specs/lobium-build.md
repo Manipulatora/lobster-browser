@@ -5,7 +5,7 @@
 > **rebase automation**, the **mobile** variant, and per-patch **verification** for **Lobium** — our
 > own Chromium-based engine ("Lobium", formerly "kernel").
 > **Read first:** [MASTER_PLAN](../MASTER_PLAN.md) (§5 fingerprint model, §10 Track F),
-> [ADR-0003](../adr/ADR-0003-engine-strategy.md) (two-engine strategy),
+> [ADR-0003](../adr/ADR-0003-engine-strategy.md) (Lobium-only production engine),
 > [ADR-0004](../adr/ADR-0004-lobium.md) (Lobium decision),
 > [`lobium/config-channel.md`](../../lobium/config-channel.md),
 > [`lobium/patches/README.md`](../../lobium/patches/README.md).
@@ -20,8 +20,8 @@ vendor/renderer, canvas & Web Audio farbling, screen/DPR, UA/platform in all con
 **on SwiftShader** (real-GPU validation is the pending keystone, ENG-2). The native launcher wires the
 binary into the product launch path when a built binary is discovered via `LOBSTER_LOBIUM_BIN`,
 `LOBSTER_LOBIUM_DIR`, the local `~/lobium-build/src/out/Lobium/chrome` dev layout, or a packaged engine
-resource (RUN-1, proven live); otherwise the interim `chromium` engine (patchright) still serves
-`lobium` launches.
+resource (RUN-1, proven live). If no native Lobium binary is provisioned, production launch fails clearly.
+Patchright/Chromium remains an internal validation harness only.
 
 _Originally (Day-4):_ `lobium/` was a *scaffold*: a dry-run `build.sh`, an example `gn-args.gn.example`,
 an **empty** `patches/series`, and prose specs. No Chromium tree had been fetched, no patch written, no
@@ -36,7 +36,7 @@ tagged **status: done / partial / planned**.
 | Term | Meaning |
 |---|---|
 | **Lobium** | Our own Chromium fork + native patches. Flagship engine. Formerly "kernel". |
-| **Chromium (interim)** | Prebuilt ungoogled-chromium driven via patchright. Everyday engine, also serves `lobium` until the native build ships. |
+| **Patchright harness** | Internal test/validation path only. It must not serve production profile launches or native-fingerprint claims. |
 | **Farbling** | Deterministic, seed-driven perturbation of a fingerprint surface (Brave's term), used here for canvas/WebGL/audio. |
 | **Config channel** | The native mechanism carrying the per-profile `Fingerprint` into the C++ engine (§4). |
 | **Pinned ref** | The exact upstream Chromium git revision Lobium is built from (`CHROMIUM_REF`). |
@@ -236,7 +236,7 @@ per-call variance — MASTER_PLAN §5 rule 4), yet each surface is decorrelated.
 |---|---|---|---|---|---|
 | 10 | navigator-ua-ch | `navigator.userAgent/platform/vendor/appVersion`, `navigator.userAgentData` (Sec-CH-UA brands + GREASE, mobile, platform, platformVersion, fullVersion) | `content/browser/…/user_agent`, `third_party/blink/renderer/core/frame/navigator*.cc`, `components/embedder_support/user_agent_utils.cc`, `services/network/…` for request headers | Override the UA string builder + the `UserAgentMetadata` struct at its source so `navigator.*`, the `User-Agent` header, and every `Sec-CH-UA*` request header derive from **one** config-driven value (no JS, no divergence). | `navigator.userAgent`, `uaBrands`, `uaPlatform`, `uaPlatformVersion`, `uaMobile`, `uaFullVersion`, `platform` |
 | 11 | screen-dpr | `screen.width/height/availWidth/availHeight/colorDepth`, `window.devicePixelRatio`, `matchMedia` resolution/color-gamut | `third_party/blink/renderer/core/frame/screen.cc`, `.../local_dom_window.cc`, `display/` via `ScreenInfo` | Feed a synthetic `ScreenInfo`/`display::Display` from config so screen + DPR + `matchMedia` are internally consistent and independent of the host monitor. | `screen.*`, `screen.devicePixelRatio` |
-| 12 | timezone-locale | `Intl` timezone, `Date` offset, `navigator.language(s)`, `Accept-Language` | `third_party/blink/renderer/core/timezone/…`, `third_party/icu` timezone default, `third_party/blink/.../navigator_language.cc`, ICU locale default | Set the process ICU default timezone + locale from config so `Intl`, `Date`, and `navigator.languages` all agree — native equivalent of the CDP `setTimezoneOverride`/`setLocaleOverride` we use on interim Chromium, but tell-free. | `locale.timezone`, `locale.locale`, `navigator.languages`, `locale.acceptLanguage` |
+| 12 | timezone-locale | `Intl` timezone, `Date` offset, `navigator.language(s)`, `Accept-Language` | `third_party/blink/renderer/core/timezone/…`, `third_party/icu` timezone default, `third_party/blink/.../navigator_language.cc`, ICU locale default | Set the process ICU default timezone + locale from config so `Intl`, `Date`, and `navigator.languages` all agree — native equivalent of the CDP validation-harness overrides, but tell-free. | `locale.timezone`, `locale.locale`, `navigator.languages`, `locale.acceptLanguage` |
 | 13 | fonts | Font enumeration + metrics (`document.fonts`, canvas text metrics, CSS font matching) | `third_party/blink/renderer/platform/fonts/…`, platform `FontCache` (`font_cache_{win,mac,linux}.cc`), skia font manager | Filter the platform font enumeration to the config's allow-list matched to the claimed OS, and block probing of unlisted fonts (fallback deterministically). Prevents an OS-mismatched font set from betraying the UA. | `fonts[]`, `os` |
 | 14 | hardware-concurrency-memory | `navigator.hardwareConcurrency`, `navigator.deviceMemory`, `navigator.maxTouchPoints` | `third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc`, `.../navigator_device_memory.cc`, `.../navigator.cc` (touch), also worker global scopes | Return config values from the getters in **all** contexts (window + workers), so a worker can't leak the real core count. | `navigator.hardwareConcurrency`, `navigator.deviceMemory`, `navigator.maxTouchPoints` |
 | 15 | canvas-farbling | 2D `toDataURL`/`toBlob`/`getImageData`, `measureText` metrics | `third_party/blink/renderer/modules/canvas/…` (`canvas_rendering_context_2d.cc`, `base_rendering_context_2d.cc`), `platform/graphics/…`, `OffscreenCanvas` module, worker/iframe globals | Seeded per-pixel perturbation applied at readback (Brave-style farbling): near-imperceptible, deterministic per profile+session, applied uniformly in **main frame, iframes, dedicated/shared/service workers, and OffscreenCanvas**. Text metrics get a matching seeded jitter. | `seed` (canvas salt) |
@@ -244,7 +244,7 @@ per-call variance — MASTER_PLAN §5 rule 4), yet each surface is decorrelated.
 | 17 | webgl-pixel-hash | `readPixels` / `toDataURL` of a WebGL scene (the rendered-hash vector) | same modules as 16 + `gpu/command_buffer/…` readback path | Seeded perturbation on WebGL readback analogous to canvas farbling, so the rendered-image hash is stable-per-profile but not host-identifying. | `seed` (webgl salt) |
 | 18 | audiocontext-dsp | `AudioContext`/`OfflineAudioContext` DSP fingerprint, `sampleRate`, `baseLatency` | `third_party/blink/renderer/modules/webaudio/…`, `media/…` audio params | Seeded micro-perturbation in the audio DSP output path + config-driven `sampleRate`/`baseLatency`, deterministic per profile. | `seed` (audio salt), audio device profile |
 | 19 | webgpu-adapter | `GPUAdapter` name/vendor, `requestAdapterInfo`, `limits`, `features` | `third_party/blink/renderer/modules/webgpu/…`, `third_party/dawn` adapter info | Report a config-driven adapter identity + coherent limits/features (must match the WebGL device story). P2 — lands after core surfaces. | webgpu device profile (derived from `webgl` device) |
-| 20 | webrtc-ip | ICE candidate IPs (mDNS/host/srflx) so the public IP == proxy exit IP, no local-IP leak | `third_party/blink/renderer/modules/peerconnection/…`, `third_party/webrtc`, `content/browser/…/webrtc` | Force the effective ICE policy natively (proxy-only / default route hidden) so WebRTC never leaks the real or local IP behind the proxy. Native equivalent of the interim policy. | WebRTC policy flag + proxy awareness |
+| 20 | webrtc-ip | ICE candidate IPs (mDNS/host/srflx) so the public IP == proxy exit IP, no local-IP leak | `third_party/blink/renderer/modules/peerconnection/…`, `third_party/webrtc`, `content/browser/…/webrtc` | Force the effective ICE policy natively (proxy-only / default route hidden) so WebRTC never leaks the real or local IP behind the proxy. | WebRTC policy flag + proxy awareness |
 | 21 | boringssl-tls-ja3-ja4 | TLS ClientHello shape → **JA3/JA4** (cipher list/order, extensions/order, curves, sig-algs, ALPN, GREASE) | `net/socket/ssl_client_socket_impl.cc`, `net/ssl/…`, `third_party/boringssl` | Pin the ClientHello assembly to reproduce the exact JA3/JA4 of the claimed Chrome build (extension ordering, GREASE placement, supported_groups). Config selects the TLS profile keyed to the UA-claimed version. | TLS profile (derived from claimed Chrome version) |
 | 22 | http2-settings-priority-header-order | HTTP/2 `SETTINGS` values/order, PRIORITY/stream-dependency behavior, pseudo-header + request-header **order** | `net/spdy/…`, `net/http/http_network_transaction.cc`, `net/third_party/quiche` | Emit the SETTINGS frame, priority tree, and header ordering that match the claimed Chrome build's network signature. | HTTP/2 profile (derived from claimed Chrome version) |
 | 30 | rebrand | Product name/icons/version strings (non-fingerprint) | `chrome/app/theme/…`, `chrome/browser/…`, version files | Rebrand to "Lobium" for distribution. **Must not** alter any fingerprint-visible string that a site reads (UA version stays Chrome-coherent — driven by patch 10, not here). | — |
@@ -354,10 +354,11 @@ Notes:
 The Lobium launcher (a `Launcher` in `packages/engine-runner/src/runners/`) will, on `launch`:
 1. Serialize `ctx.fingerprint` + derived `net` block → `${userDataDir}/lobium-fp.json` (0600).
 2. Spawn the Lobium binary with `--lobium-fp-config=<path>` + `--user-data-dir` + proxy switches.
-3. Return `{ pid, ws, debuggerAddress }` (`LaunchHandle`) — same contract as the interim runner, so
-   Lobium drops in transparently behind `sidecar-ipc.md` `launch`/`startProfile`.
-Because deep surfaces are now native, the Lobium path **skips** the CDP init-script/emulation that the
-interim path uses (`cdp-fingerprint.ts`) for those surfaces — no JS tell.
+3. Return `{ pid, ws, debuggerAddress }` (`LaunchHandle`) for automation/control clients.
+
+Because profile-visible fingerprint surfaces are native, the Lobium path **does not** apply production
+fingerprint values through CDP init-script/emulation (`cdp-fingerprint.ts`). Those helpers remain for the
+internal harness and migration tests only.
 
 ---
 
@@ -372,7 +373,7 @@ interim path uses (`cdp-fingerprint.ts`) for those surfaces — no JS tell.
 | **Compile budget** | Cold build (no cache): several hours single-host; with reclient/warm cache, incremental rebuilds after a rebase target **< ~30–60 min**. Track wall-clock per build in CI; alert on regressions. Skip PGO (`chrome_pgo_phase=0`) for iteration builds; run PGO only for release artifacts. |
 | **Isolation** | Builds run in a clean container/VM with pinned `depot_tools` + toolchain; no host state leaks into artifacts (reproducibility). |
 | **CI placement** | Lobium's build is a **separate long-running pipeline**, NOT on every PR (MASTER_PLAN §8). Triggers: (a) new pinned ref / rebase, (b) patch-series change, (c) nightly, (d) manual. PR CI only lint-checks the patch series (apply-cleanly + header-present), never compiles. |
-| **Artifact hosting** | Signed, versioned artifacts (per OS/arch) uploaded to S3-compatible object storage (same infra family as the SaaS profile blobs, MASTER_PLAN §3), served to desktop clients via the download-on-first-run mechanism (mirrors `/engines` for interim Chromium; **binaries never committed to git**). Each artifact carries a manifest: `{ engine:"lobium", version, os, arch, chromiumRef, sha256, signed:true, notarized? }`. |
+| **Artifact hosting** | Signed, versioned Lobium artifacts (per OS/arch) uploaded to S3-compatible object storage (same infra family as the SaaS profile blobs, MASTER_PLAN §3), served to desktop clients via the download-on-first-run/resource mechanism; **binaries never committed to git**. Each artifact carries a manifest: `{ engine:"lobium", version, os, arch, chromiumRef, sha256, signed:true, notarized? }`. |
 
 ---
 
@@ -453,8 +454,9 @@ rejects, which is what makes a ≤3-day cadence sustainable by two agents rather
 
 ## 9. Verification — validating each patch against the detector matrix
 
-**status: partial.** The CI harness exists (`ci/validation/run.mjs`, `thresholds.json`, T-005) and
-today grades the **interim** Chromium; the *same* harness grades Lobium builds as each patch lands.
+**status: partial.** The CI harness exists (`ci/validation/run.mjs`, `thresholds.json`, T-005) and the
+native Lobium detector (`ci/validation/lobium-detect.mjs`) grades Lobium builds as patches land. Older
+Patchright/Chromium checks are retained as internal compatibility tests, not product proof.
 
 ### 9.1 The gate
 
@@ -463,9 +465,9 @@ today grades the **interim** Chromium; the *same* harness grades Lobium builds a
 { "sannysoft": { "maxFailed": 2 }, "creepjs": { "minTrustScore": 60, "maxLies": 0 },
   "webrtc": { "requireIcePublicIpEqualsProxyIp": true }, "coherence": { "maxIssues": 0 } }
 ```
-The `sannysoft.maxFailed: 2` allowance exists **because** WebGL vendor/renderer are still host values
-on the interim engine (see the `//` note in the file). **When Lobium's WebGL patches (16/17) land, that
-allowance drops to 0** — that tightening is the objective proof the native patch worked.
+The `sannysoft.maxFailed: 2` allowance is historical from the interim-harness era. The Lobium production
+gate target is zero unexpected detector failures on a real-GPU machine; any allowance must be explicitly
+justified in `thresholds.json` and `PROJECT-STATUS.md`.
 
 ### 9.2 Per-patch acceptance (each patch is "done" only when its detector check passes)
 
@@ -512,9 +514,10 @@ types and the sidecar-side `deriveFingerprintFromHost` scaffold now exist, inclu
 shader precision, and GL version fields in the shared model/config channel.
 
 **Where we're going:** the first-build/config-channel POC is complete. The current production path is:
-RG-1 real-GPU baseline, HC-1..6 host calibration, native real-GPU CI, then multi-OS build/signing/rebase
-automation. The product still falls back to the interim Chromium when no env-provided, auto-discovered,
-or bundled binary exists, but the flagship path is native Lobium on the user's real hardware.
+RUN-3 direct native launcher hardening, RG-1 real-GPU baseline, HC-1..6 host calibration, native real-GPU
+CI, then multi-OS build/signing/rebase automation. The product no longer falls back to interim Chromium
+when no env-provided, auto-discovered, or bundled binary exists; it fails clearly until Lobium is
+provisioned.
 
 **Honest bottom line:** the native engine moat is no longer just a design; the core dev-path patches are
 built and passing their local detector harness. The remaining boundary is production proof: real

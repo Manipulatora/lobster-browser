@@ -123,6 +123,17 @@ export interface LocaleFingerprint {
 export type WebRtcPolicy =
   'default_public_interface_only' | 'disable_non_proxied_udp' | 'proxy_only' | 'disabled';
 
+/**
+ * Product persona mode for Language / Timezone / Geolocation / WebRTC / Fonts.
+ * - `real`: do not override (use host / seed defaults)
+ * - `manual`: use the user-supplied value
+ * - `based_ip`: derive from proxy exit IP (geo overlay)
+ */
+export type PersonaMode = 'real' | 'manual' | 'based_ip';
+
+/** Android device type for the create-profile Fingerprint tab. */
+export type AndroidDeviceType = 'mobile' | 'tablet';
+
 /** User-facing deterministic noise switches. Unsupported switches must be surfaced in UI. */
 export interface HardwareNoisePolicy {
   webgl: boolean;
@@ -155,9 +166,9 @@ export interface FingerprintLaunchPolicy {
 }
 
 /**
- * A coherent, per-profile fingerprint. The engine-runner fills the deep surfaces
- * (canvas/webgl/audio) at the native engine layer; the JS-safe surfaces here are
- * generated from real-device distributions and applied via clean CDP overrides.
+ * A coherent, per-profile fingerprint. Production launches serialize this shape into Lobium's native
+ * config channel so profile-visible values are owned by the engine layer. CDP helpers may still consume
+ * it in internal harnesses, but they are not the production fingerprint path.
  */
 export interface Fingerprint {
   os: OsFamily;
@@ -236,4 +247,14 @@ export type FingerprintOverrides = Partial<{
   hardwareNoise: Partial<HardwareNoisePolicy>;
   mediaDevices: Partial<MediaDeviceProfile>;
   fonts: string[];
-}>;
+  /** Persona modes for UI-driven locale/fonts/WebRTC resolution at launch. */
+  fontsMode: PersonaMode;
+  languageMode: PersonaMode;
+  timezoneMode: PersonaMode;
+  geolocationMode: PersonaMode;
+  webrtcMode: PersonaMode;
+  /** Android-only device picker (Play CSV). Desktop Lobium launch remains fail-closed. */
+  androidDeviceType: AndroidDeviceType;
+  androidDeviceModel: string;
+  androidDeviceCode: string;
+}>

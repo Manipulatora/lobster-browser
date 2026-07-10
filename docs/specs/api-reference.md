@@ -179,10 +179,11 @@ Errors: `401 unauthorized`; `500 db lock`.
 
 ### 1.8 Planned local endpoints (spec) ⬜
 
-**`POST /api/v1/profile/create`** — mirrors the cloud `CreateProfileInput`:
+**`POST /api/v1/profile/create`** — mirrors the cloud `CreateProfileInput`. Production profiles use
+`"engine": "lobium"` only; old `"chromium"` values are rejected or migrated.
 ```jsonc
 // body
-{ "name": "US-01", "engine": "chromium", "os": "windows",
+{ "name": "US-01", "engine": "lobium", "os": "windows",
   "fingerprintSeed": "optional-hex", "fingerprintOverrides": { /* opaque */ },
   "proxy": { "type": "socks5", "host": "1.2.3.4", "port": 1080, "username": "u", "password": "p" },
   "tags": ["affiliate"], "folder": "US", "notes": "" }
@@ -398,11 +399,12 @@ Every route requires JWT. Team is resolved from the caller's membership or an ex
 | `POST` | `/profiles/:id/clone` | `teamId?` | `{ name? }` | ⬜ planned |
 | `POST` | `/profiles/:id/share` | `teamId?` | `ProfileSharing` | ⬜ planned |
 
-**`CreateProfileDto`** (validated against `ENGINE_KINDS`/`OS_FAMILIES` — `lobium` is first-class):
+**`CreateProfileDto`** (validated against `ENGINE_KINDS`/`OS_FAMILIES` — production accepts `lobium`
+only):
 | Field | Type | Req | Rule |
 |---|---|---|---|
 | `name` | string | ✅ | ≤ 120 |
-| `engine` | `"lobium"\|"chromium"` | ✅ | in `ENGINE_KINDS` |
+| `engine` | `"lobium"` | ✅ | production engine; compatibility code may read legacy `chromium` rows but must not launch them |
 | `os` | `"windows"\|"macos"\|"linux"` | ✅ | in `OS_FAMILIES` |
 | `fingerprintSeed` | string | ⬜ | omit → server mints a random 128-bit hex seed |
 | `fingerprintOverrides` | object | ⬜ | opaque JSON (deep validation in `@lobster/fingerprint`) |
@@ -414,7 +416,7 @@ Every route requires JWT. Team is resolved from the caller's membership or an ex
 // POST /profiles  → data: Profile
 {
   "id": "p_…", "name": "US-affiliate-01",
-  "engine": "chromium", "os": "windows",
+  "engine": "lobium", "os": "windows",
   "fingerprintSeed": "9f2c…", "fingerprintOverrides": { "timezone": "America/New_York" },
   "proxy": { "id": "px_…", "type": "socks5", "host": "1.2.3.4", "port": 1080 },
   "tags": ["affiliate"], "folder": "US", "notes": "",

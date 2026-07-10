@@ -8,11 +8,24 @@
 
 set -euo pipefail
 
-SRC="${LOBSTER_LOBIUM_DIR:-/home/chrome/lobium-build/src/out/Lobium}"
-OUT="${1:-/home/chrome/browser/lobster-browser/dist-linux/lobium-runtime}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+HOME_DIR="${HOME:-/home/$(whoami)}"
 
-if [[ ! -x "$SRC/chrome" ]]; then
-  echo "error: Lobium chrome not found at $SRC/chrome" >&2
+SRC=""
+for candidate in \
+  "${LOBSTER_LOBIUM_DIR:-}" \
+  "${LOBSTER_LOBIUM_SRC:-}" \
+  "$HOME_DIR/lobium-build/src/out/Lobium" \
+  /home/chrome/lobium-build/src/out/Lobium; do
+  if [[ -n "$candidate" && -x "$candidate/chrome" ]]; then
+    SRC="$candidate"
+    break
+  fi
+done
+OUT="${1:-$ROOT/dist-linux/lobium-runtime}"
+
+if [[ -z "$SRC" || ! -x "$SRC/chrome" ]]; then
+  echo "error: Lobium chrome not found (set LOBSTER_LOBIUM_DIR to out/Lobium)" >&2
   exit 1
 fi
 

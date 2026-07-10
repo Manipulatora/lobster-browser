@@ -172,7 +172,7 @@ mod tests {
             &conn,
             CreateProfileTemplateInput {
                 name: "US Retail".to_string(),
-                engine: "chromium".to_string(),
+                engine: "lobium".to_string(),
                 os: "windows".to_string(),
                 os_version: Some("Windows 11 23H2".to_string()),
                 preset_parameters: Some(vec!["User Agent".to_string(), "Extensions".to_string()]),

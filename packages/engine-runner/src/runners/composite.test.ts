@@ -36,7 +36,7 @@ function sampleFingerprint(): Fingerprint {
   };
 }
 
-function params(profileId: string, engine: LaunchParams['engine'] = 'chromium'): LaunchParams {
+function params(profileId: string, engine: LaunchParams['engine'] = 'lobium'): LaunchParams {
   return { profileId, engine, userDataDir: `/data/${profileId}`, fingerprint: sampleFingerprint() };
 }
 
@@ -55,7 +55,7 @@ function fakeRegistry(recorded: LaunchContext[]): LauncherRegistry {
         close: () => Promise.resolve(),
       };
     };
-  return { lobium: make(), chromium: make() };
+  return { lobium: make() };
 }
 
 test('launch prepares coherent options + returns endpoints from the launcher', async () => {
@@ -99,7 +99,7 @@ test('status lists running instances; stop removes them', async () => {
 test('a crashed / externally-closed browser is evicted so the profile can relaunch', async () => {
   let closeListener: (() => void) | undefined;
   const registry: LauncherRegistry = {
-    chromium: async (ctx: LaunchContext): Promise<LaunchHandle> => ({
+    lobium: async (ctx: LaunchContext): Promise<LaunchHandle> => ({
       pid: 1,
       ws: `ws://127.0.0.1:9222/${ctx.profileId}`,
       debuggerAddress: '127.0.0.1:9222',

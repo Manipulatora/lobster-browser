@@ -1,11 +1,11 @@
 # SPEC — Linux product package (deb + local install)
 
 > **Status: PROVEN (2026-07-09).** A Linux `.deb` of the Lobster desktop shell was built on this
-> machine, installed under `~/.local/share/lobster`, and proven end-to-end: **UI starts → sidecar
-> (bundled Node) → create/list profile → Launch → native Lobium Chrome/152 runs with CDP**.
+> machine (`ivyhfx` VPS), installed under `~/.local/share/lobster`, and proven end-to-end:
+> **UI starts → sidecar (bundled Node) → create/list profile → Launch → native Lobium Chrome/152
+> runs with CDP** (`product-e2e.mjs` PASS).
 >
-> Read alongside [`windows-cross-build.md`](windows-cross-build.md) and
-> [`PROJECT-STATUS.md`](../PROJECT-STATUS.md) (DSK-5/11).
+> Read alongside [`windows-cross-build.md`](windows-cross-build.md).
 
 ---
 
@@ -13,9 +13,9 @@
 
 | Artifact | Size | Notes |
 |---|---|---|
-| `dist-linux/Lobster Browser_0.0.0_amd64.deb` | ~55 MB | Shell + bundled Node 22 + self-contained sidecar |
+| `dist-linux/Lobster Browser_0.0.0_amd64.deb` | ~58 MB | Shell + bundled Node + self-contained sidecar |
 | `dist-linux/lobster-desktop` | ~23 MB | Release binary |
-| `dist-linux/lobium-runtime/` | ~1.0 GB | Stripped Lobium (`chrome` + `.so` + paks/locales) — **not** the 7.3 GB `out/` tree |
+| `dist-linux/lobium-runtime/` | ~1.0 GB | Stripped Lobium (`chrome` + `.so` + paks/locales) — **not** the full `out/` tree |
 | `~/.local/share/lobster/` | ~1.2 GB | User-local install (deb extract + lobium-runtime) |
 | `~/.local/bin/lobster-browser` | symlink | Launcher → `dist-linux/run-lobster.sh` |
 
@@ -23,45 +23,25 @@
 (hybrid) because a 1 GB engine inside every deb/AppImage update is impractical. The launcher env
 wires `LOBSTER_LOBIUM_BIN` / `LOBSTER_NODE_BIN` / `LOBSTER_SIDECAR` so Launch works with no monorepo.
 
+On this build VPS (no NVIDIA), the install defaults to `LOBSTER_GPU=software` (SwiftShader).
+
 ---
 
 ## 2. Rebuild / install (this machine)
 
 ```bash
-export PATH=/home/chrome/browser/.tools/node22/bin:/home/chrome/browser/.tools/cargo/bin:$PATH
-export RUSTUP_HOME=/home/chrome/browser/.tools/rustup CARGO_HOME=/home/chrome/browser/.tools/cargo
-export LOBSTER_LOBIUM_BIN=/home/chrome/lobium-build/src/out/Lobium/chrome
-export LOBSTER_GPU=gpu LOBSTER_ANGLE_BACKEND=vulkan
-export VK_ICD_FILENAMES=/home/chrome/browser/.gpu/nvidia_icd.json
-export DISPLAY=:20.0
+# Optional overrides:
+#   LOBSTER_LOBIUM_SRC=$HOME/lobium-build/src/out/Lobium
+#   LOBSTER_GPU=software   # or gpu + LOBSTER_ANGLE_BACKEND=vulkan on NVIDIA hosts
 
-cd /home/chrome/browser/lobster-browser
-
-# 1) Self-contained sidecar (includes @lobster/* + patchright + undici/socks…)
-node scripts/bundle-sidecar.mjs
-
-# 2) Strip Lobium runtime (~1GB)
-bash scripts/package-lobium-runtime.sh dist-linux/lobium-runtime
-
-# 3) Vendor Node into Tauri resources
-mkdir -p apps/desktop/src-tauri/resources/node/bin
-cp -a /home/chrome/browser/.tools/node22/bin/node apps/desktop/src-tauri/resources/node/bin/node
-
-# 4) Build .deb (tauri.conf.json resources: sidecar + node)
-cd apps/desktop && npm run tauri -- build --bundles deb
-
-# 5) Install user-local (no sudo) — see scripts/build-linux-product.sh
-```
-
-Or run the orchestrator:
-
-```bash
+cd /home/ivyhfx/browser   # or your clone root
 bash scripts/build-linux-product.sh
 ```
 
 Start the installed UI:
 
 ```bash
+export PATH="$HOME/.local/bin:$PATH"
 lobster-browser
 # or: dist-linux/run-lobster.sh
 ```
@@ -72,15 +52,11 @@ lobster-browser
 
 | Step | Result |
 |---|---|
-| Bundled sidecar `ping` | OK |
-| `product-e2e.mjs` with installed Lobium env | **PASS** (create → headful Lobium → cookies → navigate → screenshot → stop) |
-| Installed GUI starts | Sidecar spawn log: packaged Node + sidecar paths |
+| Bundled sidecar | OK |
+| `product-e2e.mjs` with installed Lobium env | **PASS** (create → Lobium → cookies → navigate → screenshot → stop) |
+| Installed GUI starts | Sidecar spawn: packaged Node + sidecar paths |
 | Local API `/api/v1/health` | `{ status: ok }` |
-| Profile list + `/api/v1/profile/start` | Returns `debuggerAddress` + `ws` |
 | CDP `/json/version` | `Chrome/152.0.7928.0` (native Lobium) |
-| `/api/v1/profile/stop` | OK |
-
-UI Create Profile uses Tauri IPC (`create_profile`) into the same SQLite the local API lists/launches.
 
 ---
 

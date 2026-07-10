@@ -71,7 +71,7 @@ test('create -> list -> get -> update -> delete, all team-scoped with a unique s
   const create = await request(app.getHttpServer())
     .post('/profiles')
     .set(auth)
-    .send({ name: 'Profile A', engine: 'chromium', os: 'windows' });
+    .send({ name: 'Profile A', engine: 'lobium', os: 'windows' });
   assert.ok([200, 201].includes(create.status), `create status ${create.status}`);
   assert.equal(create.body.code, 0);
   const profile = create.body.data;
@@ -83,7 +83,7 @@ test('create -> list -> get -> update -> delete, all team-scoped with a unique s
   const create2 = await request(app.getHttpServer())
     .post('/profiles')
     .set(auth)
-    .send({ name: 'Profile B', engine: 'chromium', os: 'macos' });
+    .send({ name: 'Profile B', engine: 'lobium', os: 'macos' });
   assert.equal(create2.body.code, 0);
   assert.notEqual(
     create2.body.data.fingerprintSeed,
@@ -129,7 +129,7 @@ test("profiles are isolated per team: one user never sees another user's profile
   await request(app.getHttpServer())
     .post('/profiles')
     .set({ Authorization: `Bearer ${tokenA}` })
-    .send({ name: 'A-only', engine: 'chromium', os: 'linux' });
+    .send({ name: 'A-only', engine: 'lobium', os: 'linux' });
 
   const listB = await request(app.getHttpServer())
     .get('/profiles')
@@ -156,7 +156,7 @@ test('update can edit engine, os, and fingerprintOverrides and they persist', as
   const create = await request(app.getHttpServer())
     .post('/profiles')
     .set(auth)
-    .send({ name: 'Editable', engine: 'chromium', os: 'windows' });
+    .send({ name: 'Editable', engine: 'lobium', os: 'windows' });
   assert.equal(create.body.code, 0);
   const id: string = create.body.data.id;
   const originalSeed: string = create.body.data.fingerprintSeed;
@@ -193,7 +193,7 @@ async function createProfile(auth: { Authorization: string }, name: string): Pro
   const create = await request(app.getHttpServer())
     .post('/profiles')
     .set(auth)
-    .send({ name, engine: 'chromium', os: 'windows' });
+    .send({ name, engine: 'lobium', os: 'windows' });
   assert.ok([200, 201].includes(create.status), `create status ${create.status}`);
   return create.body.data.id as string;
 }
@@ -434,21 +434,21 @@ test('free-tier profile limit matches the schema default (5) and is enforced', a
     const res = await request(app.getHttpServer())
       .post('/profiles')
       .set(auth)
-      .send({ name: `Limit ${i}`, engine: 'chromium', os: 'windows' });
+      .send({ name: `Limit ${i}`, engine: 'lobium', os: 'windows' });
     assert.ok([200, 201].includes(res.status), `create ${i} status ${res.status}`);
   }
 
   const overflow = await request(app.getHttpServer())
     .post('/profiles')
     .set(auth)
-    .send({ name: 'one too many', engine: 'chromium', os: 'windows' });
+    .send({ name: 'one too many', engine: 'lobium', os: 'windows' });
   assert.equal(overflow.status, 403);
 });
 
 test('unauthenticated create is 401', async () => {
   const res = await request(app.getHttpServer())
     .post('/profiles')
-    .send({ name: 'nope', engine: 'chromium', os: 'windows' });
+    .send({ name: 'nope', engine: 'lobium', os: 'windows' });
   assert.equal(res.status, 401);
 });
 
@@ -459,7 +459,7 @@ test('bulk create makes N profiles each with a unique seed, batch-checked agains
   const bulk = await request(app.getHttpServer())
     .post('/profiles/bulk')
     .set(auth)
-    .send({ count: 3, namePrefix: 'Batch', engine: 'chromium', os: 'windows', tags: ['ecom'] });
+    .send({ count: 3, namePrefix: 'Batch', engine: 'lobium', os: 'windows', tags: ['ecom'] });
   assert.ok([200, 201].includes(bulk.status), `bulk status ${bulk.status}`);
   assert.equal(bulk.body.code, 0);
   assert.equal(bulk.body.data.length, 3);
@@ -474,7 +474,7 @@ test('bulk create makes N profiles each with a unique seed, batch-checked agains
   const overflow = await request(app.getHttpServer())
     .post('/profiles/bulk')
     .set(auth)
-    .send({ count: 3, namePrefix: 'Over', engine: 'chromium', os: 'windows' });
+    .send({ count: 3, namePrefix: 'Over', engine: 'lobium', os: 'windows' });
   assert.equal(overflow.status, 403);
   const list = await request(app.getHttpServer()).get('/profiles').set(auth);
   assert.equal(list.body.data.length, 3, 'nothing partial was created on the rejected batch');
@@ -493,7 +493,7 @@ test('export is secret-free; import transfers profiles (preserving seed identity
   await request(app.getHttpServer())
     .post('/profiles')
     .set(authA)
-    .send({ name: 'Beta', engine: 'chromium', os: 'linux' });
+    .send({ name: 'Beta', engine: 'lobium', os: 'linux' });
   // Sync a secret blob into Alpha to prove export never carries it.
   await request(app.getHttpServer())
     .post(`/profiles/${p1.body.data.id}/sync`)
@@ -538,12 +538,12 @@ test('profile actions are recorded to the team audit log (newest first, with met
   const create = await request(app.getHttpServer())
     .post('/profiles')
     .set(auth)
-    .send({ name: 'Audited', engine: 'chromium', os: 'windows' });
+    .send({ name: 'Audited', engine: 'lobium', os: 'windows' });
   assert.equal(create.body.code, 0);
   await request(app.getHttpServer())
     .post('/profiles/bulk')
     .set(auth)
-    .send({ count: 2, namePrefix: 'B', engine: 'chromium', os: 'windows' });
+    .send({ count: 2, namePrefix: 'B', engine: 'lobium', os: 'windows' });
 
   // AuditController (GET /audit) is mounted transitively via ProfilesModule -> AuditModule.
   const audit = await request(app.getHttpServer()).get('/audit').set(auth);

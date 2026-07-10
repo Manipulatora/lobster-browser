@@ -161,15 +161,20 @@ index ffdaf1716e..b9ea49e5cc 100644
 +    }
 +  }
 +  if (!lobium_fp_data->empty()) {
-+    // The payload rides the renderer command line, which Windows caps at 32767 chars. If a config is
-+    // implausibly large (e.g. a huge font enumeration), skip the switch so the renderer falls back to
-+    // host values rather than failing to launch (an over-length CreateProcess line is rejected).
-+    if (lobium_fp_data->size() <= 24u * 1024u) {
++    // The payload rides the renderer command line, which Windows caps at 32767 chars for the *entire*
++    // CreateProcess line. Keep a conservative headroom for Chromium's other switches. If a config is
++    // too large (historically: shipping full macOS font catalogs), SKIP the switch — but this is a
++    // hard fail for spoofing: renderers then report HOST platform/HWC while UA may still come from
++    // other paths, which CreepJS scores as WorkerGlobalScope lies. Sidecar must keep lobium-fp.json
++    // compact (no unused font lists) until a non-cmdline transport exists.
++    constexpr size_t kMaxLobiumFpDataBytes = 28u * 1024u;
++    if (lobium_fp_data->size() <= kMaxLobiumFpDataBytes) {
 +      renderer_cmd->AppendSwitchASCII("lobium-fp-data", *lobium_fp_data);
 +    } else {
 +      LOG(ERROR) << "Lobium: fingerprint config is too large for the renderer command line ("
-+                 << lobium_fp_data->size()
-+                 << " bytes); skipping the native override for this renderer.";
++                 << lobium_fp_data->size() << " > " << kMaxLobiumFpDataBytes
++                 << " bytes); SKIPPING native override — renderers will leak HOST fingerprint. "
++                    "Shrink lobium-fp.json (do not embed font catalogs on the cmdline path).";
 +    }
 +  }
 +

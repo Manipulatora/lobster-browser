@@ -35,7 +35,7 @@ test('buildAndroidLobiumConfig carries Android identity + mobile UA-CH model', (
 });
 
 test('Android farbling seeds are stable per profile seed and differ across seeds', () => {
-  const fp = deriveAndroidFingerprint('same-android-device', { engine: 'chromium' });
+  const fp = deriveAndroidFingerprint('same-android-device', { engine: 'lobium' });
   const a = buildAndroidLobiumConfig(fp, { seed: 'profile-1' }).seeds;
   const a2 = buildAndroidLobiumConfig(fp, { seed: 'profile-1' }).seeds;
   const b = buildAndroidLobiumConfig(fp, { seed: 'profile-2' }).seeds;

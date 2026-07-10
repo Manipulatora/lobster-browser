@@ -129,6 +129,43 @@ impl std::fmt::Display for StartError {
     }
 }
 
+struct LaunchOsTarget {
+    os: &'static str,
+    arch: Option<&'static str>,
+}
+
+fn normalize_desktop_launch_os(os: &str) -> Result<LaunchOsTarget, StartError> {
+    match os {
+        "windows" => Ok(LaunchOsTarget {
+            os: "windows",
+            arch: None,
+        }),
+        "macos" => Ok(LaunchOsTarget {
+            os: "macos",
+            arch: None,
+        }),
+        "macos_intel" => Ok(LaunchOsTarget {
+            os: "macos",
+            arch: Some("x86_64"),
+        }),
+        "macos_arm" => Ok(LaunchOsTarget {
+            os: "macos",
+            arch: Some("arm64"),
+        }),
+        "linux" => Ok(LaunchOsTarget {
+            os: "linux",
+            arch: None,
+        }),
+        "android" => Ok(LaunchOsTarget {
+            os: "android",
+            arch: Some("arm64"),
+        }),
+        other => Err(StartError::Failed(anyhow::anyhow!(
+            "unsupported profile OS target \"{other}\""
+        ))),
+    }
+}
+
 /// Start a profile through the engine-runner sidecar. Shared by the local HTTP API and the desktop
 /// `launch_profile` Tauri command so both entry points drive the SAME launch path (derive fingerprint
 /// from the stored seed + overrides + proxy geo, then launch). Returns the sidecar's `startProfile`
@@ -158,11 +195,21 @@ pub async fn start_profile_via_sidecar(
         }
         profile
     };
+    if profile.engine != "lobium" {
+        return Err(StartError::Failed(anyhow::anyhow!(
+            "Lobium is the only supported engine; profile {} is configured for {}",
+            profile.id,
+            profile.engine
+        )));
+    }
+    let launch_target = normalize_desktop_launch_os(&profile.os)?;
     let user_data_dir = profiles_dir.join(&profile.id);
     let params = json!({
         "profileId": profile.id,
+        "profileName": profile.name,
         "engine": profile.engine,
-        "os": profile.os,
+        "os": launch_target.os,
+        "arch": launch_target.arch,
         "osVersion": profile.os_version,
         "fingerprintSeed": profile.fingerprint_seed,
         "fingerprintOverrides": profile.fingerprint_overrides,
@@ -406,7 +453,7 @@ mod tests {
     fn test_input(name: &str) -> profile_store::CreateProfileInput {
         profile_store::CreateProfileInput {
             name: name.to_string(),
-            engine: "chromium".to_string(),
+            engine: "lobium".to_string(),
             os: "windows".to_string(),
             os_version: Some("Windows 11 23H2".to_string()),
             fingerprint_seed: None,

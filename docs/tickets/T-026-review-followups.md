@@ -24,9 +24,9 @@ reasoning trail; use `PROJECT-STATUS.md` for current priority.
 ## Deferred — MEDIUM
 
 - **T-026c · DOWNGRADED for native Lobium.**
-  The native config channel reaches popup renderers for device/deep surfaces, so only CDP-only
-  timezone/locale/geo have a possible pre-override window. Still worth doing for interim Chromium and for
-  full geo correctness, but no longer a top device-identity leak on Lobium.
+  The native config channel must reach popup renderers before first script. CDP auto-attach can still be
+  used to observe/control the test, but production timezone/locale/geo correctness must come from native
+  Lobium config, not an interim override race.
 - **T-020a · Plan-limit TOCTOU** (already filed) — concurrent create/bulk/import can exceed a team's
   limit; needs a serializable transaction / per-team advisory lock on the Postgres path.
 

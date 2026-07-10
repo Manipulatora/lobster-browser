@@ -107,6 +107,20 @@ test('startProfile carries UI launch policy fields to the runner', async () => {
   assert.equal(launched.extensions?.[0]?.source, 'chrome_web_store');
 });
 
+test('startProfile honors a requested macOS architecture in catalog derivation', async () => {
+  const runner = new RecordingRunner();
+  await startProfile(runner, {
+    ...base,
+    os: 'macos',
+    arch: 'arm64',
+  });
+
+  const launched = runner.launched[0];
+  assert.ok(launched);
+  assert.equal(launched.fingerprint.arch, 'arm64');
+  assert.match(launched.fingerprint.webgl.renderer, /Apple M\d/);
+});
+
 test('startProfile derives from host calibration when one is supplied', async () => {
   const runner = new RecordingRunner();
   await startProfile(runner, {
@@ -209,4 +223,23 @@ test('startProfile REFUSES an incoherent persona from user overrides (fail-close
     /incoherent fingerprint.*maxTouchPoints/s,
   );
   assert.equal(runner.launched.length, 0, 'an incoherent persona must never reach the engine');
+});
+
+test('startProfile fail-closes when the proxy TCP endpoint is unreachable', async () => {
+  const runner = new RecordingRunner();
+  await assert.rejects(
+    startProfile(runner, {
+      ...base,
+      proxy: {
+        id: 'dead-proxy',
+        type: 'socks5',
+        host: '127.0.0.1',
+        port: 1,
+        username: 'u',
+        password: 'p',
+      },
+    }),
+    /proxy 127\.0\.0\.1:1 is unreachable/,
+  );
+  assert.equal(runner.launched.length, 0, 'unreachable proxy must never reach the engine');
 });

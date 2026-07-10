@@ -128,10 +128,21 @@ struct LocaleConfig {
 };
 
 // Per-profile farbling seeds (uint32) — stable per profile, so canvas/WebGL/audio hashes are steady.
+// `client_rects` gates Element getClientRects / getBoundingClientRect noise (0 = off).
 struct FarblingSeeds {
   uint32_t canvas = 0;
   uint32_t webgl = 0;
   uint32_t audio = 0;
+  uint32_t client_rects = 0;
+};
+
+// Mirrors MediaDeviceProfile in @lobster/shared-types. `present` gates the enumerateDevices hook.
+struct MediaDevicesConfig {
+  bool present = false;
+  int cameras = 0;
+  int microphones = 0;
+  int speakers = 0;
+  bool stable_device_ids = true;
 };
 
 struct NetConfig {
@@ -151,6 +162,7 @@ struct LobiumFpConfig {
   LocaleConfig locale;
   std::vector<std::string> fonts;
   FarblingSeeds seeds;
+  MediaDevicesConfig media_devices;
   NetConfig net;
 
   // Parse the config file at `path`. Returns std::nullopt on a missing/invalid/incompatible file

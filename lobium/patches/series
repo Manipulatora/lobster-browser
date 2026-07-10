@@ -42,23 +42,16 @@ fingerprint/audio-worklet-tap.patch
 #   through BOTH window.devicePixelRatio and the CSS media-query path (MediaValues) so matchMedia agrees.
 #   Removes the headless 800x600 tell. See hooks.md for hook points + deferred limitations.
 fingerprint/screen-dpr.patch
+# matchMedia('(device-width/height)') must agree with screen.width/height (CreepJS Screen lie).
+fingerprint/media-values-device-size.patch
+# HC-4 deep WebGL (version / shadingLanguageVersion / extensions / shaderPrecision). Config reader +
+#   sidecar already carry the fields; this routes them through Blink. Rebuild Lobium to prove in binary.
+fingerprint/host-gpu-profile.patch
+# clientRects farbling (seeds.clientRects) + mediaDevices enumerateDevices (policy.mediaDevices).
+fingerprint/client-rects.patch
+fingerprint/media-devices.patch
 # Still to author / prove:
-# host-gpu-profile.patch — the Blink HOOK for the deep WebGL surfaces (HC-4). The config-channel READER
-#   now parses them: lobium_fp_config.{h,cc} carry webgl.version, webgl.shading_language_version,
-#   webgl.extensions[], and webgl.shader_precision (vertex+fragment), and the sidecar already serializes
-#   them (packages/engine-runner/src/lobium-config.ts + lobium-config.test.ts round-trip). What remains
-#   is the tiny hook that ROUTES them through Blink, all reading LobiumFpConfig::Current()->webgl:
-#     - WebGLRenderingContextBase::getParameter(VERSION|SHADING_LANGUAGE_VERSION) -> webgl.version /
-#       .shading_language_version (when non-empty).
-#     - WebGLRenderingContextBase::getSupportedExtensions()/getExtension/extensionsUtil -> webgl.extensions
-#       (when non-empty): return exactly the configured list so getExtension() agrees with the array.
-#     - WebGLRenderingContextBase::getShaderPrecisionFormat(shader, precisionType) -> the matching
-#       webgl.shader_precision bucket (when present).
-#   CONFIRMED-NEEDED by ci/validation/battle-test.mjs on the real RTX 5090: 18 desktop personas claiming
-#   NVIDIA/AMD/Intel/Apple across Windows/macOS/Linux all exposed ONE identical extension set + precision
-#   (the real host GPU) — a cross-check tell. The host-calibrated path (ci/validation/host-calibration-e2e.mjs)
-#   already makes the renderer STRING match the host, so this hook closes the extension/precision/version
-#   leg. Renderer normalization policy (HC-5, RendererPolicy.normalized_host) stays a separate follow-up.
+#   Renderer normalization policy (HC-5, RendererPolicy.normalized_host) stays a separate follow-up.
 # fonts: NOT a Blink patch. The launcher can already write a private fontconfig and set FONTCONFIG_FILE
 #   when LOBSTER_FONTS_DIR is provisioned; production still needs licensed metric-compatible bundles
 #   shipped as app resources. A queryLocalFonts filter alone remains a trap (FontMetadata.blob() throws

@@ -200,13 +200,13 @@ function buildTemplate(input: CreateProfileTemplateInput): ProfileTemplate {
 function seedMockStore(): void {
   const samples: CreateProfileInput[] = [
     {
-      name: 'US Retail — Chrome',
-      engine: 'chromium',
+      name: 'US Retail — Lobium',
+      engine: 'lobium',
       os: 'windows',
       tags: ['retail', 'us'],
       folder: 'Shopping',
     },
-    { name: 'EU Social — Lobium', engine: 'lobium', os: 'macos', tags: ['social', 'eu'] },
+    { name: 'EU Social — Lobium', engine: 'lobium', os: 'macos_arm', tags: ['social', 'eu'] },
     { name: 'Lobium QA', engine: 'lobium', os: 'linux', tags: ['qa'], folder: 'Internal' },
   ];
   for (const sample of samples) {
@@ -267,9 +267,9 @@ function seedMockStore(): void {
 
   const template = buildTemplate({
     name: 'US Retail Desktop',
-    engine: 'chromium',
+    engine: 'lobium',
     os: 'windows',
-    osVersion: 'Windows 11 23H2',
+    osVersion: 'Windows 11',
     presetParameters: ['User Agent', 'Extensions'],
     proxyId: 'px-us-1',
     proxyLabel: 'US Residential Gateway',

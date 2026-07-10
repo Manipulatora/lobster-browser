@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import type { EngineKind, FingerprintOverrides, OsFamily, Profile } from '@lobster/shared-types';
+import type { EngineKind, FingerprintOverrides, Profile, ProfileOsTarget } from '@lobster/shared-types';
 
 import { PrismaService } from '../prisma/prisma.service';
 import type {
@@ -15,7 +15,7 @@ import type {
  */
 interface ProfileMetadata {
   engine: EngineKind;
-  os: OsFamily;
+  os: ProfileOsTarget;
   fingerprintOverrides?: FingerprintOverrides;
   tags: string[];
   folder?: string;
@@ -130,7 +130,7 @@ export class PrismaProfilesRepository implements ProfilesRepository {
   private readMetadata(value: Prisma.JsonValue): ProfileMetadata {
     const metadata = (value ?? {}) as unknown as Partial<ProfileMetadata>;
     return {
-      engine: metadata.engine ?? 'chromium',
+      engine: metadata.engine ?? 'lobium',
       os: metadata.os ?? 'windows',
       fingerprintOverrides: metadata.fingerprintOverrides,
       tags: metadata.tags ?? [],

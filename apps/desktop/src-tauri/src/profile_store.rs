@@ -528,7 +528,7 @@ mod tests {
     fn input(name: &str) -> CreateProfileInput {
         CreateProfileInput {
             name: name.to_string(),
-            engine: "chromium".to_string(),
+            engine: "lobium".to_string(),
             os: "windows".to_string(),
             os_version: None,
             fingerprint_seed: None,

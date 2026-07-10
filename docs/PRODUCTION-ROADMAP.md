@@ -7,8 +7,9 @@
 > M ½–2d · L 2–5d · XL >1wk. **Owner:** Claude (engine/native/security/review) + Codex (UI/CRUD/tests).
 >
 > **Deployment model (decisive):** Lobster is a **desktop agent** — end users install it on their **own**
-> Windows / macOS / Linux machines, each with its **own real GPU**. Profiles launch Lobium on the user's
-> real hardware. This single fact drives the entire architecture below.
+> Windows / macOS / Linux machines, each with its **own real GPU**. Profiles launch **native Lobium only**
+> on the user's real hardware. Patchright is an internal harness, not a production engine. This single
+> fact drives the entire architecture below.
 
 ---
 
@@ -70,8 +71,8 @@ each profile gets its own VM/GPU.
 
 ## 1. Current baseline (what's verified, from PROJECT-STATUS)
 
-**Proven/implemented on the dev path:** from-source Chromium 152 fork; native config channel; native Lobium
-launcher when a binary is discovered through `LOBSTER_LOBIUM_BIN`, `LOBSTER_LOBIUM_DIR`, the local
+**Proven/implemented on the dev path:** from-source Chromium 152 fork; native config channel; direct
+native Lobium launcher when a binary is discovered through `LOBSTER_LOBIUM_BIN`, `LOBSTER_LOBIUM_DIR`, the local
 `~/lobium-build/src/out/Lobium/chrome` dev layout, or a packaged engine resource; per-profile
 `lobium-fp.json` + farbling seed threading; desktop `launch_profile`/`stop_profile` commands wired to the sidecar; local automation API
 default-deny + loopback Host guard + constant-time token compare; local durable proxy/template stores;
@@ -87,10 +88,11 @@ and private fontconfig **when a font pack is provisioned**. Latest focused local
 typecheck, desktop typecheck/build, local API SDK tests, desktop Playwright smoke, opt-in product launch
 E2E, `git diff --check`, and 14 Rust desktop tests green.
 
-**Not yet production proof:** all native engine detector proof is still SwiftShader/headless/dev-box proof;
-there is no real-GPU baseline, no first-run host-calibration probe/service, no native Lobium blocking CI gate, no packaged
-sidecar/engine, no signed installers/updater, no client-side blob encryption, no local SQLite encryption,
-no S3 implementation, no Postgres CI path, no real Stripe flow, and no broad/live anti-bot detector matrix.
+**Not yet production proof:** the direct native runtime still needs authenticated proxy support and
+cookie pre-injection/export without Patchright; detector proof still needs blocking real-GPU CI,
+first-run host-calibration service, and multi-OS consumer hardware. There is no native Lobium blocking
+CI gate, no packaged sidecar/engine, no signed installers/updater, no complete Stripe flow, and no
+broad/live anti-bot detector matrix.
 The React desktop UI can call launch/stop and has a browser-preview Playwright smoke, but there is not yet
 a clean-VM packaged product E2E.
 
@@ -109,7 +111,8 @@ END-USER MACHINE (Windows / macOS / Linux, real GPU)
 │   • Local Automation API (Axum, default-deny, keyed)                   │
 │           │ JSON-RPC                                                    │
 │   • Engine-runner sidecar (Node) ── derive persona = host ⊕ seed ⊕ geo │
-│           │  writes lobium-fp.json + FONTCONFIG + --lobium-fp-config    │
+│           │  direct-spawns Lobium; writes lobium-fp.json + FONTCONFIG   │
+│           │  + --lobium-fp-config; exposes CDP for control only          │
 │   • Lobium engine (per-OS signed build)  ◀── native farbling on the    │
 │                                              machine's REAL GPU        │
 └───────────────────────────┬────────────────────────────────────────────┘
@@ -162,6 +165,7 @@ for real.
 | RG-0 | Provision the Linux+RTX3060 box; clone repo; run `lobium/build.sh` (fetch Chromium 152 + apply patches + build) | `out/Lobium/chrome --version` OK; patches applied clean | M |
 | RG-1 | Run the existing battle-test + detector gate on the **real GPU** (drop `--enable-unsafe-swiftshader`) | JSON report saved; record the true canvas/WebGL/audio hashes + WebGL caps/exts + CreepJS/Pixelscan baseline | M |
 | RG-2 | Triage the delta vs SwiftShader: which tells vanish, which appear | a ranked findings list drives Phase 1 | S |
+| RUN-3 | Harden the **direct native Lobium launcher**: keep Patchright out of production, rerun product E2E, and replace Patchright-only cookie/proxy auth behavior | `startProfile` launches direct Lobium; product E2E passes without Patchright; authenticated proxy path either works via native/local adapter or fails closed with UI warning | M |
 
 **Exit:** a committed, dated real-GPU baseline report. The "headless/software" signal is gone; we now know
 the real numbers to iterate against.
@@ -232,9 +236,9 @@ field.
 | BE-2 | **Prove Postgres/Prisma** path + CI Postgres service — never exercised | CI spins Postgres, migrate deploy, same e2e assertions pass vs Prisma | L |
 | BE-3/4 | Persist `encryptedBlobRef` lifecycle + quota; **real Stripe** billing (raw-body webhook signature, Subscription write, plan-limit gate) | signed webhook flips tier + gate honors it; unsigned rejected | L |
 | BE-5/7/9 | ApiKeyGuard wiring; member-removal/leave-team routes; Dockerfile + staging deploy | key-scoped routes 401 on revoke; staging serves `/health` | M |
-| PROX-1/2/4 | **Cookie inject/export** into the launched context; complete launch-path **SOCKS5 exit-geo** and geo coherence | cookie import → logged-in on a real site; SOCKS profile launches matching-exit locale | M×3 |
+| PROX-1/2/4 | **Cookie inject/export** for the direct Lobium path; complete launch-path **SOCKS5 exit-geo** and geo coherence without Patchright production fallback | cookie import → logged-in on a real site through native Lobium; SOCKS profile launches matching-exit locale; any CDP used for cookies is a control channel, not fingerprint spoofing | M×3 |
 | PROX-8/7 | Proxy kill-switch (fail-closed) + DNS-leak/socks5h | proxy drop → no direct egress; DNS resolves only via proxy | L |
-| RUN-2 | **Popup override gate** (`Target.setAutoAttach`+`waitForDebuggerOnStart`) — testable now on a **headful** machine (the reason it was deferred) | popup's first script sees the persona tz/locale, not host | M |
+| RUN-2 | **Popup/native-config inheritance gate** — verify newly opened tabs/windows receive the same Lobium native config before first page script; CDP auto-attach may be used only to observe/control the test | popup's first script sees the persona values from Lobium native config, not host values | M |
 | SEC-6/7/8/9 | Observability (structured logs, `/metrics`, readiness, Sentry) + rate-limit/helmet | one JSON line/request; `/health/ready` 503 without DB in prod; forced 500 in Sentry | M |
 | SEC-16/17 | Harden gitleaks (full-history + license + dep-audit); rotate the exposed PAT | fake `lb_live_` blocked; PAT confirmed rotated | S |
 
@@ -262,7 +266,7 @@ than laying a design-system foundation first. Runs in parallel with Phases 1–3
 | UI-1 | **Design-system foundation**: replace the single hand-rolled `styles.css` with tokens (color/spacing/typography/elevation/radii/motion) + a small component library (Button, Input, Select, Modal, Table, Tabs, Toast, Tooltip, Badge, Menu, EmptyState, Skeleton) | every screen consumes tokens/components; no ad-hoc hex/spacing; light/red theme centralized; dark theme togglable | L | **done** (tokens + `ui/` lib + theme toggle; legacy views still mix class names) |
 | UI-2 | **Profiles workspace at scale**: virtualized table for 1k–10k rows, multi-select bulk actions (launch/stop/tag/move/delete), column sort/filter, saved views, per-row live status (running/stopped, proxy health, last-used) | 10k-row grid scrolls at 60fps; bulk launch/stop works; status reflects real runner state | L | **partial** (bulk + sort + status badges; virtualization open) |
 | UI-3 | **Folders/tags + search**: organize profiles into folders/tags with fast fuzzy search and quick-launch (⌘K/Ctrl-K palette) | profiles are findable/organizable at scale; command palette launches by name | M | **partial** (palette + search/filters; folders open) |
-| UI-4 | **Fingerprint editor with live coherence**: surface the existing `validateFingerprintCoherence` in the UI — per-field support badges (native/CDP/unsupported), inline warnings, block impossible combinations, live persona preview | impossible combos are blocked pre-launch; unsupported fields visibly disabled; preview matches the launched persona | M | **done** |
+| UI-4 | **Fingerprint editor with live coherence**: surface the existing `validateFingerprintCoherence` in the UI — per-field support badges (native/control-only/unsupported), inline warnings, block impossible combinations, live persona preview | impossible combos are blocked pre-launch; unsupported fields visibly disabled; preview matches the launched persona | M | **done** |
 | UI-5 | **Onboarding + first-run**: welcome flow that runs the host-calibration step (HC), explains proxy setup, and seeds a first profile; in-app update prompts | a new user reaches a launchable profile in <2 min; calibration is a guided step | M | **done** (welcome + create CTA; live HC step still Phase 1) |
 | UI-6 | **Automation panel**: a polished "Connect Selenium/Playwright/Puppeteer" surface with copy-paste snippets, the profile's `debuggerAddress`/`ws` endpoint, and SDK links (the local API + SDK examples already exist) | user can copy a working automation snippet per profile | S | **done** |
 | UI-7 | **Motion, empty states, feedback**: skeleton loaders, optimistic updates, toasts for every async action, empty-state illustrations, keyboard shortcuts, focus/aria accessibility pass | no blank/janky states; all async actions give feedback; keyboard-navigable | M | **done** (toasts/empty/skeleton/palette; deeper a11y pass open) |

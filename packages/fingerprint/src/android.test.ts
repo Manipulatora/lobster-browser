@@ -41,7 +41,7 @@ test('deriveAndroidFingerprint is deterministic and coherent across seeds', () =
 
 test('Android fingerprints carry the complete mobile identity chain', () => {
   const fp = deriveAndroidFingerprint('android-shape', {
-    engine: 'chromium',
+    engine: 'lobium',
     browserVersion: '140.0.1234.56',
   });
 
@@ -123,7 +123,7 @@ test('Android seeds select diverse device models and mobile GPU vendors', () => 
   const vendors = new Set<string>();
 
   for (let i = 0; i < 300; i++) {
-    const fp = deriveAndroidFingerprint(generateSeed(), { engine: 'chromium' });
+    const fp = deriveAndroidFingerprint(generateSeed(), { engine: 'lobium' });
     models.add(fp.android.model);
     vendors.add(gpuVendor(fp.webgl.vendor));
   }
@@ -181,7 +181,7 @@ test('Android coherence flags desktop-shaped and internally mixed profiles', () 
 });
 
 test('desktop coherence validator rejects Android instead of treating it as launchable desktop', () => {
-  const fp = deriveAndroidFingerprint('android-not-desktop', { engine: 'chromium' });
+  const fp = deriveAndroidFingerprint('android-not-desktop', { engine: 'lobium' });
   assert.deepEqual(validateFingerprintCoherence(fp as never), [
     'Unsupported desktop fingerprint OS "android"',
   ]);

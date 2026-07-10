@@ -1,0 +1,56 @@
+Lobium — native clientRects farbling (seeds.clientRects).
+
+Perturbs Element::getClientRects / GetBoundingClientRect by a stable sub-pixel delta so float
+geometry fingerprints differ per profile without changing layout. Guarded on seeds.clientRects != 0.
+
+diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+@@ -26,6 +26,9 @@
+ 
+ #include "third_party/blink/renderer/core/dom/element.h"
+ 
++#include "components/lobium_fp/lobium_farble.h"
++#include "components/lobium_fp/lobium_fp_config.h"
++
+ #include <algorithm>
+ #include <bitset>
+ #include <limits>
+@@ -3463,6 +3466,19 @@
+     GetDocument().AdjustRectForScrollAndAbsoluteZoom(rect,
+                                                      *element_layout_object);
+   }
++  // Lobium: seeded client-rect farbling (unlinkability). Sub-pixel noise only; layout untouched.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->seeds.client_rects) {
++    for (wtf_size_t i = 0; i < rects.size(); ++i) {
++      float x = rects[i].x();
++      float y = rects[i].y();
++      float w = rects[i].width();
++      float h = rects[i].height();
++      lobium::FarbleClientRect(&x, &y, &w, &h, static_cast<uint32_t>(i),
++                               cfg->seeds.client_rects);
++      rects[i].SetRect(x, y, w, h);
++    }
++  }
+   return MakeGarbageCollected<DOMRectList>(rects);
+ }
+ 
+@@ -3515,7 +3531,18 @@
+ DOMRect* Element::GetBoundingClientRect() {
+   GetDocument().EnsurePaintLocationDataValidForNode(
+       this, DocumentUpdateReason::kJavaScript);
+-  return DOMRect::FromRectF(GetBoundingClientRectNoLifecycleUpdate());
++  gfx::RectF result = GetBoundingClientRectNoLifecycleUpdate();
++  // Lobium: same client-rect seed as getClientRects so bounding box agrees with the list.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->seeds.client_rects) {
++    float x = result.x();
++    float y = result.y();
++    float w = result.width();
++    float h = result.height();
++    lobium::FarbleClientRect(&x, &y, &w, &h, 0u, cfg->seeds.client_rects);
++    result.SetRect(x, y, w, h);
++  }
++  return DOMRect::FromRectF(result);
+ }
+ 
+ DOMRect* Element::GetBoundingClientRectForBinding() {

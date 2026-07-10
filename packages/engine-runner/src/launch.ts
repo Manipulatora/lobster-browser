@@ -17,7 +17,7 @@ function chromeWebRtcFlagPolicy(params: LaunchParams): string {
   return params.proxy ? 'disable_non_proxied_udp' : 'default_public_interface_only';
 }
 
-/** Options for launching a persistent browser context (patchright / Playwright compatible). */
+/** Browser launch options shared by the direct Lobium path and internal harnesses. */
 export interface PersistentLaunchOptions {
   userDataDir: string;
   headless: boolean;
@@ -26,9 +26,9 @@ export interface PersistentLaunchOptions {
 }
 
 /**
- * Build the persistent-context launch options for an engine launch. Pure & deterministic so it can
- * be unit-tested without a real browser. The live runner (T-002b) passes the result to
- * patchright `launchPersistentContext`.
+ * Build deterministic launch policy args for an engine launch. The direct Lobium launcher consumes the
+ * args/userDataDir/headless fields and converts supported proxy settings to native process flags. The
+ * Patchright launcher may still consume this shape in internal compatibility tests.
  */
 export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOptions {
   const { fingerprint } = params;
@@ -90,9 +90,9 @@ export interface UserAgentMetadata {
 }
 
 /**
- * JS-safe emulation applied via CDP. Deliberately limited to value-substitution surfaces
- * (UA/UA-CH, timezone, locale, geolocation). It NEVER includes canvas/WebGL/audio/TLS — those deep
- * surfaces are handled natively by Lobium (best-effort on the interim Chromium).
+ * Legacy/internal CDP emulation shape. Production Lobium launches do not use this as the fingerprint
+ * layer; they write `lobium-fp.json` and let native patches consume the values. This remains useful for
+ * regression harnesses and migration comparisons. It NEVER includes canvas/WebGL/audio/TLS.
  */
 export interface CdpEmulation {
   userAgent: string;
@@ -140,8 +140,8 @@ export function buildCdpEmulation(fp: Fingerprint): CdpEmulation {
 }
 
 /**
- * Build the main-world init script for the JS-only navigator surfaces that **no CDP override owns**:
- * `deviceMemory` and `maxTouchPoints`.
+ * Build the main-world init script used by the legacy/internal CDP harness for navigator surfaces that
+ * no CDP override owns: `deviceMemory` and `maxTouchPoints`.
  *
  * The UA string, platform, UA-CH, hardwareConcurrency, timezone, locale, languages and geolocation
  * are all applied authoritatively by `applyCdpFingerprint` via dedicated CDP overrides — and CDP
@@ -149,13 +149,11 @@ export function buildCdpEmulation(fp: Fingerprint): CdpEmulation {
  * throws, so we (a) never touch the CDP-owned surfaces here and (b) wrap each `def` in try/catch so
  * one failure can't abort the rest (the bug that used to leave `deviceMemory` undefined).
  *
- * IMPORTANT: this deliberately does NOT touch canvas/WebGL/AudioContext/TLS — those deep surfaces are
- * native (Lobium). Overriding them from JS is detectable, so we never do it here (see MASTER_PLAN §5).
+ * IMPORTANT: this deliberately does NOT touch canvas/WebGL/AudioContext/TLS. Overriding them from JS is
+ * detectable, so production Lobium owns them natively (see MASTER_PLAN §5).
  *
- * Interim-engine caveat: patchright neutralizes main-world script injection for stealth, so these two
- * surfaces are effectively best-effort on the interim Chromium and become authoritative on Lobium
- * (which sets them natively). The CDP `Emulation.*` overrides in `applyCdpFingerprint` are global and
- * apply regardless; only these JS-injection surfaces carry the caveat.
+ * Production caveat: this is not the production stealth path. Lobium must set these surfaces natively;
+ * this script exists for the internal harness and regression comparisons only.
  */
 export function buildFingerprintInitScript(fp: Fingerprint): string {
   const nav = fp.navigator;

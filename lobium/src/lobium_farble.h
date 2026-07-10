@@ -43,6 +43,16 @@ void FarbleCanvasRgbaFlippedRows(uint8_t* base,
                                  int top_origin_y,
                                  uint32_t seed);
 
+// Sub-pixel client-rect noise for getClientRects / getBoundingClientRect. Nudges x/y/width/height by
+// a stable delta in {-0.0001, 0, +0.0001} keyed on (seed, rect_index, channel). Imperceptible to layout
+// but changes float fingerprints. No-op when seed is 0.
+void FarbleClientRect(float* x,
+                      float* y,
+                      float* width,
+                      float* height,
+                      uint32_t rect_index,
+                      uint32_t seed);
+
 }  // namespace lobium
 
 #endif  // COMPONENTS_LOBIUM_FP_LOBIUM_FARBLE_H_

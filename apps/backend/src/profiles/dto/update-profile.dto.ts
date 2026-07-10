@@ -1,6 +1,6 @@
 import { IsArray, IsIn, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
-import { ENGINE_KINDS, OS_FAMILIES } from '@lobster/shared-types';
-import type { EngineKind, FingerprintOverrides, OsFamily } from '@lobster/shared-types';
+import { ENGINE_KINDS, PROFILE_OS_TARGETS } from '@lobster/shared-types';
+import type { EngineKind, FingerprintOverrides, ProfileOsTarget } from '@lobster/shared-types';
 
 /**
  * Body for PATCH /profiles/:id. Every field is optional (partial update). The desktop editor
@@ -20,8 +20,8 @@ export class UpdateProfileDto {
   engine?: EngineKind;
 
   @IsOptional()
-  @IsIn([...OS_FAMILIES])
-  os?: OsFamily;
+  @IsIn([...PROFILE_OS_TARGETS])
+  os?: ProfileOsTarget;
 
   // User-editable overrides applied on top of the seed-derived fingerprint. Accepted as opaque
   // JSON here; deep coherence validation lives in @lobster/fingerprint.

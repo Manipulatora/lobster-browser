@@ -33,11 +33,11 @@ coherence validator catch more real tells — without introducing any new detect
 6. **Validation harness upgraded.** Derives → applies a Berlin proxy geo → grants geolocation permission →
    asserts the full geo cluster including a live `navigator.geolocation.getCurrentPosition` round-trip.
 
-## Interim-engine reality (honest)
+## Historical harness reality (honest)
 
 patchright neutralizes main-world JS injection for stealth, so `deviceMemory`/`maxTouchPoints` are
-**best-effort on the interim Chromium** and become authoritative on **Lobium** (native). The harness
-reports `deviceMemory` but does not gate on it. Global CDP `Emulation.*` overrides apply regardless.
+best-effort in the old harness and become authoritative only when **Lobium** consumes them natively. The
+harness reports `deviceMemory` but does not gate on it. Production must not rely on this CDP path.
 
 ## Acceptance criteria — all met
 

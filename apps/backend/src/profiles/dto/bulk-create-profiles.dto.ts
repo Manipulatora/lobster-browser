@@ -1,6 +1,6 @@
 import { IsArray, IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
-import { ENGINE_KINDS, OS_FAMILIES } from '@lobster/shared-types';
-import type { EngineKind, OsFamily } from '@lobster/shared-types';
+import { ENGINE_KINDS, PROFILE_OS_TARGETS } from '@lobster/shared-types';
+import type { EngineKind, ProfileOsTarget } from '@lobster/shared-types';
 
 /** Upper bound on a single bulk-create call (also guards against accidental huge batches). */
 export const MAX_BULK_CREATE = 50;
@@ -23,8 +23,8 @@ export class BulkCreateProfilesDto {
   @IsIn([...ENGINE_KINDS])
   engine!: EngineKind;
 
-  @IsIn([...OS_FAMILIES])
-  os!: OsFamily;
+  @IsIn([...PROFILE_OS_TARGETS])
+  os!: ProfileOsTarget;
 
   @IsOptional()
   @IsArray()

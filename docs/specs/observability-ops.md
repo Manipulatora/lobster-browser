@@ -633,8 +633,9 @@ config yet.)
 
 Today's CI (`.github/workflows/ci.yml`) has five jobs on push/PR to `main`: **web**
 (format/typecheck/build/test + `prisma generate`), **secret-scan** (gitleaks), **rust**
-(fmt/clippy/test), **engine-launch** (live patchright Chromium), **fingerprint-gate** (live detector
-under Xvfb). That's the **quality gate**. Add **delivery** pipelines:
+(fmt/clippy/test), **engine-launch** (native Lobium when provisioned; Patchright harness only for
+internal compatibility), **fingerprint-gate** (live detector under Xvfb). That's the **quality gate**.
+Add **delivery** pipelines:
 
 | Pipeline | Trigger | Steps |
 |---|---|---|
@@ -809,5 +810,5 @@ reconciliation + quota enforcement.
 **Honest summary:** the *quality* gates are real and green; the *operations* layer — deploy,
 observe, scale, deliver, bill-at-scale — is specified here and largely unbuilt. This doc is the
 build-to target so that operational maturity ships deliberately alongside the product, not as an
-afterthought. It stays consistent with MASTER_PLAN's posture: usable-from-day-one on the interim
-Chromium, with the production-grade run-book brought online as the SaaS and Lobium mature.
+afterthought. It stays consistent with MASTER_PLAN's posture: product launch is Lobium-only, and the
+production-grade run-book must mature alongside the SaaS and native engine.

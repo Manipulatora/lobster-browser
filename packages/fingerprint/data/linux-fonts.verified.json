@@ -1,0 +1,1791 @@
+{
+  "source": "Ubuntu noble package filelists + known family maps for packaged free fonts",
+  "license": "SIL OFL / GPL / Apache / Ubuntu Font Licence (per package)",
+  "retrievedNote": "Family names from Ubuntu package filelists and documented package family maps. Not invented GPU/font lists.",
+  "packages": [
+    {
+      "package": "fonts-liberation",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-liberation/filelist"
+    },
+    {
+      "package": "fonts-liberation-sans-narrow",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-liberation-sans-narrow/filelist"
+    },
+    {
+      "package": "fonts-dejavu-core",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-dejavu-core/filelist"
+    },
+    {
+      "package": "fonts-dejavu-extra",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-dejavu-extra/filelist"
+    },
+    {
+      "package": "fonts-noto-core",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-noto-core/filelist"
+    },
+    {
+      "package": "fonts-noto-ui-core",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-noto-ui-core/filelist"
+    },
+    {
+      "package": "fonts-noto-color-emoji",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-noto-color-emoji/filelist"
+    },
+    {
+      "package": "fonts-noto-mono",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-noto-mono/filelist"
+    },
+    {
+      "package": "fonts-freefont-ttf",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-freefont-ttf/filelist"
+    },
+    {
+      "package": "fonts-ubuntu",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-ubuntu/filelist"
+    },
+    {
+      "package": "fonts-ubuntu-console",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-ubuntu-console/filelist"
+    },
+    {
+      "package": "fonts-opensymbol",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-opensymbol/filelist"
+    },
+    {
+      "package": "fonts-crosextra-carlito",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-crosextra-carlito/filelist"
+    },
+    {
+      "package": "fonts-crosextra-caladea",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-crosextra-caladea/filelist"
+    },
+    {
+      "package": "fonts-croscore",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-croscore/filelist"
+    },
+    {
+      "package": "fonts-cantarell",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-cantarell/filelist"
+    },
+    {
+      "package": "fonts-droid-fallback",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-droid-fallback/filelist"
+    },
+    {
+      "package": "fonts-lato",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-lato/filelist"
+    },
+    {
+      "package": "fonts-open-sans",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-open-sans/filelist"
+    },
+    {
+      "package": "fonts-roboto",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-roboto/filelist"
+    },
+    {
+      "package": "fonts-ibm-plex",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-ibm-plex/filelist"
+    },
+    {
+      "package": "fonts-inter",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-inter/filelist"
+    },
+    {
+      "package": "fonts-jetbrains-mono",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-jetbrains-mono/filelist"
+    },
+    {
+      "package": "fonts-firacode",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-firacode/filelist"
+    },
+    {
+      "package": "fonts-hack",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-hack/filelist"
+    },
+    {
+      "package": "fonts-inconsolata",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-inconsolata/filelist"
+    },
+    {
+      "package": "fonts-source-code-pro",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-source-code-pro/filelist"
+    },
+    {
+      "package": "fonts-source-sans",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-source-sans/filelist"
+    },
+    {
+      "package": "fonts-source-serif",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-source-serif/filelist"
+    },
+    {
+      "package": "fonts-texgyre",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-texgyre/filelist"
+    },
+    {
+      "package": "fonts-sil-gentium",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-sil-gentium/filelist"
+    },
+    {
+      "package": "fonts-sil-charis",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-sil-charis/filelist"
+    },
+    {
+      "package": "fonts-sil-andika",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-sil-andika/filelist"
+    },
+    {
+      "package": "fonts-sil-abyssinica",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-sil-abyssinica/filelist"
+    },
+    {
+      "package": "fonts-sil-padauk",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-sil-padauk/filelist"
+    },
+    {
+      "package": "fonts-sil-scheherazade",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-sil-scheherazade/filelist"
+    },
+    {
+      "package": "fonts-khmeros",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-khmeros/filelist"
+    },
+    {
+      "package": "fonts-tlwg-loma",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-loma/filelist"
+    },
+    {
+      "package": "fonts-tlwg-garuda",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-garuda/filelist"
+    },
+    {
+      "package": "fonts-tlwg-kinnari",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-kinnari/filelist"
+    },
+    {
+      "package": "fonts-tlwg-laksaman",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-laksaman/filelist"
+    },
+    {
+      "package": "fonts-tlwg-mono",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-mono/filelist"
+    },
+    {
+      "package": "fonts-tlwg-norasi",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-norasi/filelist"
+    },
+    {
+      "package": "fonts-tlwg-purisa",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-purisa/filelist"
+    },
+    {
+      "package": "fonts-tlwg-sawasdee",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-sawasdee/filelist"
+    },
+    {
+      "package": "fonts-tlwg-typewriter",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-typewriter/filelist"
+    },
+    {
+      "package": "fonts-tlwg-typist",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-typist/filelist"
+    },
+    {
+      "package": "fonts-tlwg-typo",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-typo/filelist"
+    },
+    {
+      "package": "fonts-tlwg-umpush",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-umpush/filelist"
+    },
+    {
+      "package": "fonts-tlwg-waree",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-tlwg-waree/filelist"
+    },
+    {
+      "package": "fonts-wqy-zenhei",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-wqy-zenhei/filelist"
+    },
+    {
+      "package": "fonts-wqy-microhei",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-wqy-microhei/filelist"
+    },
+    {
+      "package": "fonts-noto-cjk",
+      "url": "https://packages.ubuntu.com/noble/all/fonts-noto-cjk/filelist"
+    }
+  ],
+  "fonts": [
+    {
+      "family": "Abyssinica SIL",
+      "package": "fonts-sil-abyssinica",
+      "source": "ubuntu-noble:fonts-sil-abyssinica"
+    },
+    {
+      "family": "Andika",
+      "package": "fonts-sil-andika",
+      "source": "ubuntu-noble:fonts-sil-andika"
+    },
+    {
+      "family": "Arimo",
+      "package": "fonts-croscore",
+      "source": "ubuntu-noble:fonts-croscore"
+    },
+    {
+      "family": "Caladea",
+      "package": "fonts-crosextra-caladea",
+      "source": "ubuntu-noble:fonts-crosextra-caladea"
+    },
+    {
+      "family": "Cantarell",
+      "package": "fonts-cantarell",
+      "source": "ubuntu-noble:fonts-cantarell"
+    },
+    {
+      "family": "Carlito",
+      "package": "fonts-crosextra-carlito",
+      "source": "ubuntu-noble:fonts-crosextra-carlito"
+    },
+    {
+      "family": "Charis SIL",
+      "package": "fonts-sil-charis",
+      "source": "ubuntu-noble:fonts-sil-charis"
+    },
+    {
+      "family": "Cousine",
+      "package": "fonts-croscore",
+      "source": "ubuntu-noble:fonts-croscore"
+    },
+    {
+      "family": "DejaVu Math TeX Gyre",
+      "package": "fonts-dejavu-extra",
+      "source": "ubuntu-noble:fonts-dejavu-extra"
+    },
+    {
+      "family": "DejaVu Sans",
+      "package": "fonts-dejavu-core",
+      "source": "ubuntu-noble:fonts-dejavu-core"
+    },
+    {
+      "family": "DejaVu Sans Mono",
+      "package": "fonts-dejavu-core",
+      "source": "ubuntu-noble:fonts-dejavu-core"
+    },
+    {
+      "family": "DejaVu Serif",
+      "package": "fonts-dejavu-core",
+      "source": "ubuntu-noble:fonts-dejavu-core"
+    },
+    {
+      "family": "Droid Sans Fallback",
+      "package": "fonts-droid-fallback",
+      "source": "ubuntu-noble:fonts-droid-fallback"
+    },
+    {
+      "family": "Fira Code",
+      "package": "fonts-firacode",
+      "source": "ubuntu-noble:fonts-firacode"
+    },
+    {
+      "family": "FreeMono",
+      "package": "fonts-freefont-ttf",
+      "source": "ubuntu-noble:fonts-freefont-ttf"
+    },
+    {
+      "family": "FreeSans",
+      "package": "fonts-freefont-ttf",
+      "source": "ubuntu-noble:fonts-freefont-ttf"
+    },
+    {
+      "family": "FreeSerif",
+      "package": "fonts-freefont-ttf",
+      "source": "ubuntu-noble:fonts-freefont-ttf"
+    },
+    {
+      "family": "Gentium",
+      "package": "fonts-sil-gentium",
+      "source": "ubuntu-noble:fonts-sil-gentium"
+    },
+    {
+      "family": "Gentium Basic",
+      "package": "fonts-sil-gentium",
+      "source": "ubuntu-noble:fonts-sil-gentium"
+    },
+    {
+      "family": "Gentium Book Basic",
+      "package": "fonts-sil-gentium",
+      "source": "ubuntu-noble:fonts-sil-gentium"
+    },
+    {
+      "family": "Hack",
+      "package": "fonts-hack",
+      "source": "ubuntu-noble:fonts-hack"
+    },
+    {
+      "family": "IBM Plex Mono",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Mono Semi",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Mono Text",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Arabic",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Arabic Text",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Condensed Semi",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Condensed Text",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Devanagari",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Devanagari Text",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Hebrew",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Hebrew Text",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Semi",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Text",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Thai",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Thai Looped",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Thai Looped Text",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Thai Text",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Var",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Sans Var Roman",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Serif",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Serif Semi",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "IBM Plex Serif Text",
+      "package": "fonts-ibm-plex",
+      "source": "ubuntu-noble:fonts-ibm-plex"
+    },
+    {
+      "family": "Inconsolata",
+      "package": "fonts-inconsolata",
+      "source": "ubuntu-noble:fonts-inconsolata"
+    },
+    {
+      "family": "Inter",
+      "package": "fonts-inter",
+      "source": "ubuntu-noble:fonts-inter"
+    },
+    {
+      "family": "Inter Display",
+      "package": "fonts-inter",
+      "source": "ubuntu-noble:fonts-inter"
+    },
+    {
+      "family": "Inter Display Extra",
+      "package": "fonts-inter",
+      "source": "ubuntu-noble:fonts-inter"
+    },
+    {
+      "family": "Inter Display Semi",
+      "package": "fonts-inter",
+      "source": "ubuntu-noble:fonts-inter"
+    },
+    {
+      "family": "Inter Extra",
+      "package": "fonts-inter",
+      "source": "ubuntu-noble:fonts-inter"
+    },
+    {
+      "family": "Inter Semi",
+      "package": "fonts-inter",
+      "source": "ubuntu-noble:fonts-inter"
+    },
+    {
+      "family": "Jet Brains Mono",
+      "package": "fonts-jetbrains-mono",
+      "source": "ubuntu-noble:fonts-jetbrains-mono"
+    },
+    {
+      "family": "Jet Brains Mono Extra",
+      "package": "fonts-jetbrains-mono",
+      "source": "ubuntu-noble:fonts-jetbrains-mono"
+    },
+    {
+      "family": "Jet Brains Mono Semi",
+      "package": "fonts-jetbrains-mono",
+      "source": "ubuntu-noble:fonts-jetbrains-mono"
+    },
+    {
+      "family": "JetBrains Mono",
+      "package": "fonts-jetbrains-mono",
+      "source": "ubuntu-noble:fonts-jetbrains-mono"
+    },
+    {
+      "family": "Khmer O Sbattambang",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Khmer O Sbokor",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Khmer O Scontent",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Khmer O Sfasthand",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Khmer O Sfreehand",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Khmer O Smetalchrieng",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Khmer O Smuol",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Khmer O Smuollight",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Khmer O Smuolpali",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Khmer O Ssiemreap",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Khmer OS",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Khmer OS System",
+      "package": "fonts-khmeros",
+      "source": "ubuntu-noble:fonts-khmeros"
+    },
+    {
+      "family": "Lato",
+      "package": "fonts-lato",
+      "source": "ubuntu-noble:fonts-lato"
+    },
+    {
+      "family": "Lato Hairline",
+      "package": "fonts-lato",
+      "source": "ubuntu-noble:fonts-lato"
+    },
+    {
+      "family": "Lato Heavy",
+      "package": "fonts-lato",
+      "source": "ubuntu-noble:fonts-lato"
+    },
+    {
+      "family": "Liberation Mono",
+      "package": "fonts-liberation",
+      "source": "ubuntu-noble:fonts-liberation"
+    },
+    {
+      "family": "Liberation Sans",
+      "package": "fonts-liberation",
+      "source": "ubuntu-noble:fonts-liberation"
+    },
+    {
+      "family": "Liberation Serif",
+      "package": "fonts-liberation",
+      "source": "ubuntu-noble:fonts-liberation"
+    },
+    {
+      "family": "Noto Color Emoji",
+      "package": "fonts-noto-color-emoji",
+      "source": "ubuntu-noble:fonts-noto-color-emoji"
+    },
+    {
+      "family": "Noto Kufi Arabic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Looped Lao",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Looped Lao UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Looped Thai",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Looped Thai UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Music",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Naskh Arabic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Naskh Arabic UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Nastaliq Urdu",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Rashi Hebrew",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Adlam",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Adlam Unjoined",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Anatolian Hieroglyphs",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Arabic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Arabic UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Armenian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Avestan",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Balinese",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Bamum",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Bassa Vah",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Batak",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Bengali",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Bengali UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Bhaiksuki",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Brahmi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Buginese",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Buhid",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Canadian Aboriginal",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Carian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Caucasian Albanian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Chakma",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Cham",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Cherokee",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans CJK",
+      "package": "fonts-noto-cjk",
+      "source": "ubuntu-noble:fonts-noto-cjk"
+    },
+    {
+      "family": "Noto Sans Coptic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Cuneiform",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Cypriot",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Deseret",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Devanagari",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Devanagari UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Display",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Duployan",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Egyptian Hieroglyphs",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Elbasan",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Elymaic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Ethiopic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Georgian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Glagolitic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Gothic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Grantha",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Gujarati",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Gujarati UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Gunjala Gondi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Gurmukhi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Gurmukhi UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Hanifi Rohingya",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Hanunoo",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Hatran",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Hebrew",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Imperial Aramaic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Indic Siyaq Numbers",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Inscriptional Pahlavi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Inscriptional Parthian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Javanese",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Kaithi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Kannada",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Kannada UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Kayah",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Kharoshthi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Khmer",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Khmer UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Khojki",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Khudawadi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Lao",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Lao UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Lepcha",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Limbu",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Linear",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Linear A",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Lisu",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Lycian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Lydian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Mahajani",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Malayalam",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Malayalam UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Mandaic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Manichaean",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Marchen",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Masaram Gondi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Math",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Mayan Numerals",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Medefaidrin",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Meetei Mayek",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Mende Kikakui",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Meroitic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Miao",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Modi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Mongolian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Mono",
+      "package": "fonts-noto-mono",
+      "source": "ubuntu-noble:fonts-noto-mono"
+    },
+    {
+      "family": "Noto Sans Mro",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Multani",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Myanmar",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Myanmar UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans N Ko",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Nabataean",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans New Tai Lue",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Newa",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Nushu",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Ogham",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Ol Chiki",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Old",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Old Hungarian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Old North Arabian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Old Permic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Old Persian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Old Sogdian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Old South Arabian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Old Turkic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Oriya",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Oriya UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Osage",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Osmanya",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Pahawh Hmong",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Palmyrene",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Pau Cin Hau",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Phags Pa",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Phoenician",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Psalter Pahlavi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Rejang",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Runic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Samaritan",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Saurashtra",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Sharada",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Shavian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Siddham",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Sign Writing",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Sinhala",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Sinhala UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Sogdian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Sora Sompeng",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Soyombo",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Sundanese",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Syloti Nagri",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Symbols",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Symbols2",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Syriac",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tagalog",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tagbanwa",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tai Le",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tai Tham",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tai Viet",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Takri",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tamil",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tamil Supplement",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tamil UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Telugu",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Telugu UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Thaana",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Thai",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Thai UI",
+      "package": "fonts-noto-ui-core",
+      "source": "ubuntu-noble:fonts-noto-ui-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh Adrar",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh Agraw Imazighen",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh Ahaggar",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh Air",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh APT",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh Azawagh",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh Ghat",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh Hawad",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh Rhissa Ixa",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh SIL",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tifinagh Tawellemmet",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Tirhuta",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Ugaritic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Vai",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Wancho",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Warang Citi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Yi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Sans Zanabazar Square",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Ahom",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Armenian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Balinese",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Bengali",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif CJK",
+      "package": "fonts-noto-cjk",
+      "source": "ubuntu-noble:fonts-noto-cjk"
+    },
+    {
+      "family": "Noto Serif Devanagari",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Display",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Dogra",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Ethiopic",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Georgian",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Grantha",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Gujarati",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Gurmukhi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Hebrew",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Kannada",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Khmer",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Khojki",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Lao",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Malayalam",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Myanmar",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Nyiakeng Puachue Hmong",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Sinhala",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Tamil",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Tamil Slanted",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Tangut",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Telugu",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Thai",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Tibetan",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Serif Yezidi",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Noto Traditional Nushu",
+      "package": "fonts-noto-core",
+      "source": "ubuntu-noble:fonts-noto-core"
+    },
+    {
+      "family": "Open Sans",
+      "package": "fonts-open-sans",
+      "source": "ubuntu-noble:fonts-open-sans"
+    },
+    {
+      "family": "Open Sans Cond",
+      "package": "fonts-open-sans",
+      "source": "ubuntu-noble:fonts-open-sans"
+    },
+    {
+      "family": "Open Sans Extra",
+      "package": "fonts-open-sans",
+      "source": "ubuntu-noble:fonts-open-sans"
+    },
+    {
+      "family": "opens",
+      "package": "fonts-opensymbol",
+      "source": "ubuntu-noble:fonts-opensymbol"
+    },
+    {
+      "family": "OpenSymbol",
+      "package": "fonts-opensymbol",
+      "source": "ubuntu-noble:fonts-opensymbol"
+    },
+    {
+      "family": "Padauk",
+      "package": "fonts-sil-padauk",
+      "source": "ubuntu-noble:fonts-sil-padauk"
+    },
+    {
+      "family": "Padauk Book",
+      "package": "fonts-sil-padauk",
+      "source": "ubuntu-noble:fonts-sil-padauk"
+    },
+    {
+      "family": "Roboto",
+      "package": "fonts-roboto",
+      "source": "ubuntu-noble:fonts-roboto"
+    },
+    {
+      "family": "Roboto Slab",
+      "package": "fonts-roboto",
+      "source": "ubuntu-noble:fonts-roboto"
+    },
+    {
+      "family": "Scheherazade",
+      "package": "fonts-sil-scheherazade",
+      "source": "ubuntu-noble:fonts-sil-scheherazade"
+    },
+    {
+      "family": "Scheherazade New",
+      "package": "fonts-sil-scheherazade",
+      "source": "ubuntu-noble:fonts-sil-scheherazade"
+    },
+    {
+      "family": "Source Code Pro",
+      "package": "fonts-source-code-pro",
+      "source": "ubuntu-noble:fonts-source-code-pro"
+    },
+    {
+      "family": "Source Sans 3",
+      "package": "fonts-source-sans",
+      "source": "ubuntu-noble:fonts-source-sans"
+    },
+    {
+      "family": "Source Sans Pro",
+      "package": "fonts-source-sans",
+      "source": "ubuntu-noble:fonts-source-sans"
+    },
+    {
+      "family": "Source Serif 4",
+      "package": "fonts-source-serif",
+      "source": "ubuntu-noble:fonts-source-serif"
+    },
+    {
+      "family": "Source Serif Pro",
+      "package": "fonts-source-serif",
+      "source": "ubuntu-noble:fonts-source-serif"
+    },
+    {
+      "family": "TeX Gyre Adventor",
+      "package": "fonts-texgyre",
+      "source": "ubuntu-noble:fonts-texgyre"
+    },
+    {
+      "family": "TeX Gyre Bonum",
+      "package": "fonts-texgyre",
+      "source": "ubuntu-noble:fonts-texgyre"
+    },
+    {
+      "family": "TeX Gyre Chorus",
+      "package": "fonts-texgyre",
+      "source": "ubuntu-noble:fonts-texgyre"
+    },
+    {
+      "family": "TeX Gyre Cursor",
+      "package": "fonts-texgyre",
+      "source": "ubuntu-noble:fonts-texgyre"
+    },
+    {
+      "family": "TeX Gyre Heros",
+      "package": "fonts-texgyre",
+      "source": "ubuntu-noble:fonts-texgyre"
+    },
+    {
+      "family": "TeX Gyre Pagella",
+      "package": "fonts-texgyre",
+      "source": "ubuntu-noble:fonts-texgyre"
+    },
+    {
+      "family": "TeX Gyre Schola",
+      "package": "fonts-texgyre",
+      "source": "ubuntu-noble:fonts-texgyre"
+    },
+    {
+      "family": "TeX Gyre Termes",
+      "package": "fonts-texgyre",
+      "source": "ubuntu-noble:fonts-texgyre"
+    },
+    {
+      "family": "Tinos",
+      "package": "fonts-croscore",
+      "source": "ubuntu-noble:fonts-croscore"
+    },
+    {
+      "family": "Ubuntu",
+      "package": "fonts-ubuntu",
+      "source": "ubuntu-noble:fonts-ubuntu"
+    },
+    {
+      "family": "Ubuntu Mono",
+      "package": "fonts-ubuntu",
+      "source": "ubuntu-noble:fonts-ubuntu"
+    },
+    {
+      "family": "WenQuanYi Micro Hei",
+      "package": "fonts-wqy-microhei",
+      "source": "ubuntu-noble:fonts-wqy-microhei"
+    },
+    {
+      "family": "WenQuanYi Zen Hei",
+      "package": "fonts-wqy-zenhei",
+      "source": "ubuntu-noble:fonts-wqy-zenhei"
+    }
+  ]
+}

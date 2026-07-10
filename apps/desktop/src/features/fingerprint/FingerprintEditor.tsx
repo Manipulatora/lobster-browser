@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { normalizeDeviceMemory } from '@lobster/fingerprint';
 
 import type {
   EngineKind,
@@ -7,7 +8,7 @@ import type {
   LocaleFingerprint,
   MediaDeviceProfile,
   NavigatorFingerprint,
-  OsFamily,
+  ProfileOsTarget,
   Profile,
   RendererPolicy,
   ScreenFingerprint,
@@ -47,7 +48,7 @@ interface FingerprintEditorProps {
  */
 interface FpForm {
   engine: EngineKind;
-  os: OsFamily;
+  os: ProfileOsTarget;
   osVersion: string;
   platform: string;
   languages: string;
@@ -164,7 +165,8 @@ function toOverrides(form: FpForm, profile: Profile): FingerprintOverrides {
   const hc = toNum(form.hardwareConcurrency);
   if (hc !== undefined) nav.hardwareConcurrency = hc;
   const dm = toNum(form.deviceMemory);
-  if (dm !== undefined) nav.deviceMemory = dm;
+  // Snap to the HTML deviceMemory ladder (0.25…8) so free-typed 16/32/128 cannot fail-close launch.
+  if (dm !== undefined) nav.deviceMemory = normalizeDeviceMemory(dm);
   const mtp = toNum(form.maxTouchPoints);
   if (mtp !== undefined) nav.maxTouchPoints = mtp;
 
@@ -327,17 +329,12 @@ export function FingerprintEditor({
         <div className="field-grid">
           <label className="field">
             <span className="field__label">Engine</span>
-            <select
+            <input
               className="input"
-              value={form.engine}
-              onChange={(e) => set('engine', e.target.value as EngineKind)}
-            >
-              {ENGINE_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
+              aria-label="Engine"
+              value={ENGINE_OPTIONS.find((o) => o.value === form.engine)?.label ?? 'Lobium'}
+              readOnly
+            />
           </label>
           <label className="field">
             <span className="field__label">Operating system</span>
@@ -345,7 +342,7 @@ export function FingerprintEditor({
               className="input"
               value={form.os}
               onChange={(e) => {
-                const os = e.target.value as OsFamily;
+                const os = e.target.value as ProfileOsTarget;
                 setForm((prev) => ({ ...prev, os, osVersion: OS_VERSION_OPTIONS[os][0] }));
               }}
             >
@@ -354,7 +351,6 @@ export function FingerprintEditor({
                   {o.label}
                 </option>
               ))}
-              <option disabled>Android (separate mobile target planned)</option>
             </select>
           </label>
           <label className="field">

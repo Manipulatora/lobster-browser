@@ -7,8 +7,9 @@ import type {
   EngineKind,
   Fingerprint,
   FingerprintOverrides,
-  OsFamily,
+  ProfileOsTarget,
 } from '@lobster/shared-types';
+import { archForTarget, desktopOsForTarget } from '../profiles/options';
 
 /**
  * Live persona preview + coherence check for the fingerprint editor (UI-4).
@@ -27,12 +28,26 @@ export interface PersonaPreview {
 
 export function previewPersona(
   seed: string,
-  os: OsFamily,
+  os: ProfileOsTarget,
   engine: EngineKind,
   overrides?: FingerprintOverrides,
 ): PersonaPreview {
   try {
-    const base = deriveFingerprint(seed || 'preview-seed', { os, engine });
+    const desktopOs = desktopOsForTarget(os);
+    if (!desktopOs) {
+      return {
+        fingerprint: null,
+        issues: [],
+        ok: false,
+        error: 'Android profiles require the Android Lobium APK runner; desktop preview is not applicable.',
+      };
+    }
+    const arch = archForTarget(os);
+    const base = deriveFingerprint(seed || 'preview-seed', {
+      os: desktopOs,
+      engine,
+      ...(arch ? { arch } : {}),
+    });
     const fingerprint = overrides ? applyOverrides(base, overrides) : base;
     const issues = validateFingerprintCoherence(fingerprint);
     return { fingerprint, issues, ok: issues.length === 0 };
@@ -59,13 +74,22 @@ export const FIELD_SUPPORT: Record<string, { level: SupportLevel; note: string }
   deviceMemory: { level: 'native', note: 'Native navigator.deviceMemory (secure-context).' },
   screen: { level: 'native', note: 'Native screen geometry / DPR / colorDepth.' },
   webglRenderer: { level: 'native', note: 'Native WebGL vendor/renderer string + farbled pixels.' },
-  webglDeep: { level: 'planned', note: 'Extensions/precision from host calibration (HC-4, pending native hook).' },
+  webglDeep: {
+    level: 'native',
+    note: 'Extensions/precision/version via HC-4 Blink hooks (requires Lobium rebuild).',
+  },
   timezone: { level: 'cdp', note: 'Applied over CDP (Emulation.setTimezoneOverride).' },
   locale: { level: 'cdp', note: 'Applied over CDP + Accept-Language.' },
   geolocation: { level: 'cdp', note: 'Applied over CDP; permission granted at context level.' },
   webrtc: { level: 'native', note: 'WebRTC IP policy via launch flags + native config.' },
   canvasNoise: { level: 'native', note: 'Native canvas farbling (seeded per profile).' },
   audioNoise: { level: 'native', note: 'Native Web Audio farbling (seeded per profile).' },
-  mediaDevices: { level: 'planned', note: 'Camera/mic/speaker counts — native consumption pending.' },
-  clientRects: { level: 'planned', note: 'getClientRects noise — native consumption pending.' },
+  mediaDevices: {
+    level: 'native',
+    note: 'enumerateDevices counts/IDs from policy.mediaDevices (requires Lobium rebuild).',
+  },
+  clientRects: {
+    level: 'native',
+    note: 'getClientRects noise from seeds.clientRects (requires Lobium rebuild).',
+  },
 };

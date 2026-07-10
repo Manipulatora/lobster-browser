@@ -1,4 +1,3 @@
-import { invoke } from '@tauri-apps/api/core';
 import {
   BellIcon,
   CreditCardIcon,
@@ -17,8 +16,7 @@ import { PricingView } from './features/pricing/PricingView';
 import { ProfilesView } from './features/profiles/ProfilesView';
 import { ProxiesView } from './features/proxies/ProxiesView';
 import { TemplatesView } from './features/templates/TemplatesView';
-import octiumMainIcon from './assets/brand/octium-main-icon.png';
-import { t } from './i18n';
+import lobsterIcon from './assets/brand/lobster-icon.png';
 import { CommandPalette, Kbd, useTheme, type Command } from './ui';
 import type { Profile } from '@lobster/shared-types';
 
@@ -53,18 +51,9 @@ function ActiveView({
 export function App(): JSX.Element {
   const { theme, toggle } = useTheme();
   const [active, setActive] = useState<NavKey>('profiles');
-  const [version, setVersion] = useState<string>(isDesktopRuntime() ? '…' : 'dev');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [createProfileSignal, setCreateProfileSignal] = useState(0);
-
-  useEffect(() => {
-    // `app_version` is a Tauri command; it only exists inside the desktop webview.
-    if (!isDesktopRuntime()) return;
-    invoke<string>('app_version')
-      .then(setVersion)
-      .catch(() => setVersion('unknown'));
-  }, []);
 
   // Keep a lightweight profile list for command-palette search / quick-launch.
   useEffect(() => {
@@ -171,8 +160,7 @@ export function App(): JSX.Element {
     <div className="app-shell">
       <header className="topbar">
         <div className="topbar__brand">
-          <img className="topbar__logo" src={octiumMainIcon} alt="" aria-hidden />
-          <span>{t('app.name')}</span>
+          <img className="topbar__logo" src={lobsterIcon} alt="Lobster Browser" />
         </div>
         <div className="topbar__spacer" />
         <div className="topbar__actions">
@@ -206,10 +194,6 @@ export function App(): JSX.Element {
 
       <div className="workspace">
         <aside className="sidebar" aria-label="Primary navigation">
-          <div className="account-switcher">
-            <span className="account-name">Lobster</span>
-            <span className="account-version">{version}</span>
-          </div>
           <nav className="nav">
             {NAV_ITEMS.map((item) => {
               const Icon = item.icon;

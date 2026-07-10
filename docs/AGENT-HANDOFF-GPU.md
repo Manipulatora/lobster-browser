@@ -310,10 +310,10 @@ node ci/validation/lobium-detect.mjs        # full native detector (needs the Lo
 
 Verify the run did NOT fall back to software: `gpu-baseline.mjs` sets `softwareRenderer:false` /
 `verdict:ok` and `isSoftwareRenderer()` gates it. On 2026-07-08 this produced the first real-GPU
-baseline on an RTX 5090 (`ANGLE (NVIDIA, Vulkan 1.4.312 ... RTX 5090)`), using the interim Chromium
-because no Lobium binary is built on this host — see `ci/validation/reports/README.md`. Note the RTX 5090
-is data-center-class; still capture a mid-range consumer-GPU (RTX 3060 / GTX 1660) baseline for realistic
-user-device signals, and rerun through native Lobium once built.
+baseline on an RTX 5090 (`ANGLE (NVIDIA, Vulkan 1.4.312 ... RTX 5090)`). Current production proof must
+rerun through native Lobium, not an interim browser — see `ci/validation/reports/README.md`. Note the RTX
+5090 is high-end/outlier hardware; still capture a mid-range consumer-GPU (RTX 3060 / GTX 1660) baseline
+for realistic user-device signals.
 
 Expected outcome for the next phase is not "perfect score immediately." The first goal is to produce a
 dated real-GPU baseline report that proves whether the engine is using the physical GPU and records true:

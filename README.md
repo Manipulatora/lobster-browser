@@ -1,7 +1,7 @@
 # 🦞 Lobster Browser
 
 A production-grade **anti-detect browser + SaaS** — feature-comparable to Octo Browser, built as a
-Rust + Tauri desktop agent that orchestrates native-strength browser engines, backed by a TypeScript
+Rust + Tauri desktop agent that orchestrates a native-strength Lobium browser kernel, backed by a TypeScript
 cloud platform.
 
 > **Strategy:** [`docs/MASTER_PLAN.md`](docs/MASTER_PLAN.md). **Current reality:**
@@ -21,11 +21,10 @@ systems. It ships as:
 - a **desktop agent** (Rust + Tauri) that manages profiles/proxies and launches engines, and
 - a **cloud SaaS** (TypeScript/NestJS) for auth, teams, encrypted profile sync, and billing.
 
-The flagship engine is **Lobium** — our own Chromium-based build with native fingerprinting (50+
-configurable params, canvas/WebGL/audio/TLS-JA4) — built on a parallel track. Until the custom build
-ships, Lobium is served by a patched Chromium via patchright. Alongside it, the product runs on a
-prebuilt (ungoogled) **Chromium** driven via patchright as the interim/everyday engine. The UI/UX is
-our own custom design system.
+The only production engine is **Lobium** — our own Chromium-based build with native fingerprinting
+(50+ configurable params, canvas/WebGL/audio/TLS-JA4) and a per-profile native config channel.
+Patchright is allowed only as an internal validation/test harness; it is not a product stealth layer and
+not the core engine. The UI/UX is our own custom design system.
 
 Lobster ships **open source**, so we freely import any OSS; Donut Browser and others are reference only.
 
@@ -39,10 +38,10 @@ packages/
   shared-types/       TS types shared across front/back/api/sidecar
   fingerprint/        Seed -> coherent fingerprint model + coherence rules
   proxy/              Proxy testing + exit-IP geo derivation
-  engine-runner/      Node/TS sidecar: launch/control Lobium + Chromium
+  engine-runner/      Node/TS sidecar: direct native Lobium launch/control
   local-api-sdk/      Client SDK examples (js/ + python/) for the local automation API
 lobium/               Lobium: Chromium build scripts, GN args, quilt patch series, config channel
-engines/              Download-on-first-run scripts for the interim Chromium (binaries NOT committed)
+engines/              Legacy/validation engine helpers; production does not fall back to Chromium
 docs/                 Master plan, ADRs, agent protocol, API/IPC contracts, tickets
 ci/                   Fingerprint validation harness
 tests/                e2e / integration / detector validation suite
@@ -71,8 +70,8 @@ npm run typecheck:core
 # Build everything that can build
 npm run build
 
-# Download the pinned interim browser engine (ungoogled-chromium)
-node engines/download-engines.mjs
+# Point the sidecar at a built Lobium binary
+export LOBSTER_LOBIUM_BIN=$HOME/lobium-build/src/out/Lobium/chrome
 ```
 
 ## Status
@@ -80,8 +79,8 @@ node engines/download-engines.mjs
 **Engine foundation strong; product not yet beta.** Lobium's native config channel and major
 fingerprint surfaces are built and dev-proven on Chromium 152. Native Lobium is wired into the product
 launch path when a built binary is discovered via `LOBSTER_LOBIUM_BIN`, `LOBSTER_LOBIUM_DIR`, the local
-`~/lobium-build/src/out/Lobium/chrome` dev layout, or a packaged engine resource; otherwise `lobium`
-falls back to the interim patched Chromium for dev/CI.
+`~/lobium-build/src/out/Lobium/chrome` dev layout, or a packaged engine resource. If no Lobium binary is
+available, launch fails clearly; there is intentionally no uncustomized Chromium/Patchright fallback.
 
 The big missing piece is now **real-hardware, host-calibrated proof**: current detector evidence is still
 SwiftShader/headless/dev-box evidence. Host-calibration types and a deterministic

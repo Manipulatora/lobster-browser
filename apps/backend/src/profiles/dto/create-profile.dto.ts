@@ -1,17 +1,17 @@
 import { IsArray, IsIn, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
-import { ENGINE_KINDS, OS_FAMILIES } from '@lobster/shared-types';
+import { ENGINE_KINDS, PROFILE_OS_TARGETS } from '@lobster/shared-types';
 import type {
   CreateProfileInput,
   EngineKind,
   FingerprintOverrides,
-  OsFamily,
+  ProfileOsTarget,
 } from '@lobster/shared-types';
 
 /**
  * Body for POST /profiles. Implements the shared `CreateProfileInput` contract so the
  * cloud API accepts exactly what the desktop UI produces.
  *
- * `engine`/`os` validate against the runtime `ENGINE_KINDS`/`OS_FAMILIES` arrays from
+ * `engine`/`os` validate against the runtime `ENGINE_KINDS`/`PROFILE_OS_TARGETS` arrays from
  * @lobster/shared-types — the single source of truth — so the accepted set never drifts
  * (notably `lobium` is a first-class engine, not a 400).
  *
@@ -37,8 +37,8 @@ export class CreateProfileDto implements Pick<
   @IsIn([...ENGINE_KINDS])
   engine!: EngineKind;
 
-  @IsIn([...OS_FAMILIES])
-  os!: OsFamily;
+  @IsIn([...PROFILE_OS_TARGETS])
+  os!: ProfileOsTarget;
 
   // Optional — if omitted the server generates a random seed (deterministic fingerprint source).
   @IsOptional()

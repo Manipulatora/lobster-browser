@@ -1,0 +1,121 @@
+Lobium — HC-4 deep WebGL surfaces (version / shadingLanguageVersion / extensions / shaderPrecision).
+
+Routes the already-parsed config fields through Blink so a persona's claimed GPU class agrees with
+getParameter(VERSION|SHADING_LANGUAGE_VERSION), getSupportedExtensions()/getExtension(), and
+getShaderPrecisionFormat(). Empty/absent fields leave the host value (fail-open). Confirmed needed by
+battle-test on real GPUs: extension set + precision leaked the host while UNMASKED_RENDERER was spoofed.
+
+No BUILD.gn change (hooks live in already-wired webgl module); no config-schema change (reader already
+parses these fields). Requires a Lobium rebuild on the build VPS to prove in binary.
+
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -3873,6 +3873,24 @@
+     UseCounter::Count(context, WebFeature::kWebGLDebugRendererInfo);
+   }
+ 
++  // Lobium HC-4: when the persona lists extensions, refuse names outside that list so
++  // getExtension() agrees with getSupportedExtensions() (both read cfg->webgl.extensions).
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && !cfg->webgl.extensions.empty()) {
++    bool allowed = false;
++    for (const std::string& ext : cfg->webgl.extensions) {
++      if (name == String::FromUtf8(ext)) {
++        allowed = true;
++        break;
++      }
++    }
++    if (!allowed) {
++      return ScriptObject(
++          script_state->GetIsolate(),
++          ToV8Traits<IDLNullable<WebGLExtension>>::ToV8(script_state, nullptr));
++    }
++  }
++
+   WebGLExtension* extension = EnableExtensionIfSupported(name, context);
+   return ScriptObject(
+       script_state->GetIsolate(),
+@@ -4160,6 +4178,12 @@
+     case GL_SCISSOR_TEST:
+       return GetBooleanParameter(script_state, pname);
+     case GL_SHADING_LANGUAGE_VERSION:
++      // Lobium HC-4: persona shading-language string (full JS-visible value from host calibration).
++      if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++          cfg && !cfg->webgl.shading_language_version.empty()) {
++        return WebGLAny(script_state,
++                        String::FromUtf8(cfg->webgl.shading_language_version));
++      }
+       return WebGLAny(
+           script_state,
+           StrCat({"WebGL GLSL ES 1.0 (",
+@@ -4222,6 +4246,11 @@
+     case GL_VENDOR:
+       return WebGLAny(script_state, String("WebKit"));
+     case GL_VERSION:
++      // Lobium HC-4: persona GL version string (full JS-visible value from host calibration).
++      if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++          cfg && !cfg->webgl.version.empty()) {
++        return WebGLAny(script_state, String::FromUtf8(cfg->webgl.version));
++      }
+       return WebGLAny(
+           script_state,
+           StrCat({"WebGL 1.0 (", String(ContextGL()->GetString(GL_VERSION)),
+@@ -4561,6 +4590,41 @@
+       return nullptr;
+   }
+ 
++  // Lobium HC-4: persona shader-precision buckets (must agree with spoofed GPU class).
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->webgl.shader_precision.present) {
++    const lobium::ShaderPrecisionStage& stage =
++        (shader_type == GL_VERTEX_SHADER) ? cfg->webgl.shader_precision.vertex
++                                          : cfg->webgl.shader_precision.fragment;
++    const lobium::ShaderPrecisionFormat* fmt = nullptr;
++    switch (precision_type) {
++      case GL_LOW_FLOAT:
++        fmt = &stage.low_float;
++        break;
++      case GL_MEDIUM_FLOAT:
++        fmt = &stage.medium_float;
++        break;
++      case GL_HIGH_FLOAT:
++        fmt = &stage.high_float;
++        break;
++      case GL_LOW_INT:
++        fmt = &stage.low_int;
++        break;
++      case GL_MEDIUM_INT:
++        fmt = &stage.medium_int;
++        break;
++      case GL_HIGH_INT:
++        fmt = &stage.high_int;
++        break;
++      default:
++        break;
++    }
++    if (fmt) {
++      return MakeGarbageCollected<WebGLShaderPrecisionFormat>(
++          fmt->range_min, fmt->range_max, fmt->precision);
++    }
++  }
++
+   GLint range[2] = {0, 0};
+   GLint precision = 0;
+   ContextGL()->GetShaderPrecisionFormat(shader_type, precision_type, range,
+@@ -4580,6 +4644,17 @@
+   if (isContextLost())
+     return std::nullopt;
+ 
++  // Lobium HC-4: exact persona extension list (empty config = host enumeration).
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && !cfg->webgl.extensions.empty()) {
++    Vector<String> configured;
++    configured.reserve(static_cast<wtf_size_t>(cfg->webgl.extensions.size()));
++    for (const std::string& ext : cfg->webgl.extensions) {
++      configured.push_back(String::FromUtf8(ext));
++    }
++    return configured;
++  }
++
+   Vector<String> result;
+ 
+   for (ExtensionTracker* tracker : extensions_) {

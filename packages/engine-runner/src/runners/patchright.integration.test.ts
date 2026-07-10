@@ -60,7 +60,7 @@ function sampleFingerprint(): Fingerprint {
 const chromiumReady = await isChromiumAvailable();
 
 test(
-  'patchright launcher launches real Chromium, exposes a working CDP endpoint, and is stealthy',
+  'patchright driver launches a Chrome-family binary, exposes a working CDP endpoint, and is stealthy',
   {
     skip: chromiumReady
       ? false
@@ -68,7 +68,7 @@ test(
   },
   async () => {
     const runner = new CompositeRunner({
-      chromium: createPatchrightLauncher({
+      lobium: createPatchrightLauncher({
         headless: true,
         extraArgs: ['--no-sandbox', '--disable-dev-shm-usage'],
       }),
@@ -76,7 +76,7 @@ test(
     const userDataDir = await mkdtemp(join(tmpdir(), 'lobster-itest-'));
     const params: LaunchParams = {
       profileId: 'itest',
-      engine: 'chromium',
+      engine: 'lobium',
       userDataDir,
       fingerprint: sampleFingerprint(),
       headless: true,
@@ -96,11 +96,20 @@ test(
         await page.goto('data:text/html,<title>lobster</title>');
 
         const ua = await page.evaluate<string>(() => navigator.userAgent);
+        const viewport = await page.evaluate(() => {
+          const pageGlobal = globalThis as unknown as { innerWidth: number; innerHeight: number };
+          return { width: pageGlobal.innerWidth, height: pageGlobal.innerHeight };
+        });
         const webdriver = await page.evaluate<boolean | undefined>(
           () => (navigator as { webdriver?: boolean }).webdriver,
         );
 
         assert.match(ua, /Chrome\//, 'real Chrome user agent from a live browser');
+        assert.notDeepEqual(
+          viewport,
+          { width: 1280, height: 720 },
+          'viewport must not be Patchright/Playwright default; it should follow the Lobium window',
+        );
         assert.notEqual(
           webdriver,
           true,

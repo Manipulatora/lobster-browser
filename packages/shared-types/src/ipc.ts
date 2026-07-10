@@ -1,4 +1,4 @@
-import type { EngineKind, OsFamily } from './engine.js';
+import type { CpuArch, EngineKind, OsFamily } from './engine.js';
 import type {
   Fingerprint,
   FingerprintLaunchPolicy,
@@ -43,6 +43,8 @@ export interface SidecarResponse<R = unknown> {
 
 export interface LaunchParams {
   profileId: string;
+  /** Human-readable Lobster profile name for NTP / chrome profile labeling. */
+  profileName?: string;
   engine: EngineKind;
   /** Profile-selected OS build/version label, when present. */
   osVersion?: string;
@@ -74,8 +76,16 @@ export interface LaunchParams {
  */
 export interface StartProfileParams {
   profileId: string;
+  /** Human-readable Lobster profile name for NTP / chrome profile labeling. */
+  profileName?: string;
   engine: EngineKind;
-  os: OsFamily;
+  /**
+   * Launch OS. Desktop targets are `windows`/`macos`/`linux` (product targets like `macos_arm` are
+   * normalized before sidecar IPC). `android` routes to the ADB/APK runner — never desktop UA spoof.
+   */
+  os: OsFamily | 'android';
+  /** Optional architecture requested by a user-facing target such as macOS Intel vs macOS Arm. */
+  arch?: CpuArch;
   osVersion?: string;
   /**
    * Optional host snapshot captured by the desktop control plane. When present, the sidecar derives the

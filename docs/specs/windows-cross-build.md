@@ -152,7 +152,7 @@ Output (under the cargo target dir):
 
 | ID | Task | Why |
 |---|---|---|
-| DSK-5/11 | Bundle the `engine-runner` Node sidecar (e.g. as a packaged single-file binary) + a **Windows Lobium build** (or the interim Chromium) as Tauri `externalBin`/`resources`; resolve them at runtime | so a clean-VM install can actually launch profiles with no system Node/engine |
+| DSK-5/11 | Bundle the `engine-runner` Node sidecar (e.g. as a packaged single-file binary) + a **Windows Lobium build** as Tauri `externalBin`/`resources`; resolve them at runtime | so a clean-VM install can actually launch profiles with no system Node/engine |
 | SEC-14a | Authenticode signing + timestamp (real cert), or a `sign_command` in `tauri.conf.json` | remove SmartScreen warnings; required for GA |
 | ENG-7a | A **Windows Lobium build host** (Chromium fork must be built on Windows) | the native engine + its config channel on Windows |
 | DSK auto-update | Wire the Tauri updater with Ed25519 signing | in-product updates |

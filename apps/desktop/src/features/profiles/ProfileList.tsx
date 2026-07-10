@@ -7,12 +7,13 @@ import {
   PlayIcon,
   StopIcon,
 } from '@heroicons/react/24/outline';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import type { LaunchInfo } from '../../api/tauri';
-import octiumMainIcon from '../../assets/brand/octium-main-icon.png';
-import { Badge, EmptyState, type BadgeTone } from '../../ui';
-import { osLabel, STATUS_META } from './options';
+import lobsterIcon from '../../assets/brand/lobster-icon.png';
+import { EmptyState } from '../../ui';
+import { isAndroidTarget, osLabel } from './options';
 
 export type ProfileSortKey = 'name' | 'updatedAt' | 'status' | 'proxy';
 export type SortDir = 'asc' | 'desc';
@@ -35,6 +36,8 @@ interface ProfileListProps {
   onMoveToTrash: (id: string) => void;
   onEditProfile: (profile: Profile) => void;
   onSetPassword: (id: string) => void;
+  /** Explicit CDP / automation details (never auto-shown on launch). */
+  onShowConnection: (id: string) => void;
 }
 
 /** Whether a status means the engine is (or is becoming) live. */
@@ -59,20 +62,6 @@ function proxyLabel(profile: Profile): { title: string; detail: string } {
     title: profile.proxy.label ?? `${profile.proxy.host}:${profile.proxy.port}`,
     detail: `${profile.proxy.host}:${profile.proxy.port}`,
   };
-}
-
-function statusTone(status: Profile['status']): BadgeTone {
-  switch (status) {
-    case 'running':
-      return 'success';
-    case 'launching':
-    case 'stopping':
-      return 'warning';
-    case 'error':
-      return 'danger';
-    default:
-      return 'neutral';
-  }
 }
 
 function SortHeader({
@@ -100,6 +89,88 @@ function SortHeader({
   );
 }
 
+function StatusActionButton({
+  profile,
+  busy,
+  androidTarget,
+  onLaunch,
+  onStop,
+}: {
+  profile: Profile;
+  busy: boolean;
+  androidTarget: boolean;
+  onLaunch: (id: string) => void;
+  onStop: (id: string) => void;
+}): JSX.Element {
+  if (profile.status === 'stopping' || (busy && profile.status === 'running')) {
+    return (
+      <button
+        type="button"
+        className="icon-button icon-button--table status-action status-action--closing"
+        disabled
+        aria-label={`${profile.name} is closing`}
+        title="Closing"
+      >
+        <span className="status-dots" aria-hidden>
+          <i />
+          <i />
+          <i />
+        </span>
+      </button>
+    );
+  }
+
+  if (profile.status === 'launching' || (busy && !isLive(profile.status))) {
+    return (
+      <button
+        type="button"
+        className="icon-button icon-button--table status-action status-action--closing"
+        disabled
+        aria-label={`${profile.name} is launching`}
+        title="Launching"
+      >
+        <span className="status-dots" aria-hidden>
+          <i />
+          <i />
+          <i />
+        </span>
+      </button>
+    );
+  }
+
+  if (profile.status === 'running') {
+    return (
+      <button
+        type="button"
+        className="icon-button icon-button--table"
+        onClick={() => onStop(profile.id)}
+        disabled={busy}
+        aria-label={`Stop ${profile.name}`}
+        title="Stop"
+      >
+        <StopIcon aria-hidden />
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="icon-button icon-button--table icon-button--primary"
+      onClick={() => onLaunch(profile.id)}
+      disabled={busy}
+      aria-label={`Launch ${profile.name}`}
+      title={
+        androidTarget
+          ? 'Launch via ADB on a connected Android device (Lobium APK)'
+          : 'Launch'
+      }
+    >
+      <PlayIcon aria-hidden />
+    </button>
+  );
+}
+
 /** Dense profile table with per-profile lifecycle + management actions. */
 export function ProfileList({
   profiles,
@@ -117,11 +188,29 @@ export function ProfileList({
   onMoveToTrash,
   onEditProfile,
   onSetPassword,
+  onShowConnection,
 }: ProfileListProps): JSX.Element {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const triggerRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const allSelected = profiles.length > 0 && profiles.every((p) => selectedIds.has(p.id));
   const someSelected = profiles.some((p) => selectedIds.has(p.id));
+
+  useLayoutEffect(() => {
+    if (!openMenuId) {
+      setMenuPos(null);
+      return;
+    }
+    const trigger = triggerRefs.current.get(openMenuId);
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const menuWidth = 178;
+    setMenuPos({
+      top: rect.bottom + 6,
+      left: Math.max(8, rect.right - menuWidth),
+    });
+  }, [openMenuId]);
 
   useEffect(() => {
     if (openMenuId === null) return undefined;
@@ -129,6 +218,8 @@ export function ProfileList({
     function closeIfOutside(event: PointerEvent): void {
       const target = event.target;
       if (target instanceof Node && menuRef.current?.contains(target)) return;
+      const trigger = openMenuId ? triggerRefs.current.get(openMenuId) : null;
+      if (trigger && target instanceof Node && trigger.contains(target)) return;
       setOpenMenuId(null);
     }
 
@@ -136,11 +227,19 @@ export function ProfileList({
       if (event.key === 'Escape') setOpenMenuId(null);
     }
 
+    function closeOnScroll(): void {
+      setOpenMenuId(null);
+    }
+
     document.addEventListener('pointerdown', closeIfOutside);
     document.addEventListener('keydown', closeOnEscape);
+    window.addEventListener('scroll', closeOnScroll, true);
+    window.addEventListener('resize', closeOnScroll);
     return () => {
       document.removeEventListener('pointerdown', closeIfOutside);
       document.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('scroll', closeOnScroll, true);
+      window.removeEventListener('resize', closeOnScroll);
     };
   }, [openMenuId]);
 
@@ -153,6 +252,10 @@ export function ProfileList({
       />
     );
   }
+
+  const openProfile = openMenuId ? profiles.find((p) => p.id === openMenuId) : undefined;
+  const openLive = openProfile ? isLive(openProfile.status) : false;
+  const openHasConnection = openProfile ? launchInfo.has(openProfile.id) : false;
 
   return (
     <div className="data-panel">
@@ -178,14 +281,6 @@ export function ProfileList({
                 onClick={() => onSort('name')}
               />
             </th>
-            <th>
-              <SortHeader
-                label="Status"
-                active={sortKey === 'status'}
-                dir={sortDir}
-                onClick={() => onSort('status')}
-              />
-            </th>
             <th>Description</th>
             <th>
               <SortHeader
@@ -201,10 +296,9 @@ export function ProfileList({
         <tbody>
           {profiles.map((profile) => {
             const busy = busyIds.has(profile.id);
-            const live = isLive(profile.status);
             const info = launchInfo.get(profile.id);
             const proxy = proxyLabel(profile);
-            const meta = STATUS_META[profile.status];
+            const androidTarget = isAndroidTarget(profile.os);
             return (
               <tr key={profile.id} className={selectedIds.has(profile.id) ? 'row--selected' : undefined}>
                 <td className="check-cell">
@@ -217,7 +311,7 @@ export function ProfileList({
                 </td>
                 <td>
                   <div className="profile-title-cell">
-                    <img className="row-mark" src={octiumMainIcon} alt="" aria-hidden />
+                    <img className="row-mark" src={lobsterIcon} alt="" aria-hidden />
                     <div className="profile-title-text">
                       <div className="table-title">{profile.name}</div>
                       <div className="table-subtitle">
@@ -226,100 +320,33 @@ export function ProfileList({
                       </div>
                     </div>
                     <div className="table-actions">
-                      {live ? (
-                        <button
-                          type="button"
-                          className="icon-button icon-button--table"
-                          onClick={() => onStop(profile.id)}
-                          disabled={busy}
-                          aria-label={`Stop ${profile.name}`}
-                          title="Stop"
-                        >
-                          <StopIcon aria-hidden />
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="icon-button icon-button--table icon-button--primary"
-                          onClick={() => onLaunch(profile.id)}
-                          disabled={busy}
-                          aria-label={`Launch ${profile.name}`}
-                          title="Launch"
-                        >
-                          <PlayIcon aria-hidden />
-                        </button>
-                      )}
-                      <div className="row-menu" ref={openMenuId === profile.id ? menuRef : null}>
+                      <StatusActionButton
+                        profile={profile}
+                        busy={busy}
+                        androidTarget={androidTarget}
+                        onLaunch={onLaunch}
+                        onStop={onStop}
+                      />
+                      <div className="row-menu">
                         <button
                           type="button"
                           className="icon-button icon-button--table"
                           aria-label={`More actions for ${profile.name}`}
                           aria-expanded={openMenuId === profile.id}
                           title="More"
+                          ref={(el) => {
+                            if (el) triggerRefs.current.set(profile.id, el);
+                            else triggerRefs.current.delete(profile.id);
+                          }}
                           onClick={() =>
                             setOpenMenuId((current) => (current === profile.id ? null : profile.id))
                           }
                         >
                           <EllipsisVerticalIcon aria-hidden />
                         </button>
-                        {openMenuId === profile.id ? (
-                          <div className="action-menu" role="menu">
-                            <button
-                              type="button"
-                              className="menu-item"
-                              role="menuitem"
-                              onClick={() => {
-                                setOpenMenuId(null);
-                                onEditProfile(profile);
-                              }}
-                            >
-                              Edit profile
-                            </button>
-                            <button
-                              type="button"
-                              className="menu-item"
-                              role="menuitem"
-                              onClick={() => {
-                                setOpenMenuId(null);
-                                onClone(profile.id);
-                              }}
-                            >
-                              Clone
-                            </button>
-                            <button
-                              type="button"
-                              className="menu-item"
-                              role="menuitem"
-                              onClick={() => {
-                                setOpenMenuId(null);
-                                onSetPassword(profile.id);
-                              }}
-                            >
-                              Set/remove pwd
-                            </button>
-                            <button
-                              type="button"
-                              className="menu-item menu-item--danger"
-                              role="menuitem"
-                              disabled={live}
-                              title={live ? 'Stop before moving to trash' : undefined}
-                              onClick={() => {
-                                setOpenMenuId(null);
-                                onMoveToTrash(profile.id);
-                              }}
-                            >
-                              Move to trash
-                            </button>
-                          </div>
-                        ) : null}
                       </div>
                     </div>
                   </div>
-                </td>
-                <td>
-                  <Badge tone={statusTone(profile.status)} dot>
-                    {meta.label}
-                  </Badge>
                 </td>
                 <td>
                   <span className="muted">{profile.notes ?? info?.debuggerAddress ?? ''}</span>
@@ -351,6 +378,78 @@ export function ProfileList({
           })}
         </tbody>
       </table>
+
+      {openMenuId && openProfile && menuPos
+        ? createPortal(
+            <div
+              className="action-menu action-menu--portal"
+              role="menu"
+              ref={menuRef}
+              style={{ top: menuPos.top, left: menuPos.left }}
+            >
+              <button
+                type="button"
+                className="menu-item"
+                role="menuitem"
+                onClick={() => {
+                  setOpenMenuId(null);
+                  onEditProfile(openProfile);
+                }}
+              >
+                Edit profile
+              </button>
+              {openLive && openHasConnection ? (
+                <button
+                  type="button"
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenMenuId(null);
+                    onShowConnection(openProfile.id);
+                  }}
+                >
+                  Connection details
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="menu-item"
+                role="menuitem"
+                onClick={() => {
+                  setOpenMenuId(null);
+                  onClone(openProfile.id);
+                }}
+              >
+                Clone
+              </button>
+              <button
+                type="button"
+                className="menu-item"
+                role="menuitem"
+                onClick={() => {
+                  setOpenMenuId(null);
+                  onSetPassword(openProfile.id);
+                }}
+              >
+                Set/remove pwd
+              </button>
+              <button
+                type="button"
+                className="menu-item menu-item--danger"
+                role="menuitem"
+                disabled={openLive}
+                title={openLive ? 'Stop before moving to trash' : undefined}
+                onClick={() => {
+                  setOpenMenuId(null);
+                  onMoveToTrash(openProfile.id);
+                }}
+              >
+                Move to trash
+              </button>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

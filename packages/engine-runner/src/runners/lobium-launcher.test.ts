@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -7,6 +7,7 @@ import { deriveFingerprint } from '@lobster/fingerprint';
 import { LOBIUM_CONFIG_FILENAME } from '../lobium-config.js';
 import {
   buildLobiumLaunchArgs,
+  buildNativeLobiumProcessArgs,
   createLobiumLauncher,
   isLobiumAvailable,
   lobiumBinaryCandidates,
@@ -19,7 +20,11 @@ const fp = deriveFingerprint('seed-lobium-test', { os: 'windows', engine: 'lobiu
 
 function ctxWith(
   userDataDir: string,
-  opts: { proxy?: { server: string }; seed?: string; policy?: true } = {},
+  opts: {
+    proxy?: { server: string; username?: string; password?: string };
+    seed?: string;
+    policy?: true;
+  } = {},
 ): LaunchContext {
   return {
     profileId: 'p',
@@ -240,5 +245,138 @@ test('buildLobiumLaunchArgs writes profile policy into the native config', async
     });
   } finally {
     await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('buildNativeLobiumProcessArgs is direct native Chromium args, not Patchright context config', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-native-args-'));
+  try {
+    const args = await buildNativeLobiumProcessArgs(ctxWith(userDataDir), {
+      headless: true,
+      extraArgs: ['--no-sandbox'],
+    });
+    assert.ok(args.includes(`--user-data-dir=${userDataDir}`));
+    assert.ok(args.includes('--remote-debugging-port=0'));
+    assert.ok(args.includes('--headless=new'));
+    assert.ok(args.includes('--no-sandbox'));
+    assert.ok(args.includes(`--lobium-fp-config=${join(userDataDir, LOBIUM_CONFIG_FILENAME)}`));
+    assert.ok(args.includes('about:blank'));
+  } finally {
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('buildNativeLobiumProcessArgs requires the auth adapter for credentialed proxies', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-proxy-auth-'));
+  try {
+    await assert.rejects(
+      () =>
+        buildNativeLobiumProcessArgs(
+          ctxWith(userDataDir, {
+            proxy: { server: 'socks5://proxy.example:1080', username: 'u', password: 'p' },
+          }),
+        ),
+      /authenticated proxy requires the local proxy auth adapter/,
+    );
+  } finally {
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('buildNativeLobiumProcessArgs accepts a local shim --proxy-server for authed proxies', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-proxy-shim-'));
+  try {
+    const args = await buildNativeLobiumProcessArgs(
+      ctxWith(userDataDir, {
+        proxy: { server: 'socks5://proxy.example:1080', username: 'u', password: 'secret-pass' },
+      }),
+      {},
+      'http://127.0.0.1:18080',
+    );
+    assert.ok(args.includes('--proxy-server=http://127.0.0.1:18080'));
+    assert.ok(!args.some((a) => a.includes('secret-pass')), 'credentials must not appear in argv');
+    assert.ok(!args.some((a) => a.includes('proxy.example')), 'upstream host not passed raw');
+  } finally {
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('buildNativeLobiumProcessArgs passes unauthenticated proxy straight through', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-proxy-plain-'));
+  try {
+    const args = await buildNativeLobiumProcessArgs(
+      ctxWith(userDataDir, { proxy: { server: 'socks5://10.0.0.9:1080' } }),
+    );
+    assert.ok(args.includes('--proxy-server=socks5://10.0.0.9:1080'));
+  } finally {
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('createLobiumLauncher fail-closes when the upstream proxy TCP is unreachable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'lobium-proxy-dead-'));
+  const userDataDir = join(root, 'profile');
+  const fakeBin = join(root, 'fake-lobium.cjs');
+  await writeFile(fakeBin, '#!/usr/bin/env node\nprocess.exit(0)\n');
+  await chmod(fakeBin, 0o755);
+  try {
+    const launcher = createLobiumLauncher({
+      executablePath: fakeBin,
+      extraArgsFor: async () => [],
+      envFor: async () => undefined,
+    });
+    await assert.rejects(
+      () =>
+        launcher(
+          ctxWith(userDataDir, {
+            // Closed loopback port — TCP connect fails immediately (not a long timeout).
+            proxy: { server: 'socks5://127.0.0.1:1', username: 'u', password: 'p' },
+          }),
+        ),
+      /proxy 127\.0\.0\.1:1 is unreachable/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('createLobiumLauncher spawns a native binary directly and reads DevToolsActivePort', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'lobium-direct-launch-'));
+  const userDataDir = join(root, 'profile');
+  const fakeBin = join(root, 'fake-lobium.cjs');
+  await writeFile(
+    fakeBin,
+    `#!/usr/bin/env node
+const fs = require('node:fs');
+const net = require('node:net');
+const path = require('node:path');
+const uddArg = process.argv.find((arg) => arg.startsWith('--user-data-dir='));
+if (!uddArg) process.exit(7);
+const userDataDir = uddArg.slice('--user-data-dir='.length);
+fs.mkdirSync(userDataDir, {recursive: true});
+// Listen so readDevToolsEndpoint's TCP reachability check passes.
+const server = net.createServer();
+server.listen(43210, '127.0.0.1', () => {
+  fs.writeFileSync(path.join(userDataDir, 'DevToolsActivePort'), '43210\\n/devtools/browser/native-fake\\n');
+});
+setInterval(() => {}, 1000);
+`,
+  );
+  await chmod(fakeBin, 0o755);
+  try {
+    const launcher = createLobiumLauncher({
+      executablePath: fakeBin,
+      extraArgsFor: buildLobiumLaunchArgs,
+      envFor: async () => undefined,
+    });
+    const handle = await launcher(ctxWith(userDataDir));
+    assert.equal(handle.ws, 'ws://127.0.0.1:43210/devtools/browser/native-fake');
+    assert.equal(handle.debuggerAddress, '127.0.0.1:43210');
+    assert.ok(handle.pid > 0);
+    const written = JSON.parse(await readFile(join(userDataDir, LOBIUM_CONFIG_FILENAME), 'utf8'));
+    assert.equal(written.version, 1);
+    await handle.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

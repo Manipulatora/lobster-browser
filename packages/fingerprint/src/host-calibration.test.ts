@@ -83,8 +83,8 @@ test('deriveFingerprintFromHost inherits captured host hardware while keeping Ch
 
 test('deriveFingerprintFromHost is deterministic per seed and host snapshot', () => {
   const h = host();
-  const a = deriveFingerprintFromHost('same-seed', h, { engine: 'chromium' });
-  const b = deriveFingerprintFromHost('same-seed', h, { engine: 'chromium' });
+  const a = deriveFingerprintFromHost('same-seed', h, { engine: 'lobium' });
+  const b = deriveFingerprintFromHost('same-seed', h, { engine: 'lobium' });
   assert.deepEqual(a, b);
 });
 

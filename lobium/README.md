@@ -5,13 +5,13 @@ fingerprint surfaces **natively** (no JS/CDP tell) and exposes a per-profile con
 50+ fingerprint parameters. See [ADR-0004](../docs/adr/ADR-0004-lobium.md) and
 [MASTER_PLAN §10 Track F](../docs/MASTER_PLAN.md).
 
-> Lobium is a **parallel, longer-horizon track**. The product ships and stays fully usable on the
-> interim prebuilt Chromium (driven via patchright) while Lobium matures into the default engine.
+> Lobium is the **only production engine**. Patchright/Chromium may be used as an internal validation
+> harness, but product launches must use native Lobium or fail with a clear provisioning error.
 
 ## Current status
 
 Chromium **152.0.7928.0** was fetched, configured, and compiled from source (~6.5 h stock on a 12-core
-box). The native fingerprint **config channel** is built, and the product launch path can now reach native
+box). The native fingerprint **config channel** is built, and the product launch path direct-spawns native
 Lobium when a built binary is provided through `LOBSTER_LOBIUM_BIN`, `LOBSTER_LOBIUM_DIR`, the local
 `~/lobium-build/src/out/Lobium/chrome` dev layout, or a packaged engine resource.
 

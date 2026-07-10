@@ -5,14 +5,13 @@
 > This is the product surface a "perfect" anti-detect browser + SaaS must cover, mapped onto what the
 > repo already ships vs. what is planned.
 >
-> **Read first:** [`MASTER_PLAN.md`](../MASTER_PLAN.md) (strategy, two-engine model, terminology).
+> **Read first:** [`MASTER_PLAN.md`](../MASTER_PLAN.md) (strategy, Lobium-only engine model, terminology).
 > **Sibling specs (deep dives, some pending):** `fingerprint-parameters.md` (the 50+ param model),
 > `proxy.md` (proxy + geo coherence), `api-reference.md` (local automation API + SDKs). Where those
 > exist they are the source of truth for their surface; this catalog links out rather than duplicating.
 >
-> **Terminology:** two engines behind one interface — **Lobium** (our own Chromium build, flagship;
-> served by patched Chromium via patchright until the native build ships) and **Chromium** (prebuilt
-> ungoogled, interim/everyday). Both present a Chrome-family fingerprint.
+> **Terminology:** one production engine — **Lobium** (our own Chromium build). Patchright/Chromium may
+> appear in historical rows or internal validation harnesses, but they are not product engines.
 >
 > **Status legend:** **done** (shipped + tested in-repo) · **partial** (scaffolded / first slice landed,
 > gaps remain) · **planned** (designed here, not yet built). **Priority:** **P0** (v1 launch-critical) ·
@@ -35,8 +34,8 @@ The grounding for "status" is the current tree:
 
 - **Desktop core** (`apps/desktop/src-tauri`): SQLite profile store, profile IPC commands
   (`list/create/get/update/delete/launch/stop`), sidecar client, local Axum API.
-- **Engine runner** (`packages/engine-runner`): patchright launcher, CDP fingerprint injection,
-  `startProfile`, composite runner.
+- **Engine runner** (`packages/engine-runner`): direct native Lobium launcher, `lobium-fp.json` config
+  writer, `startProfile`, composite runner, CDP endpoint return for automation/control.
 - **Fingerprint** (`packages/fingerprint`): seed→coherent `generateFingerprint`, coherence rules,
   overrides, real-device pools.
 - **Proxy** (`packages/proxy`): parse + exit-IP geo derivation. **Cookies** (`packages/cookies`):
@@ -106,8 +105,8 @@ per-data-type export/merge tooling is the work ahead.
 
 ## 3. Fingerprints
 
-Real-system, 50+ parameters, per-profile stable and coherent. Deep surfaces are **native in Lobium**;
-JS-safe surfaces are applied via clean CDP on the interim Chromium. **Full parameter reference:
+Real-system, 50+ parameters, per-profile stable and coherent. Production-visible surfaces are
+**native in Lobium**; CDP/Patchright mappings are internal harness history. **Full parameter reference:
 `fingerprint-parameters.md`** (this section is the feature-level summary).
 
 | Sub-feature | Detail | Priority | Parity | Status |
@@ -115,17 +114,17 @@ JS-safe surfaces are applied via clean CDP on the interim Chromium. **Full param
 | Real-system source | Values drawn from real-device datasets (fingerprint-suite + pools); statistically real, internally coherent. | P0 | Octo, ML, Kameleo | **done** (`generateFingerprint`, pools, coherence tests) |
 | Deterministic + stable | Per-profile hex **seed** → deterministic fingerprint; stable across restarts. | P0 | all | **done** (`FingerprintSeed`, seeded PRNG) |
 | Coherence enforcement | UA ↔ OS ↔ WebGL ↔ screen ↔ hardware ↔ fonts ↔ locale all describe one machine; validated by coherence rules + CI detector gate. | P0 | Octo, ML | **partial** (rules + tests **done**; CI detector gate **partial**) |
-| 50+ configurable params | One shared config model (`Fingerprint`/`FingerprintOverrides`) consumed by editor UI, sidecar, and the Lobium config channel. Groups: navigator/UA-CH, screen, WebGL, fonts, hardware, locale/timezone, audio, WebRTC, canvas, TLS/JA4, WebGPU, media/codecs. | P0 | Octo, ML, Kameleo | **partial** (JS-safe + several native deep surfaces implemented; host calibration/TLS/WebGPU/mobile still open) |
+| 50+ configurable params | One shared config model (`Fingerprint`/`FingerprintOverrides`) consumed by editor UI, sidecar, and the Lobium config channel. Groups: navigator/UA-CH, screen, WebGL, fonts, hardware, locale/timezone, audio, WebRTC, canvas, TLS/JA4, WebGPU, media/codecs. | P0 | Octo, ML, Kameleo | **partial** (several native surfaces implemented; direct launcher wired; host calibration/full native consumption/TLS/WebGPU/mobile still open) |
 | Fingerprint editor UI | Per-group form; blank field = "no override" (keep seed-derived); parses non-blank into `FingerprintOverrides`. Currently: engine, OS, `navigator.platform`, languages, locale, timezone, hardwareConcurrency (+ growing). | P0 | all | **partial** (`FingerprintEditor.tsx` first params) |
 | Overrides layer | User overrides applied on top of seed-derived values (`FingerprintOverrides` = partial navigator/screen/locale/fonts). | P0 | all | **done** (`overrides.ts` + tests) |
 | Android | Android fingerprint profile type: mobile UA, `maxTouchPoints`, mobile GPU, screen/orientation, `deviceMemory`, `uaMobile=true`. | P1 | Dolphin, GL, Kameleo | **partial** (TS catalog/types/derive/coherence done; launchable profile type + Android APK/device runner **planned**) |
 | Deep surfaces native (Lobium) | Canvas farbling, WebGL vendor/renderer + pixel hash, AudioContext DSP, font metrics, TLS JA3/JA4 + HTTP/2 — enforced natively, no JS tell. | P0 (moat) | Octo, ML | **partial** (canvas/WebGL/audio/screen/native navigator done on dev path; real-GPU/host calibration/TLS still open) |
-| WebRTC leak policy | ICE public IP == proxy IP (native in Lobium; policy on interim). | P0 | all | **partial** |
+| WebRTC leak policy | ICE public IP == proxy IP through Lobium native policy plus launch hardening. | P0 | all | **partial** |
 | Regenerate fingerprint | Re-seed a profile (new coherent identity) while keeping name/tags/proxy. | P1 | all | **planned** |
 
-**Parity note:** the depth here is the entire moat. Interim JS-safe substitution reaches AdsPower/GoLogin
-tier; **native Lobium** is what reaches Octo/Multilogin/Kameleo tier. The parameter model is shared and
-ready; native enforcement is the multi-week Lobium effort.
+**Parity note:** the depth here is the entire moat. Harness-level CDP substitution is not enough for an
+Octo-class product; **native Lobium** is the tier we are building toward. The parameter model is shared
+and ready; complete native enforcement and proof remain the hard work.
 
 ---
 
@@ -281,7 +280,7 @@ Cross-platform Tauri agent (Rust core + React/TS custom UI).
 | Installer / packaging | Signed installers; bundle sidecar; engine download-on-first-run (binaries not committed). | P0 | all | **planned** (Day 8) |
 | Auto-update | Delta updates + signature check; channel (stable/beta). | P1 | all | **planned** |
 | Onboarding | First-run: sign-in, create first profile, attach proxy, launch. | P0 | all | **planned** |
-| Settings | Engine paths, default engine/OS, local API port + key, proxy defaults, telemetry opt-in, theme, language. | P1 | all | **partial** (Settings nav item exists) |
+| Settings | Lobium engine path/status, default OS, local API port + key, proxy defaults, telemetry opt-in, theme, language. | P1 | all | **partial** (Settings nav item exists) |
 | i18n | Localized UI (EN first; RU/ZH/… next — the incumbents' key markets). | P2 | Octo, ADS, GL | **planned** |
 | Accessibility | Keyboard nav, focus states, ARIA, contrast; screen-reader labels. | P1 | (differentiator) | **partial** (semantic form labels present) |
 | Telemetry (opt-in) | Anonymous, opt-in usage/crash reporting; off by default. | P2 | some | **planned** |
@@ -361,11 +360,11 @@ Pixelscan, Sannysoft, Iphey, browserleaks, FingerprintJS + WebRTC-leak + coheren
 
 ### Phase 1 — Launch (v1, the 10-day product)
 Profiles CRUD + clone + bulk-create + import/export; real-system fingerprints (seed-stable, coherent) +
-editor over JS-safe surfaces; per-profile proxy + test + geo-sync; single-instance lock + status;
+editor over Lobium-supported fields; per-profile proxy + test + geo-sync; single-instance lock + status;
 local automation API (start/stop/list/status → Selenium + Playwright + Puppeteer) + Bearer auth +
 Py/JS SDK; encrypted cloud sync (push/pull + version conflict); auth + teams (admin/member) + profile
 sharing; Stripe billing metered on profiles; Windows installer + engine download-on-first-run;
-detector-matrix CI gate; **Lobium build pipeline + first native patch + config-channel POC**.
+detector-matrix CI gate; **direct native Lobium launch + config-channel proof**.
 
 ### Phase 2 — Depth & teams
 Light/red shell; Profiles/Proxies/Templates/Pricing IA; create-profile wizard; extensions +
@@ -374,14 +373,15 @@ granular RBAC + tag-scoped access + per-profile passwords + immutable audit expo
 proxy store + rotation + provider integrations; per-key API rate limiting + profile CRUD over API +
 C# SDK + **MCP server**; multi-axis billing (seats/RPM) + trials/dunning + usage UI; macOS + Linux
 packaging + auto-update + onboarding wizard + Settings/i18n; conflict-resolution UX + backup/restore.
-**Lobium:** progressive native coverage (canvas/WebGL/audio farbling), becomes selectable default.
+**Lobium:** progressive native coverage (canvas/WebGL/audio farbling), host calibration, real-GPU proof,
+and no weaker production fallback.
 
 ### Phase 3 — Scale & moat
 Cloud-run profiles + simultaneous-launch metering + cloud phones; Android Lobium APK/device runner;
 human-like input library + no-code RPA/scenario builder + sync automation; disposable profiles +
 cookie robot/warm-up; proxy marketplace/rotation pools; per-team KMS / zero-knowledge sync;
 full native 50+ param enforcement + TLS/JA3/JA4 + HTTP/2 + WebGPU; multi-OS signed Lobium builds +
-notarization + continuous Chrome-stable rebase → **Lobium is the default engine**.
+notarization + continuous Chrome-stable rebase.
 
 ---
 
@@ -391,7 +391,7 @@ notarization + continuous Chrome-stable rebase → **Lobium is the default engin
 |---|---|---|---|---|
 | **Profiles** | create, read/update/delete, clone, bulk-create, import, export, transfer, tags, folders, search, filters, notes, templates, quick/disposable, single-instance lock, status, cookie-robot/warm-up | P0–P2 | Octo/ML/ADS/GL/Dolphin/Kameleo | **partial** (CRUD **done**; bulk/import/export/templates/warm-up **planned**) |
 | **Browser data** | cookies, localStorage, IndexedDB, bookmarks, extensions, history, passwords/autofill — persist + sync | P0–P2 | all | **partial** (cookies **done**; storage **partial**; rest **planned**) |
-| **Fingerprints** | real-system source, seed-stable, coherence, 50+ params, editor UI, overrides, Android, native deep surfaces, WebRTC policy, regenerate | P0–P1 | Octo/ML/Kameleo (depth) | **partial** (catalog/CDP + major native deep surfaces done; host calibration/Android/TLS still open) |
+| **Fingerprints** | real-system source, seed-stable, coherence, 50+ params, editor UI, overrides, Android, native deep surfaces, WebRTC policy, regenerate | P0–P1 | Octo/ML/Kameleo (depth) | **partial** (catalog + major native surfaces done; direct launcher wired; host calibration/Android/TLS still open) |
 | **Proxy** | types, per-profile attach, test/IP-check, geo-sync, quality signals, store/library, rotation, providers, marketplace | P0–P2 | all | **partial** (parse+geo **done**; store/rotation/providers **planned**) |
 | **Teams** | teams, roles, invitations, membership mgmt, granular RBAC, tag-scoped access, per-profile sharing/password, transfer, seats, audit log | P0–P1 | Octo/ML/ADS | **partial** (teams+admin/member+sharing field **done**; RBAC/audit/seats **planned**) |
 | **Automation** | local API, core endpoints, profile CRUD over API, auth+rate limits, Selenium/Playwright/Puppeteer, SDKs (Py/JS/C#), MCP, headless, cloud-run, human-like input, RPA, sync automation | P0–P2 | Octo/ADS/GL/Dolphin | **partial** (API+connect+Py/JS SDK **done**; MCP/RPA/cloud-run/C# **planned**) |
@@ -411,9 +411,9 @@ deterministic, coherent, real-system fingerprint per seed; a working local autom
 back both a Selenium `debuggerAddress` and a Playwright/Puppeteer CDP `ws` from one `start` call;
 encrypted, versioned cloud sync with optimistic-concurrency conflict detection; JWT auth with teams
 and admin/member RBAC + a profile-sharing field; the canonical cookie import/export layer; proxy
-parsing + exit-IP geo derivation; and Python + JS SDKs. The desktop shell and the first fingerprint-
-editor and profiles screens exist. This is a genuinely usable core, honest about running on the interim
-Chromium.
+parsing + exit-IP geo derivation; and Python + JS SDKs. The desktop shell and the first fingerprint
+editor and profiles screens exist. Direct native Lobium launch is wired when a binary is provisioned;
+the remaining gap is production proof and packaging, not an interim engine plan.
 
 **Where the gaps are.** The bulk of Octo-parity **breadth** is still **planned**: profile templates /
 warm-up; extensions / bookmarks / history / passwords persistence; proxy store / rotation / providers;

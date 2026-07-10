@@ -63,7 +63,8 @@ test('buildLobiumConfig carries the fingerprint surfaces + a version', () => {
     'WEBGL_debug_renderer_info',
   ]);
   assert.equal(config.locale.timezone, 'Europe/Berlin');
-  assert.deepEqual(config.fonts, ['Arial', 'Calibri']);
+  // Native channel omits font catalogs (cmdline size); fingerprint.fonts stay on the Fingerprint.
+  assert.deepEqual(config.fonts, []);
   assert.deepEqual(config.policy.renderer, { mode: 'host' });
   assert.deepEqual(config.policy.hardwareNoise, {
     webgl: true,
@@ -77,6 +78,7 @@ test('buildLobiumConfig carries the fingerprint surfaces + a version', () => {
     speakers: 2,
     stableDeviceIds: true,
   });
+  assert.equal(config.seeds.clientRects, 0, 'clientRects noise off by default → seed 0');
 });
 
 test('buildLobiumConfig round-trips the deep WebGL surfaces the native reader consumes (HC-4)', () => {
@@ -163,12 +165,24 @@ test('buildLobiumConfig carries explicit profile launch policy', () => {
     audio: true,
     clientRects: true,
   });
+  assert.equal(config.seeds.canvas, 0, 'canvas noise off → seed gated to 0');
+  assert.ok(config.seeds.webgl > 0, 'webgl noise on → non-zero seed');
+  assert.ok(config.seeds.audio > 0, 'audio noise on → non-zero seed');
+  assert.ok(config.seeds.clientRects > 0, 'clientRects noise on → non-zero seed');
   assert.deepEqual(config.policy.mediaDevices, {
     cameras: 2,
     microphones: 1,
     speakers: 3,
     stableDeviceIds: false,
   });
+});
+
+test('hardware noise checkboxes gate farbling seeds', () => {
+  const allOff = buildLobiumConfig(fp(), {
+    seed: 'noise-off',
+    hardwareNoise: { webgl: false, canvas: false, audio: false },
+  });
+  assert.deepEqual(allOff.seeds, { canvas: 0, webgl: 0, audio: 0, clientRects: 0 });
 });
 
 test('writeLobiumConfig writes owner-only JSON that round-trips, and the flag points at it', async () => {

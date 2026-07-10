@@ -43,7 +43,7 @@ function sampleFingerprint(): Fingerprint {
 test('buildLaunchOptions maps userDataDir, headless default, proxy, and coherent args', () => {
   const params: LaunchParams = {
     profileId: 'p1',
-    engine: 'chromium',
+    engine: 'lobium',
     userDataDir: '/data/p1',
     fingerprint: sampleFingerprint(),
     proxy: { id: 'x', type: 'socks5', host: 'h', port: 1080, username: 'u', password: 'p' },
@@ -73,7 +73,7 @@ test('buildLaunchOptions applies a proxy-aware WebRTC IP-handling policy (leak p
   // With a proxy: force all WebRTC through it so the real public IP can never leak via STUN.
   const withProxy = buildLaunchOptions({
     profileId: 'p',
-    engine: 'chromium',
+    engine: 'lobium',
     userDataDir: '/d',
     fingerprint: sampleFingerprint(),
     proxy: { id: 'x', type: 'socks5', host: 'h', port: 1080 },
@@ -83,7 +83,7 @@ test('buildLaunchOptions applies a proxy-aware WebRTC IP-handling policy (leak p
   // Without a proxy: still restrict to the default public interface (no multi-interface enumeration).
   const noProxy = buildLaunchOptions({
     profileId: 'p',
-    engine: 'chromium',
+    engine: 'lobium',
     userDataDir: '/d',
     fingerprint: sampleFingerprint(),
   });
@@ -95,7 +95,7 @@ test('buildLaunchOptions applies a proxy-aware WebRTC IP-handling policy (leak p
 test('buildLaunchOptions honors an explicit WebRTC launch policy', () => {
   const explicitProxyOnly = buildLaunchOptions({
     profileId: 'p',
-    engine: 'chromium',
+    engine: 'lobium',
     userDataDir: '/d',
     fingerprint: sampleFingerprint(),
     webrtcPolicy: 'proxy_only',
@@ -106,7 +106,7 @@ test('buildLaunchOptions honors an explicit WebRTC launch policy', () => {
 
   const explicitDefault = buildLaunchOptions({
     profileId: 'p',
-    engine: 'chromium',
+    engine: 'lobium',
     userDataDir: '/d',
     fingerprint: sampleFingerprint(),
     proxy: { id: 'x', type: 'http', host: 'h', port: 8080 },

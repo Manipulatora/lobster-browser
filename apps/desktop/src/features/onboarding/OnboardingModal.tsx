@@ -69,8 +69,8 @@ export function OnboardingModal({
             the full fingerprint.
           </li>
           <li>
-            <strong>Launch &amp; automate</strong> — connect Playwright, Puppeteer, or Selenium via
-            the CDP endpoints shown after launch.
+            <strong>Launch &amp; automate</strong> — open the profile, then use ⋮ → Connection
+            details for CDP endpoints when you need Playwright, Puppeteer, or Selenium.
           </li>
         </ol>
       </div>

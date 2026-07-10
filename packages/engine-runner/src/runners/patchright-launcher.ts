@@ -1,19 +1,26 @@
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { applyCdpFingerprint, type CdpSession } from '../cdp-fingerprint.js';
 import { applyCookieImport } from '../cookie-inject.js';
+import { readDevToolsEndpoint } from '../devtools-endpoint.js';
+import {
+  buildLobsterStartPageHtml,
+  isBrandableStartUrl,
+  isNtpUrl,
+  LOBSTER_START_PAGE_URL,
+} from './branding-start-page.js';
 import type { Launcher, LaunchContext, LaunchHandle } from './types.js';
 
+export { LOBSTER_START_PAGE_URL, buildLobsterStartPageHtml } from './branding-start-page.js';
+
 /**
- * Real engine launcher backed by **patchright** (a stealth-hardened Playwright fork) driving a
- * patched Chromium. Used for the `chromium` and `lobium` engines.
+ * Internal launcher backed by **patchright** (a stealth-hardened Playwright fork) driving a Chrome-family
+ * binary. This is kept for validation harnesses and compatibility tests only. Production profiles launch
+ * through the direct native Lobium launcher in `lobium-launcher.ts`.
  *
- * We launch a persistent context (per-profile user-data-dir) with the JS-safe fingerprint surfaces
- * applied via context options (UA/locale/timezone/geo) + an init script for the remaining navigator
- * fields — never touching canvas/WebGL/audio/TLS, which are native. We ask Chromium for a real CDP
- * port (`--remote-debugging-port=0`) and read the resulting `DevToolsActivePort` file so external
- * automation can `connectOverCDP(ws)` / set Selenium `debuggerAddress`.
+ * It launches a persistent context (per-profile user-data-dir) and may apply legacy CDP/init-script
+ * substitutions for regression comparison. It never represents production fingerprint depth. We ask the
+ * browser for a real CDP port (`--remote-debugging-port=0`) and read the resulting `DevToolsActivePort`
+ * file so harness automation can `connectOverCDP(ws)` / set Selenium `debuggerAddress`.
  */
 
 interface PwProxy {
@@ -29,6 +36,7 @@ interface PwGeolocation {
 interface PersistentContextOptions {
   headless?: boolean;
   args?: string[];
+  viewport?: null | { width: number; height: number };
   proxy?: PwProxy;
   userAgent?: string;
   locale?: string;
@@ -40,6 +48,12 @@ interface PersistentContextOptions {
   env?: Record<string, string>;
 }
 type PwPage = object;
+interface NavigablePage {
+  goto(url: string, opts?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
+  /** Playwright setContent — preferred so the omnibox stays about:blank (no data: URL). */
+  setContent?(html: string, opts?: { waitUntil?: string; timeout?: number }): Promise<unknown>;
+  url?: () => string;
+}
 interface PwContext {
   newCDPSession(page: PwPage): Promise<CdpSession>;
   pages(): PwPage[];
@@ -65,52 +79,82 @@ async function loadChromium(): Promise<PwChromium> {
   return mod.chromium;
 }
 
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+function navigablePage(page: PwPage): NavigablePage | undefined {
+  const candidate = page as Partial<NavigablePage>;
+  return typeof candidate.goto === 'function' ? (candidate as NavigablePage) : undefined;
+}
 
-/** Read Chromium's `DevToolsActivePort` (written when launched with `--remote-debugging-port`). */
-async function readCdpEndpoint(
-  userDataDir: string,
-  retries = 100,
-): Promise<{ port: number; ws: string }> {
-  const file = join(userDataDir, 'DevToolsActivePort');
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      const [portLine, pathLine] = (await readFile(file, 'utf8')).split('\n');
-      const port = Number(portLine);
-      if (Number.isInteger(port) && port > 0 && pathLine) {
-        return { port, ws: `ws://127.0.0.1:${port}${pathLine.trim()}` };
-      }
-    } catch {
-      // File not written yet — the browser is still starting.
-    }
-    await delay(100);
+async function maybeOpenLobsterStartPage(
+  page: PwPage,
+  { allowBlank, profileName }: { allowBlank: boolean; profileName?: string },
+): Promise<void> {
+  const nav = navigablePage(page);
+  if (!nav) return;
+  const url = nav.url?.() ?? '';
+  if (allowBlank ? !isBrandableStartUrl(url) : !isNtpUrl(url)) return;
+  const html = buildLobsterStartPageHtml(
+    profileName !== undefined ? { profileName } : {},
+  );
+  // Prefer setContent so the address bar stays about:blank (not a huge data: URL).
+  if (typeof nav.setContent === 'function') {
+    await nav.goto('about:blank', { waitUntil: 'commit', timeout: 10_000 }).catch(() => {});
+    await nav.setContent(html, { waitUntil: 'commit', timeout: 10_000 });
+    return;
   }
-  throw new Error('timed out waiting for the Chromium CDP endpoint (DevToolsActivePort)');
+  // Last resort for minimal fakes: never navigate to LOBSTER_START_PAGE_URL (pollutes omnibox).
+  await nav.goto('about:blank', { waitUntil: 'commit', timeout: 10_000 }).catch(() => {});
+  // Fake pages in unit tests only implement goto; production Patchright always has setContent.
+  void LOBSTER_START_PAGE_URL;
+  void html;
+}
+
+/**
+ * Brand the initial tab, then brand every subsequent NTP tab (not every about:blank).
+ * Previous behavior only branded pages[0], which made branding look first-tab-only.
+ */
+async function openLobsterStartPage(
+  context: PwContext,
+  pages: PwPage[],
+  profileName?: string,
+): Promise<void> {
+  const brandOpts =
+    profileName !== undefined
+      ? { allowBlank: true as const, profileName }
+      : { allowBlank: true as const };
+  const brandOptsLater =
+    profileName !== undefined
+      ? { allowBlank: false as const, profileName }
+      : { allowBlank: false as const };
+  const initial = pages.length > 0 ? pages : [await context.newPage()];
+  for (const page of initial) {
+    await maybeOpenLobsterStartPage(page, brandOpts);
+  }
+  context.on('page', (page) => {
+    void maybeOpenLobsterStartPage(page, brandOptsLater);
+  });
 }
 
 export interface PatchrightLauncherOptions {
   headless?: boolean;
   /** Extra Chromium flags (e.g. `--no-sandbox` in containers/CI). */
   extraArgs?: string[];
-  /** Override the browser binary — the native Lobium launcher points this at the from-source build. */
+  /** Override the browser binary for harness tests. */
   executablePath?: string;
   /**
-   * Per-launch async args provider, run just before spawn. The native Lobium launcher uses it to write
-   * the per-profile `lobium-fp.json` and return its `--lobium-fp-config=<path>` flag, so the native
-   * config channel is wired up on every real launch (not just the detector harness).
+   * Per-launch async args provider, run just before spawn. Kept for harness experiments; production
+   * Lobium config args are built by `lobium-launcher.ts`.
    */
   extraArgsFor?: (ctx: LaunchContext) => Promise<string[]> | string[];
   /**
-   * Per-launch env-var provider (merged over `process.env`), run just before spawn. The native Lobium
-   * launcher uses it to write the per-profile private fontconfig and set `FONTCONFIG_FILE` (ENG-6), so
-   * the font fingerprint is OS-plausible + stable per profile.
+   * Per-launch env-var provider (merged over `process.env`), run just before spawn. Kept for harness
+   * experiments such as private fontconfig validation.
    */
   envFor?: (ctx: LaunchContext) => Promise<Record<string, string> | undefined>;
 }
 
 /**
  * Run the post-launch configuration on an already-spawned persistent context (grant geolocation, apply
- * the per-page CDP fingerprint, read the CDP endpoint) and return the {@link LaunchHandle}.
+ * legacy harness substitutions, read the CDP endpoint) and return the {@link LaunchHandle}.
  *
  * If ANY step throws, the Chromium we just spawned would be orphaned — never closed, its user-data
  * `SingletonLock` left behind so the next launch of this profile fails. We close it (best-effort) on
@@ -122,19 +166,18 @@ export async function configureLaunchedContext(
   ctx: LaunchContext,
 ): Promise<LaunchHandle> {
   try {
-    // Grant geolocation so a page that asks actually reads the proxy-derived coordinates. Without this
-    // the override is set but `getCurrentPosition` is denied — geo would silently not apply in production.
+    // Grant geolocation so a page that asks actually reads the proxy-derived coordinates in the harness.
     if (ctx.emulation.geolocation) {
       await context.grantPermissions(['geolocation']);
     }
 
-    // Apply the JS-safe fingerprint to every page via CDP (main world) — reliable under patchright,
-    // whose addInitScript runs in an isolated world the page's navigator can't see.
+    // Apply legacy harness substitutions to every page via CDP (main world). Production Lobium does not
+    // use this path for fingerprinting.
     const applyToPage = async (page: PwPage): Promise<void> => {
       const cdp = await context.newCDPSession(page);
       await applyCdpFingerprint(cdp, ctx.fingerprint);
     };
-    const pages = context.pages();
+    let pages = context.pages();
     for (const page of pages) {
       await applyToPage(page);
     }
@@ -147,11 +190,14 @@ export async function configureLaunchedContext(
     // to the whole browser context. No-op when the profile has no cookie import.
     if (ctx.cookiesImport) {
       const cookiePage = pages[0] ?? (await context.newPage());
+      if (pages.length === 0) pages = [cookiePage];
       const cdp = await context.newCDPSession(cookiePage);
       await applyCookieImport(cdp, ctx.cookiesImport);
     }
 
-    const { port, ws } = await readCdpEndpoint(ctx.options.userDataDir);
+    await openLobsterStartPage(context, pages, ctx.profileName);
+
+    const { port, ws } = await readDevToolsEndpoint(ctx.options.userDataDir);
     return {
       // The OS pid isn't exposed by the persistent-context API; lifecycle is managed via close().
       pid: 0,
@@ -181,7 +227,11 @@ export function createPatchrightLauncher(opts: PatchrightLauncherOptions = {}): 
     const options: PersistentContextOptions = {
       headless: opts.headless ?? ctx.options.headless,
       args,
-      // JS-safe value substitution (deep surfaces stay native — see MASTER_PLAN §5).
+      // Patchright/Playwright defaults to a fixed 1280x720 viewport. In a real headed browser that can
+      // leave a dead blank strip beside the page when the window is larger. Let the viewport follow the
+      // Lobium window instead; native screen hooks still control screen.*.
+      viewport: null,
+      // Legacy harness value substitution. Production values are native Lobium config.
       userAgent: ctx.emulation.userAgent,
       locale: ctx.emulation.locale,
       timezoneId: ctx.emulation.timezoneId,

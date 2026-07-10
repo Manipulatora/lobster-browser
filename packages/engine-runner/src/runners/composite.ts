@@ -11,12 +11,13 @@ import { defaultLaunchers } from './default-launchers.js';
 import type { LaunchContext, LaunchHandle, LauncherRegistry } from './types.js';
 
 /**
- * The real engine runner. It prepares a coherent launch (options + CDP emulation + JS-safe init
- * script) from the profile's fingerprint, delegates the actual browser start to the per-engine
- * launcher, and tracks running instances (single-active-instance per profile).
+ * The real engine runner. It prepares a coherent launch from the profile's fingerprint, delegates the
+ * actual browser start to the per-engine launcher, and tracks running instances
+ * (single-active-instance per profile). The production Lobium launcher consumes the fingerprint through
+ * the native config channel; CDP emulation/init-script fields remain only for internal harnesses.
  *
  * The launcher registry is injected, so this orchestration is fully unit-tested with a fake; the
- * real patchright adapter (which needs a browser binary) drops in via {@link defaultLaunchers}.
+ * direct native Lobium adapter (which needs a browser binary) drops in via {@link defaultLaunchers}.
  */
 export class CompositeRunner implements EngineRunner {
   private readonly launchers: LauncherRegistry;
@@ -37,6 +38,7 @@ export class CompositeRunner implements EngineRunner {
 
     const ctx: LaunchContext = {
       profileId: params.profileId,
+      ...(params.profileName !== undefined ? { profileName: params.profileName } : {}),
       engine: params.engine,
       ...(params.osVersion !== undefined ? { osVersion: params.osVersion } : {}),
       fingerprint: params.fingerprint,

@@ -10,7 +10,7 @@ import { buildLaunchers } from './runners/default-launchers.js';
  * contract with the Rust desktop core (see docs/contracts/sidecar-ipc.md).
  */
 async function main(): Promise<void> {
-  // Wire real launchers when a patched Chromium is installed; unprovisioned engines report a clear
+  // Wire the direct native Lobium launcher when a binary is provisioned; missing Lobium reports a clear
   // error. Headless/sandbox behavior is env-configurable for servers/containers.
   const runner = new CompositeRunner(
     await buildLaunchers({

@@ -49,7 +49,7 @@ the source of truth; this doc is the human-readable spec.
   ```jsonc
   {
     "profileId": "string",
-    "engine": "lobium" | "chromium",
+    "engine": "lobium",
     "osVersion": "Windows 11 23H2",
     "userDataDir": "/abs/path/to/profile",   // persistent per-profile dir
     "fingerprint": { /* fully-resolved coherent Fingerprint (post-geo) */ },
@@ -70,11 +70,11 @@ the source of truth; this doc is the human-readable spec.
   ```jsonc
   { "profileId": "string", "pid": 12345, "ws": "ws://127.0.0.1:PORT/devtools/browser/...", "debuggerAddress": "127.0.0.1:PORT" }
   ```
-- Behavior: launch the engine with the per-profile `userDataDir` + proxy; apply the **JS-safe**
-  fingerprint surfaces through CDP; deep surfaces are native on **Lobium**. When native Lobium is
-  discovered, the launcher writes `<userDataDir>/lobium-fp.json` and passes
-  `--lobium-fp-config=<path>`; otherwise `lobium` falls back to the interim Chromium path for dev/CI.
-  Return the CDP endpoints. Enforce single-active-instance per `profileId`.
+- Behavior: launch **native Lobium** with the per-profile `userDataDir` + proxy, write
+  `<userDataDir>/lobium-fp.json`, pass `--lobium-fp-config=<path>`, and return CDP endpoints for
+  automation/control. Fingerprint values are consumed by Lobium's native config path, not applied through
+  Patchright/JS/CDP. If a native Lobium binary is not provisioned, launch fails clearly. Enforce
+  single-active-instance per `profileId`.
 
 ### `stop`
 - params (`StopParams`): `{ "profileId": "string" }` → result: `{}` (ok). Gracefully close the engine.
@@ -90,6 +90,6 @@ the source of truth; this doc is the human-readable spec.
 
 ## Notes
 
-- Both engines speak this one contract: `chromium` is the interim prebuilt engine; `lobium` is our
-  flagship custom build when a binary is provided/discovered, with a clean fallback to interim Chromium
-  for developer environments without the native artifact.
+- `engine` remains in the payload for compatibility with existing shared types and API clients, but
+  production accepts only `lobium`. Test harnesses may still instantiate a Chromium/Patchright runner
+  internally; they are not product fallback behavior.

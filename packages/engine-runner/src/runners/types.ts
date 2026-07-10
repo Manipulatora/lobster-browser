@@ -10,10 +10,12 @@ import type { CdpEmulation, PersistentLaunchOptions } from '../launch.js';
 /** Everything a concrete engine launcher needs — prepared by the CompositeRunner from a profile. */
 export interface LaunchContext {
   profileId: string;
+  /** Human-readable Lobster profile name (NTP chip + Chromium profile prefs). */
+  profileName?: string;
   engine: EngineKind;
   /** Profile-selected OS build/version label, when present. */
   osVersion?: string;
-  /** The fully-resolved fingerprint — used to apply CDP overrides on each page. */
+  /** The fully-resolved fingerprint — serialized into Lobium's native config channel. */
   fingerprint: Fingerprint;
   /** Native policy fields resolved from profile overrides and proxy state. */
   fingerprintPolicy?: FingerprintLaunchPolicy;
@@ -24,7 +26,9 @@ export interface LaunchContext {
   /** Imported cookies to load into the launched context so the profile opens logged-in (PROX-1/2). */
   cookiesImport?: CookieImportDraft;
   options: PersistentLaunchOptions;
+  /** Internal/test CDP shape; production Lobium launcher does not use this for fingerprinting. */
   emulation: CdpEmulation;
+  /** Internal/test JS init script; production Lobium launcher does not inject it. */
   initScript: string;
 }
 
@@ -45,8 +49,8 @@ export interface LaunchHandle {
 }
 
 /**
- * Launches one engine family. The real implementation wraps patchright driving a patched Chromium
- * (chromium/lobium); it is injected so the orchestration is fully testable with a fake.
+ * Launches one engine family. The production implementation launches native Lobium; tests can inject
+ * fakes or lower-level adapters.
  */
 export type Launcher = (ctx: LaunchContext) => Promise<LaunchHandle>;
 

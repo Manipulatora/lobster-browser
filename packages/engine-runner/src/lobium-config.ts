@@ -36,10 +36,12 @@ export interface LobiumFarblingSeeds {
   canvas: number;
   webgl: number;
   audio: number;
+  /** Sub-pixel getClientRects / getBoundingClientRect noise; 0 disables the native hook. */
+  clientRects: number;
 }
 
 export interface LobiumNetConfig {
-  /** WebRTC IP-handling policy — matches the interim engine's flag (see launch.ts). */
+  /** WebRTC IP-handling policy — mirrored in launch hardening flags and consumed by native Lobium. */
   webrtcPolicy: WebRtcPolicy;
   /** Non-secret proxy summary (type/host/port only — never credentials). */
   proxy?: { type: string; host: string; port: number };
@@ -126,6 +128,15 @@ export function buildLobiumConfig(
     mediaDevices: { ...DEFAULT_MEDIA_DEVICES, ...opts.mediaDevices },
   };
   if (opts.osVersion) policy.osVersion = opts.osVersion;
+  const noise = policy.hardwareNoise;
+  // Gate farbling seeds by Hardware noise checkboxes. A zero seed disables native farbling for that
+  // surface (Lobium treats seed==0 as off).
+  //
+  // fonts: intentionally empty in the native channel. Lobium does not yet consume cfg.fonts (font
+  // isolation is FONTCONFIG_FILE / LOBSTER_FONTS_DIR packaging). Shipping the full OS catalog here
+  // (macOS ~2500 names) base64-blows past the renderer command-line size guard (~24 KiB), so the
+  // browser silently drops --lobium-fp-data and workers leak host platform/HWC — a CreepJS lie.
+  // Keep the field for schema stability; populate only when a non-cmdline transport exists.
   return {
     version: LOBIUM_CONFIG_VERSION,
     arch: fp.arch,
@@ -133,11 +144,12 @@ export function buildLobiumConfig(
     screen: fp.screen,
     webgl: fp.webgl,
     locale: fp.locale,
-    fonts: fp.fonts,
+    fonts: [],
     seeds: {
-      canvas: hashStringToUint32(`${base}:canvas`),
-      webgl: hashStringToUint32(`${base}:webgl`),
-      audio: hashStringToUint32(`${base}:audio`),
+      canvas: noise.canvas ? hashStringToUint32(`${base}:canvas`) : 0,
+      webgl: noise.webgl ? hashStringToUint32(`${base}:webgl`) : 0,
+      audio: noise.audio ? hashStringToUint32(`${base}:audio`) : 0,
+      clientRects: noise.clientRects ? hashStringToUint32(`${base}:clientRects`) : 0,
     },
     policy,
     net,
@@ -151,7 +163,9 @@ export async function writeLobiumConfig(
 ): Promise<string> {
   await mkdir(userDataDir, { recursive: true });
   const path = join(userDataDir, LOBIUM_CONFIG_FILENAME);
-  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  // Compact JSON: the browser base64-forwards this onto the renderer command line (Windows ~32K
+  // CreateProcess cap). Pretty-print would waste budget for no benefit at runtime.
+  await writeFile(path, `${JSON.stringify(config)}\n`, { mode: 0o600 });
   return path;
 }
 

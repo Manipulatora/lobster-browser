@@ -6,7 +6,7 @@ import {
   validateHostCalibrationProfile,
   validateFingerprintCoherence,
 } from '@lobster/fingerprint';
-import { deriveGeoFromExitIp } from '@lobster/proxy';
+import { deriveGeoFromExitIp, toEnginePlaywrightProxy } from '@lobster/proxy';
 import type {
   Fingerprint,
   FingerprintLaunchPolicy,
@@ -18,8 +18,17 @@ import type {
   StartProfileParams,
   WebRtcPolicy,
 } from '@lobster/shared-types';
+import { assertUpstreamReachable } from './proxy-auth-adapter.js';
 import type { EngineRunner } from './runner.js';
 import { loadHostCalibration, resolveHostCalibrationPath } from './host-calibration-store.js';
+
+/** True when a geo/proxy error means the upstream is dead — fail closed, do not launch. */
+function isProxyUnreachableError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /unreachable|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|Proxy connection timed out|SOCKS geo lookup timed out|connect ETIMEDOUT|connect ECONNREFUSED/i.test(
+    msg,
+  );
+}
 
 const DEFAULT_HARDWARE_NOISE: HardwareNoisePolicy = {
   webgl: true,
@@ -67,6 +76,18 @@ export async function startProfile(
   runner: EngineRunner,
   params: StartProfileParams,
 ): Promise<LaunchResult> {
+  if (params.engine !== 'lobium') {
+    throw new Error(
+      `refusing to launch profile ${params.profileId}: Lobium is the only supported engine`,
+    );
+  }
+  if (params.os !== 'windows' && params.os !== 'macos' && params.os !== 'linux') {
+    throw new Error(
+      `refusing to launch profile ${params.profileId}: desktop sidecar cannot launch OS "${String(
+        params.os,
+      )}"`,
+    );
+  }
   // HC-3: host-calibrated derivation is the DEFAULT whenever a host profile has been captured. An
   // explicit `params.hostCalibration` (passed by the control plane) wins; otherwise, if a persisted
   // host profile exists (LOBSTER_HOST_CALIBRATION_FILE) and its OS matches this profile, use it. When
@@ -74,7 +95,7 @@ export async function startProfile(
   let hostCalibration = params.hostCalibration;
   if (!hostCalibration) {
     const persisted = await loadHostCalibration(resolveHostCalibrationPath());
-    if (persisted && persisted.os === params.os) {
+    if (persisted && persisted.os === params.os && (!params.arch || persisted.arch === params.arch)) {
       hostCalibration = persisted;
     }
   }
@@ -85,6 +106,12 @@ export async function startProfile(
       throw new Error(
         `refusing to launch profile ${params.profileId}: host calibration OS ` +
           `"${hostCalibration.os}" does not match profile OS "${params.os}"`,
+      );
+    }
+    if (params.arch && hostCalibration.arch !== params.arch) {
+      throw new Error(
+        `refusing to launch profile ${params.profileId}: host calibration arch ` +
+          `"${hostCalibration.arch}" does not match profile arch "${params.arch}"`,
       );
     }
     const hostIssues = validateHostCalibrationProfile(hostCalibration);
@@ -101,18 +128,27 @@ export async function startProfile(
     fingerprint = deriveFingerprint(params.fingerprintSeed, {
       os: params.os,
       engine: params.engine,
+      ...(params.arch ? { arch: params.arch } : {}),
     });
   }
   fingerprint = applyOverrides(fingerprint, params.fingerprintOverrides);
 
   if (params.proxy) {
+    // Fail closed on a dead upstream before geo overlay / engine spawn — otherwise the UI warns
+    // about geo and still opens a blank Lobium window that cannot egress.
+    await assertUpstreamReachable(toEnginePlaywrightProxy(params.proxy));
     try {
       const geo = await deriveGeoFromExitIp(params.proxy);
       fingerprint = applyGeoToFingerprint(fingerprint, geo);
     } catch (err) {
-      // Fail-open on a transient exit-IP lookup — but NOT silently. A proxied profile whose
-      // locale/timezone don't match the exit IP is a top-tier bot signal, so surface it loudly (the
-      // sidecar forwards stderr) rather than quietly shipping a mismatched persona.
+      if (isProxyUnreachableError(err)) {
+        throw new Error(
+          `refusing to launch profile ${params.profileId}: proxy is unreachable — ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+      // Fail-open only on soft geo-API failures (bad JSON, rate limit, missing fields) when TCP to
+      // the proxy already succeeded. Surface loudly — mismatched locale/tz is a bot signal.
       console.warn(
         `[startProfile] proxy exit-IP geo derivation failed for profile ${params.profileId}; ` +
           'launching with the seed-derived locale/timezone, which may not match the proxy exit — ' +
@@ -135,6 +171,7 @@ export async function startProfile(
 
   const launchParams: LaunchParams = {
     profileId: params.profileId,
+    ...(typeof params.profileName === 'string' ? { profileName: params.profileName } : {}),
     engine: params.engine,
     ...(typeof params.osVersion === 'string' ? { osVersion: params.osVersion } : {}),
     userDataDir: params.userDataDir,

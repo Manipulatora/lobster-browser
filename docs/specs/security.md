@@ -327,8 +327,8 @@ primary defense; the `Origin`/`Host` allowlist is defense in depth.
 
 | Threat | Mitigation | Status |
 |---|---|---|
-| **Fingerprint leak / correlation** | native deep-surface fingerprinting (Lobium), coherent real-system params, WebRTC-behind-proxy, clean CDP, CI detector gate (see MASTER_PLAN §5–6) | tracked in fingerprint spec |
-| **WebRTC/DNS IP leak** | ICE == proxy IP (native Lobium / policy interim); DNS via proxy | `partial` |
+| **Fingerprint leak / correlation** | native Lobium fingerprinting, coherent real-system params, WebRTC-behind-proxy, artifact-free control CDP, CI detector gate (see MASTER_PLAN §5–6) | tracked in fingerprint spec |
+| **WebRTC/DNS IP leak** | ICE == proxy IP (native Lobium + launch policy); DNS via proxy | `partial` |
 | **Token theft** | short access TTL + rotating refresh + reuse detection + revocation; HttpOnly/Secure cookies; keychain on desktop | `planned` |
 | **Blob exfiltration from server** | **client-side AES-GCM (zero-knowledge)** — stolen S3/PG bytes are useless without team keys | `partial` (server-opaque `done`; LBv1 envelope `done`; SEC-2 key hierarchy `planned`) |
 | **Blob exfiltration from disk** | local store encryption + keychain-held LSK; single-active-instance lock | `planned` |
@@ -379,13 +379,13 @@ primary defense; the `Origin`/`Host` allowlist is defense in depth.
 | **SBOM** | generate CycloneDX SBOM (npm + cargo) per release; publish with artifacts | `planned` |
 | **Dependency updates** | automated PRs (Dependabot/Renovate), grouped, gated by full CI incl. fingerprint validation | `planned` |
 | **Build integrity** | pinned toolchains (`rust-toolchain.toml`, `.nvmrc`); reproducible-ish builds; sign desktop installers (Win Authenticode / macOS notarization — MASTER_PLAN §10 Day 8) | `partial` |
-| **Engine provenance** | interim Chromium downloaded on first run with a **checksum/signature check** (binaries never committed — gitignored `engines/bin/`); Lobium built from our own pinned source + patch series | `partial` |
+| **Engine provenance** | Lobium built from our own pinned source + patch series; packaged binaries are signed/checksummed and never committed to git | `partial` |
 | **CI hardening** | least-privilege `GITHUB_TOKEN`, no secrets exposed to fork PRs, `concurrency` cancels superseded runs | `partial` |
 | **Third-party OSS attribution** | keep attribution files when importing OSS (MASTER_PLAN §7.5) | `done` |
 
-**Notable dependency trust anchors:** `patchright` (CDP cleanliness), `fingerprint-suite` (fp data),
-`bcryptjs`, `@nestjs/jwt`, `rusqlite`, Tauri. Each is a supply-chain trust decision; pin versions and
-review upgrades deliberately.
+**Notable dependency trust anchors:** Chromium/depot_tools/Lobium patch tooling, `fingerprint-suite`
+(fallback/catalog data), `patchright` for internal tests only, `bcryptjs`, `@nestjs/jwt`, `rusqlite`,
+Tauri. Each is a supply-chain trust decision; pin versions and review upgrades deliberately.
 
 ---
 

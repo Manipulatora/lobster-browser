@@ -1,0 +1,83 @@
+Lobium — native mediaDevices enumerateDevices spoof (policy.mediaDevices).
+
+Replaces the host device list with persona camera/microphone/speaker counts. Labels stay empty
+(permission-shaped); deviceIds are deterministic when stableDeviceIds is true. Uses StringBuilder
+(no libc buffer APIs) for Chromium -Wunsafe-buffer-usage cleanliness.
+
+diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.cc b/third_party/blink/renderer/modules/mediastream/media_devices.cc
+@@ -3,9 +3,11 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/mediastream/media_devices.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ 
+ #include <algorithm>
+ #include <string>
++#include <string_view>
+ #include <utility>
+ 
+ #include "base/feature_list.h"
+@@ -1484,6 +1486,63 @@
+     }
+   }
+ 
++  // Lobium: replace host device enumeration with the persona mediaDevices policy counts.
++  // Labels stay empty (permission-gated on real Chrome); deviceIds are stable when configured.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->media_devices.present) {
++    media_devices.clear();
++    result_contains_nonempty_input_device_ids = false;
++    const auto& md = cfg->media_devices;
++    auto stable_id = [&](std::string_view kind, int index) -> String {
++      if (!md.stable_device_ids) {
++        return String();
++      }
++      uint32_t h = cfg->seeds.canvas ^ cfg->seeds.webgl ^ 0x4D454449u;  // 'MEDI'
++      for (unsigned char c : kind) {
++        h = (h ^ static_cast<uint32_t>(c)) * 16777619u;
++      }
++      h ^= static_cast<uint32_t>(index) * 0x9E3779B1u;
++      h ^= h >> 16;
++      h *= 0x7FEB352Du;
++      h ^= h >> 15;
++      // 32 hex chars — Chrome-shaped deviceId length without claiming a real host id.
++      StringBuilder id;
++      for (int i = 0; i < 8; ++i) {
++        const uint32_t nibble_word =
++            h ^ (0xA5A5A5A5u * static_cast<uint32_t>(i + 1));
++        id.AppendFormat("%04x", nibble_word & 0xFFFFu);
++      }
++      return id.ReleaseString();
++    };
++    auto push_devices = [&](mojom::blink::MediaDeviceType type, int count,
++                            std::string_view kind_key) {
++      const std::string group_key = std::string(kind_key) + "-group";
++      for (int i = 0; i < count; ++i) {
++        String id = stable_id(kind_key, i);
++        if (!id.empty() &&
++            (type == mojom::blink::MediaDeviceType::kMediaAudioInput ||
++             type == mojom::blink::MediaDeviceType::kMediaVideoInput)) {
++          result_contains_nonempty_input_device_ids = true;
++        }
++        String group = stable_id(group_key, 0);
++        if (type == mojom::blink::MediaDeviceType::kMediaVideoInput ||
++            type == mojom::blink::MediaDeviceType::kMediaAudioInput) {
++          media_devices.push_back(MakeGarbageCollected<InputDeviceInfo>(
++              id, String(), group, type));
++        } else {
++          media_devices.push_back(MakeGarbageCollected<MediaDeviceInfo>(
++              id, String(), group, type));
++        }
++      }
++    };
++    push_devices(mojom::blink::MediaDeviceType::kMediaAudioInput, md.microphones,
++                 "audioinput");
++    push_devices(mojom::blink::MediaDeviceType::kMediaVideoInput, md.cameras,
++                 "videoinput");
++    push_devices(mojom::blink::MediaDeviceType::kMediaAudioOutput, md.speakers,
++                 "audiooutput");
++  }
++
+   ReportCompletedEnumerateDevices(result_contains_nonempty_input_device_ids);
+   result_tracker->Resolve(media_devices);
+   tracer->End();

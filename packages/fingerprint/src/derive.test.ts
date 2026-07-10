@@ -11,7 +11,7 @@ import { DEVICE_TEMPLATES } from './pools.js';
 import { generateSeed } from './seed.js';
 
 const OSES: OsFamily[] = ['windows', 'macos', 'linux'];
-const ENGINES: EngineKind[] = ['lobium', 'chromium'];
+const ENGINES: EngineKind[] = ['lobium'];
 
 /** Extract the GPU vendor family from a WebGL vendor string like "Google Inc. (NVIDIA)". */
 function gpuVendor(vendor: string): string {
@@ -32,8 +32,8 @@ test('deriveFingerprint is deterministic across 50 seeds x OS x engine', () => {
 });
 
 test('a fixed seed produces byte-identical output (stable profile identity)', () => {
-  const a = deriveFingerprint('fixed-seed-001', { os: 'windows', engine: 'chromium' });
-  const b = deriveFingerprint('fixed-seed-001', { os: 'windows', engine: 'chromium' });
+  const a = deriveFingerprint('fixed-seed-001', { os: 'windows', engine: 'lobium' });
+  const b = deriveFingerprint('fixed-seed-001', { os: 'windows', engine: 'lobium' });
   assert.deepEqual(a, b);
 });
 
@@ -53,7 +53,7 @@ test('generated fingerprints are internally coherent across 50 seeds x OS x engi
   }
 });
 
-test('every engine presents a Chrome UA + Sec-CH-UA brands (both engines are Chromium-based)', () => {
+test('Lobium presents a Chrome UA + Sec-CH-UA brands', () => {
   for (let i = 0; i < 25; i++) {
     const seed = generateSeed();
     for (const os of OSES) {
@@ -133,7 +133,7 @@ test('derives coherent device data (rich fonts, real GPU, plausible screen) from
   for (let i = 0; i < 25; i++) {
     const seed = generateSeed();
     for (const os of OSES) {
-      const fp = deriveFingerprint(seed, { os, engine: 'chromium' });
+      const fp = deriveFingerprint(seed, { os, engine: 'lobium' });
 
       assert.ok(fp.fonts.length > 0, `fonts empty ${os} seed=${seed}`);
       assert.ok(fp.webgl.renderer.length > 0, `webgl renderer empty ${os} seed=${seed}`);
@@ -153,7 +153,7 @@ test('no desktop profile advertises an implausibly low deviceMemory (>= 4 GB, ca
   for (let i = 0; i < 200; i++) {
     const seed = generateSeed();
     for (const os of OSES) {
-      const fp = deriveFingerprint(seed, { os, engine: 'chromium' });
+      const fp = deriveFingerprint(seed, { os, engine: 'lobium' });
       assert.ok(
         fp.navigator.deviceMemory >= DESKTOP_MIN_DEVICE_MEMORY && fp.navigator.deviceMemory <= 8,
         `deviceMemory ${fp.navigator.deviceMemory} out of [${DESKTOP_MIN_DEVICE_MEMORY},8] for ${os} seed=${seed}`,
@@ -176,6 +176,19 @@ test('deriveFromPools is coherent for every OS/arch', () => {
         );
       }
     }
+  }
+});
+
+test('macOS architecture request selects a coherent Intel or Apple-Silicon device class', () => {
+  for (let i = 0; i < 50; i++) {
+    const seed = generateSeed();
+    const intel = deriveFingerprint(seed, { os: 'macos', engine: 'lobium', arch: 'x86_64' });
+    assert.equal(intel.arch, 'x86_64', `Intel Mac arch seed=${seed}`);
+    assert.doesNotMatch(intel.webgl.renderer, /Apple M\d/, `Intel Mac GPU seed=${seed}`);
+
+    const arm = deriveFingerprint(seed, { os: 'macos', engine: 'lobium', arch: 'arm64' });
+    assert.equal(arm.arch, 'arm64', `Apple Silicon Mac arch seed=${seed}`);
+    assert.match(arm.webgl.renderer, /Apple M\d/, `Apple Silicon Mac GPU seed=${seed}`);
   }
 });
 
@@ -239,11 +252,11 @@ test('EVERY catalog device class is coherent (exhaustive, not sampled)', () => {
 test('different seeds select DIVERSE GPU vendors per OS (not one collapsed device)', () => {
   // The catalog spans Intel/NVIDIA/AMD on Windows+Linux and Apple on macOS. Over many seeds we must
   // actually see that spread — proof the derivation is coherent-but-varied, not fixed.
-  const expected: Record<OsFamily, number> = { windows: 3, macos: 1, linux: 3 };
+  const expected: Record<OsFamily, number> = { windows: 3, macos: 2, linux: 3 };
   for (const os of OSES) {
     const vendors = new Set<string>();
     for (let i = 0; i < 300; i++) {
-      const fp = deriveFingerprint(generateSeed(), { os, engine: 'chromium' });
+      const fp = deriveFingerprint(generateSeed(), { os, engine: 'lobium' });
       vendors.add(gpuVendor(fp.webgl.vendor));
     }
     assert.ok(
@@ -271,7 +284,7 @@ test('proxy geo is an OVERLAY: it rewrites locale/timezone/languages but never t
   for (let i = 0; i < 25; i++) {
     const seed = generateSeed();
     for (const os of OSES) {
-      const base = deriveFingerprint(seed, { os, engine: 'chromium' });
+      const base = deriveFingerprint(seed, { os, engine: 'lobium' });
       const geoed = applyGeoToFingerprint(base, geo);
 
       // Geo cluster tracks the proxy...

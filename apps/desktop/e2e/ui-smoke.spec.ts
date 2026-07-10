@@ -19,11 +19,14 @@ test('desktop UI smoke: profiles, filters, trash, proxies, templates, pricing', 
   await page.getByPlaceholder('Tags').fill('e2e, policy');
 
   await page.getByRole('button', { name: 'Fingerprint' }).click();
-  await page.getByLabel('Engine').selectOption('lobium');
+  await expect(page.getByLabel('Engine')).toHaveValue('Lobium');
   await page.getByLabel('Operating system').selectOption('windows');
-  await page.getByLabel('OS version').selectOption('Windows 11 23H2');
+  await page.getByLabel('OS version').selectOption('Windows 11');
+  await page.getByLabel('Geolocation mode').selectOption('manual');
   await page.getByLabel('Geolocation latitude').fill('40.7128');
   await page.getByLabel('Geolocation longitude').fill('-74.0060');
+  await page.getByLabel('WebRTC mode').selectOption('manual');
+  await page.getByLabel('WebRTC', { exact: true }).selectOption('proxy_only');
   await page.getByLabel('Renderer').selectOption('normalized_host');
   await page.getByLabel('Client Rects').check();
   await page.getByLabel('Cameras').fill('2');
@@ -36,7 +39,7 @@ test('desktop UI smoke: profiles, filters, trash, proxies, templates, pricing', 
   await expect(page.getByText('1 cookies detected')).toBeVisible();
 
   await page.getByRole('button', { name: 'Security' }).click();
-  await page.getByLabel('WebRTC').selectOption('proxy_only');
+  await expect(page.getByLabel('Password')).toBeDisabled();
 
   await page.getByRole('button', { name: 'Extensions' }).click();
   await page

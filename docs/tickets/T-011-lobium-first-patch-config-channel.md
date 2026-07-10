@@ -61,12 +61,10 @@ upstream 152.
   (same-key-all-channels) and re-proven; the remaining gaps (AudioWorklet/ScriptProcessorNode upstream
   taps, known-input invertibility, byte analyser paths) are documented in `hooks.md` and deferred with
   rationale.
-- **Scope correction:** the originally-specified `navigator.userAgent` / platform / UA-CH surface was
-  investigated natively and deliberately **left to CDP** — these are the `JS-safe` surfaces MASTER_PLAN §5
-  routes through `setUserAgentOverride` (a native `NavigatorID::platform()` override had zero effect under
-  this Chrome; the value comes via the CDP reduced-UA path). The native moat is reserved for surfaces CDP
-  genuinely cannot reach (the deep surfaces above). The acceptance criterion is therefore met against a
-  deep surface (WebGL/canvas persona differs by config) rather than UA.
+- **Historical scope correction, superseded by T-028 / ADR-0003:** this ticket originally left
+  `navigator.userAgent` / platform / UA-CH to the CDP harness. Later native work moved UA/platform into
+  Lobium across windows and workers. Production now requires native Lobium consumption; CDP remains
+  internal/test-only.
 - **Screen / devicePixelRatio** (`fingerprint/screen-dpr.patch`) — persona screen geometry + colour depth
   + DPR from the config, via `Screen::GetRect`/`colorDepth` and the DPR through BOTH `window.devicePixelRatio`
   and the CSS media-query path (`MediaValues`) so `matchMedia` agrees. Closed a real detected tell (every

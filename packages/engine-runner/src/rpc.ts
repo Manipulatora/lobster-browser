@@ -8,6 +8,7 @@ import type {
 } from '@lobster/shared-types';
 import type { EngineRunner } from './runner.js';
 import { startProfile } from './start-profile.js';
+import { startAndroidProfile } from './start-android-profile.js';
 import { ensureHostCalibration } from './ensure-host-calibration.js';
 
 /** Dispatch one sidecar request to the runner and produce a response. Never throws. */
@@ -19,12 +20,21 @@ export async function dispatch(
     switch (req.method) {
       case 'ping':
         return { id: req.id, ok: true, result: { pong: true } };
-      case 'startProfile':
+      case 'startProfile': {
+        const params = req.params as StartProfileParams;
+        if (params.os === 'android') {
+          return {
+            id: req.id,
+            ok: true,
+            result: await startAndroidProfile(params),
+          };
+        }
         return {
           id: req.id,
           ok: true,
-          result: await startProfile(runner, req.params as StartProfileParams),
+          result: await startProfile(runner, params),
         };
+      }
       case 'launch':
         return { id: req.id, ok: true, result: await runner.launch(req.params as LaunchParams) };
       case 'stop':

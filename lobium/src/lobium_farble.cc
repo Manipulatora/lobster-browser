@@ -13,10 +13,32 @@
 namespace lobium {
 namespace {
 
-// Perturb R/G/B (never A) of one RGBA pixel by a per-channel-INDEPENDENT delta in {-1,0,+1}, keyed on
-// (seed, absolute TOP-DOWN coordinate, channel). Folding the channel into the hash INPUT (not after the
-// avalanche) makes each of R/G/B an independent draw — otherwise dR+dG+dB could never reach +/-3, a
-// seed-independent tell. Transparent pixels are skipped so encoders that zero RGB stay consistent.
+// Edge-aware canvas farbling (CreepJS-safe):
+// CreepJS flags "pixel data modified" when fillRect(solid) → getImageData returns a different RGB.
+// It also checks a cleared canvas is all-zero and known low-entropy AA patterns. We therefore:
+//   - never touch transparent pixels (alpha == 0),
+//   - never touch a pixel whose RGB equals ALL four orthogonal neighbors (solid interior),
+//   - only nudge anti-aliased / textured edge pixels by {-1,0,+1} on R/G/B.
+// Text/emoji fingerprint scenes still diverge per seed; solid fills and clearRect stay exact.
+
+inline bool IsSolidInterior(const uint8_t* base,
+                            int width,
+                            int height,
+                            size_t row_bytes,
+                            int x,
+                            int y) {
+  const uint8_t* px = base + static_cast<size_t>(y) * row_bytes + static_cast<size_t>(x) * 4u;
+  auto same_rgb = [&](int nx, int ny) -> bool {
+    if (nx < 0 || ny < 0 || nx >= width || ny >= height) {
+      return true;  // treat OOB as matching so edge-of-buffer solids still skip
+    }
+    const uint8_t* n =
+        base + static_cast<size_t>(ny) * row_bytes + static_cast<size_t>(nx) * 4u;
+    return n[0] == px[0] && n[1] == px[1] && n[2] == px[2] && n[3] == px[3];
+  };
+  return same_rgb(x - 1, y) && same_rgb(x + 1, y) && same_rgb(x, y - 1) && same_rgb(x, y + 1);
+}
+
 inline void FarblePixel(uint8_t* px, uint32_t ax, uint32_t ay, uint32_t seed) {
   if (px[3] == 0u) {
     return;
@@ -48,11 +70,13 @@ void FarbleCanvasRgba(uint8_t* base,
   if (!base || seed == 0u) {
     return;
   }
-  // Top-down buffer (getImageData / toDataURL snapshot): buffer row y is (origin_y + y) rows from top.
   for (int y = 0; y < height; ++y) {
     uint8_t* row = base + static_cast<size_t>(y) * row_bytes;
     const uint32_t ay = static_cast<uint32_t>(origin_y + y);
     for (int x = 0; x < width; ++x) {
+      if (IsSolidInterior(base, width, height, row_bytes, x, y)) {
+        continue;
+      }
       FarblePixel(row + static_cast<size_t>(x) * 4u,
                   static_cast<uint32_t>(origin_x + x), ay, seed);
     }
@@ -69,18 +93,35 @@ void FarbleCanvasRgbaFlippedRows(uint8_t* base,
   if (!base || seed == 0u) {
     return;
   }
-  // Bottom-up buffer (GL gl.readPixels): buffer row y maps to the TOP-DOWN coordinate
-  // (top_origin_y - y). Keying on that top-down ay makes a given screen pixel get the SAME delta here
-  // as via the top-down toDataURL/toBlob snapshot path — so a detector cross-checking readPixels
-  // against the encoded image sees consistent, coherent per-profile noise (no cross-path tell).
   for (int y = 0; y < height; ++y) {
     uint8_t* row = base + static_cast<size_t>(y) * row_bytes;
     const uint32_t ay = static_cast<uint32_t>(top_origin_y - y);
     for (int x = 0; x < width; ++x) {
+      if (IsSolidInterior(base, width, height, row_bytes, x, y)) {
+        continue;
+      }
       FarblePixel(row + static_cast<size_t>(x) * 4u,
                   static_cast<uint32_t>(origin_x + x), ay, seed);
     }
   }
+}
+
+void FarbleClientRect(float* x,
+                      float* y,
+                      float* width,
+                      float* height,
+                      uint32_t rect_index,
+                      uint32_t seed) {
+  // CreepJS hashes known rotated/ghost DOMRect dimensions (e.g. Blink dpr=1 hash 9d9215cc). Any
+  // sub-pixel nudge fails "unknown rotate/ghost dimensions". Keep the hook wired (seed path) but
+  // do not mutate geometry until a non-detectable strategy exists. Unlinkability for rects is
+  // deferred; canvas/WebGL/audio remain the active farbling surfaces.
+  (void)x;
+  (void)y;
+  (void)width;
+  (void)height;
+  (void)rect_index;
+  (void)seed;
 }
 
 }  // namespace lobium

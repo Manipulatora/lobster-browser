@@ -76,10 +76,10 @@ suites nightly or on release).
 | | |
 |---|---|
 | **Runners** | `node:test` (`*.integration.test.ts`); NestJS + `supertest` for HTTP; Rust integration harness for the Axum local API (**planned**) |
-| **What** | sidecar JSON-RPC round-trips (`rpc.ts`), `start-profile` → real patchright launch → CDP applied, composite runner selection (Lobium vs Chromium path), backend module ↔ Prisma (against an ephemeral Postgres), local-API SDK ↔ Axum daemon |
-| **CI** | `engine-launch` job (installs patchright Chromium `--with-deps`); backend integration on `web` (Prisma client generated, SQLite/Postgres test DB) |
+| **What** | sidecar JSON-RPC round-trips (`rpc.ts`), `start-profile` → direct native Lobium launch when provisioned, `lobium-fp.json` native-config assertion, backend module ↔ Prisma (against an ephemeral Postgres), local-API SDK ↔ Axum daemon |
+| **CI** | `engine-launch` job prefers provisioned native Lobium; Patchright/Chromium jobs are internal compatibility harnesses only. Backend integration runs on `web` (Prisma client generated, SQLite/Postgres test DB). |
 | **Coverage target** | every sidecar RPC method + every local-API endpoint + every backend controller has ≥ 1 integration test |
-| **Skip contract** | browser-dependent tests **self-skip** when no engine is installed (already the pattern in `patchright.integration.test.ts`) — never silently pass |
+| **Skip contract** | browser-dependent tests **self-skip** when no engine is installed — never silently pass. Product-release gates must not count Patchright skips/passes as native Lobium proof. |
 
 ### L3 — e2e / journey
 
@@ -168,12 +168,12 @@ Extend the existing file (today it has `sannysoft`, `creepjs`, `webrtc`, `cohere
 - A detector with **no OSS build** (Pixelscan, Iphey) is live-only and runs nightly, never blocking a PR
   (avoids flaky external-dependency failures on the merge path).
 
-### Per-engine expectation
+### Engine expectation
 
-The matrix runs per engine. **Lobium** targets full green (native deep surfaces). The **interim
-Chromium** is allowed the documented deep-surface allowances (e.g. WebGL vendor/renderer read the host
-GPU until Lobium ships — the reason `sannysoft.maxFailed = 2`). Thresholds are keyed per engine once
-Lobium lands (`thresholds.lobium.*` / `thresholds.chromium.*`).
+The production matrix runs against **native Lobium** and targets full green on real consumer GPU hardware.
+Patchright/Chromium harnesses may run for regression comparison, but their allowances do not define the
+release bar. Any remaining detector allowance must be documented against Lobium in `thresholds.json` and
+`PROJECT-STATUS.md`.
 
 ---
 
@@ -272,7 +272,6 @@ ships (UA major, UA-CH version list, GREASE, feature detection, new APIs). We mo
 |---|---|---|---|---|
 | **Chrome-stable version** | Chromium release API / `chromiumdash` | daily cron | new stable major published | **planned** |
 | **UA / UA-CH template staleness** | diff our default UA template vs latest stable | daily | our default major < stable major − 1 (we lag > 1 release) | **planned** |
-| **Interim Chromium pin** | `engines/` download pin vs stable | daily | pinned build major < stable − 2 | **planned** |
 | **Lobium rebase lag** | Lobium build base vs stable | weekly | base major < stable − 2 | **planned** |
 | **Real-device dataset freshness** | fingerprint-suite dataset version | weekly | dataset > 90 days old | **planned** |
 | **Detector heuristic drift** | nightly live-detector deltas (§2/§3) | nightly | score/verdict regresses vs 7-day baseline | **planned** |
@@ -280,8 +279,8 @@ ships (UA major, UA-CH version list, GREASE, feature detection, new APIs). We mo
 ### Mechanism
 
 - A scheduled workflow (`.github/workflows/drift.yml`, **planned**) queries the Chromium release feed,
-  compares against `packages/fingerprint` UA templates + the `engines/` pin + the Lobium base, and opens a
-  GitHub issue (`kind: drift`) with the delta and a suggested bump.
+  compares against `packages/fingerprint` UA templates + the Lobium base, and opens a GitHub issue
+  (`kind: drift`) with the delta and a suggested bump.
 - **Version-cadence alert:** because Chrome ships ~monthly, the target is to **never lag stable by more
   than one major**. The alert escalates: lag 1 = info, lag 2 = warn (issue), lag 3 = block (drift becomes a
   release gate — see §9).
@@ -390,7 +389,7 @@ Every layer maps to a concrete job. **Blocking** = merge/release cannot proceed 
 | Unit + integration (TS/backend) | L1/L2 | `web` → `test --workspaces` | PR/push | yes | **done** |
 | Rust build/test/fmt/clippy | L1 | `rust` | PR/push | yes | **done** |
 | Secret scan | L6 | `secret-scan` (gitleaks) | PR/push | yes | **done** |
-| Engine launch (live Chromium) | L2 | `engine-launch` | PR/push | yes | **done** |
+| Engine launch (native Lobium when provisioned) | L2 | `engine-launch` | PR/push | yes | **partial** |
 | **Anti-detect gate (Sannysoft)** | L4 | `fingerprint-gate` (`run.mjs` under Xvfb) | PR/push | **yes** | **done** |
 | Coherence validator wired into gate | L4 | `fingerprint-gate` (invoke `validateFingerprintCoherence`) | PR/push | yes | **planned** |
 | Dep audit (`npm`/`cargo audit`) | L6 | `deps-audit` | PR/push | yes | **planned** |
@@ -410,16 +409,16 @@ version lag ≤ 1 major. This is the machine-checkable form of MASTER_PLAN §13 
 
 ## Status vs target
 
-**Built and honest today:** a fast unit/integration base on `node:test` + `cargo test`, live engine-launch
-integration via patchright, backend auth/teams/profiles specs, a working **coherence validator** (7 rules),
-and a **blocking live anti-detect gate** against bot.sannysoft.com with objective thresholds — the L1/L2
-base and one L4 rail are real and green.
+**Built and honest today:** a fast unit/integration base on `node:test` + `cargo test`, direct native
+Lobium launch tests when a binary is provisioned, a retained Patchright compatibility harness, backend
+auth/teams/profiles specs, a working **coherence validator**, and detector scripts including
+`lobium-detect.mjs`. The L1/L2 base is real; the release-grade L4 rail still needs real-GPU Lobium CI.
 
 **The delta to this spec (all planned):** the rest of the detector matrix (CreepJS/Pixelscan/Iphey/
 BrowserLeaks/FingerprintJS — thresholds are declared but unwired), the live anti-bot panel, wiring the
 coherence validator and WebRTC-leak check into the gate, desktop e2e journeys, the load/perf suite with
 its SLO numbers, the security SAST/DAST stage, chaos/soak, fingerprint-drift monitoring, golden-fixture
 reproducibility (including logging the harness seed), and the nightly/daily CI jobs that host them. The
-Sannysoft `maxFailed: 2` allowance is the honest marker of the interim Chromium's deep-surface gap that
-**Lobium** closes natively — at which point per-engine thresholds tighten the whole matrix to full green.
-The pyramid's base is load-bearing; the apex is scaffolding to build.
+Sannysoft historical allowances came from the interim-harness era. The release target is native Lobium
+full green on real GPU, with any temporary allowance explicitly justified and tracked. The pyramid's base
+is load-bearing; the apex is scaffolding to build.

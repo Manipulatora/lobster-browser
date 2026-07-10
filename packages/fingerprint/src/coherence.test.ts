@@ -12,7 +12,7 @@ import { deriveFingerprint } from './derive.js';
 
 /** A coherent, freshly derived Windows fingerprint to mutate in the rule tests below. */
 function coherentBase(): Fingerprint {
-  const fp = deriveFingerprint('coherence-rule-base', { os: 'windows', engine: 'chromium' });
+  const fp = deriveFingerprint('coherence-rule-base', { os: 'windows', engine: 'lobium' });
   assert.deepEqual(validateFingerprintCoherence(fp), [], 'base fixture must start coherent');
   return structuredClone(fp);
 }
@@ -26,7 +26,7 @@ function assertFlags(fp: Fingerprint, re: RegExp): void {
 }
 
 test('applyGeoToFingerprint aligns timezone/locale/languages with the proxy geo', () => {
-  const fp = deriveFingerprint('seed-de', { os: 'windows', engine: 'chromium' });
+  const fp = deriveFingerprint('seed-de', { os: 'windows', engine: 'lobium' });
   const geo: GeoInfo = {
     ip: '1.2.3.4',
     countryCode: 'DE',
@@ -71,7 +71,7 @@ test('unknown country AND unknown timezone (Etc/UTC) keeps a coherent seed-defau
 });
 
 test('a mapped foreign country (SE) gets its primary locale coherent with the timezone', () => {
-  const fp = deriveFingerprint('seed-se', { os: 'windows', engine: 'chromium' });
+  const fp = deriveFingerprint('seed-se', { os: 'windows', engine: 'lobium' });
   const geo: GeoInfo = { ip: '5.5.5.5', countryCode: 'SE', timezone: 'Europe/Stockholm' };
   const out = applyGeoToFingerprint(fp, geo);
 
@@ -183,7 +183,7 @@ test('flags an implausible hardwareConcurrency, OS-aware (96 cores ok on Windows
   assertFlags(zero, /hardwareConcurrency/);
 
   const mac = structuredClone(
-    deriveFingerprint('mac-hw-base', { os: 'macos', engine: 'chromium' }),
+    deriveFingerprint('mac-hw-base', { os: 'macos', engine: 'lobium' }),
   );
   assert.deepEqual(validateFingerprintCoherence(mac), [], 'mac base must be coherent');
   mac.navigator.hardwareConcurrency = 96; // > 56, impossible on macOS
@@ -215,14 +215,14 @@ test('flags an unrealistic colorDepth and devicePixelRatio, but allows fractiona
 
 /** A coherent, freshly derived macOS fingerprint to mutate in the WebGL rule tests. */
 function coherentMacBase(): Fingerprint {
-  const fp = deriveFingerprint('coherence-mac-base', { os: 'macos', engine: 'chromium' });
+  const fp = deriveFingerprint('coherence-mac-base', { os: 'macos', engine: 'lobium' });
   assert.deepEqual(validateFingerprintCoherence(fp), [], 'mac base fixture must start coherent');
   return structuredClone(fp);
 }
 
 /** A coherent, freshly derived Linux fingerprint to mutate in the WebGL rule tests. */
 function coherentLinuxBase(): Fingerprint {
-  const fp = deriveFingerprint('coherence-linux-base', { os: 'linux', engine: 'chromium' });
+  const fp = deriveFingerprint('coherence-linux-base', { os: 'linux', engine: 'lobium' });
   assert.deepEqual(validateFingerprintCoherence(fp), [], 'linux base fixture must start coherent');
   return structuredClone(fp);
 }

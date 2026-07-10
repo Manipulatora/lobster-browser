@@ -38,8 +38,9 @@ Current code reality:
   Trash restore/permanent-delete, Playwright UI smoke coverage, and preserved launch/stop/fingerprint/
   edit/clone/password/delete flows.
 - `NewProfileForm` is now a modal wizard with `General`, `Fingerprint`, `Cookies`, `Security`, and
-  `Extensions` categories. Supported JS-safe overrides and policy fields are persisted and sent through
-  the sidecar launch contract.
+  `Extensions` categories. Native-Lobium-supported fields and launch policy fields are persisted and sent
+  through the sidecar launch contract; legacy CDP support is internal/test-only and must not be presented
+  as production engine depth.
 - `Proxies` and `Templates` now have local Tauri/SQLite stores. The proxy page can add/list/check stored
   proxies through Rust IPC, templates can be created/listed locally, and templates can seed profile
   creation. Pricing remains UI-only until backend billing is wired.
@@ -88,11 +89,11 @@ Required elements:
 
 - Profile list/table of created profiles.
 - `Create Profile` primary button.
-- Search and filters: OS, proxy, tags, status, engine.
+- Search and filters: OS, proxy, tags, status, Lobium build/status.
 - Row/card actions: one primary launch/stop button plus a three-dot menu containing edit profile,
   clone, set/remove password, and move to trash.
 - Status indicators: idle, launching, running, stopping, error.
-- Engine badge: Lobium or Chromium.
+- Engine badge: Lobium build/status only. Chromium must not appear as a production engine choice.
 - Proxy/coherence indicator: no proxy, proxy OK, proxy warning, proxy mismatch.
 
 Recommended layout:
@@ -113,27 +114,17 @@ The current inline `NewProfileForm` should become a modal or drawer wizard. Requ
    - Optional template selector once Templates exists.
 
 2. **Fingerprint**
-   - User Agent.
-   - Operating system.
-   - OS version.
-   - Screen resolution.
-   - Fonts.
-   - Languages.
-   - Timezone.
-   - Geolocation.
-   - WebRTC policy.
-   - CPU cores.
-   - RAM size.
-   - Renderer/GPU label, for example Intel UHD / NVIDIA / AMD strings.
-   - Hardware Noise checkboxes:
-     - WebGL.
-     - Canvas.
-     - Audio.
-     - Client Rects.
-   - Media Devices:
-     - camera count.
-     - microphone count.
-     - speaker count.
+   - User Agent (**read-only**, derived from Operating system + Lobium Chrome version).
+   - Operating system: Windows | macOS Intel | macOS Arm | Linux | Android.
+   - OS version (Win 10/11; macOS 13/14/15/26; Android 13→latest; Linux distro labels).
+   - Screen resolution (Windows / macOS incl. Retina; **not** shown for Android).
+   - Android Device Type + Device Model (verified Play CSV; desktop launch fail-closed).
+   - Fonts: mode `real | manual | based_ip` + verified OS catalog (Win 300+, Mac 1000+; Linux deferred).
+   - Language / Timezone / Geolocation / WebRTC: each `real | manual | based_ip`.
+   - CPU cores / RAM size.
+   - WebGL renderer: verified catalog presets (Win 300+ with PCI IDs; Mac 200+; Linux deferred).
+   - Hardware Noise checkboxes: WebGL, Canvas, Audio, Client Rects.
+   - Media Devices: camera / microphone / speaker counts.
 
 3. **Cookies**
    - File picker for `.txt` and `.json`.
@@ -185,7 +176,7 @@ Required elements:
 - `Add Template` button.
 - Template editor with:
   - name and description.
-  - default engine.
+  - Lobium build/status policy.
   - default OS/OS version policy.
   - fingerprint policy.
   - proxy policy.
@@ -429,24 +420,22 @@ Acceptance:
 - Extensions accepts Chrome Web Store links.
 - Security shows WebRTC/password controls and unsupported-feature warnings.
 
-Implementation status: **partial**. The category structure exists; supported JS-safe fields and policy
-fields save; cookie file/drop/paste parsing persists draft metadata; extension references persist; stored
-proxy and template selectors feed profile creation. Browser cookie injection and extension installation
-remain engine/runtime tasks.
+Implementation status: **partial**. The category structure exists; native-Lobium policy fields save;
+cookie file/drop/paste parsing persists draft metadata; extension references persist; stored proxy and
+template selectors feed profile creation. Browser cookie injection and extension installation remain
+engine/runtime tasks on the direct Lobium path.
 
 ### UX-4 Full Fingerprint UI
 
 Acceptance:
 
-- User can select/edit all requested fields.
-- Unsupported fields are visibly disabled or marked planned.
-- OS version selection exists for Windows/macOS/Linux; Android version selection belongs to the future
-  Android runner.
-- Renderer selection follows host-calibrated policy.
+- User can select/edit all requested fields from the product matrix (read-only UA; OS-specific screens/fonts/WebGL; Android device type/model; persona modes; hardware noise/media).
+- Unsupported fields are visibly disabled or marked planned (Linux font/WebGL deferred; Client Rects / mediaDevices native consume partial).
+- OS version selection exists for Windows / macOS Intel / macOS Arm / Linux / Android.
+- WebGL renderer presets come from verified catalogs with PCI/product IDs (see [`fingerprint-catalog-provenance.md`](fingerprint-catalog-provenance.md)).
+- Engine choice is Lobium-only (no uncustomized Chromium).
 
-Implementation status: **partial**. Create/edit flows expose the requested desktop fingerprint and
-policy controls, and Android is visible as a non-launchable planned target. The sidecar/Lobium config
-contract now carries the policy fields; native consumption and host calibration still need completion.
+Implementation status: **mostly done (UI + catalog + launch config)**. Create-profile Fingerprint tab matches the matrix; edit path locks engine to Lobium; `lobium-fp.json` carries UA/screen/fonts/WebGL/noise-gated seeds/media policy. Remaining: native clientRects/mediaDevices hooks, Linux catalogs, host-calibration default path, HC-4 deep-GPU extensions.
 
 ### PROX-UI-1 Proxy Pages
 

@@ -14,8 +14,8 @@ import {
 import type {
   CreateProfileInput,
   EngineKind,
-  OsFamily,
   Profile,
+  ProfileOsTarget,
   ProfileTemplate,
   ProfileStatus,
   StoredProxy,
@@ -38,7 +38,7 @@ import { t } from '../../i18n';
 import { Button, EmptyState, Skeleton, useToast } from '../../ui';
 import { EditProfileForm } from './EditProfileForm';
 import { NewProfileForm } from './NewProfileForm';
-import { ENGINE_OPTIONS, OS_OPTIONS, STATUS_META } from './options';
+import { ENGINE_OPTIONS, isAndroidTarget, OS_OPTIONS, STATUS_META } from './options';
 import { ProfileList, type ProfileSortKey, type SortDir } from './ProfileList';
 import { TrashModal } from './TrashModal';
 import { useProfiles } from './useProfiles';
@@ -92,7 +92,7 @@ export function ProfilesView({
   const [query, setQuery] = useState('');
   const [showFilters, setShowFilters] = useState(false);
   const [engineFilter, setEngineFilter] = useState<'all' | EngineKind>('all');
-  const [osFilter, setOsFilter] = useState<'all' | OsFamily>('all');
+  const [osFilter, setOsFilter] = useState<'all' | ProfileOsTarget>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | ProfileStatus>('all');
   const [proxyFilter, setProxyFilter] = useState<'all' | 'with' | 'without'>('all');
   const [tagFilter, setTagFilter] = useState('');
@@ -211,16 +211,40 @@ export function ProfilesView({
     await refreshTrash();
   }
 
-  async function handleCreate(input: CreateProfileInput): Promise<void> {
-    await create(input);
+  async function handleCreate(
+    input: CreateProfileInput,
+    options?: { password?: string },
+  ): Promise<void> {
+    const profile = await create(input);
+    if (options?.password) {
+      await setPassword(profile.id, options.password);
+    }
+    // Refresh proxy list in case create-form added a custom proxy.
+    try {
+      setAvailableProxies(await proxiesClient.list_proxies());
+    } catch {
+      /* non-fatal */
+    }
     setShowForm(false);
     markOnboarded();
     setShowOnboarding(false);
     toast.success(`Created profile “${input.name}”.`);
   }
 
+  async function handleCreateProxyFromProfile(
+    input: Parameters<typeof proxiesClient.create_proxy>[0],
+  ): Promise<StoredProxy> {
+    const created = await proxiesClient.create_proxy(input);
+    setAvailableProxies(await proxiesClient.list_proxies());
+    return created;
+  }
+
   async function handleLaunch(id: string): Promise<void> {
     const target = profiles.find((profile) => profile.id === id);
+    if (target && isAndroidTarget(target.os)) {
+      toast.error('Android profiles require the Android Lobium APK runner.');
+      return;
+    }
     let password: string | undefined;
     if (target?.passwordProtected) {
       const value = window.prompt('Enter this profile password to launch.');
@@ -231,13 +255,24 @@ export function ProfilesView({
     try {
       const info = await launch(id, password);
       setLaunchInfo((prev) => new Map(prev).set(id, info));
-      setLaunchPanel({ profileName: target?.name ?? 'Profile', info });
-      toast.success(`Launched. Connect over CDP at ${info.debuggerAddress}.`);
+      // Do not auto-open the CDP/automation modal — Octo-style: go straight to the browser.
+      // Connection details remain available via the profile ⋮ menu while running.
+      toast.success(`Launched ${target?.name ?? 'profile'}.`);
     } catch (e: unknown) {
       toast.error(`Launch failed: ${errMessage(e)}`);
     } finally {
       setBusy(id, false);
     }
+  }
+
+  function handleShowConnection(id: string): void {
+    const info = launchInfo.get(id);
+    const target = profiles.find((profile) => profile.id === id);
+    if (!info) {
+      toast.error('Profile is not running.');
+      return;
+    }
+    setLaunchPanel({ profileName: target?.name ?? 'Profile', info });
   }
 
   async function handleStop(id: string): Promise<void> {
@@ -365,8 +400,12 @@ export function ProfilesView({
   async function handleBulkLaunch(): Promise<void> {
     const ids = [...selectedIds].filter((id) => {
       const p = profiles.find((x) => x.id === id);
-      return p && !isLive(p.status);
+      return p && !isLive(p.status) && !isAndroidTarget(p.os);
     });
+    if (ids.length === 0) {
+      toast.error('No selected desktop Lobium profiles can be launched.');
+      return;
+    }
     for (const id of ids) {
       await handleLaunch(id);
     }
@@ -571,7 +610,7 @@ export function ProfilesView({
             <select
               className="input"
               value={osFilter}
-              onChange={(e) => setOsFilter(e.target.value as 'all' | OsFamily)}
+              onChange={(e) => setOsFilter(e.target.value as 'all' | ProfileOsTarget)}
             >
               <option value="all">All OS</option>
               {OS_OPTIONS.map((option) => (
@@ -725,6 +764,7 @@ export function ProfilesView({
           onMoveToTrash={handleMoveToTrash}
           onEditProfile={setEditingProfile}
           onSetPassword={handleSetPassword}
+          onShowConnection={handleShowConnection}
         />
       )}
 
@@ -740,6 +780,7 @@ export function ProfilesView({
             proxies={availableProxies}
             templates={availableTemplates}
             onCreate={handleCreate}
+            onCreateProxy={handleCreateProxyFromProfile}
             onCancel={() => setShowForm(false)}
           />
         </div>

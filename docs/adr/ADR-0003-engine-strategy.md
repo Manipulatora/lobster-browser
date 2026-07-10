@@ -1,38 +1,56 @@
-# ADR-0003 — Two-engine strategy (Lobium + Chromium)
+# ADR-0003 — Lobium-only production engine
 
-- **Status:** Accepted
-- **Date:** 2026-07-02
-- **Deciders:** Owner + Claude
+- **Status:** Accepted, supersedes the earlier two-engine/interim-Chromium strategy
+- **Date:** 2026-07-09
+- **Deciders:** Owner + Claude + Codex
 
 ## Context
 
-The owner wants a **dedicated Chromium-based engine** (the Octo model) as the product's engine — our
-own patched build (**Lobium**) with native fingerprinting and 50+ configurable parameters. A production
-build is a multi-week build+patch effort, so we need an interim engine that makes the product complete
-and usable while Lobium matures.
+The target product must be comparable to Octo Browser at the engine layer. That means the browser
+identity cannot depend on Patchright, Playwright, JS init scripts, or an uncustomized Chromium binary as
+the production stealth mechanism. Those tools are useful for testing and automation, but they are not a
+browser kernel.
+
+The earlier plan accepted an interim patched Chromium path so the product could move while Lobium was
+being built. That trade-off is now rejected by product direction: **Lobium is the only product engine**.
 
 ## Decision
 
-Support **two engines behind one sidecar interface**:
+Production profiles launch **only native Lobium**, our own Chromium fork, through the direct native
+launcher in `packages/engine-runner/src/runners/lobium-launcher.ts`.
 
-- **Lobium (flagship):** our own Chromium fork (via `depot_tools` + GN/ninja, an ungoogled-style quilt
-  patch series). Native control of all deep surfaces (canvas/WebGL/audio/fonts/WebRTC) + BoringSSL
-  **TLS/JA3/JA4 + HTTP/2** matching, plus a per-profile config channel exposing 50+ params. Built on a
-  parallel track (MASTER_PLAN §10 Track F); becomes the **default engine** as its patches land. Until
-  the custom build ships, Lobium is served by a patched Chromium via patchright.
-- **Chromium (interim, everyday):** a prebuilt (ungoogled) Chromium driven via patchright for broad
-  Chrome-family coverage. JS-safe surfaces are applied through clean isolated-context CDP init scripts
-  (never deep surfaces from JS); deep surfaces (canvas/WebGL/audio/TLS) are **best-effort** until Lobium
-  ships and handles them natively.
+The sidecar may expose CDP endpoints for user automation and debugging, but it must not use CDP or JS
+injection as the production fingerprint-spoofing layer. The sidecar writes `lobium-fp.json`, passes
+`--lobium-fp-config=<path>`, launches the Lobium binary directly, and returns the browser's
+`DevToolsActivePort` endpoint.
 
-The interim Chromium is pinned & vendored (downloaded on first run). Fingerprints are **real-system**
-(real-device datasets), Chrome-family, seeded, coherent, and stable per profile — the same 50+ param
-model consumed by the editor UI, the sidecar, and the Lobium config channel.
+Patchright is allowed only for:
+
+- internal validation harnesses,
+- compatibility/regression tests,
+- experimental comparison against a Chrome-family binary.
+
+Patchright is not allowed for:
+
+- default launchers,
+- production profile launches,
+- fallback when Lobium is missing,
+- deep fingerprint behavior,
+- claiming Octo-class engine parity.
+
+If Lobium is not provisioned, launch fails with an actionable "engine not provisioned" error. It must not
+fall back to uncustomized Chromium.
 
 ## Consequences
 
-- ➕ A complete, usable product immediately (interim Chromium) + a growing native moat (Lobium).
-- ➕ Engine-agnostic control plane — Lobium replaces the interim Chromium transparently.
-- ➖ Two engines to integrate; mitigated by the single sidecar contract and shared fingerprint model.
-- ➖ Until Lobium's native patches (incl. TLS/JA4) land, the deep surfaces on interim Chromium are
-  best-effort rather than tell-free.
+- The architecture now matches the intended Octo-class model: a proprietary/custom Chromium kernel owns
+  fingerprint behavior natively.
+- The product can be less convenient in dev/CI because a Lobium binary is required for real launches.
+  That inconvenience is intentional; it prevents false confidence from a weaker runtime.
+- Authenticated proxy support must be implemented through a native/local proxy-auth adapter. The direct
+  launcher currently fails closed when proxy credentials are present, instead of silently delegating to
+  Patchright.
+- Cookie import/export and other operational CDP features must be kept conceptually separate from
+  fingerprint spoofing. CDP can be used for control/automation, not for identity.
+- Docs and tests must treat Patchright references as internal/harness-only unless explicitly marked
+  historical.

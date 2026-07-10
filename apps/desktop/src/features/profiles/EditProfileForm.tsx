@@ -1,10 +1,10 @@
 import { XMarkIcon } from '@heroicons/react/24/outline';
 import { useState } from 'react';
 
-import type { EngineKind, OsFamily, Profile } from '@lobster/shared-types';
+import type { EngineKind, Profile, ProfileOsTarget } from '@lobster/shared-types';
 
 import type { ProfilePatch } from '../../api/tauri';
-import octiumMainIcon from '../../assets/brand/octium-main-icon.png';
+import lobsterIcon from '../../assets/brand/lobster-icon.png';
 import { ENGINE_OPTIONS, OS_OPTIONS, OS_VERSION_OPTIONS } from './options';
 
 interface EditProfileFormProps {
@@ -19,7 +19,7 @@ interface EditProfileState {
   name: string;
   description: string;
   engine: EngineKind;
-  os: OsFamily;
+  os: ProfileOsTarget;
   osVersion: string;
   folder: string;
   tags: string;
@@ -62,7 +62,7 @@ export function EditProfileForm({
     setForm((prev) => ({ ...prev, [key]: value }));
   }
 
-  function setOs(os: OsFamily): void {
+  function setOs(os: ProfileOsTarget): void {
     setForm((prev) => ({ ...prev, os, osVersion: OS_VERSION_OPTIONS[os][0] }));
   }
 
@@ -92,7 +92,7 @@ export function EditProfileForm({
     <form className="modal" onSubmit={handleSubmit} aria-label="Edit profile">
       <header className="modal-header">
         <div className="modal-title-row">
-          <img className="profile-icon-preview" src={octiumMainIcon} alt="" aria-hidden />
+          <img className="profile-icon-preview" src={lobsterIcon} alt="" aria-hidden />
           <div>
             <h2>Edit profile</h2>
             <p className="modal-subtitle">{profile.name}</p>
@@ -153,7 +153,7 @@ export function EditProfileForm({
             <select
               className="input"
               value={form.os}
-              onChange={(e) => setOs(e.target.value as OsFamily)}
+              onChange={(e) => setOs(e.target.value as ProfileOsTarget)}
             >
               {OS_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>

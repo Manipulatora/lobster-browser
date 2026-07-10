@@ -1,6 +1,6 @@
 # ADR-0004 — Lobium (our own Chromium-based engine)
 
-- **Status:** Accepted
+- **Status:** Accepted, updated 2026-07-09 for Lobium-only production runtime
 - **Date:** 2026-07-02
 - **Deciders:** Owner + Claude
 
@@ -12,7 +12,7 @@ the engine in C++. The owner wants this as a core product capability, not a defe
 
 ## Decision
 
-Build **Lobium** — our own Chromium-based browser build — as a first-class, parallel track.
+Build **Lobium** — our own Chromium-based browser build — as the only production browser runtime.
 
 - **Base & pipeline:** fork Chromium via `depot_tools`; manage changes as an **ungoogled-style quilt
   patch series** under `/lobium/patches`. GN/ninja builds with `ccache`/reclient on a dedicated build
@@ -25,16 +25,25 @@ Build **Lobium** — our own Chromium-based browser build — as a first-class, 
   params **natively** — no JS tell.
 - **Real-system fingerprints:** Lobium's values come from real-device datasets, kept coherent and stable
   per profile.
+- **Direct launcher:** production starts the native Lobium binary directly and exposes CDP only for
+  automation/control. Patchright is an internal test harness, not the product engine.
 - **Android:** an Android Lobium APK/device-runner variant follows once the desktop build is solid.
 
-## v1 (10-day) scope for Lobium
-Build environment up, first successful Chromium build, quilt series initialized, first native patch
-(navigator/UA-CH), and one fingerprint param wired end-to-end through the config channel (POC). Full
-native coverage + TLS/JA4 + multi-OS signed builds continue beyond v1 until Lobium becomes the default.
+## Current scope boundary
+
+The original v1 POC scope is complete enough that Lobium is no longer a parallel aspiration. The current
+engineering target is production hardening:
+
+- direct native launch as the default and only product path,
+- no uncustomized Chromium fallback,
+- all fingerprint fields consumed through `lobium-fp.json`,
+- host-calibrated real-GPU proof,
+- multi-OS signed Lobium builds,
+- Android Lobium as a separate APK/device-runner track.
 
 ## Consequences
 
 - ➕ A genuine, tell-free native engine — the durable competitive moat.
-- ➕ Engine-agnostic architecture means it ships incrementally behind the same sidecar interface.
+- ➕ The sidecar contract stays stable while the implementation becomes Lobium-native.
 - ➖ Significant build infrastructure + a permanent upstream-rebase cost; must be resourced and must not
-  derail the v1 product (which runs on the interim prebuilt Chromium meanwhile).
+  be replaced by a weaker Patchright/Chromium runtime.

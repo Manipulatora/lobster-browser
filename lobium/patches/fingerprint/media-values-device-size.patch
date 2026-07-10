@@ -1,0 +1,44 @@
+Lobium — MediaValues device-width/height for matchMedia ↔ screen coherence.
+
+CreepJS Screen lie "failed matchMedia" fires when
+  matchMedia(`(device-width: ${screen.width}px) and (device-height: ${screen.height}px)`)
+is false. Screen::GetRect already reports the persona size; MediaValues::CalculateDeviceWidth/Height
+still read the host display. Hook both to cfg->screen.width/height (and DPR for the physical-pixels
+quirk) so CSS device-* media queries agree with screen.*.
+
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+@@ -165,6 +165,17 @@
+ 
+ int MediaValues::CalculateDeviceWidth(LocalFrame* frame) {
+   DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
++  // Lobium: keep matchMedia('(device-width: Npx)') coherent with screen.width (Screen::GetRect).
++  // CreepJS flags Screen as a lie when device-width media queries disagree with screen.width.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->screen.width > 0) {
++    int device_width = cfg->screen.width;
++    if (frame->GetSettings()->GetReportScreenSizeInPhysicalPixelsQuirk()) {
++      const double dpr = cfg->screen.device_pixel_ratio > 0 ? cfg->screen.device_pixel_ratio : 1.0;
++      device_width = static_cast<int>(lroundf(static_cast<float>(device_width * dpr)));
++    }
++    return device_width;
++  }
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   int device_width = screen_info.rect.width();
+@@ -177,6 +188,16 @@
+ 
+ int MediaValues::CalculateDeviceHeight(LocalFrame* frame) {
+   DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
++  // Lobium: keep matchMedia('(device-height: Npx)') coherent with screen.height.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->screen.height > 0) {
++    int device_height = cfg->screen.height;
++    if (frame->GetSettings()->GetReportScreenSizeInPhysicalPixelsQuirk()) {
++      const double dpr = cfg->screen.device_pixel_ratio > 0 ? cfg->screen.device_pixel_ratio : 1.0;
++      device_height = static_cast<int>(lroundf(static_cast<float>(device_height * dpr)));
++    }
++    return device_height;
++  }
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   int device_height = screen_info.rect.height();

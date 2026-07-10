@@ -13,7 +13,7 @@ import { ENGINE_CHROME, chromeVersionForms, DEVICE_TEMPLATES } from './pools.js'
 
 export interface DeriveOptions {
   os: OsFamily;
-  /** The engine (lobium | chromium). Both are Chromium-based, so it does not change the fingerprint. */
+  /** Product engine. Kept in the API so all callers explicitly bind derivation to Lobium. */
   engine: EngineKind;
   arch?: CpuArch;
   /**
@@ -74,7 +74,11 @@ export function deriveFromPools(
   // seed-diverse — it is pinned to the running engine (all profiles share one binary), so the UA never
   // contradicts a feature-probe or the fullVersionList high-entropy read. The UA string carries the
   // reduced form (major.0.0.0); uaFullVersion carries the real build, exactly as Chrome 152 reports.
-  const device = rng.pick(tpl.devices);
+  const macCandidates =
+    os === 'macos'
+      ? tpl.devices.filter((device) => deviceArchFromRenderer(device.webgl.renderer) === arch)
+      : tpl.devices;
+  const device = rng.pick(macCandidates.length > 0 ? macCandidates : tpl.devices);
   const ver = chromeVersionForms(browserVersion ?? ENGINE_CHROME.full);
 
   // Architecture is a PROPERTY OF THE PICKED DEVICE, not a free parameter: an Apple-Silicon Mac (Metal
@@ -83,7 +87,7 @@ export function deriveFromPools(
   // "Apple M2 Pro" persona reporting arch=x86 is a glaring cross-check tell (FP-3). The `arch` arg is
   // retained for API compatibility but the device is authoritative (there is no ARM-Windows device).
   void arch;
-  const deviceArch: CpuArch = /Apple M\d/.test(device.webgl.renderer) ? 'arm64' : 'x86_64';
+  const deviceArch = deviceArchFromRenderer(device.webgl.renderer);
 
   const primaryLocale = 'en-US';
   const languages = [primaryLocale, 'en'];
@@ -137,4 +141,8 @@ export function deriveFromPools(
     },
     fonts: [...tpl.fonts],
   };
+}
+
+function deviceArchFromRenderer(renderer: string): CpuArch {
+  return /Apple M\d/.test(renderer) ? 'arm64' : 'x86_64';
 }

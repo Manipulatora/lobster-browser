@@ -29,6 +29,7 @@
     "@lobster/fingerprint": "*",
     "@lobster/proxy": "*",
     "@lobster/shared-types": "*",
-    "patchright": "^1.61.1"
+    "patchright": "^1.61.1",
+    "proxy-chain": "^3.0.0"
   }
 }

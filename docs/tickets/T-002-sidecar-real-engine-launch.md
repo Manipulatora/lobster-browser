@@ -1,16 +1,24 @@
-# T-002 — Sidecar: real engine launch (patchright)
+# T-002 — Sidecar: real engine launch (historical Patchright harness)
+
+> **Superseded production architecture:** ADR-0003 now makes Lobium the only production engine.
+> This ticket records the original Patchright launch harness and is retained for history/internal tests.
+> Current production work is RUN-3/direct native Lobium launch: direct-spawn Lobium, write
+> `lobium-fp.json`, expose CDP for control only, and never use Patchright as the product stealth layer.
 
 - **Pillar/Track:** B · Engine & Fingerprint
 - **Assignee:** Claude
-- **Status:** ready
+- **Status:** done · historical harness; superseded for production by RUN-3 / ADR-0003
 - **Depends on:** Day 0 sidecar skeleton (done), T-003 (fingerprint-suite) can land in parallel
 
 ## Goal
 
-Replace `NotImplementedRunner` with a real `EngineRunner` that launches Chromium via patchright — both
-the `chromium` interim engine and `lobium` (served by a patched Chromium via patchright until the
-native build ships) — applies the JS-safe fingerprint surfaces cleanly, and returns working CDP
-endpoints — fulfilling the [sidecar IPC contract](../contracts/sidecar-ipc.md).
+Historical goal: replace `NotImplementedRunner` with a real launch harness that launched Chromium via
+Patchright and returned working CDP endpoints. This was useful to prove orchestration and validation
+plumbing. It is no longer the product launch architecture.
+
+Current production goal: fulfill the [sidecar IPC contract](../contracts/sidecar-ipc.md) through direct
+native Lobium only. Fingerprint surfaces are consumed via Lobium native config, while CDP endpoints are
+returned for automation/control.
 
 ## Spec
 
@@ -34,7 +42,8 @@ endpoints — fulfilling the [sidecar IPC contract](../contracts/sidecar-ipc.md)
 ## Acceptance criteria
 
 - `launch` a `chromium` profile → `chromium.connectOverCDP(ws)` succeeds and the page loads.
-- `launch` a `lobium` profile → connects the same way (interim patched Chromium via patchright).
+- Historical harness: `launch` a `lobium`-labelled profile connected the same way. Production now uses
+  direct native Lobium only.
 - Cookies persist across relaunch (same `userDataDir`).
 - No `navigator.webdriver`; patchright isolated contexts confirmed (no `Runtime.enable` tell).
 

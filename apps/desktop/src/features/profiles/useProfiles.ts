@@ -10,7 +10,7 @@ export interface UseProfiles {
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
-  create: (input: CreateProfileInput) => Promise<void>;
+  create: (input: CreateProfileInput) => Promise<Profile>;
   clone: (id: string) => Promise<void>;
   update: (id: string, patch: ProfilePatch) => Promise<Profile>;
   moveToTrash: (id: string) => Promise<void>;
@@ -51,8 +51,9 @@ export function useProfiles(): UseProfiles {
 
   const create = useCallback(
     async (input: CreateProfileInput) => {
-      await profilesClient.create_profile(input);
+      const profile = await profilesClient.create_profile(input);
       await refresh();
+      return profile;
     },
     [refresh],
   );

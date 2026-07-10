@@ -1,4 +1,4 @@
-import type { EngineKind, OsFamily } from './engine.js';
+import type { EngineKind, ProfileOsTarget } from './engine.js';
 import type { FingerprintOverrides, FingerprintSeed } from './fingerprint.js';
 import type { ProxyConfig } from './proxy.js';
 
@@ -14,7 +14,7 @@ export interface Profile {
   id: string;
   name: string;
   engine: EngineKind;
-  os: OsFamily;
+  os: ProfileOsTarget;
   /** OS build/version label, e.g. Windows 11 23H2 or macOS 14. */
   osVersion?: string;
   /** Deterministic seed → stable coherent fingerprint. */
@@ -43,7 +43,7 @@ export interface Profile {
 export interface CreateProfileInput {
   name: string;
   engine: EngineKind;
-  os: OsFamily;
+  os: ProfileOsTarget;
   osVersion?: string;
   fingerprintSeed?: FingerprintSeed;
   fingerprintOverrides?: FingerprintOverrides;
@@ -61,7 +61,7 @@ export interface ProfileTemplate {
   id: string;
   name: string;
   engine: EngineKind;
-  os: OsFamily;
+  os: ProfileOsTarget;
   osVersion?: string;
   presetParameters: string[];
   proxyId?: string;
@@ -78,7 +78,7 @@ export interface ProfileTemplate {
 export interface CreateProfileTemplateInput {
   name: string;
   engine: EngineKind;
-  os: OsFamily;
+  os: ProfileOsTarget;
   osVersion?: string;
   presetParameters?: string[];
   proxyId?: string;
@@ -119,7 +119,7 @@ export interface BrowserExtensionRef {
 export interface ProfileExport {
   name: string;
   engine: EngineKind;
-  os: OsFamily;
+  os: ProfileOsTarget;
   osVersion?: string;
   fingerprintSeed: FingerprintSeed;
   fingerprintOverrides?: FingerprintOverrides;

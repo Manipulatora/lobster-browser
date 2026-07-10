@@ -5,7 +5,8 @@
 > "where are we now." Much of "gap #1: Lobium not built" is now **done**: Lobium is built from source with
 > major native surfaces and a native detector script, still pending real-GPU/host-calibrated proof. This doc is kept for the reasoning trail and its
 > mapping of gaps -> detailed specs, which remain useful. The body below is not authoritative for current
-> maturity; several historical rows still describe the pre-Lobium state.
+> maturity; several historical rows still describe the pre-Lobium state. ADR-0003 also supersedes this
+> snapshot's two-engine/interim Chromium strategy: production is Lobium-only.
 >
 > An honest mid-sprint review (~end of Day 4). It reminisces the path built so far, confirms what is
 > genuinely solid, and admits the gaps between "green demo" and a **perfect Octo-class product**. It
@@ -28,7 +29,7 @@ Everything below is **verified green** (typecheck + tests + the live detector ga
 | Backend (NestJS) | bcrypt+JWT auth + guard + `/auth/me`; **teams + memberships + roles**; **profiles** (repo factory, team-scoped, plan limit, unique seeds); **cloud sync** (client-encrypted blob push/pull + versioning + conflict); Prisma schema + `0001_init` migration + docker-compose | 27 tests |
 | Proxy | `deriveGeoFromExitIp` (through the proxy, undici), `parseGeoResponse`, `testProxy` | 14 tests |
 | Cookies | `@lobster/cookies` — Netscape + Playwright/CDP JSON parse/serialize | 8 tests |
-| Engine strategy | **two engines**: `lobium` (our custom Chromium build — flagship) + `chromium` (interim); Camoufox dropped | ADR-0003/0004 |
+| Engine strategy | Historical row superseded: current production strategy is **Lobium-only**; Camoufox/interim Chromium dropped | ADR-0003/0004 |
 
 **Totals: ~75 automated tests green + a live detector gate.** The architecture (engine-agnostic control plane, TS derive → CDP apply, Rust ↔ sidecar) is sound and the validation gate already earned its keep (it caught a real `hardwareConcurrency` isolation-world bug that the CDP fix closed).
 
@@ -40,7 +41,7 @@ Everything below is **verified green** (typecheck + tests + the live detector ga
 - **Coherence-first fingerprinting** — real-device data + a validator + a seeded, stable, deterministic model.
 - **The validation gate is real** — headful, live detector, asserts the fingerprint *actually applied* (not just "a browser launched").
 - **End-to-end automation path** — `POST /profile/start` → store → sidecar → real Chromium → CDP `ws`/`debuggerAddress`, all verified.
-- **Honest interim posture** — we never spoof deep surfaces from JS; the harness reports the WebGL gap rather than hiding it.
+- **Honest harness posture** — we never ship deep-surface spoofing from JS; harnesses report gaps rather than hiding them.
 
 ---
 
@@ -85,7 +86,7 @@ The master plan was strong on *strategy* but thin on *executable depth*. The fol
 ## 5. Path to a perfect product (phased)
 
 - **Finish the sprint's product surface (Days 5–10):** billing/metering, granular RBAC + audit, localStorage/extension sync, SOCKS proxy + rotation, packaging + signing + auto-update, SDKs, the full detector matrix, and observability basics.
-- **Phase 2 — the moat (Lobium):** stand up the build, land the native patch series (canvas/WebGL/audio, then **TLS/JA4 + HTTP2**), wire the config channel to all 50+ params, make Lobium the default engine, multi-OS signed builds + rebase automation.
+- **Phase 2 — the moat (Lobium):** stand up the build, land the native patch series (canvas/WebGL/audio, then **TLS/JA4 + HTTP2**), wire the config channel to all 50+ params, keep Lobium as the only production engine, multi-OS signed builds + rebase automation.
 - **Phase 3 — scale & depth:** cloud-run profiles, Android Lobium/device runner, proxy marketplace, MCP + official SDKs, granular org/RBAC, enterprise SSO, human-like input, higher-scale billing.
 
 Each phase's features and their acceptance criteria are enumerated in [`specs/feature-catalog.md`](specs/feature-catalog.md); the non-functional targets are in [`specs/qa-testing.md`](specs/qa-testing.md).
