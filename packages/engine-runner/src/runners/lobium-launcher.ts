@@ -21,7 +21,7 @@ import {
   startLocalProxyAdapter,
   type LocalProxyAdapter,
 } from '../proxy-auth-adapter.js';
-import { watchAndBrandNewTabs } from './branding-start-page.js';
+// NTP branding is native (patched engine resources); no CDP start-page injection.
 import type { Launcher, LaunchContext, LaunchHandle } from './types.js';
 
 /**
@@ -218,14 +218,18 @@ export async function buildNativeLobiumProcessArgs(
     '--remote-debugging-port=0',
     '--no-first-run',
     '--no-default-browser-check',
+    // Profile name for the NATIVE toolbar chip (rendered left of the omnibox by the Lobium engine
+    // patch). Replaces the old in-page profile chip drawn by the injected NTP.
+    ...(ctx.profileName ? [`--lobium-profile-name=${ctx.profileName}`] : []),
     ...ctx.options.args,
     ...(opts.extraArgs ?? []),
     ...nativeProxyArgs(resolvedProxy),
     ...((opts.headless ?? ctx.options.headless) ? ['--headless=new'] : []),
     ...dynamicArgs,
-    // about:blank keeps the omnibox clean; watchAndBrandNewTabs injects the Lobster NTP via CDP
-    // setDocumentContent (never navigate to a data: URL).
-    'about:blank',
+    // Open Chromium's REAL New Tab Page (not an injected data:/about:blank mock). The NTP is branded
+    // natively: master brand image on the search box + profile_branding.png below it, real shortcuts,
+    // "New Tab" title — see lobium/patches/branding/*.
+    'chrome://newtab/',
   ];
 }
 
@@ -507,10 +511,7 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
         // Cookie import must run after CDP is up; Patchright's connectOverCDP closes its own
         // connection on browser.close() without SIGTERM'ing our detached chrome (verified by E2E).
         await applyCookiesToNativeLobium(ws, ctx.cookiesImport);
-        // Brand every tab/window with the Chrome-like Lobster NTP (omnibox stays about:blank).
-        const stopBranding = watchAndBrandNewTabs(ws, {
-          ...(ctx.profileName ? { profileName: ctx.profileName } : {}),
-        });
+        // NTP branding is now NATIVE (chrome://newtab, patched engine resources) — no CDP injection.
         const closeListeners = new Set<() => void>();
         const shutdownAdapter = async () => {
           if (adapter) {
@@ -519,7 +520,6 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
           }
         };
         child.once('exit', () => {
-          stopBranding();
           void shutdownAdapter();
           for (const listener of closeListeners) listener();
         });
@@ -528,7 +528,6 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
           ws,
           debuggerAddress: `127.0.0.1:${port}`,
           close: async () => {
-            stopBranding();
             await closeProcess(child);
             await shutdownAdapter();
           },

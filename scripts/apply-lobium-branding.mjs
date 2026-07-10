@@ -21,6 +21,10 @@ const MAIN_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-icon.png'
 const PURPLE_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-icon-purple.png');
 const WORDMARK = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-wordmark.png');
 const WORDMARK_HZ = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-wordmark-horizontal.png');
+// NTP brand images: master (on the search box) + profile_branding sub-brand (under the search box).
+// Both already background-transparent (see scripts/make-brand-transparent.mjs).
+const NTP_MASTER = resolve(ROOT, 'apps/desktop/src/assets/brand/lobium-ntp-master-transparent.png');
+const NTP_PROFILE_BRANDING = resolve(ROOT, 'apps/desktop/src/assets/brand/profile_branding.png');
 const MONO_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-icon-mono-dark.png');
 const LEGACY_MONO_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/octium-browser-icon-mono.png');
 const PUBLIC_MONO_ICON = resolve(ROOT, 'apps/desktop/public/octium-browser-icon-mono.png');
@@ -220,22 +224,22 @@ async function patchNativeBrandingFiles() {
     ].join('\n'),
   );
 
-  // NTP: image wordmark (global for every new-tab), not plain HTML text.
+  // NTP brand images: master (on the search box) + profile_branding (under the search box).
   const ntpIconsDir = resolve(CHROMIUM_SRC, 'chrome/browser/resources/new_tab_page/icons');
-  if (existsSync(WORDMARK)) {
-    await copyFile(WORDMARK, resolve(ntpIconsDir, 'lobster_wordmark.png'));
+  if (existsSync(NTP_MASTER)) {
+    await copyFile(NTP_MASTER, resolve(ntpIconsDir, 'lobium_master.png'));
   }
-  if (existsSync(WORDMARK_HZ)) {
-    await copyFile(WORDMARK_HZ, resolve(ntpIconsDir, 'lobster_wordmark_horizontal.png'));
+  if (existsSync(NTP_PROFILE_BRANDING)) {
+    await copyFile(NTP_PROFILE_BRANDING, resolve(ntpIconsDir, 'profile_branding.png'));
   }
 
   const iconsBuildGn = resolve(ntpIconsDir, 'BUILD.gn');
   if (existsSync(iconsBuildGn)) {
     let gn = await readFile(iconsBuildGn, 'utf8');
-    if (!gn.includes('lobster_wordmark.png')) {
+    if (!gn.includes('lobium_master.png')) {
       gn = gn.replace(
         'input_files = [',
-        'input_files = [\n    "lobster_wordmark.png",\n    "lobster_wordmark_horizontal.png",',
+        'input_files = [\n    "lobium_master.png",\n    "profile_branding.png",',
       );
       await writeFile(iconsBuildGn, gn, 'utf8');
     }
@@ -245,7 +249,7 @@ async function patchNativeBrandingFiles() {
   const logoHtml = [
     '${this.showLogo_ ? html`',
     '  <div id="logo" aria-label="Lobium">',
-    '    <img id="logoImage" src="icons/lobster_wordmark.png" alt="Lobster" draggable="false">',
+    '    <img id="logoImage" src="icons/lobium_master.png" alt="Lobium" draggable="false">',
     '  </div>',
     "` : ''}",
     '${this.showDoodle_ ? html`',
@@ -293,9 +297,10 @@ async function patchNativeBrandingFiles() {
 
 #logoImage {
   display: block;
-  width: min(420px, 72vw);
+  width: auto;
   height: auto;
-  max-height: 168px;
+  max-width: min(300px, 64vw);
+  max-height: var(--ntp-logo-height, 168px);
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
@@ -309,27 +314,40 @@ async function patchNativeBrandingFiles() {
     ],
   ]);
 
-  await replaceInFile(resolve(CHROMIUM_SRC, 'chrome/browser/resources/new_tab_page/app.ts'), [
-    [
-      /protected accessor oneGoogleBarEnabled_: boolean =\n\s+loadTimeData\.getBoolean\('oneGoogleBarEnabled'\);/,
-      'protected accessor oneGoogleBarEnabled_: boolean = false;',
-    ],
-    [
-      /protected accessor shortcutsEnabled_: boolean =\n\s+loadTimeData\.getBoolean\('shortcutsEnabled'\);/,
-      'protected accessor shortcutsEnabled_: boolean = false;',
-    ],
-  ]);
+  // Sub-brand image (profile_branding.png) directly under the search box on the NTP. Idempotent:
+  // only inserts when the marker id is not already present.
+  const appHtmlPath = resolve(CHROMIUM_SRC, 'chrome/browser/resources/new_tab_page/app.html');
+  if (existsSync(appHtmlPath)) {
+    let appHtml = await readFile(appHtmlPath, 'utf8');
+    if (!appHtml.includes('id="lobiumSubBrand"')) {
+      // Insert right after the #searchboxContainer closes (the `</div>` before the action-chips block).
+      appHtml = appHtml.replace(
+        /(\n {2}<\/div>\n)( {2}\$\{this\.lazyRender_ && this\.ntpNextFeaturesEnabled_)/,
+        `$1  <!-- Lobium: sub-brand image directly under the search box (profile_branding.png). -->\n  <div id="lobiumSubBrand" ?hidden="\${!this.logoEnabled_}">\n    <img src="icons/profile_branding.png" alt="" draggable="false">\n  </div>\n$2`,
+      );
+      await writeFile(appHtmlPath, appHtml, 'utf8');
+    }
+  }
+  const appCssPath = resolve(CHROMIUM_SRC, 'chrome/browser/resources/new_tab_page/app.css');
+  if (existsSync(appCssPath)) {
+    let appCss = await readFile(appCssPath, 'utf8');
+    if (!appCss.includes('#lobiumSubBrand')) {
+      appCss +=
+        '\n/* Lobium: sub-brand image (profile_branding.png) directly under the search box. */\n' +
+        '#lobiumSubBrand {\n  display: flex;\n  justify-content: center;\n  align-items: center;\n' +
+        '  margin: 4px auto 16px;\n  width: var(--ntp-search-box-width, min(337px, 80vw));\n}\n' +
+        '#lobiumSubBrand[hidden] {\n  display: none;\n}\n' +
+        '#lobiumSubBrand img {\n  display: block;\n  width: auto;\n  height: auto;\n' +
+        '  max-width: min(240px, 60vw);\n  max-height: 96px;\n  object-fit: contain;\n' +
+        '  user-select: none;\n  -webkit-user-drag: none;\n}\n';
+      await writeFile(appCssPath, appCss, 'utf8');
+    }
+  }
 
-  await replaceInFile(resolve(CHROMIUM_SRC, 'chrome/app/generated_resources.grd'), [
-    [/Search Google or type a URL/g, 'Search or type a URL'],
-    [/Search Google/g, 'Search the web'],
-    [
-      /<message name="IDS_EXTENSION_WEB_STORE_TITLE_SHORT" desc="Shortened version of text for the Chrome Web Store">\n\s+Web Store\n\s+<\/message>/,
-      `<message name="IDS_EXTENSION_WEB_STORE_TITLE_SHORT" desc="Shortened version of text for the Chrome Web Store">
-        Extensions
-      </message>`,
-    ],
-  ]);
+  // NOTE: We deliberately do NOT disable shortcuts / one-google-bar or rewrite the omnibox / Web Store
+  // strings. The product intent is a stock-Chrome NTP with only the brand images swapped — real
+  // "Add shortcut" tiles, real search text ("Search Google or type a URL"), real Web Store. Those
+  // transforms were removed; app.ts / generated_resources.grd stay pristine.
 
   const stringFiles = [
     'chrome/app/chromium_strings.grd',
