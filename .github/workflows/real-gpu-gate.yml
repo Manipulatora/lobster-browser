@@ -70,6 +70,13 @@ jobs:
           fi
           echo "Lobium binary: $LOBSTER_LOBIUM_BIN"
 
+      # Fast GPU-independent plumbing check: proves the HC-4 deep-WebGL hook is compiled + live in the
+      # binary (sentinel values round-trip). Cheap early failure if a rebuild dropped the hook.
+      - name: HC-4 deep-WebGL hook probe
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+        run: node ci/validation/hc4-probe.mjs
+
       - name: Native Lobium detector (real GPU)
         env:
           LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}

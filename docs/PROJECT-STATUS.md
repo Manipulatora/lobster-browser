@@ -6,9 +6,12 @@
 > [`PRODUCTION-ROADMAP.md`](PRODUCTION-ROADMAP.md); dependency ordering lives in
 > [`DEPENDENCIES.md`](DEPENDENCIES.md).
 >
-> **Last audited:** 2026-07-09 after HC-4 / clientRects / mediaDevices / Linux catalogs / Android ADB
-> launch wiring. Production launch uses direct native Lobium only. Patchright remains an internal
-> validation harness. Still deferred: HC-4 binary rebuild proof on the build VPS, authenticated proxy
+> **Last audited:** 2026-07-10 — HC-4 confirmed compiled + functional in the binary
+> (`ci/validation/hc4-probe.mjs` 5/5; `autoninja -n` clean) and a real-GPU zero-lies gate added
+> (`ci/validation/gate.mjs` + `.github/workflows/real-gpu-gate.yml`). Prior audit 2026-07-09 after
+> clientRects / mediaDevices / Linux catalogs / Android ADB launch wiring. Production launch uses direct
+> native Lobium only. Patchright remains an internal validation harness. Still deferred: real-GPU
+> zero-lies proof through the new gate on consumer hardware, authenticated proxy
 > support in the direct/native path, cookie pre-injection without Patchright, signing certs, Windows
 > Lobium/Node runtime bundle, Stripe live webhooks.
 > **Maturity legend:** **PROVEN** = exercised by a local run/test or live script; **CONDITIONAL** =
@@ -58,13 +61,21 @@ What is real now:
 
 What is still not real:
 
-- **Real-GPU proof now exists on native Lobium (RTX 5090), with one confirmed open tell.** The engine
-  launches on the physical GPU (no SwiftShader) and 18/18 desktop personas across Windows/macOS/Linux
-  apply their configured/native string surfaces coherently (`battle-test.mjs`). The confirmed remaining tell is
-  the **deep-GPU host leak (HC-4)**: `getSupportedExtensions()`/`getShaderPrecisionFormat()`/`gl.VERSION`
-  betray the real host GPU because the native Blink hook that consumes the (now-serialized, now-parsed)
-  config fields is not yet compiled into the binary. The RTX 5090 is also data-center-class; a mid-range
-  consumer GPU + Windows/macOS baselines are still needed before an "Octo-class" claim is defensible.
+- **HC-4 deep-WebGL hook is now COMPILED and FUNCTIONAL in the binary (proven).** Previously listed as
+  the one confirmed open tell. Build-state audit (obj + `libblink_modules.so` rebuilt after the patch;
+  `autoninja -n chrome` reports nothing to do) plus an empirical sentinel probe
+  (`ci/validation/hc4-probe.mjs`, 5/5 PASS) confirm the binary routes `cfg->webgl.{version,
+  shadingLanguageVersion,extensions,shaderPrecision}` to JS: `gl.VERSION`, `SHADING_LANGUAGE_VERSION`,
+  `getSupportedExtensions()`, the `getExtension()` allow-list guard, and `getShaderPrecisionFormat()`
+  all return the configured values. The earlier "not yet compiled" claim was **stale** — a rebuild
+  after the patch (2026-07-10) already included it; it simply had not been re-validated.
+- **What HC-4 does NOT yet prove: real-GPU coherence.** The plumbing is live, but no run has yet shown a
+  persona's claimed GPU class agreeing with *real* pixel/capability reality on consumer hardware — every
+  CreepJS "zero lies" datapoint to date is still SwiftShader (`gpuMode: "software"`). That is now the job
+  of the **real-GPU stealth gate** (`.github/workflows/real-gpu-gate.yml` + `ci/validation/gate.mjs`,
+  see `docs/specs/real-gpu-ci.md`), which fails unless a run is real-hardware AND every situation is
+  zero-lies. The RTX 5090 datapoint is also data-center-class; a mid-range consumer GPU + Windows/macOS
+  baselines through that gate are still needed before an "Octo-class" claim is defensible.
 - **No persisted host calibration service yet.** `deriveFingerprint` still uses `pools.ts` when no host
   snapshot is supplied; there is no persisted first-run desktop host profile, no real-GPU host baseline,
   and no UI flow that makes host calibration the default.
@@ -100,7 +111,7 @@ What is still not real:
 | Screen/DPR/colorDepth/availTop | PROVEN ON SWIFTSHADER | Native screen hooks exist. |
 | Fonts via private fontconfig | CONDITIONAL | Launcher sets `FONTCONFIG_FILE` only when `LOBSTER_FONTS_DIR` exists; repo has dev symlink packs, not final licensed production bundles. |
 | Real-GPU detector score | ABSENT | Must be measured without SwiftShader on consumer hardware. |
-| Host-calibrated GPU extensions/precision/version | SCAFFOLDED | Shared types, host-derived fingerprint helper, and Lobium config serialization can carry extension lists, shader precision, and GL version strings. Actual host probe + native consumption remain open. |
+| Host-calibrated GPU extensions/precision/version (HC-4) | PROVEN IN BINARY (plumbing) | Native Blink hook is compiled + functional: `ci/validation/hc4-probe.mjs` confirms `gl.VERSION`/`SHADING_LANGUAGE_VERSION`/`getSupportedExtensions()`/`getExtension()` guard/`getShaderPrecisionFormat()` all return config values (5/5). Remaining: real host probe as default source + real-GPU coherence via the real-GPU gate. |
 | Multi-OS builds/signing/notarization | ABSENT | Linux/dev path only. |
 
 ### 2.2 Runner, Desktop, Backend, QA
@@ -157,12 +168,12 @@ multi-OS consumer-hardware coverage, and not a packaged clean-VM product proof.
 | ID | P | Status | Task |
 |---|---|---|---|
 | RG-0 | P0 | partial | Real GPU box provisioned (NVIDIA RTX 5090, driver 580, Linux). Confirmed Chromium-family builds reach the physical GPU headlessly via `--use-gl=angle --use-angle=vulkan` + NVIDIA Vulkan ICD; default ANGLE path can degrade to llvmpipe. Consumer GPU and cross-OS baselines remain. |
-| RG-1 | P0 | partial | GPU flag policy centralized in `@lobster/engine-runner` `buildGpuArgs` (env `LOBSTER_GPU`/`LOBSTER_ANGLE_BACKEND`); `lobium-detect.mjs` no longer force-SwiftShader in GPU mode; `ci/validation/gpu-baseline.mjs` archives a real-GPU report and fails on software fallback. Blocking native-Lobium real-GPU CI remains open. |
-| RG-2 | P0 | partial | Real-GPU triage done via `ci/validation/battle-test.mjs` on native Lobium (RTX 5090): 18/18 desktop personas pass applied-surface + coherence; the confirmed delta is the deep-GPU host leak (see HC-4). Mid-range consumer-GPU + Windows/macOS baselines remain. |
+| RG-1 | P0 | mostly done | GPU flag policy centralized in `@lobster/engine-runner` `buildGpuArgs` (env `LOBSTER_GPU`/`LOBSTER_ANGLE_BACKEND`); `lobium-detect.mjs` no longer force-SwiftShader in GPU mode; `ci/validation/gpu-baseline.mjs` archives a real-GPU report and fails on software fallback. **Blocking real-GPU CI now authored**: `ci/validation/gate.mjs` (strict: rejects software renderer + any nonzero lies) + `.github/workflows/real-gpu-gate.yml` (self-hosted `gpu` runner) + `docs/specs/real-gpu-ci.md`. Verified it FAILS the current SwiftShader report. Open only: provisioning the self-hosted runner + flipping the `pull_request` trigger. |
+| RG-2 | P0 | partial | Real-GPU triage done via `ci/validation/battle-test.mjs` on native Lobium (RTX 5090): 18/18 desktop personas pass applied-surface + coherence. The former HC-4 delta is now closed in the binary (see HC-4). Remaining: run the real-GPU zero-lies gate (RG-1) on the RTX 5090 + a mid-range consumer GPU + Windows/macOS baselines, and record a `GATE PASS`. |
 | HC-1 | P0 | partial | Host GPU probe runs live on the real GPU via `ci/validation/host-calibration-e2e.mjs` (probe + OS fontconfig -> validated host snapshot). Windows/macOS device baselines remain open. |
 | HC-2 | P0 | partial | Browser-side screen/navigator/timezone/font probe scaffold exists; cross-OS first-run live probe still open. |
 | HC-3 | P0 | mostly done | `deriveFingerprintFromHost` proven E2E; `host-calibration-store` + `ensureHostCalibration` (load/probe/persist) + sidecar RPC `ensureHostCalibration`; desktop sets default `LOBSTER_HOST_CALIBRATION_FILE` under app data. Live GPU probe injection into `ensureHostCalibration` from first-run UI still open (CI e2e / injectable probe cover the path). |
-| HC-4 | P0 | mostly done | Config reader + sidecar serialize deep WebGL fields; Blink hook authored as `fingerprint/host-gpu-profile.patch` (VERSION / SHADING_LANGUAGE_VERSION / extensions / shaderPrecision). **Rebuild Lobium on the build VPS** to prove in binary; battle-test gate still open until then. |
+| HC-4 | P0 | **done (plumbing)** | Config reader + sidecar serialize deep WebGL fields; Blink hook `fingerprint/host-gpu-profile.patch` (VERSION / SHADING_LANGUAGE_VERSION / extensions / shaderPrecision) is **compiled + functional in the binary** — `ci/validation/hc4-probe.mjs` returns 5/5 sentinel matches (incl. the `getExtension()` allow-list guard). Only real-GPU coherence (does the claimed GPU class match real reality) remains, tracked under RG-1/RG-2. |
 | AND-0..9 | P1 | partial | Android ADB launch path wired: `startAndroidProfile` + desktop Launch enabled (fail-closed without a ready device). APK build, real-device detector proof, and APK-side config reader remain open. See `docs/specs/android.md`. |
 | HC-5 | P1 | open | Renderer masking/normalization policy per OS/GPU. |
 | HC-6 | P1 | open | Screen/window metric coherence. |
