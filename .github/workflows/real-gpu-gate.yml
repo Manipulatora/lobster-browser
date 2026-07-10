@@ -105,6 +105,19 @@ jobs:
           LOBSTER_GATE_REQUIRE_DETECT: '1'
         run: node ci/validation/gate.mjs
 
+      # Non-blocking: record a real anti-bot datapoint on real hardware each run. A detector "fail" is a
+      # product signal to triage, not a red build — so this never fails the gate.
+      - name: Anti-bot exam (record datapoint)
+        continue-on-error: true
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_GPU: gpu
+          LOBSTER_ANGLE_BACKEND: ${{ vars.LOBSTER_ANGLE_BACKEND || 'vulkan' }}
+          VK_ICD_FILENAMES: ${{ vars.VK_ICD_FILENAMES }}
+          DISPLAY: ${{ vars.DISPLAY || ':0' }}
+          LOBSTER_EXAM_URLS: ${{ vars.LOBSTER_EXAM_URLS }}
+        run: node ci/validation/antibot-exam.mjs
+
       - name: Upload validation reports
         if: always()
         uses: actions/upload-artifact@v4
