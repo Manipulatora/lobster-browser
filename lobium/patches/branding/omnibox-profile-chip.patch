@@ -1,5 +1,5 @@
 diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
-index 0353e3f0ae..e562868f38 100644
+index 0353e3f0ae..464508ac3e 100644
 --- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
 +++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
 @@ -16,6 +16,7 @@
@@ -64,11 +64,12 @@ index 0353e3f0ae..e562868f38 100644
    // Initialize the Omnibox view. browser_ can be nullptr on ChromeOS in the
    // case of simple_web_view_dialog. Or it can be nulltpr on ChromeOS and on
    // other desktop platforms in the case of presentation_receiver_window_view.
-@@ -923,6 +963,15 @@ void LocationBarView::Layout(PassKey) {
-                 !ShouldShowKeywordBubble()
-           : chip_controller_->chip()->GetVisible() &&
-                 !ShouldShowKeywordBubble();
-+  // Lobium: profile-name chip is the leftmost leading decoration inside the omnibox.
+@@ -958,6 +998,16 @@ void LocationBarView::Layout(PassKey) {
+     location_icon_view_->SetVisible(false);
+   }
+ 
++  // Lobium: profile-name chip sits just AFTER the lock/site-info icon (to its right,
++  // before the URL text) as a leading decoration.
 +  if (lobium_profile_chip_) {
 +    lobium_profile_chip_->SetVisible(true);
 +    leading_decorations.AddDecoration(vertical_padding, location_height,
@@ -77,10 +78,10 @@ index 0353e3f0ae..e562868f38 100644
 +                                      lobium_profile_chip_);
 +  }
 +
-   if (show_overriding_permission_chip) {
-     if (base::FeatureList::IsEnabled(
-             content_settings::features::kLeftHandSideActivityIndicators)) {
-@@ -1509,11 +1558,19 @@ int LocationBarView::GetMinimumLeadingWidth() const {
+   auto add_trailing_decoration = [&](View* view, int intra_item_padding,
+                                      int edge_padding) {
+     if (view->GetVisible()) {
+@@ -1509,11 +1559,19 @@ int LocationBarView::GetMinimumLeadingWidth() const {
      return 0;
    }
  

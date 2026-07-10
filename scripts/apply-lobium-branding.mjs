@@ -24,7 +24,7 @@ const WORDMARK_HZ = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-wordmar
 // NTP brand images: master (on the search box) + profile_branding sub-brand (under the search box).
 // Both already background-transparent (see scripts/make-brand-transparent.mjs).
 const NTP_MASTER = resolve(ROOT, 'apps/desktop/src/assets/brand/lobium-ntp-master-transparent.png');
-const NTP_PROFILE_BRANDING = resolve(ROOT, 'apps/desktop/src/assets/brand/profile_branding.png');
+const NTP_PROFILE_BRANDING = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-fight-banner-03.png');
 const MONO_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-icon-mono-dark.png');
 const LEGACY_MONO_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/octium-browser-icon-mono.png');
 const PUBLIC_MONO_ICON = resolve(ROOT, 'apps/desktop/public/octium-browser-icon-mono.png');
