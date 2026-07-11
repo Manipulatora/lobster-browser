@@ -8,15 +8,15 @@
 
 :root {
   /* --- Brand + semantic palette (light) --------------------------------------------------------- */
-  --brand-50: #fff1f1;
-  --brand-100: #ffe0e0;
-  --brand-200: #ffc4c4;
-  --brand-300: #ff9b9b;
-  --brand-400: #f96565;
-  --brand-500: #e62424; /* primary red */
-  --brand-600: #cf1f1f;
-  --brand-700: #ab1919;
-  --brand-800: #8d1717;
+  --brand-50: #f5f3ff;
+  --brand-100: #ede9fe;
+  --brand-200: #ddd6fe;
+  --brand-300: #c4b5fd;
+  --brand-400: #a78bfa;
+  --brand-500: #7c3aed; /* primary violet */
+  --brand-600: #6d28d9;
+  --brand-700: #5b21b6;
+  --brand-800: #4c1d95;
 
   --green: #16a34a;
   --green-soft: #e9f9ee;
@@ -134,9 +134,9 @@
   --text: #eef2f7;
   --text-muted: #98a3b3;
   --text-soft: #6b7686;
-  --red: #ff5a5a;
-  --red-hover: #ff7373;
-  --red-soft: #2a1416;
+  --red: #a78bfa;
+  --red-hover: #c4b5fd;
+  --red-soft: #241a40;
   --on-brand: #ffffff;
 
   --green-soft: #10241a;

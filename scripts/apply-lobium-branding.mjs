@@ -17,20 +17,20 @@ import { chromium } from 'playwright';
 const ROOT = resolve('.');
 const CHROMIUM_SRC =
   process.env.LOBIUM_CHROMIUM_SRC || process.env.CHROMIUM_SRC || '/home/ivyhfx/lobium-build/src';
-const MAIN_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-icon.png');
-const PURPLE_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-icon-purple.png');
-const WORDMARK = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-wordmark.png');
-const WORDMARK_HZ = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-wordmark-horizontal.png');
+const MAIN_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/icon.png');
+const PURPLE_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/icon.png');
+const WORDMARK = resolve(ROOT, 'apps/desktop/src/assets/brand/site-logo.png');
+const WORDMARK_HZ = resolve(ROOT, 'apps/desktop/src/assets/brand/site-logo.png');
 // NTP brand images: master (on the search box) + profile_branding sub-brand (under the search box).
 // Both already background-transparent (see scripts/make-brand-transparent.mjs).
-const NTP_MASTER = resolve(ROOT, 'apps/desktop/src/assets/brand/lobium-ntp-master-transparent.png');
-const NTP_PROFILE_BRANDING = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-fight-banner-03.png');
+const NTP_MASTER = resolve(ROOT, 'apps/desktop/src/assets/brand/browser-logo.png');
+const NTP_PROFILE_BRANDING = resolve(ROOT, 'apps/desktop/src/assets/brand/ad.png');
 const MONO_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/lobster-icon-mono-dark.png');
 const LEGACY_MONO_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/octium-browser-icon-mono.png');
 const PUBLIC_MONO_ICON = resolve(ROOT, 'apps/desktop/public/octium-browser-icon-mono.png');
 const PUBLIC_FAVICON = resolve(ROOT, 'apps/desktop/public/lobster-icon-purple.png');
 const PUBLIC_ICON = resolve(ROOT, 'apps/desktop/public/lobster-icon.png');
-const RED = '#d71920';
+const RED = '#7c3aed'; // primary violet (brand accent)
 async function ensureDir(path) {
   await mkdir(dirname(path), { recursive: true });
 }

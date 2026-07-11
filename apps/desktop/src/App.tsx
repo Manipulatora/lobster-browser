@@ -16,7 +16,7 @@ import { PricingView } from './features/pricing/PricingView';
 import { ProfilesView } from './features/profiles/ProfilesView';
 import { ProxiesView } from './features/proxies/ProxiesView';
 import { TemplatesView } from './features/templates/TemplatesView';
-import lobsterIcon from './assets/brand/lobster-icon.png';
+import siteLogo from './assets/brand/site-logo.png';
 import { CommandPalette, Kbd, useTheme, type Command } from './ui';
 import type { Profile } from '@lobster/shared-types';
 
@@ -160,7 +160,7 @@ export function App(): JSX.Element {
     <div className="app-shell">
       <header className="topbar">
         <div className="topbar__brand">
-          <img className="topbar__logo" src={lobsterIcon} alt="Lobster Browser" />
+          <img className="topbar__logo" src={siteLogo} alt="Lobium" />
         </div>
         <div className="topbar__spacer" />
         <div className="topbar__actions">
