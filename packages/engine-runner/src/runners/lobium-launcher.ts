@@ -21,6 +21,8 @@ import {
   startLocalProxyAdapter,
   type LocalProxyAdapter,
 } from '../proxy-auth-adapter.js';
+import { resolveGpuMode } from '../gpu.js';
+import { dirname } from 'node:path';
 // NTP branding is native (patched engine resources); no CDP start-page injection.
 import type { Launcher, LaunchContext, LaunchHandle } from './types.js';
 
@@ -139,6 +141,21 @@ export async function buildLobiumLaunchEnv(
     const conf = await writeFontConfig(ctx.options.userDataDir, ctx.fingerprint.os, base);
     if (conf) {
       env.FONTCONFIG_FILE = conf;
+    }
+  }
+  // Software (SwiftShader) rendering: pin the bundled SwiftShader Vulkan ICD so ANGLE's
+  // SwANGLE backend deterministically uses it, instead of the host Vulkan loader possibly
+  // selecting a partial/incompatible ICD (which fails `eglInitialize` with "requested
+  // extension not supported" → WebGL becomes unavailable and WebGL-dependent pages render
+  // blank). Only in software mode, so a real-GPU host is never forced onto SwiftShader.
+  if (resolveGpuMode() === 'software') {
+    const bin = resolveLobiumBinary();
+    if (bin) {
+      const icd = join(dirname(bin), 'vk_swiftshader_icd.json');
+      if (existsSync(icd)) {
+        env.VK_ICD_FILENAMES = icd;
+        env.VK_DRIVER_FILES = icd; // newer Vulkan loaders read this name
+      }
     }
   }
   return env;

@@ -1,5 +1,5 @@
 diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
-index 0353e3f0ae..464508ac3e 100644
+index 0353e3f0ae..c32ed5dae9 100644
 --- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
 +++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
 @@ -16,6 +16,7 @@
@@ -64,45 +64,20 @@ index 0353e3f0ae..464508ac3e 100644
    // Initialize the Omnibox view. browser_ can be nullptr on ChromeOS in the
    // case of simple_web_view_dialog. Or it can be nulltpr on ChromeOS and on
    // other desktop platforms in the case of presentation_receiver_window_view.
-@@ -958,6 +998,16 @@ void LocationBarView::Layout(PassKey) {
-     location_icon_view_->SetVisible(false);
-   }
- 
-+  // Lobium: profile-name chip sits just AFTER the lock/site-info icon (to its right,
-+  // before the URL text) as a leading decoration.
+@@ -994,6 +1034,13 @@ void LocationBarView::Layout(PassKey) {
+   add_trailing_decoration(page_action_container_,
+                           /*intra_item_padding=*/0,
+                           /*edge_padding=*/trailing_decorations_edge_padding);
++  // Lobium: profile-name chip as a trailing decoration, sitting just to the left of
++  // the zoom/bookmark page-action icons on the right side of the omnibox.
 +  if (lobium_profile_chip_) {
 +    lobium_profile_chip_->SetVisible(true);
-+    leading_decorations.AddDecoration(vertical_padding, location_height,
-+                                      /*auto_collapse=*/false, 0,
-+                                      /*intra_item_padding=*/0, icon_left,
-+                                      lobium_profile_chip_);
++    add_trailing_decoration(lobium_profile_chip_, /*intra_item_padding=*/0,
++                            /*edge_padding=*/trailing_decorations_edge_padding);
 +  }
-+
-   auto add_trailing_decoration = [&](View* view, int intra_item_padding,
-                                      int edge_padding) {
-     if (view->GetVisible()) {
-@@ -1509,11 +1559,19 @@ int LocationBarView::GetMinimumLeadingWidth() const {
-     return 0;
-   }
- 
-+  // Lobium: reserve room for the leading profile chip when present.
-+  int lobium_chip_width = 0;
-+  if (lobium_profile_chip_) {
-+    lobium_chip_width = lobium_profile_chip_->GetPreferredSize().width() +
-+                        GetLayoutConstant(LayoutConstant::kLocationBarElementPadding);
-+  }
-+
-   if (location_icon_view_->GetShowText()) {
--    return location_icon_view_->GetMinimumLabelTextWidth();
-+    return lobium_chip_width + location_icon_view_->GetMinimumLabelTextWidth();
-   }
- 
--  return GetLayoutConstant(LayoutConstant::kLocationBarElementPadding) +
-+  return lobium_chip_width +
-+         GetLayoutConstant(LayoutConstant::kLocationBarElementPadding) +
-          location_icon_view_->GetMinimumSize().width();
- }
- 
+   add_trailing_decoration(ai_mode_hint_label_, /*intra_item_padding=*/0,
+                           /*edge_padding=*/trailing_decorations_edge_padding);
+   for (ContentSettingImageView* view : base::Reversed(content_setting_views_)) {
 diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.h b/chrome/browser/ui/views/location_bar/location_bar_view.h
 index 62b5f976ff..d467d84e5e 100644
 --- a/chrome/browser/ui/views/location_bar/location_bar_view.h

@@ -160,6 +160,12 @@ cp -a "$DIST/lobium-runtime/." "$INSTALL_ROOT/lobium/"
   fi
   echo "export DISPLAY=\"${DISPLAY}\""
   echo "export LOBSTER_HOST_CALIBRATION_FILE=\"$INSTALL_ROOT/host-calibration.json\""
+  # Software rendering: pin the bundled SwiftShader Vulkan ICD so SwANGLE initializes
+  # deterministically (host Vulkan ICDs can be partial/incompatible and break WebGL).
+  if [[ "${LOBSTER_GPU}" == "software" && -f "$INSTALL_ROOT/lobium/vk_swiftshader_icd.json" ]]; then
+    echo "export VK_ICD_FILENAMES=\"$INSTALL_ROOT/lobium/vk_swiftshader_icd.json\""
+    echo "export VK_DRIVER_FILES=\"$INSTALL_ROOT/lobium/vk_swiftshader_icd.json\""
+  fi
 } > "$INSTALL_ROOT/env"
 
 cat > "$DIST/run-lobster.sh" <<EOF
