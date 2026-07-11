@@ -216,13 +216,22 @@ input[type='checkbox'] {
 }
 
 .toolbar-total {
-  gap: 9px;
-  min-width: 130px;
-  font-size: 20px;
+  gap: 5px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .toolbar-total strong {
-  font-weight: 500;
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text);
+}
+
+.toolbar-total__sep {
+  color: var(--text-soft);
+  margin: 0 1px;
 }
 
 .toolbar-online {

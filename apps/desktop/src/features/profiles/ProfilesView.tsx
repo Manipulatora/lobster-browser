@@ -525,10 +525,18 @@ export function ProfilesView({
     <section className="page profiles-view">
       <header className="table-toolbar">
         <div className="toolbar-total">
-          <span>Total:</span>
           <strong>{profiles.length}</strong>
-          <span className="green-dot" aria-hidden />
-          <strong className="toolbar-online">{runningCount}</strong>
+          <span>{profiles.length === 1 ? 'profile' : 'profiles'}</span>
+          {runningCount > 0 && (
+            <>
+              <span className="toolbar-total__sep" aria-hidden>
+                ·
+              </span>
+              <span className="green-dot" aria-hidden />
+              <strong className="toolbar-online">{runningCount}</strong>
+              <span>running</span>
+            </>
+          )}
         </div>
         <div className="toolbar-search">
           <label className="search-field">
