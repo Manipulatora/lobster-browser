@@ -11,9 +11,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import type { LaunchInfo } from '../../api/tauri';
-import lobsterIcon from '../../assets/brand/lobster-icon.png';
+import appIcon from '../../assets/brand/icon.png';
 import { EmptyState } from '../../ui';
-import { isAndroidTarget, osLabel } from './options';
+import { isAndroidTarget, osLabel, STATUS_META } from './options';
 
 export type ProfileSortKey = 'name' | 'updatedAt' | 'status' | 'proxy';
 export type SortDir = 'asc' | 'desc';
@@ -38,6 +38,7 @@ interface ProfileListProps {
   onSetPassword: (id: string) => void;
   /** Explicit CDP / automation details (never auto-shown on launch). */
   onShowConnection: (id: string) => void;
+  onExportCookies: (id: string) => void;
 }
 
 /** Whether a status means the engine is (or is becoming) live. */
@@ -57,7 +58,11 @@ function formatDate(value: string): string {
 }
 
 function proxyLabel(profile: Profile): { title: string; detail: string } {
-  if (!profile.proxy) return { title: 'No proxy', detail: 'Set a proxy' };
+  if (!profile.proxy) {
+    return profile.proxyId
+      ? { title: 'Stored proxy', detail: profile.proxyId }
+      : { title: 'No proxy', detail: 'Set a proxy' };
+  }
   return {
     title: profile.proxy.label ?? `${profile.proxy.host}:${profile.proxy.port}`,
     detail: `${profile.proxy.host}:${profile.proxy.port}`,
@@ -160,11 +165,7 @@ function StatusActionButton({
       onClick={() => onLaunch(profile.id)}
       disabled={busy}
       aria-label={`Launch ${profile.name}`}
-      title={
-        androidTarget
-          ? 'Launch via ADB on a connected Android device (Lobium APK)'
-          : 'Launch'
-      }
+      title={androidTarget ? 'Launch (phone-emulated Chrome — no device or APK required)' : 'Launch'}
     >
       <PlayIcon aria-hidden />
     </button>
@@ -189,6 +190,7 @@ export function ProfileList({
   onEditProfile,
   onSetPassword,
   onShowConnection,
+  onExportCookies,
 }: ProfileListProps): JSX.Element {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
@@ -300,7 +302,10 @@ export function ProfileList({
             const proxy = proxyLabel(profile);
             const androidTarget = isAndroidTarget(profile.os);
             return (
-              <tr key={profile.id} className={selectedIds.has(profile.id) ? 'row--selected' : undefined}>
+              <tr
+                key={profile.id}
+                className={selectedIds.has(profile.id) ? 'row--selected' : undefined}
+              >
                 <td className="check-cell">
                   <input
                     type="checkbox"
@@ -311,11 +316,12 @@ export function ProfileList({
                 </td>
                 <td>
                   <div className="profile-title-cell">
-                    <img className="row-mark" src={lobsterIcon} alt="" aria-hidden />
+                    <img className="row-mark" src={appIcon} alt="" aria-hidden />
                     <div className="profile-title-text">
                       <div className="table-title">{profile.name}</div>
                       <div className="table-subtitle">
-                        {osLabel(profile.os)} · {formatDate(profile.updatedAt)}
+                        {osLabel(profile.os)} · {STATUS_META[profile.status].label} ·{' '}
+                        {formatDate(profile.updatedAt)}
                         {profile.passwordProtected ? ' · Password protected' : ''}
                       </div>
                     </div>
@@ -409,6 +415,19 @@ export function ProfileList({
                   }}
                 >
                   Connection details
+                </button>
+              ) : null}
+              {openProfile.status === 'running' ? (
+                <button
+                  type="button"
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenMenuId(null);
+                    onExportCookies(openProfile.id);
+                  }}
+                >
+                  Export live cookies
                 </button>
               ) : null}
               <button

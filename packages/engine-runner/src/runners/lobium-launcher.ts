@@ -13,8 +13,19 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { ProxyConfig } from '@lobster/shared-types';
 import { readDevToolsEndpoint, clearDevToolsActivePort } from '../devtools-endpoint.js';
+import {
+  extensionLaunchArgs,
+  prepareProfileExtensions,
+  type PrepareExtensionsOptions,
+} from '../extensions.js';
 import { writeFontConfig } from '../fonts.js';
 import { buildLobiumConfig, lobiumConfigArg, writeLobiumConfig } from '../lobium-config.js';
+import {
+  assertLobiumBuildCapabilities,
+  LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
+  probeLobiumBuildCapabilities,
+  requiredLobiumCapabilities,
+} from '../lobium-capabilities.js';
 import {
   assertUpstreamReachable,
   needsLocalProxyAdapter,
@@ -47,6 +58,8 @@ export interface NativeLobiumLauncherOptions {
   extraArgsFor?: (ctx: LaunchContext) => Promise<string[]> | string[];
   /** Per-launch env provider. Defaults to per-profile fontconfig when a font pack is provisioned. */
   envFor?: (ctx: LaunchContext) => Promise<Record<string, string> | undefined>;
+  /** Download/cache controls for extension preparation; injectable for deterministic tests. */
+  extensions?: PrepareExtensionsOptions;
 }
 
 function isExecutableFile(path: string): boolean {
@@ -114,16 +127,23 @@ export function resolveLobiumBinary(): string | undefined {
   return undefined;
 }
 
-/** Resolve the bundled font-pack base dir (`LOBSTER_FONTS_DIR`, e.g. repo `lobium/fonts`), else undefined. */
+/** Resolve a provisioned font-pack base dir from explicit or packaged runtime locations. */
 export function resolveFontsBaseDir(): string | undefined {
   const p = process.env.LOBSTER_FONTS_DIR;
-  return p && existsSync(p) ? p : undefined;
+  if (p && existsSync(join(p, 'font-pack.manifest.json'))) return p;
+  const bin = resolveLobiumBinary();
+  const candidates = [
+    ...(bin ? [join(dirname(bin), 'fonts')] : []),
+    join(process.cwd(), 'lobium', 'fonts'),
+    join(process.cwd(), 'resources', 'fonts'),
+  ];
+  return candidates.find((candidate) => existsSync(join(candidate, 'font-pack.manifest.json')));
 }
 
 /**
  * Per-launch env: write the profile's private fontconfig and point FONTCONFIG_FILE at it (ENG-6), so the
- * font fingerprint is OS-plausible + stable per profile. No-op (host fonts) when no font pack is
- * provisioned or the OS has no bundle.
+ * font fingerprint is OS-plausible + stable per profile. This is fail-closed: a profile always carries
+ * a resolved font list, so an absent pack must never degrade to host `/etc/fonts`.
  */
 export async function buildLobiumLaunchEnv(
   ctx: LaunchContext,
@@ -135,14 +155,25 @@ export async function buildLobiumLaunchEnv(
     GOOGLE_API_KEY: 'no',
     GOOGLE_DEFAULT_CLIENT_ID: 'no',
     GOOGLE_DEFAULT_CLIENT_SECRET: 'no',
+    // Chromium's native locale/timezone defaults come from the child process environment on desktop
+    // Linux. Keep those process-wide (including workers and Intl/Date) aligned with the resolved
+    // profile instead of relying on the test-only CDP overrides.
+    TZ: ctx.fingerprint.locale.timezone,
+    LANG: `${ctx.fingerprint.locale.locale.replaceAll('-', '_')}.UTF-8`,
+    LC_ALL: `${ctx.fingerprint.locale.locale.replaceAll('-', '_')}.UTF-8`,
   };
   const base = resolveFontsBaseDir();
-  if (base) {
-    const conf = await writeFontConfig(ctx.options.userDataDir, ctx.fingerprint.os, base);
-    if (conf) {
-      env.FONTCONFIG_FILE = conf;
-    }
+  if (!base) {
+    throw new Error(
+      'required Lobium open-font pack is not provisioned; set LOBSTER_FONTS_DIR to a directory containing font-pack.manifest.json',
+    );
   }
+  env.FONTCONFIG_FILE = await writeFontConfig(
+    ctx.options.userDataDir,
+    ctx.fingerprint.os,
+    base,
+    ctx.fingerprint.fonts,
+  );
   // Software (SwiftShader) rendering: pin the bundled SwiftShader Vulkan ICD so ANGLE's
   // SwANGLE backend deterministically uses it, instead of the host Vulkan loader possibly
   // selecting a partial/incompatible ICD (which fails `eglInitialize` with "requested
@@ -181,9 +212,11 @@ export function proxySummaryFromServer(
 ): Pick<ProxyConfig, 'type' | 'host' | 'port'> | undefined {
   try {
     const u = new URL(server);
-    const type = u.protocol.replace(/:$/, '') as ProxyConfig['type'];
+    const protocol = u.protocol.replace(/:$/, '');
+    if (protocol !== 'http' && protocol !== 'https' && protocol !== 'socks5') return undefined;
+    const type = protocol as ProxyConfig['type'];
     const port = Number(u.port);
-    if (!u.hostname || !Number.isInteger(port) || port <= 0) return undefined;
+    if (!u.hostname || !Number.isInteger(port) || port <= 0 || port > 65_535) return undefined;
     return { type, host: u.hostname, port };
   } catch {
     return undefined;
@@ -219,6 +252,20 @@ export async function buildLobiumLaunchArgs(ctx: LaunchContext): Promise<string[
   return [lobiumConfigArg(path)];
 }
 
+/**
+ * Best-effort `--window-position` centering the phone-sized window would otherwise land wherever
+ * the window manager defaults to (often a top-left cascade). Node has no portable way to query the
+ * real monitor resolution without a native dependency, so this centers against a common 1920x1080
+ * reference — close enough on the common case, and merely off-center (never broken/clipped) on
+ * unusual monitor setups since Chromium clamps an off-screen position back on-screen.
+ */
+function centeredWindowPositionArg(width: number, height: number): string {
+  const REFERENCE_SCREEN = { width: 1920, height: 1080 };
+  const x = Math.max(0, Math.round((REFERENCE_SCREEN.width - width) / 2));
+  const y = Math.max(0, Math.round((REFERENCE_SCREEN.height - height) / 2));
+  return `--window-position=${x},${y}`;
+}
+
 export async function buildNativeLobiumProcessArgs(
   ctx: LaunchContext,
   opts: NativeLobiumLauncherOptions = {},
@@ -228,6 +275,11 @@ export async function buildNativeLobiumProcessArgs(
   const dynamicArgs = opts.extraArgsFor
     ? await opts.extraArgsFor(ctx)
     : await buildLobiumLaunchArgs(ctx);
+  const extensionPaths = await prepareProfileExtensions(
+    ctx.extensions,
+    ctx.options.userDataDir,
+    opts.extensions,
+  );
   const resolvedProxy =
     proxyServer ??
     // Unauthenticated upstream can be passed straight through; authenticated must go via the shim
@@ -248,14 +300,21 @@ export async function buildNativeLobiumProcessArgs(
     // Profile name for the NATIVE toolbar chip (rendered left of the omnibox by the Lobium engine
     // patch). Replaces the old in-page profile chip drawn by the injected NTP.
     ...(ctx.profileName ? [`--lobium-profile-name=${ctx.profileName}`] : []),
+    // Mobile persona: center the phone-sized window (--window-size already comes from
+    // ctx.options.args, sized to the persona's screen). A phone-sized window in the WM's default
+    // top-left placement reads as "a small desktop window", not "a phone" — centering is what makes
+    // it visually read as a device sitting in the middle of the screen.
+    ...(ctx.isMobileProfile
+      ? [centeredWindowPositionArg(ctx.fingerprint.screen.availWidth, ctx.fingerprint.screen.availHeight)]
+      : []),
     ...ctx.options.args,
     ...(opts.extraArgs ?? []),
+    ...extensionLaunchArgs(extensionPaths),
     ...nativeProxyArgs(resolvedProxy),
     ...((opts.headless ?? ctx.options.headless) ? ['--headless=new'] : []),
     ...dynamicArgs,
-    // Open Chromium's REAL New Tab Page (not an injected data:/about:blank mock). The NTP is branded
-    // natively: master brand image on the search box + profile_branding.png below it, real shortcuts,
-    // "New Tab" title — see lobium/patches/branding/*.
+    // Open Lobium's native New Tab Page (not an injected data:/about:blank mock). After a native
+    // rebuild it uses browser-logo.png above search and ad.png below it; see the branding pipeline.
     'chrome://newtab/',
   ];
 }
@@ -326,6 +385,64 @@ export function ensureChromiumProfileName(userDataDir: string, profileName: stri
   }
 }
 
+function readJsonObject(path: string): Record<string, unknown> {
+  try {
+    if (existsSync(path)) {
+      const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    }
+  } catch {
+    /* malformed/missing preference file is rebuilt below */
+  }
+  return {};
+}
+
+/**
+ * Persist the resolved language cluster before Chromium starts. Unlike the detector harness's CDP
+ * override, profile prefs feed navigator.language(s), workers, and the network Accept-Language source.
+ */
+export function ensureChromiumPersonaPreferences(ctx: LaunchContext): void {
+  const defaultDir = join(ctx.options.userDataDir, 'Default');
+  try {
+    mkdirSync(defaultDir, { recursive: true });
+  } catch {
+    return;
+  }
+  const languages = ctx.fingerprint.navigator.languages.join(',');
+  const prefsPath = join(defaultDir, 'Preferences');
+  const prefs = readJsonObject(prefsPath);
+  const intl =
+    prefs.intl && typeof prefs.intl === 'object' && !Array.isArray(prefs.intl)
+      ? { ...(prefs.intl as Record<string, unknown>) }
+      : {};
+  intl.accept_languages = languages;
+  intl.selected_languages = languages;
+  prefs.intl = intl;
+  try {
+    writeFileSync(prefsPath, JSON.stringify(prefs), { mode: 0o600 });
+  } catch {
+    /* launch will still carry --lang + environment fallback */
+  }
+
+  // Application locale is a Local State pref (not a profile pref). `--lang` remains authoritative,
+  // while this keeps restart/profile UI state from resetting it to the host locale.
+  const localStatePath = join(ctx.options.userDataDir, 'Local State');
+  const localState = readJsonObject(localStatePath);
+  const localIntl =
+    localState.intl && typeof localState.intl === 'object' && !Array.isArray(localState.intl)
+      ? { ...(localState.intl as Record<string, unknown>) }
+      : {};
+  localIntl.app_locale = ctx.fingerprint.locale.locale;
+  localState.intl = localIntl;
+  try {
+    writeFileSync(localStatePath, JSON.stringify(localState), { mode: 0o600 });
+  } catch {
+    /* no-op */
+  }
+}
+
 /**
  * Remove Chromium session files that still point at the old `data:text/html;charset=utf-8,...`
  * branding navigation. Those tabs were restored on every launch and kept the omnibox polluted even
@@ -374,19 +491,55 @@ export function scrubLegacyBrandingSessions(userDataDir: string): void {
   }
 }
 
-function closeProcess(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) signalProcessTree(child, 'SIGKILL');
-    }, 5000);
+async function requestGracefulBrowserClose(browserWs: string): Promise<void> {
+  await new Promise<void>((resolveClose) => {
+    const socket = new WebSocket(browserWs);
+    const timer = setTimeout(resolveClose, 1_500);
     timer.unref();
-    child.once('exit', () => {
+    const finish = () => {
       clearTimeout(timer);
-      setTimeout(resolve, 250);
-    });
-    signalProcessTree(child, 'SIGTERM');
+      try {
+        socket.close();
+      } catch {
+        /* browser may already have closed the transport */
+      }
+      resolveClose();
+    };
+    socket.addEventListener(
+      'open',
+      () => socket.send(JSON.stringify({ id: 1, method: 'Browser.close' })),
+      { once: true },
+    );
+    socket.addEventListener('message', finish, { once: true });
+    socket.addEventListener('close', finish, { once: true });
+    socket.addEventListener('error', finish, { once: true });
   });
+}
+
+async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return Promise.race([
+    once(child, 'exit').then(() => true),
+    new Promise<boolean>((resolveWait) => {
+      const timer = setTimeout(() => resolveWait(false), timeoutMs);
+      timer.unref();
+    }),
+  ]);
+}
+
+async function closeProcess(child: ChildProcess, browserWs?: string): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (browserWs) {
+    await requestGracefulBrowserClose(browserWs);
+    if (await waitForChildExit(child, 5_000)) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+      return;
+    }
+  }
+  signalProcessTree(child, 'SIGTERM');
+  if (!(await waitForChildExit(child, 5_000))) signalProcessTree(child, 'SIGKILL');
+  await waitForChildExit(child, 2_000);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 250));
 }
 
 async function waitForEndpointOrExit(
@@ -408,14 +561,7 @@ async function waitForEndpointOrExit(
  * Uses the browser WebSocket endpoint directly — Patchright's connectOverCDP + browser.close()
  * can tear down the detached chrome process, so we avoid that path here.
  */
-async function applyCookiesToNativeLobium(
-  wsUrl: string,
-  draft: LaunchContext['cookiesImport'],
-): Promise<void> {
-  if (!draft) return;
-  const cookies = (await import('../cookie-inject.js')).cdpCookiesFromDraft(draft);
-  if (cookies.length === 0 && draft.mode !== 'replace') return;
-
+async function resolveCdpTarget(wsUrl: string): Promise<string> {
   // Prefer a page/target websocket when available; fall back to the browser endpoint.
   let targetWs = wsUrl;
   try {
@@ -430,11 +576,23 @@ async function applyCookiesToNativeLobium(
   } catch {
     /* browser endpoint is fine for Network.setCookies */
   }
+  return targetWs;
+}
 
-  await new Promise<void>((resolve, reject) => {
+async function withNativeCdp<T>(
+  wsUrl: string,
+  operation: (session: {
+    send(method: string, params?: Record<string, unknown>): Promise<unknown>;
+  }) => Promise<T>,
+): Promise<T> {
+  const targetWs = await resolveCdpTarget(wsUrl);
+  return new Promise<T>((resolve, reject) => {
     const ws = new WebSocket(targetWs);
     let nextId = 1;
-    const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+    const pending = new Map<
+      number,
+      { resolve: (v: unknown) => void; reject: (e: Error) => void }
+    >();
     const send = (method: string, params?: Record<string, unknown>) =>
       new Promise<unknown>((res, rej) => {
         const id = nextId++;
@@ -444,21 +602,16 @@ async function applyCookiesToNativeLobium(
 
     const timer = setTimeout(() => {
       ws.close();
-      reject(new Error('cookie inject CDP timed out'));
+      reject(new Error('cookie CDP operation timed out'));
     }, 15_000);
 
     ws.addEventListener('open', () => {
       void (async () => {
         try {
-          if (draft.mode === 'replace') {
-            await send('Network.clearBrowserCookies');
-          }
-          if (cookies.length > 0) {
-            await send('Network.setCookies', { cookies });
-          }
+          const result = await operation({ send });
           clearTimeout(timer);
           ws.close();
-          resolve();
+          resolve(result);
         } catch (err) {
           clearTimeout(timer);
           ws.close();
@@ -485,9 +638,60 @@ async function applyCookiesToNativeLobium(
     });
     ws.addEventListener('error', () => {
       clearTimeout(timer);
-      reject(new Error('cookie inject CDP websocket error'));
+      reject(new Error('cookie CDP websocket error'));
     });
   });
+}
+
+async function applyCookiesToNativeLobium(
+  wsUrl: string,
+  draft: LaunchContext['cookiesImport'],
+): Promise<boolean> {
+  if (!draft) return false;
+  const { applyCookieImport } = await import('../cookie-inject.js');
+  await withNativeCdp(wsUrl, (session) => applyCookieImport(session, draft));
+  return true;
+}
+
+/**
+ * Make the real OS window (already sized to the persona's phone screen via `--window-size`) behave
+ * like a phone viewport, not just a small desktop window: `mobile: true` device-metrics override so
+ * CSS `@media (pointer/hover)` and the mobile viewport meta tag path engage, plus touch emulation so
+ * mouse input is delivered as touch events (a desktop mouse otherwise never fires touchstart/
+ * touchmove, which many "real Android Chrome" mobile sites branch on). Applied once, to the initial
+ * tab CDP resolves to a page target for — a tab opened later from user action gets its own CDP
+ * session and does not inherit this override (Target-level, not browser-wide).
+ */
+async function applyAndroidMobileEmulation(
+  wsUrl: string,
+  fingerprint: LaunchContext['fingerprint'],
+): Promise<void> {
+  const { width, height, devicePixelRatio } = fingerprint.screen;
+  const maxTouchPoints = fingerprint.navigator.maxTouchPoints || 5;
+  await withNativeCdp(wsUrl, async (session) => {
+    await session.send('Emulation.setTouchEmulationEnabled', {
+      enabled: true,
+      maxTouchPoints,
+    });
+    await session.send('Emulation.setEmitTouchEventsForMouse', {
+      enabled: true,
+      configuration: 'mobile',
+    });
+    await session.send('Emulation.setDeviceMetricsOverride', {
+      width,
+      height,
+      deviceScaleFactor: devicePixelRatio || 1,
+      mobile: true,
+      screenWidth: width,
+      screenHeight: height,
+    });
+  });
+}
+
+/** Explicit local export of the current cookie jar from a running browser. */
+export async function exportCookiesFromNativeLobium(wsUrl: string): Promise<string> {
+  const { exportCookiesJson } = await import('../cookie-inject.js');
+  return withNativeCdp(wsUrl, (session) => exportCookiesJson(session));
 }
 
 /**
@@ -501,21 +705,32 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
       'LOBSTER_LOBIUM_BIN is not set or does not point to an existing file — cannot launch native Lobium',
     );
   }
-  return async (ctx: LaunchContext): Promise<LaunchHandle> => {
+  const launch: Launcher = async (ctx: LaunchContext): Promise<LaunchHandle> => {
     let adapter: LocalProxyAdapter | undefined;
     try {
+      const capabilities = await probeLobiumBuildCapabilities(bin);
+      assertLobiumBuildCapabilities(
+        capabilities,
+        ctx.fingerprintPolicy
+          ? requiredLobiumCapabilities(
+              ctx.fingerprintPolicy,
+              ctx.fingerprint.locale.geolocation !== undefined,
+            )
+          : LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
+      );
       if (ctx.options.proxy) {
         // Fail closed before spawn when the upstream is dead — clearer than a blank Lobium window.
         await assertUpstreamReachable(ctx.options.proxy);
-        if (needsLocalProxyAdapter(ctx.options.proxy)) {
-          adapter = await startLocalProxyAdapter(ctx.options.proxy);
-        }
+        // Product launches route every proxy type through the loopback adapter, even without auth.
+        // That gives HTTP/HTTPS/SOCKS one monitored, remote-DNS-capable, no-direct-fallback boundary.
+        adapter = await startLocalProxyAdapter(ctx.options.proxy);
       }
       if (ctx.profileName) {
         ensureChromiumProfileName(ctx.options.userDataDir, ctx.profileName);
       }
       // Always scrub — even when profileName is missing — so restored data: tabs cannot win.
       scrubLegacyBrandingSessions(ctx.options.userDataDir);
+      ensureChromiumPersonaPreferences(ctx);
       // Drop a stale DevToolsActivePort so we never brand/automate against a dead previous port.
       await clearDevToolsActivePort(ctx.options.userDataDir);
       const args = await buildNativeLobiumProcessArgs(
@@ -533,13 +748,25 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
         stdio: 'ignore',
         windowsHide: true,
       });
+      let networkFailure: string | undefined;
+      adapter?.onFailure((message) => {
+        if (networkFailure) return;
+        networkFailure = `proxy upstream failed: ${message}`;
+        console.error(`[lobium] profile ${ctx.profileId} ${networkFailure}`);
+        // Product-scope fail closed: stop this browser process so it cannot continue in an
+        // ambiguous network state. Chromium remains proxy-configured; no direct route is enabled.
+        signalProcessTree(child, 'SIGTERM');
+      });
       try {
         const { port, ws } = await waitForEndpointOrExit(child, ctx.options.userDataDir);
         // Cookie import must run after CDP is up; Patchright's connectOverCDP closes its own
         // connection on browser.close() without SIGTERM'ing our detached chrome (verified by E2E).
-        await applyCookiesToNativeLobium(ws, ctx.cookiesImport);
+        const cookieImportApplied = await applyCookiesToNativeLobium(ws, ctx.cookiesImport);
+        if (ctx.isMobileProfile) {
+          await applyAndroidMobileEmulation(ws, ctx.fingerprint);
+        }
         // NTP branding is now NATIVE (chrome://newtab, patched engine resources) — no CDP injection.
-        const closeListeners = new Set<() => void>();
+        const closeListeners = new Set<(reason?: string) => void>();
         const shutdownAdapter = async () => {
           if (adapter) {
             await adapter.close().catch(() => {});
@@ -548,14 +775,16 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
         };
         child.once('exit', () => {
           void shutdownAdapter();
-          for (const listener of closeListeners) listener();
+          for (const listener of closeListeners) listener(networkFailure);
         });
         return {
           pid: child.pid ?? 0,
           ws,
           debuggerAddress: `127.0.0.1:${port}`,
+          cookieImportApplied,
+          exportCookies: () => exportCookiesFromNativeLobium(ws),
           close: async () => {
-            await closeProcess(child);
+            await closeProcess(child, ws);
             await shutdownAdapter();
           },
           onClose: (listener) => {
@@ -571,4 +800,6 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
       throw err;
     }
   };
+  launch.getBuildCapabilities = () => probeLobiumBuildCapabilities(bin);
+  return launch;
 }

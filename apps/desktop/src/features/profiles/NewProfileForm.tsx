@@ -1,102 +1,70 @@
 import { XMarkIcon } from '@heroicons/react/24/outline';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { parseJson, parseNetscape } from '@lobster/cookies';
 import { normalizeDeviceMemory } from '@lobster/fingerprint';
 
 import type {
   CookieImportDraft,
   CookieImportMode,
+  BrowserExtensionRef,
   CreateProfileInput,
   CreateStoredProxyInput,
-  FingerprintOverrides,
-  HardwareNoisePolicy,
-  MediaDeviceProfile,
-  NavigatorFingerprint,
+  Profile,
   ProfileOsTarget,
   ProfileTemplate,
   ProxyConfig,
+  ProxyTestResult,
   ProxyType,
   StoredProxy,
 } from '@lobster/shared-types';
 
-import lobsterIcon from '../../assets/brand/lobster-icon.png';
+import { isDesktopRuntime, type ProfilePatch } from '../../api/tauri';
+import appIcon from '../../assets/brand/icon.png';
 import { OS_OPTIONS, OS_VERSION_OPTIONS } from './options';
 import {
   ANDROID_DEVICE_TYPE_OPTIONS,
   CPU_CORE_OPTIONS,
-  PHYSICAL_RAM_OPTIONS,
+  DEVICE_MEMORY_OPTIONS,
   PERSONA_MODE_OPTIONS,
   WEBRTC_MODE_OPTIONS,
   androidModelsForSelection,
-  chromeFullVersionForMajor,
-  chromeMajorFromUserAgent,
   defaultSelectedFontsForTarget,
   defaultUserAgent,
   findAndroidCatalogEntry,
-  fontPresetsForTarget,
   parseScreenOption,
   rendererPresetById,
   rendererPresetsForTarget,
   screenOptionsForTarget,
-  uaPlatformVersionForSelection,
-  webRtcPolicyForUiMode,
   type AndroidDeviceType,
   type PersonaMode,
   type WebRtcUiMode,
 } from './fingerprintCatalog';
+import {
+  changeDraftOs,
+  chromeWebStoreExtensionId,
+  createProfileDraft,
+  hydrateProfileDraft,
+  hydrateTemplateDraft,
+  serializeProfileDraft,
+  validateProfileDraft,
+  type ProfileDraft,
+} from './profileDraft';
 
 interface NewProfileFormProps {
-  onCreate: (input: CreateProfileInput, options?: { password?: string }) => Promise<void>;
+  profile?: Profile;
+  onCreate?: (input: CreateProfileInput, options?: { password?: string }) => Promise<void>;
+  onSave?: (patch: ProfilePatch, options?: { password?: string | null }) => Promise<void>;
   onCancel: () => void;
   onCreateProxy?: (input: CreateStoredProxyInput) => Promise<StoredProxy>;
+  onTestProxy?: (config: ProxyConfig) => Promise<ProxyTestResult>;
   proxies?: StoredProxy[];
   templates?: ProfileTemplate[];
+  loadFontFamilies?: (os: ProfileOsTarget) => Promise<string[]>;
 }
 
 type WizardStep = 'general' | 'fingerprint' | 'cookies' | 'security' | 'extensions';
 
-interface FormState {
-  name: string;
-  description: string;
-  os: ProfileOsTarget;
-  osVersion: string;
-  tags: string;
-  proxyId: string;
-  templateId: string;
-  userAgent: string;
-  androidDeviceType: AndroidDeviceType;
-  androidDeviceModel: string;
-  screenResolution: string;
-  selectedFonts: string[];
-  languageMode: PersonaMode;
-  languages: string;
-  timezoneMode: PersonaMode;
-  timezone: string;
-  geolocationMode: PersonaMode;
-  geolocationLat: string;
-  geolocationLng: string;
-  geolocationAccuracy: string;
-  cpuCores: string;
-  ramSize: string;
-  rendererPresetId: string;
-  webrtcMode: WebRtcUiMode;
-  noiseWebgl: boolean;
-  noiseCanvas: boolean;
-  noiseAudio: boolean;
-  noiseClientRects: boolean;
-  mediaCameras: string;
-  mediaMicrophones: string;
-  mediaSpeakers: string;
-  stableDeviceIds: boolean;
-  cookiesMode: CookieImportMode;
-  cookiesText: string;
-  cookiesFileName: string;
-  cookiesParsedCount: number | undefined;
-  cookiesErrors: CookieImportDraft['errors'];
-  password: string;
-  passwordConfirm: string;
-  extensionUrl: string;
-}
+type FormState = ProfileDraft;
 
 interface CustomProxyDraft {
   title: string;
@@ -105,6 +73,11 @@ interface CustomProxyDraft {
   port: string;
   login: string;
   password: string;
+}
+
+interface ValidationIssue {
+  step: WizardStep;
+  message: string;
 }
 
 const STEPS: ReadonlyArray<{ key: WizardStep; label: string }> = [
@@ -116,52 +89,33 @@ const STEPS: ReadonlyArray<{ key: WizardStep; label: string }> = [
 ];
 
 const CUSTOM_PROXY_VALUE = '__custom__';
+const MAX_COOKIE_FILE_BYTES = 5 * 1024 * 1024;
 
-function initialFonts(os: ProfileOsTarget): string[] {
-  return defaultSelectedFontsForTarget(os);
+function isValidLanguageTag(value: string): boolean {
+  try {
+    return Intl.getCanonicalLocales(value).length === 1;
+  } catch {
+    return false;
+  }
+}
+
+function isValidTimezone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isNonNegativeInteger(value: string): boolean {
+  const parsed = Number(value.trim());
+  return Number.isInteger(parsed) && parsed >= 0;
 }
 
 const initialState: FormState = {
-  name: '',
-  description: '',
-  os: 'windows',
-  osVersion: OS_VERSION_OPTIONS.windows[0],
-  tags: '',
-  proxyId: '',
-  templateId: '',
-  userAgent: defaultUserAgent('windows', 'mobile'),
-  androidDeviceType: 'mobile',
+  ...createProfileDraft(),
   androidDeviceModel: androidModelsForSelection('mobile', OS_VERSION_OPTIONS.android[0])[0] ?? '',
-  screenResolution: '1920x1080',
-  selectedFonts: initialFonts('windows'),
-  languageMode: 'based_ip',
-  languages: 'en-US, en',
-  timezoneMode: 'based_ip',
-  timezone: 'America/New_York',
-  geolocationMode: 'based_ip',
-  geolocationLat: '',
-  geolocationLng: '',
-  geolocationAccuracy: '100',
-  cpuCores: '8',
-  ramSize: '8',
-  rendererPresetId: rendererPresetsForTarget('windows')[0]?.id ?? '',
-  webrtcMode: 'based_ip',
-  noiseWebgl: true,
-  noiseCanvas: true,
-  noiseAudio: true,
-  noiseClientRects: false,
-  mediaCameras: '1',
-  mediaMicrophones: '1',
-  mediaSpeakers: '2',
-  stableDeviceIds: true,
-  cookiesMode: 'merge',
-  cookiesText: '',
-  cookiesFileName: '',
-  cookiesParsedCount: undefined,
-  cookiesErrors: undefined,
-  password: '',
-  passwordConfirm: '',
-  extensionUrl: '',
 };
 
 const emptyCustomProxy: CustomProxyDraft = {
@@ -173,52 +127,11 @@ const emptyCustomProxy: CustomProxyDraft = {
   password: '',
 };
 
-function parseTags(raw: string): string[] {
-  const seen = new Set<string>();
-  for (const part of raw.split(/[,\n]/)) {
-    const tag = part.trim();
-    if (tag) seen.add(tag);
-  }
-  return [...seen];
-}
-
 function numberOrUndefined(raw: string): number | undefined {
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
   const value = Number(trimmed);
   return Number.isFinite(value) ? value : undefined;
-}
-
-function uaPlatformForTarget(os: ProfileOsTarget): string | undefined {
-  if (os === 'windows') return 'Windows';
-  if (os === 'macos' || os === 'macos_intel' || os === 'macos_arm') return 'macOS';
-  if (os === 'linux') return 'Linux';
-  if (os === 'android') return 'Android';
-  return undefined;
-}
-
-function wholeNumberOrZero(raw: string): number {
-  const value = Number(raw.trim());
-  if (!Number.isInteger(value) || value < 0) return 0;
-  return value;
-}
-
-function hardwareNoise(form: FormState): HardwareNoisePolicy {
-  return {
-    webgl: form.noiseWebgl,
-    canvas: form.noiseCanvas,
-    audio: form.noiseAudio,
-    clientRects: form.noiseClientRects,
-  };
-}
-
-function mediaDevices(form: FormState): MediaDeviceProfile {
-  return {
-    cameras: wholeNumberOrZero(form.mediaCameras),
-    microphones: wholeNumberOrZero(form.mediaMicrophones),
-    speakers: wholeNumberOrZero(form.mediaSpeakers),
-    stableDeviceIds: form.stableDeviceIds,
-  };
 }
 
 function parseCookieDraft(
@@ -250,101 +163,141 @@ function portNumber(raw: string): number | null {
   return value;
 }
 
-function buildOverrides(form: FormState): FingerprintOverrides {
-  const navigator: Partial<NavigatorFingerprint> = {};
-  const userAgent = defaultUserAgent(form.os, form.androidDeviceType);
-  navigator.userAgent = userAgent;
-  const major = chromeMajorFromUserAgent(userAgent);
-  if (major) {
-    navigator.uaBrands = [
-      { brand: 'Chromium', version: major },
-      { brand: 'Google Chrome', version: major },
-      { brand: 'Not_A Brand', version: '24' },
-    ];
-    navigator.uaFullVersion = chromeFullVersionForMajor(major);
+function customProxyConfig(draft: CustomProxyDraft, id: string): ProxyConfig | null {
+  const port = portNumber(draft.port.trim());
+  const host = draft.host.trim();
+  if (!host || port === null) return null;
+  const config: ProxyConfig = {
+    id,
+    type: draft.type,
+    host,
+    port,
+    ...(draft.title.trim() ? { label: draft.title.trim() } : {}),
+  };
+  const username = draft.login.trim();
+  if (username) config.username = username;
+  if (draft.password) config.password = draft.password;
+  return config;
+}
+
+function validationIssues(
+  form: FormState,
+  customProxy: CustomProxyDraft,
+  selectedProxy: StoredProxy | undefined,
+  selectedTemplate: ProfileTemplate | undefined,
+): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const add = (step: WizardStep, message: string): void => {
+    issues.push({ step, message });
+  };
+
+  const name = form.name.trim();
+  if (!name) add('general', 'Enter a profile name.');
+  else if (name.length > 120) add('general', 'Profile name must be 120 characters or fewer.');
+  if (form.description.length > 2_000) {
+    add('general', 'Description must be 2,000 characters or fewer.');
   }
-  const uaPlatform = uaPlatformForTarget(form.os);
-  if (uaPlatform) navigator.uaPlatform = uaPlatform;
-  const uaPlatformVersion = uaPlatformVersionForSelection(form.os, form.osVersion);
-  if (uaPlatformVersion) navigator.uaPlatformVersion = uaPlatformVersion;
+  if (form.templateId && !selectedTemplate) {
+    add('general', 'The selected template is no longer available.');
+  }
+  if (form.proxyId === CUSTOM_PROXY_VALUE) {
+    if (!customProxy.title.trim()) add('general', 'Enter a title for the custom proxy.');
+    if (!customProxy.host.trim()) add('general', 'Enter the custom proxy host.');
+    else if (/\s|:\/\/|\//.test(customProxy.host.trim())) {
+      add('general', 'Enter the proxy host without a scheme, path, or spaces.');
+    }
+    if (portNumber(customProxy.port.trim()) === null) {
+      add('general', 'Proxy port must be a whole number from 1 to 65535.');
+    }
+    if (customProxy.password && !customProxy.login.trim()) {
+      add('general', 'Enter a proxy login when a proxy password is set.');
+    }
+  } else if (form.proxyId && !selectedProxy) {
+    add('general', 'The selected proxy is no longer available.');
+  }
+
   if (form.os === 'android') {
-    navigator.uaMobile = form.androidDeviceType === 'mobile';
-    navigator.uaModel = form.androidDeviceModel;
-    navigator.platform = 'Linux armv81';
-    navigator.maxTouchPoints = form.androidDeviceType === 'mobile' ? 5 : 10;
+    if (!findAndroidCatalogEntry(form.androidDeviceType, form.androidDeviceModel)) {
+      add('fingerprint', 'Choose a verified Android device model from the list.');
+    }
+  } else {
+    if (!parseScreenOption(form.screenResolution)) {
+      add('fingerprint', 'Choose a valid screen resolution.');
+    }
+    if (form.fonts.mode === 'manual' && form.fonts.selected.length === 0) {
+      add('fingerprint', 'Select at least one OS-compatible font.');
+    }
+    if (
+      form.rendererPresetId !== 'host' &&
+      form.rendererPresetId !== 'normalized_host' &&
+      !rendererPresetById(form.os, form.rendererPresetId)
+    ) {
+      add('fingerprint', 'Choose the calibrated host renderer or a sourced renderer preset.');
+    }
+    if (!CPU_CORE_OPTIONS.includes(Number(form.cpuCores) as (typeof CPU_CORE_OPTIONS)[number])) {
+      add('fingerprint', 'Choose a verified CPU core count.');
+    }
+    if (
+      !DEVICE_MEMORY_OPTIONS.includes(
+        Number(form.ramSize) as (typeof DEVICE_MEMORY_OPTIONS)[number],
+      )
+    ) {
+      add('fingerprint', 'Choose a Lobium-compatible reported memory value.');
+    }
   }
+
   if (form.languageMode === 'manual') {
     const languages = form.languages
       .split(',')
       .map((language) => language.trim())
       .filter(Boolean);
-    if (languages.length > 0) navigator.languages = languages;
-  }
-
-  const isDesktop = form.os !== 'android';
-  if (isDesktop) {
-    const cores = numberOrUndefined(form.cpuCores);
-    if (cores !== undefined) navigator.hardwareConcurrency = cores;
-    // UI shows physical RAM (8–128); Chromium only reports ≤8 via deviceMemory.
-    const ram = numberOrUndefined(form.ramSize);
-    if (ram !== undefined) navigator.deviceMemory = normalizeDeviceMemory(ram);
-  }
-
-  const screen = parseScreenOption(form.screenResolution);
-  const timezone = form.timezone.trim();
-  const latitude = numberOrUndefined(form.geolocationLat);
-  const longitude = numberOrUndefined(form.geolocationLng);
-  const accuracy = numberOrUndefined(form.geolocationAccuracy) ?? 100;
-  const overrides: FingerprintOverrides = {
-    fontsMode: 'manual',
-    languageMode: form.languageMode,
-    timezoneMode: form.timezoneMode,
-    geolocationMode: form.geolocationMode,
-    webrtcMode: form.webrtcMode === 'disable_udp' ? 'manual' : form.webrtcMode,
-  };
-  if (Object.keys(navigator).length > 0) overrides.navigator = navigator;
-  if (isDesktop && screen) {
-    const isMac = form.os === 'macos' || form.os === 'macos_intel' || form.os === 'macos_arm';
-    const menuBar = isMac ? 25 : 0;
-    const bottomBar = isMac ? 0 : 40;
-    overrides.screen = {
-      width: screen.width,
-      height: screen.height,
-      availWidth: screen.width,
-      availHeight: Math.max(1, screen.height - menuBar - bottomBar),
-      availLeft: 0,
-      availTop: menuBar,
-      devicePixelRatio: screen.devicePixelRatio,
-    };
-  }
-  if (
-    form.timezoneMode === 'manual' ||
-    (form.geolocationMode === 'manual' && latitude !== undefined && longitude !== undefined)
-  ) {
-    overrides.locale = {};
-    if (form.timezoneMode === 'manual' && timezone) overrides.locale.timezone = timezone;
-    if (form.geolocationMode === 'manual' && latitude !== undefined && longitude !== undefined) {
-      overrides.locale.geolocation = { latitude, longitude, accuracy };
+    if (languages.length === 0) add('fingerprint', 'Enter at least one language tag.');
+    else if (languages.some((language) => !isValidLanguageTag(language))) {
+      add('fingerprint', 'Use valid BCP-47 language tags, for example en-US, en.');
     }
   }
-  if (isDesktop && form.selectedFonts.length > 0) {
-    overrides.fonts = [...form.selectedFonts];
+  if (form.timezoneMode === 'manual' && !isValidTimezone(form.timezone.trim())) {
+    add('fingerprint', 'Enter a valid IANA timezone, for example America/New_York.');
   }
-  if (isDesktop && form.rendererPresetId) {
-    const selectedRenderer = rendererPresetById(form.os, form.rendererPresetId);
-    overrides.renderer = { mode: 'validated_preset', presetId: form.rendererPresetId };
-    if (selectedRenderer) overrides.webgl = selectedRenderer.webgl;
+  if (form.geolocationMode === 'manual') {
+    const latitude = numberOrUndefined(form.geolocationLat);
+    const longitude = numberOrUndefined(form.geolocationLng);
+    const accuracy = numberOrUndefined(form.geolocationAccuracy);
+    if (latitude === undefined || latitude < -90 || latitude > 90) {
+      add('fingerprint', 'Latitude must be a number from -90 to 90.');
+    }
+    if (longitude === undefined || longitude < -180 || longitude > 180) {
+      add('fingerprint', 'Longitude must be a number from -180 to 180.');
+    }
+    if (accuracy === undefined || accuracy <= 0) {
+      add('fingerprint', 'Geolocation accuracy must be greater than zero.');
+    }
   }
-  overrides.webrtc = webRtcPolicyForUiMode(form.webrtcMode);
-  overrides.hardwareNoise = hardwareNoise(form);
-  overrides.mediaDevices = mediaDevices(form);
-  if (form.os === 'android') {
-    overrides.androidDeviceType = form.androidDeviceType;
-    overrides.androidDeviceModel = form.androidDeviceModel;
-    const entry = findAndroidCatalogEntry(form.androidDeviceType, form.androidDeviceModel);
-    if (entry?.model) overrides.androidDeviceCode = entry.model;
+  for (const [value, label] of [
+    [form.mediaCameras, 'Camera'],
+    [form.mediaMicrophones, 'Microphone'],
+    [form.mediaSpeakers, 'Speaker'],
+  ] as const) {
+    if (!isNonNegativeInteger(value)) {
+      add('fingerprint', `${label} count must be a non-negative whole number.`);
+    }
   }
-  return overrides;
+
+  if (form.cookiesMode === 'replace' && !form.cookiesText.trim()) {
+    add('cookies', 'Add cookies before choosing Replace cookie jar.');
+  }
+  if (form.cookiesMode !== 'empty' && form.cookiesErrors?.length) {
+    add('cookies', 'Fix the cookie import errors before creating the profile.');
+  }
+
+  if (form.password !== form.passwordConfirm) {
+    add('security', 'Password confirmation does not match.');
+  }
+  if (form.passwordConfirm && !form.password) {
+    add('security', 'Enter a password before confirming it.');
+  }
+
+  return issues;
 }
 
 function FontMultiSelect({
@@ -370,75 +323,242 @@ function FontMultiSelect({
   }
 
   return (
-    <div className="font-multiselect">
-      <div className="font-multiselect__toolbar">
-        <input
-          className="input"
-          type="search"
-          value={query}
-          placeholder="Search fonts"
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        <span className="font-multiselect__tag">{selected.length} selected</span>
-        <button
-          type="button"
-          className="btn btn--secondary btn--compact"
-          onClick={() => onChange([...options])}
-        >
-          Select all
-        </button>
-        <button
-          type="button"
-          className="btn btn--secondary btn--compact"
-          onClick={() => onChange([])}
-        >
-          Clear
-        </button>
+    <details className="font-multiselect">
+      <summary className="font-multiselect__summary">
+        <span>{selected.length.toLocaleString()} OS-compatible fonts selected</span>
+        <span className="font-multiselect__summary-action">Review</span>
+      </summary>
+      <div className="font-multiselect__content">
+        <div className="font-multiselect__toolbar">
+          <input
+            className="input"
+            type="search"
+            value={query}
+            aria-label="Search available fonts"
+            placeholder="Search fonts"
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <span className="font-multiselect__tag">{selected.length} selected</span>
+          <button
+            type="button"
+            className="btn btn--secondary btn--compact"
+            onClick={() => onChange([...options])}
+          >
+            Select all
+          </button>
+          <button
+            type="button"
+            className="btn btn--secondary btn--compact"
+            onClick={() => onChange([])}
+          >
+            Clear
+          </button>
+        </div>
+        <div className="font-multiselect__list" role="listbox" aria-multiselectable="true">
+          {filtered.slice(0, 800).map((font) => {
+            const active = selectedSet.has(font);
+            return (
+              <button
+                key={font}
+                type="button"
+                role="option"
+                aria-selected={active}
+                className={active ? 'font-chip font-chip--selected' : 'font-chip'}
+                onClick={() => toggle(font)}
+              >
+                {font}
+              </button>
+            );
+          })}
+        </div>
       </div>
-      <div className="font-multiselect__list" role="listbox" aria-multiselectable="true">
-        {filtered.slice(0, 800).map((font) => {
-          const active = selectedSet.has(font);
-          return (
-            <button
-              key={font}
-              type="button"
-              role="option"
-              aria-selected={active}
-              className={active ? 'font-chip font-chip--selected' : 'font-chip'}
-              onClick={() => toggle(font)}
-            >
-              {font}
-            </button>
-          );
-        })}
-      </div>
+    </details>
+  );
+}
+
+/**
+ * Single-select searchable combobox for large option lists (thousands of entries).
+ *
+ * Replaces a plain `<input list>` + `<datalist>`: WebKitGTK (the Tauri Linux webview) renders its
+ * native datalist popup with only a handful of suggestions regardless of how many `<option>`s are
+ * present, so a 15k-entry device catalog effectively showed as "one suggestion." This component owns
+ * its own filtered listbox, so the full catalog is genuinely browsable/searchable everywhere the app
+ * runs.
+ */
+function SearchableSelect({
+  options,
+  value,
+  onChange,
+  placeholder,
+  invalid,
+  ariaLabel,
+}: {
+  options: readonly string[];
+  value: string;
+  onChange: (next: string) => void;
+  placeholder?: string;
+  invalid?: boolean;
+  ariaLabel?: string;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState(value);
+
+  useEffect(() => {
+    setQuery(value);
+  }, [value]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const base = q ? options.filter((option) => option.toLowerCase().includes(q)) : options;
+    return base.slice(0, 500);
+  }, [options, query]);
+
+  function select(option: string): void {
+    onChange(option);
+    setQuery(option);
+    setOpen(false);
+  }
+
+  return (
+    <div className="combobox">
+      <input
+        className="input"
+        value={query}
+        aria-label={ariaLabel}
+        aria-invalid={invalid}
+        autoComplete="off"
+        spellCheck={false}
+        placeholder={placeholder}
+        onFocus={() => setOpen(true)}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setOpen(true);
+        }}
+        onBlur={() => {
+          window.setTimeout(() => setOpen(false), 120);
+        }}
+      />
+      {open && (
+        <div className="combobox__list" role="listbox">
+          {filtered.length === 0 ? (
+            <div className="combobox__empty">No matches</div>
+          ) : (
+            filtered.map((option) => (
+              <button
+                key={option}
+                type="button"
+                role="option"
+                aria-selected={option === value}
+                className={
+                  option === value ? 'combobox__option combobox__option--active' : 'combobox__option'
+                }
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  select(option);
+                }}
+              >
+                {option}
+              </button>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 export function NewProfileForm({
+  profile,
   onCreate,
+  onSave,
   onCancel,
   onCreateProxy,
+  onTestProxy,
   proxies = [],
   templates = [],
+  loadFontFamilies,
 }: NewProfileFormProps): JSX.Element {
   const [step, setStep] = useState<WizardStep>('general');
-  const [form, setForm] = useState<FormState>(initialState);
-  const [customProxy, setCustomProxy] = useState<CustomProxyDraft>(emptyCustomProxy);
+  const [form, setForm] = useState<FormState>(() => {
+    const hydrated = profile ? hydrateProfileDraft(profile) : initialState;
+    const initial =
+      profile?.proxy && !profile.proxyId ? { ...hydrated, proxyId: CUSTOM_PROXY_VALUE } : hydrated;
+    return initial;
+  });
+  const [customProxy, setCustomProxy] = useState<CustomProxyDraft>(() =>
+    profile?.proxy && !profile.proxyId
+      ? {
+          title: profile.proxy.label ?? '',
+          type: profile.proxy.type,
+          host: profile.proxy.host,
+          port: String(profile.proxy.port),
+          login: profile.proxy.username ?? '',
+          password: profile.proxy.password ?? '',
+        }
+      : emptyCustomProxy,
+  );
+  const [proxyChecking, setProxyChecking] = useState(false);
+  const [proxyTest, setProxyTest] = useState<ProxyTestResult | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [showValidation, setShowValidation] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fontCatalogError, setFontCatalogError] = useState<string | null>(null);
+  const [fontCatalogLoading, setFontCatalogLoading] = useState(Boolean(loadFontFamilies));
+  const [extensionSource, setExtensionSource] =
+    useState<BrowserExtensionRef['source']>('chrome_web_store');
+  const [extensionValue, setExtensionValue] = useState('');
+  const [extensionInputError, setExtensionInputError] = useState<string | null>(null);
 
-  const canSubmit = form.name.trim().length > 0 && !submitting;
+  useEffect(() => {
+    if (!loadFontFamilies || form.os === 'android') return;
+    let current = true;
+    setFontCatalogLoading(true);
+    setFontCatalogError(null);
+    void loadFontFamilies(form.os)
+      .then((available) => {
+        if (!current) return;
+        // The manifest lists physical open-font faces. The full verified OS catalog remains the
+        // selectable/observable persona; the launcher aliases those names onto this private pack.
+        if (available.length === 0 && isDesktopRuntime()) {
+          throw new Error('the installed font pack contains no physical families');
+        }
+        setFontCatalogLoading(false);
+      })
+      .catch((cause: unknown) => {
+        if (!current) return;
+        setFontCatalogError(cause instanceof Error ? cause.message : String(cause));
+        setFontCatalogLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [form.os, loadFontFamilies]);
+
   const versionOptions = OS_VERSION_OPTIONS[form.os];
   const screenOptions = screenOptionsForTarget(form.os);
   const rendererOptions = rendererPresetsForTarget(form.os);
-  const fontOptions = fontPresetsForTarget(form.os);
   const androidModels = androidModelsForSelection(form.androidDeviceType, form.osVersion);
   const selectedProxy = proxies.find((proxy) => proxy.id === form.proxyId);
   const selectedTemplate = templates.find((template) => template.id === form.templateId);
   const isAndroid = form.os === 'android';
+  const legacyAndroid = false;
+  const editing = Boolean(profile);
   const isCustomProxy = form.proxyId === CUSTOM_PROXY_VALUE;
+  const userAgent = defaultUserAgent(form.os, form.androidDeviceType);
+  const issues = useMemo(() => {
+    const draftIssues = validateProfileDraft(form);
+    return [
+      ...draftIssues,
+      ...validationIssues(form, customProxy, selectedProxy, selectedTemplate).filter(
+        (issue) =>
+          !draftIssues.some(
+            (draftIssue) => draftIssue.step === issue.step && draftIssue.message === issue.message,
+          ),
+      ),
+    ];
+  }, [form, customProxy, selectedProxy, selectedTemplate, legacyAndroid]);
+  const currentStepIssues = showValidation ? issues.filter((issue) => issue.step === step) : [];
+  const canSubmit = !submitting && !fontCatalogLoading && fontCatalogError === null;
 
   const warnings = useMemo(() => {
     const items: string[] = [];
@@ -454,36 +574,93 @@ export function NewProfileForm({
           : 'Imported cookies will merge into the profile cookie jar at launch.',
       );
     }
-    if (form.extensionUrl.trim()) {
-      items.push('Extension reference is persisted; install-at-launch remains an engine task.');
+    if (form.extensions.some((extension) => extension.enabled)) {
+      items.push('Enabled extensions are verified and installed before Lobium starts.');
     }
     return items;
   }, [form, selectedProxy, isCustomProxy]);
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]): void {
     setForm((prev) => ({ ...prev, [key]: value }));
+    setError(null);
   }
 
   function setCustom<K extends keyof CustomProxyDraft>(key: K, value: CustomProxyDraft[K]): void {
     setCustomProxy((prev) => ({ ...prev, [key]: value }));
+    setProxyTest(null);
+    setError(null);
   }
 
   function setOs(os: ProfileOsTarget): void {
-    const nextScreens = screenOptionsForTarget(os);
-    const nextVersion = OS_VERSION_OPTIONS[os][0];
-    const nextModels =
-      os === 'android' ? androidModelsForSelection('mobile', nextVersion) : [];
-    const nextRenderers = rendererPresetsForTarget(os);
-    setForm((prev) => ({
-      ...prev,
-      os,
-      osVersion: nextVersion,
-      userAgent: defaultUserAgent(os, prev.androidDeviceType),
-      screenResolution: nextScreens[0] ?? prev.screenResolution,
-      selectedFonts: os === 'android' ? [] : defaultSelectedFontsForTarget(os),
-      rendererPresetId: nextRenderers[0]?.id ?? '',
-      androidDeviceModel: nextModels[0] ?? prev.androidDeviceModel,
+    setForm((prev) => {
+      const next = changeDraftOs(prev, os);
+      const nextModels =
+        os === 'android' ? androidModelsForSelection(prev.androidDeviceType, next.osVersion) : [];
+      return {
+        ...next,
+        androidDeviceModel: nextModels[0] ?? prev.androidDeviceModel,
+      };
+    });
+    setError(null);
+  }
+
+  function addExtension(): void {
+    const value = extensionValue.trim();
+    if (!value) {
+      setExtensionInputError('Enter an extension ID, official store URL, or absolute local path.');
+      return;
+    }
+    let extension: BrowserExtensionRef;
+    if (extensionSource === 'chrome_web_store') {
+      const id = chromeWebStoreExtensionId(value);
+      if (!id) {
+        setExtensionInputError('Enter a valid Chrome Web Store ID or official HTTPS detail URL.');
+        return;
+      }
+      if (
+        form.extensions.some(
+          (item) =>
+            item.source === 'chrome_web_store' &&
+            chromeWebStoreExtensionId(item.id ?? item.url ?? '') === id,
+        )
+      ) {
+        setExtensionInputError('That Chrome Web Store extension is already configured.');
+        return;
+      }
+      extension = {
+        source: 'chrome_web_store',
+        enabled: true,
+        id,
+        ...(value.startsWith('https://') ? { url: value } : {}),
+        installState: 'pending',
+      };
+    } else {
+      const absolute =
+        value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\');
+      if (!absolute) {
+        setExtensionInputError('Local unpacked extension paths must be absolute.');
+        return;
+      }
+      if (
+        form.extensions.some((item) => item.source === 'unpacked' && item.path?.trim() === value)
+      ) {
+        setExtensionInputError('That local unpacked extension is already configured.');
+        return;
+      }
+      extension = {
+        source: 'unpacked',
+        enabled: true,
+        path: value,
+        name: value.split(/[\\/]/).filter(Boolean).at(-1) || 'Local extension',
+        installState: 'pending',
+      };
+    }
+    setForm((previous) => ({
+      ...previous,
+      extensions: [...previous.extensions, extension],
     }));
+    setExtensionValue('');
+    setExtensionInputError(null);
   }
 
   function setAndroidDeviceType(androidDeviceType: AndroidDeviceType): void {
@@ -492,8 +669,8 @@ export function NewProfileForm({
       ...prev,
       androidDeviceType,
       androidDeviceModel: models[0] ?? prev.androidDeviceModel,
-      userAgent: defaultUserAgent(prev.os, androidDeviceType),
     }));
+    setError(null);
   }
 
   function setOsVersion(osVersion: string): void {
@@ -507,27 +684,98 @@ export function NewProfileForm({
         androidDeviceModel: keep ? prev.androidDeviceModel : (models[0] ?? prev.androidDeviceModel),
       };
     });
+    setError(null);
   }
 
   function applyTemplate(templateId: string): void {
     const template = templates.find((item) => item.id === templateId);
+    setError(null);
     setForm((prev) => {
       if (!template) return { ...prev, templateId };
+      const hydrated = hydrateTemplateDraft(prev, template);
+      const osVersion = template.osVersion ?? OS_VERSION_OPTIONS[template.os][0];
+      const screens = screenOptionsForTarget(template.os);
+      const overrides = template.fingerprintOverrides;
+      const geolocation = overrides?.locale?.geolocation;
+      const templateRenderer = overrides?.renderer;
+      const rendererPresetId =
+        templateRenderer?.mode === 'validated_preset' &&
+        rendererPresetById(template.os, templateRenderer.presetId)
+          ? templateRenderer.presetId
+          : 'host';
+      const templateScreen = overrides?.screen;
+      const matchingScreen = templateScreen
+        ? screens.find((option) => {
+            const parsed = parseScreenOption(option);
+            return (
+              parsed !== undefined &&
+              parsed.width === templateScreen.width &&
+              parsed.height === templateScreen.height &&
+              parsed.devicePixelRatio === (templateScreen.devicePixelRatio ?? 1)
+            );
+          })
+        : undefined;
+      const webrtcMode: WebRtcUiMode = !overrides?.webrtc
+        ? prev.webrtcMode
+        : overrides.webrtc === 'proxy_only'
+          ? 'based_ip'
+          : overrides.webrtc === 'disable_non_proxied_udp'
+            ? 'disable_udp'
+            : overrides.webrtc === 'disabled'
+              ? 'disabled'
+              : 'real';
       return {
-        ...prev,
+        ...hydrated,
         templateId,
         os: template.os,
-        osVersion: template.osVersion ?? OS_VERSION_OPTIONS[template.os][0],
+        osVersion,
         proxyId: template.proxyId ?? prev.proxyId,
         tags: template.tags.length > 0 ? template.tags.join(', ') : prev.tags,
-        selectedFonts:
-          template.os === 'android' ? [] : defaultSelectedFontsForTarget(template.os),
+        screenResolution: matchingScreen ?? screens[0] ?? prev.screenResolution,
+        fonts: {
+          ...hydrated.fonts,
+          mode: overrides?.fontsMode ?? hydrated.fonts.mode,
+          selected: (overrides?.fonts ?? defaultSelectedFontsForTarget(template.os)).filter(
+            (font) => hydrated.fonts.available.includes(font),
+          ),
+        },
+        languageMode:
+          overrides?.languageMode ??
+          (overrides?.navigator?.languages ? 'manual' : prev.languageMode),
+        languages: overrides?.navigator?.languages?.join(', ') ?? prev.languages,
+        timezoneMode:
+          overrides?.timezoneMode ?? (overrides?.locale?.timezone ? 'manual' : prev.timezoneMode),
+        timezone: overrides?.locale?.timezone ?? prev.timezone,
+        geolocationMode:
+          overrides?.geolocationMode ?? (geolocation ? 'manual' : prev.geolocationMode),
+        geolocationLat: geolocation ? String(geolocation.latitude) : prev.geolocationLat,
+        geolocationLng: geolocation ? String(geolocation.longitude) : prev.geolocationLng,
+        geolocationAccuracy: geolocation ? String(geolocation.accuracy) : prev.geolocationAccuracy,
+        cpuCores: overrides?.navigator?.hardwareConcurrency
+          ? String(overrides.navigator.hardwareConcurrency)
+          : prev.cpuCores,
+        ramSize: overrides?.navigator?.deviceMemory
+          ? String(normalizeDeviceMemory(overrides.navigator.deviceMemory))
+          : prev.ramSize,
+        rendererPresetId,
+        webrtcMode,
+        noiseWebgl: overrides?.hardwareNoise?.webgl ?? prev.noiseWebgl,
+        noiseCanvas: overrides?.hardwareNoise?.canvas ?? prev.noiseCanvas,
+        noiseAudio: overrides?.hardwareNoise?.audio ?? prev.noiseAudio,
+        noiseClientRects: overrides?.hardwareNoise?.clientRects ?? prev.noiseClientRects,
+        mediaCameras: String(overrides?.mediaDevices?.cameras ?? prev.mediaCameras),
+        mediaMicrophones: String(overrides?.mediaDevices?.microphones ?? prev.mediaMicrophones),
+        mediaSpeakers: String(overrides?.mediaDevices?.speakers ?? prev.mediaSpeakers),
+        stableDeviceIds: overrides?.mediaDevices?.stableDeviceIds ?? prev.stableDeviceIds,
+        androidDeviceType: overrides?.androidDeviceType ?? prev.androidDeviceType,
+        androidDeviceModel: overrides?.androidDeviceModel ?? prev.androidDeviceModel,
       };
     });
   }
 
   function setCookieText(rawText: string, fileName = form.cookiesFileName): void {
     const parsed = parseCookieDraft(rawText, fileName);
+    setError(null);
     setForm((prev) => ({
       ...prev,
       cookiesText: rawText,
@@ -539,23 +787,34 @@ export function NewProfileForm({
 
   async function handleCookieFile(file: File | undefined): Promise<void> {
     if (!file) return;
-    const rawText = await file.text();
-    setCookieText(rawText, file.name);
+    if (file.size > MAX_COOKIE_FILE_BYTES) {
+      setForm((prev) => ({
+        ...prev,
+        cookiesText: '',
+        cookiesFileName: file.name,
+        cookiesParsedCount: 0,
+        cookiesErrors: [{ message: 'Cookie file must be 5 MB or smaller.' }],
+      }));
+      return;
+    }
+    try {
+      const rawText = await file.text();
+      setCookieText(rawText, file.name);
+    } catch (e: unknown) {
+      setForm((prev) => ({
+        ...prev,
+        cookiesText: '',
+        cookiesFileName: file.name,
+        cookiesParsedCount: 0,
+        cookiesErrors: [{ message: e instanceof Error ? e.message : String(e) }],
+      }));
+    }
   }
 
   function buildCustomProxyInput(): CreateStoredProxyInput | null {
-    const parsedPort = portNumber(customProxy.port.trim());
-    if (!customProxy.title.trim() || !customProxy.host.trim() || parsedPort === null) return null;
-    const config: ProxyConfig = {
-      id: `px_${crypto.randomUUID().replaceAll('-', '')}`,
-      type: customProxy.type,
-      host: customProxy.host.trim(),
-      port: parsedPort,
-      label: customProxy.title.trim(),
-    };
-    const username = customProxy.login.trim();
-    if (username) config.username = username;
-    if (customProxy.password) config.password = customProxy.password;
+    if (!customProxy.title.trim()) return null;
+    const config = customProxyConfig(customProxy, `px_${crypto.randomUUID().replaceAll('-', '')}`);
+    if (!config) return null;
     return {
       source: 'mine',
       label: customProxy.title.trim(),
@@ -563,31 +822,37 @@ export function NewProfileForm({
     };
   }
 
+  async function handleTestProxy(): Promise<void> {
+    const config = customProxyConfig(customProxy, 'px_profile_draft');
+    if (!config || !onTestProxy) return;
+    setProxyChecking(true);
+    setProxyTest(null);
+    try {
+      setProxyTest(await onTestProxy(config));
+    } catch (e: unknown) {
+      setProxyTest({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setProxyChecking(false);
+    }
+  }
+
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!canSubmit) return;
 
-    if (form.password && form.password !== form.passwordConfirm) {
-      setError('Password confirmation does not match.');
-      setStep('security');
+    const latestIssues = [
+      ...validateProfileDraft(form),
+      ...validationIssues(form, customProxy, selectedProxy, selectedTemplate),
+    ];
+    if (latestIssues.length > 0) {
+      setShowValidation(true);
+      setError(latestIssues[0]?.message ?? 'Review the highlighted profile settings.');
+      setStep(latestIssues[0]?.step ?? 'general');
       return;
     }
 
-    const input: CreateProfileInput = {
-      name: form.name.trim(),
-      engine: 'lobium',
-      os: form.os,
-      osVersion: form.osVersion,
-      tags: parseTags(form.tags),
-    };
-    if (selectedTemplate) {
-      input.templateId = selectedTemplate.id;
-      if (selectedTemplate.fingerprintOverrides) {
-        input.fingerprintOverrides = selectedTemplate.fingerprintOverrides;
-      }
-      if (selectedTemplate.cookiesImport) input.cookiesImport = selectedTemplate.cookiesImport;
-      if (selectedTemplate.extensions) input.extensions = selectedTemplate.extensions;
-    }
+    const serialized = serializeProfileDraft(form, profile);
+    const input = serialized.input;
 
     setSubmitting(true);
     setError(null);
@@ -607,40 +872,30 @@ export function NewProfileForm({
         }
         const createdProxy = await onCreateProxy(proxyInput);
         input.proxyId = createdProxy.id;
-        input.proxy = createdProxy.config;
       } else if (selectedProxy) {
         input.proxyId = selectedProxy.id;
-        input.proxy = selectedProxy.config;
       }
 
-      const notes = form.description.trim();
-      if (notes) input.notes = notes;
-      input.fingerprintOverrides = buildOverrides(form);
-
-      if (form.cookiesMode === 'empty') {
-        input.cookiesImport = { mode: 'empty' };
+      if (editing) {
+        if (!onSave) throw new Error('Profile editing is unavailable in this runtime.');
+        const patch: ProfilePatch = {
+          ...input,
+          notes: form.description.trim(),
+          folder: form.folder.trim(),
+          proxyId: input.proxyId ?? '',
+          extensions: input.extensions ?? [],
+        };
+        await onSave(
+          patch,
+          serialized.password !== undefined ? { password: serialized.password } : undefined,
+        );
       } else {
-        const cookiesText = form.cookiesText.trim();
-        if (cookiesText) {
-          const draft: CookieImportDraft = {
-            mode: form.cookiesMode,
-            source: form.cookiesFileName ? 'file' : 'plain_text',
-            rawText: cookiesText,
-          };
-          if (form.cookiesFileName) draft.fileName = form.cookiesFileName;
-          if (form.cookiesParsedCount !== undefined) draft.parsedCount = form.cookiesParsedCount;
-          if (form.cookiesErrors) draft.errors = form.cookiesErrors;
-          input.cookiesImport = draft;
-        }
+        if (!onCreate) throw new Error('Profile creation is unavailable in this runtime.');
+        await onCreate(
+          input,
+          typeof serialized.password === 'string' ? { password: serialized.password } : undefined,
+        );
       }
-
-      const extensionUrl = form.extensionUrl.trim();
-      if (extensionUrl) {
-        input.extensions = [{ source: 'chrome_web_store', enabled: true, url: extensionUrl }];
-      }
-
-      const password = form.password.trim();
-      await onCreate(input, password ? { password } : undefined);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
       setSubmitting(false);
@@ -648,31 +903,61 @@ export function NewProfileForm({
   }
 
   return (
-    <form className="wizard modal" onSubmit={handleSubmit} aria-label="Create profile">
+    <form
+      className="wizard modal"
+      onSubmit={handleSubmit}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="new-profile-title"
+      noValidate
+    >
       <header className="modal-header">
-        <h2>New Profile</h2>
+        <h2 id="new-profile-title">{editing ? 'Edit profile' : 'New profile'}</h2>
         <button type="button" className="icon-button" onClick={onCancel} aria-label="Close">
           <XMarkIcon aria-hidden />
         </button>
       </header>
 
-      <div className="wizard-steps">
-        {STEPS.map((item) => (
-          <button
-            key={item.key}
-            type="button"
-            className={item.key === step ? 'wizard-step wizard-step--active' : 'wizard-step'}
-            onClick={() => setStep(item.key)}
-          >
-            {item.label}
-          </button>
-        ))}
+      <div className="wizard-steps" role="tablist" aria-label="Profile setup sections">
+        {STEPS.map((item) => {
+          const issueCount = showValidation
+            ? issues.filter((issue) => issue.step === item.key).length
+            : 0;
+          return (
+            <button
+              key={item.key}
+              type="button"
+              role="tab"
+              id={`new-profile-tab-${item.key}`}
+              aria-selected={item.key === step}
+              aria-controls={`new-profile-panel-${item.key}`}
+              className={item.key === step ? 'wizard-step wizard-step--active' : 'wizard-step'}
+              onClick={() => setStep(item.key)}
+            >
+              <span>{item.label}</span>
+              {issueCount > 0 ? (
+                <span className="wizard-step__issues" aria-label={`${issueCount} issues`}>
+                  {issueCount}
+                </span>
+              ) : null}
+            </button>
+          );
+        })}
       </div>
 
       <div className="modal-body wizard-body">
         {step === 'general' ? (
-          <section className="wizard-section">
-            <div className="field-grid">
+          <section
+            className="wizard-section"
+            role="tabpanel"
+            id="new-profile-panel-general"
+            aria-labelledby="new-profile-tab-general"
+          >
+            <fieldset
+              className="field-grid"
+              disabled={legacyAndroid}
+              style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}
+            >
               <label className="field field--wide">
                 <span className="field__label">Template</span>
                 <select
@@ -689,30 +974,48 @@ export function NewProfileForm({
                 </select>
               </label>
 
-              <div className="field field--wide">
+              <label className="field field--wide">
                 <span className="field__label">
                   <span className="required">*</span> Profile name
                 </span>
                 <div className="profile-name-row">
-                  <img className="profile-icon-preview" src={lobsterIcon} alt="" aria-hidden />
+                  <img className="profile-icon-preview" src={appIcon} alt="" aria-hidden />
                   <input
                     className="input"
                     type="text"
                     value={form.name}
+                    maxLength={120}
+                    aria-invalid={
+                      showValidation &&
+                      (form.name.trim().length === 0 || form.name.trim().length > 120)
+                    }
                     placeholder="Enter profile name"
                     onChange={(e) => set('name', e.target.value)}
                     autoFocus
                   />
                 </div>
-              </div>
+              </label>
 
               <label className="field field--wide">
                 <span className="field__label">Description</span>
                 <textarea
                   className="input textarea textarea--profile"
                   value={form.description}
+                  maxLength={2000}
                   placeholder="Enter description"
                   onChange={(e) => set('description', e.target.value)}
+                />
+              </label>
+
+              <label className="field field--wide">
+                <span className="field__label">Folder</span>
+                <input
+                  className="input"
+                  type="text"
+                  value={form.folder}
+                  maxLength={240}
+                  placeholder="Optional folder"
+                  onChange={(e) => set('folder', e.target.value)}
                 />
               </label>
 
@@ -721,7 +1024,10 @@ export function NewProfileForm({
                 <select
                   className="input"
                   value={form.proxyId}
-                  onChange={(e) => set('proxyId', e.target.value)}
+                  onChange={(e) => {
+                    set('proxyId', e.target.value);
+                    setProxyTest(null);
+                  }}
                 >
                   <option value="">No proxy</option>
                   <option value={CUSTOM_PROXY_VALUE}>Custom proxy…</option>
@@ -743,6 +1049,7 @@ export function NewProfileForm({
                       className="input"
                       type="text"
                       value={customProxy.title}
+                      autoComplete="off"
                       onChange={(e) => setCustom('title', e.target.value)}
                     />
                   </label>
@@ -766,6 +1073,10 @@ export function NewProfileForm({
                       className="input"
                       type="text"
                       value={customProxy.host}
+                      placeholder="proxy.example.com"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
                       onChange={(e) => setCustom('host', e.target.value)}
                     />
                   </label>
@@ -788,6 +1099,7 @@ export function NewProfileForm({
                       className="input"
                       type="text"
                       value={customProxy.login}
+                      autoComplete="username"
                       onChange={(e) => setCustom('login', e.target.value)}
                     />
                   </label>
@@ -797,9 +1109,40 @@ export function NewProfileForm({
                       className="input"
                       type="password"
                       value={customProxy.password}
+                      autoComplete="new-password"
                       onChange={(e) => setCustom('password', e.target.value)}
                     />
                   </label>
+                  <div className="custom-proxy-actions field--wide">
+                    <button
+                      type="button"
+                      className="btn btn--outline btn--compact"
+                      disabled={
+                        proxyChecking ||
+                        !onTestProxy ||
+                        !customProxyConfig(customProxy, 'px_profile_draft')
+                      }
+                      onClick={() => {
+                        void handleTestProxy();
+                      }}
+                    >
+                      {proxyChecking ? 'Testing…' : 'Test connection'}
+                    </button>
+                    {proxyTest ? (
+                      <p
+                        className={
+                          proxyTest.ok
+                            ? 'proxy-test-result proxy-test-result--ok'
+                            : 'proxy-test-result proxy-test-result--error'
+                        }
+                        role="status"
+                      >
+                        {proxyTest.ok
+                          ? `Connected${proxyTest.latencyMs !== undefined ? ` · ${proxyTest.latencyMs} ms` : ''}${proxyTest.geo?.timezone ? ` · ${proxyTest.geo.timezone}` : ''}`
+                          : proxyTest.error || 'Connection failed.'}
+                      </p>
+                    ) : null}
+                  </div>
                 </div>
               ) : null}
 
@@ -813,21 +1156,32 @@ export function NewProfileForm({
                   onChange={(e) => set('tags', e.target.value)}
                 />
               </label>
-            </div>
+            </fieldset>
           </section>
         ) : null}
 
         {step === 'fingerprint' ? (
-          <section className="wizard-section">
-            <div className="field-grid">
+          <section
+            className="wizard-section"
+            role="tabpanel"
+            id="new-profile-panel-fingerprint"
+            aria-labelledby="new-profile-tab-fingerprint"
+          >
+            <fieldset
+              className="field-grid"
+              disabled={legacyAndroid}
+              style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}
+            >
               <div className="field field--wide os-version-row">
                 <label className="field">
                   <span className="field__label">Operating system</span>
                   <select
                     className="input"
                     value={form.os}
+                    disabled={legacyAndroid}
                     onChange={(e) => setOs(e.target.value as ProfileOsTarget)}
                   >
+                    {legacyAndroid ? <option value="android">Android (legacy)</option> : null}
                     {OS_OPTIONS.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
@@ -840,6 +1194,7 @@ export function NewProfileForm({
                   <select
                     className="input"
                     value={form.osVersion}
+                    disabled={legacyAndroid}
                     onChange={(e) => setOsVersion(e.target.value)}
                   >
                     {versionOptions.map((version) => (
@@ -852,21 +1207,21 @@ export function NewProfileForm({
               </div>
 
               <label className="field field--wide">
-                <span className="field__label">User Agent</span>
+                <span className="field__label">User-Agent</span>
                 <input
                   className="input"
                   type="text"
                   aria-label="User Agent"
-                  value={form.userAgent}
+                  value={userAgent}
                   readOnly
-                  title="Derived from Operating system and Lobium Chrome version"
+                  title={userAgent}
                 />
               </label>
 
               {isAndroid ? (
                 <>
                   <label className="field">
-                    <span className="field__label">Device Type</span>
+                    <span className="field__label">Device type</span>
                     <select
                       className="input"
                       value={form.androidDeviceType}
@@ -880,29 +1235,27 @@ export function NewProfileForm({
                     </select>
                   </label>
                   <label className="field field--wide">
-                    <span className="field__label">Device Model</span>
-                    <input
-                      className="input"
-                      list="android-device-models"
+                    <span className="field__label">Device model</span>
+                    <SearchableSelect
+                      options={androidModels}
                       value={form.androidDeviceModel}
+                      onChange={(model) => set('androidDeviceModel', model)}
+                      ariaLabel="Device model"
+                      invalid={
+                        showValidation &&
+                        !findAndroidCatalogEntry(form.androidDeviceType, form.androidDeviceModel)
+                      }
                       placeholder="Search verified Play device models"
-                      onChange={(e) => set('androidDeviceModel', e.target.value)}
                     />
-                    <datalist id="android-device-models">
-                      {androidModels.slice(0, 2500).map((model) => (
-                        <option key={model} value={model}>
-                          {model}
-                        </option>
-                      ))}
-                    </datalist>
                     <span className="field-hint">
                       {androidModels.length.toLocaleString()} verified models for {form.osVersion} ·{' '}
                       {form.androidDeviceType}
                     </span>
                   </label>
                   <p className="field-hint field--wide">
-                    Android Lobium is a separate mobile engine track. Desktop launch stays blocked
-                    until the APK/device runner ships. Hardware settings are omitted for Android.
+                    Hardware settings are derived from the selected verified device model. The
+                    profile opens in a phone-sized window with touch/mobile emulation — no
+                    physical device or Lobium APK required.
                   </p>
                 </>
               ) : (
@@ -924,11 +1277,23 @@ export function NewProfileForm({
 
                   <div className="field field--wide">
                     <span className="field__label">Fonts</span>
-                    <FontMultiSelect
-                      options={fontOptions}
-                      selected={form.selectedFonts}
-                      onChange={(selectedFonts) => set('selectedFonts', selectedFonts)}
-                    />
+                    {fontCatalogLoading ? (
+                      <p className="field-hint" role="status">
+                        Reading the installed font pack…
+                      </p>
+                    ) : fontCatalogError ? (
+                      <p className="notice notice--error" role="alert">
+                        Font pack unavailable: {fontCatalogError}
+                      </p>
+                    ) : (
+                      <FontMultiSelect
+                        options={form.fonts.available}
+                        selected={form.fonts.selected}
+                        onChange={(selected) =>
+                          setForm((prev) => ({ ...prev, fonts: { ...prev.fonts, selected } }))
+                        }
+                      />
+                    )}
                   </div>
                 </>
               )}
@@ -954,6 +1319,8 @@ export function NewProfileForm({
                     className="input"
                     type="text"
                     value={form.languages}
+                    placeholder="en-US, en"
+                    spellCheck={false}
                     onChange={(e) => set('languages', e.target.value)}
                   />
                 </label>
@@ -980,6 +1347,8 @@ export function NewProfileForm({
                     className="input"
                     type="text"
                     value={form.timezone}
+                    placeholder="America/New_York"
+                    spellCheck={false}
                     onChange={(e) => set('timezone', e.target.value)}
                   />
                 </label>
@@ -1006,6 +1375,8 @@ export function NewProfileForm({
                     <input
                       className="input"
                       type="number"
+                      min={-90}
+                      max={90}
                       step="0.000001"
                       value={form.geolocationLat}
                       onChange={(e) => set('geolocationLat', e.target.value)}
@@ -1016,6 +1387,8 @@ export function NewProfileForm({
                     <input
                       className="input"
                       type="number"
+                      min={-180}
+                      max={180}
                       step="0.000001"
                       value={form.geolocationLng}
                       onChange={(e) => set('geolocationLng', e.target.value)}
@@ -1067,22 +1440,19 @@ export function NewProfileForm({
                   </label>
 
                   <label className="field">
-                    <span className="field__label">RAM size (GB)</span>
+                    <span className="field__label">Reported memory</span>
                     <select
                       className="input"
                       value={form.ramSize}
                       onChange={(e) => set('ramSize', e.target.value)}
                     >
-                      {PHYSICAL_RAM_OPTIONS.map((ram) => (
+                      {DEVICE_MEMORY_OPTIONS.map((ram) => (
                         <option key={ram} value={String(ram)}>
                           {ram} GB
                         </option>
                       ))}
                     </select>
-                    <span className="field-hint">
-                      Stored as deviceMemory {normalizeDeviceMemory(Number(form.ramSize) || 8)} GB
-                      (Chromium ladder)
-                    </span>
+                    <span className="field-hint">navigator.deviceMemory (Lobium values)</span>
                   </label>
 
                   <label className="field field--wide">
@@ -1092,7 +1462,8 @@ export function NewProfileForm({
                       value={form.rendererPresetId}
                       onChange={(e) => set('rendererPresetId', e.target.value)}
                     >
-                      <option value="">Select a verified renderer</option>
+                      <option value="host">Host GPU</option>
+                      <option value="normalized_host">Normalized host GPU</option>
                       {rendererOptions.map((renderer) => (
                         <option key={renderer.id} value={renderer.id}>
                           {renderer.label}
@@ -1100,78 +1471,93 @@ export function NewProfileForm({
                       ))}
                     </select>
                     <span className="field-hint">
-                      {rendererOptions.length.toLocaleString()} verified {form.os} renderers
+                      Host calibration is recommended. {rendererOptions.length.toLocaleString()}{' '}
+                      sourced {form.os} GPU presets available.
                     </span>
                   </label>
                 </>
               ) : null}
-            </div>
+            </fieldset>
 
-            <div className="support-grid">
-              {(
-                [
-                  ['noiseWebgl', 'WebGL'],
-                  ['noiseCanvas', 'Canvas'],
-                  ['noiseAudio', 'Audio'],
-                  ['noiseClientRects', 'Client Rects'],
-                ] as const
-              ).map(([key, label]) => (
-                <label key={key} className="check-row">
+            <fieldset className="fp-inline-group" disabled={legacyAndroid}>
+              <legend>Deterministic noise</legend>
+              <div className="support-grid">
+                {(
+                  [
+                    ['noiseWebgl', 'WebGL'],
+                    ['noiseCanvas', 'Canvas'],
+                    ['noiseAudio', 'Audio'],
+                    ['noiseClientRects', 'Client rects'],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key} className="check-row">
+                    <input
+                      type="checkbox"
+                      checked={form[key]}
+                      onChange={(e) => set(key, e.target.checked)}
+                    />
+                    <span>{label}</span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            <fieldset className="fp-inline-group" disabled={legacyAndroid}>
+              <legend>Media devices</legend>
+              <div className="field-grid">
+                <label className="field">
+                  <span className="field__label">Cameras</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={form.mediaCameras}
+                    onChange={(e) => set('mediaCameras', e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span className="field__label">Microphones</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={form.mediaMicrophones}
+                    onChange={(e) => set('mediaMicrophones', e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span className="field__label">Speakers</span>
+                  <input
+                    className="input"
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={form.mediaSpeakers}
+                    onChange={(e) => set('mediaSpeakers', e.target.value)}
+                  />
+                </label>
+                <label className="check-row check-row--field">
                   <input
                     type="checkbox"
-                    checked={form[key]}
-                    onChange={(e) => set(key, e.target.checked)}
+                    checked={form.stableDeviceIds}
+                    onChange={(e) => set('stableDeviceIds', e.target.checked)}
                   />
-                  <span>{label}</span>
+                  <span>Stable device IDs</span>
                 </label>
-              ))}
-            </div>
-
-            <div className="field-grid">
-              <label className="field">
-                <span className="field__label">Cameras</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  value={form.mediaCameras}
-                  onChange={(e) => set('mediaCameras', e.target.value)}
-                />
-              </label>
-              <label className="field">
-                <span className="field__label">Microphones</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  value={form.mediaMicrophones}
-                  onChange={(e) => set('mediaMicrophones', e.target.value)}
-                />
-              </label>
-              <label className="field">
-                <span className="field__label">Speakers</span>
-                <input
-                  className="input"
-                  type="number"
-                  min={0}
-                  value={form.mediaSpeakers}
-                  onChange={(e) => set('mediaSpeakers', e.target.value)}
-                />
-              </label>
-              <label className="check-row check-row--field">
-                <input
-                  type="checkbox"
-                  checked={form.stableDeviceIds}
-                  onChange={(e) => set('stableDeviceIds', e.target.checked)}
-                />
-                <span>Stable device IDs</span>
-              </label>
-            </div>
+              </div>
+            </fieldset>
           </section>
         ) : null}
 
         {step === 'cookies' ? (
-          <section className="wizard-section">
+          <section
+            className="wizard-section"
+            role="tabpanel"
+            id="new-profile-panel-cookies"
+            aria-labelledby="new-profile-tab-cookies"
+          >
             <label className="field field--wide">
               <span className="field__label">Import mode</span>
               <select
@@ -1197,8 +1583,11 @@ export function NewProfileForm({
                   <input
                     type="file"
                     accept=".txt,.json"
+                    aria-label="Choose a Netscape or JSON cookie file"
                     onChange={(e) => {
-                      void handleCookieFile(e.target.files?.[0]);
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      void handleCookieFile(file);
                     }}
                   />
                   <span>{form.cookiesFileName || 'Cookie file import'}</span>
@@ -1208,11 +1597,29 @@ export function NewProfileForm({
                       : 'Select or drop .txt / .json'}
                   </em>
                 </label>
+                {form.cookiesText || form.cookiesFileName ? (
+                  <div className="cookie-import-status" role="status">
+                    <span>
+                      {form.cookiesErrors?.length
+                        ? 'Import needs attention'
+                        : `${form.cookiesParsedCount ?? 0} valid cookies ready`}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn--ghost btn--compact"
+                      onClick={() => setCookieText('', '')}
+                    >
+                      Clear import
+                    </button>
+                  </div>
+                ) : null}
                 <label className="field field--wide">
                   <span className="field__label">Plain text cookies</span>
                   <textarea
                     className="input textarea textarea--tall"
                     value={form.cookiesText}
+                    aria-invalid={Boolean(form.cookiesErrors?.length)}
+                    spellCheck={false}
                     placeholder="Paste cookie text"
                     onChange={(e) => setCookieText(e.target.value, '')}
                   />
@@ -1232,7 +1639,12 @@ export function NewProfileForm({
         ) : null}
 
         {step === 'security' ? (
-          <section className="wizard-section">
+          <section
+            className="wizard-section"
+            role="tabpanel"
+            id="new-profile-panel-security"
+            aria-labelledby="new-profile-tab-security"
+          >
             <div className="field-grid">
               <label className="field">
                 <span className="field__label">Password</span>
@@ -1251,6 +1663,7 @@ export function NewProfileForm({
                   className="input"
                   type="password"
                   value={form.passwordConfirm}
+                  aria-invalid={showValidation && form.password !== form.passwordConfirm}
                   placeholder="Repeat password"
                   onChange={(e) => set('passwordConfirm', e.target.value)}
                   autoComplete="new-password"
@@ -1258,8 +1671,20 @@ export function NewProfileForm({
               </label>
             </div>
             <p className="field-hint">
-              When set, launching this profile requires the password. Leave blank for no protection.
+              {editing && profile?.passwordProtected
+                ? 'Leave blank to keep the current password, or enter a replacement.'
+                : 'When set, launching this profile requires the password.'}
             </p>
+            {editing && profile?.passwordProtected ? (
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={form.removePassword}
+                  onChange={(e) => set('removePassword', e.target.checked)}
+                />
+                <span>Remove password protection</span>
+              </label>
+            ) : null}
             <div className="review-warnings">
               {warnings.map((warning) => (
                 <p key={warning}>{warning}</p>
@@ -1269,21 +1694,155 @@ export function NewProfileForm({
         ) : null}
 
         {step === 'extensions' ? (
-          <section className="wizard-section">
-            <label className="field field--wide">
-              <span className="field__label">Chrome Web Store link</span>
-              <input
-                className="input"
-                type="url"
-                value={form.extensionUrl}
-                placeholder="https://chromewebstore.google.com/detail/..."
-                onChange={(e) => set('extensionUrl', e.target.value)}
-              />
-            </label>
+          <section
+            className="wizard-section"
+            role="tabpanel"
+            id="new-profile-panel-extensions"
+            aria-labelledby="new-profile-tab-extensions"
+          >
+            <div className="field-grid">
+              <label className="field">
+                <span className="field__label">Source</span>
+                <select
+                  className="input"
+                  value={extensionSource}
+                  onChange={(event) => {
+                    setExtensionSource(event.target.value as BrowserExtensionRef['source']);
+                    setExtensionInputError(null);
+                  }}
+                >
+                  <option value="chrome_web_store">Chrome Web Store</option>
+                  <option value="unpacked">Local unpacked directory</option>
+                </select>
+              </label>
+              <label className="field field--wide">
+                <span className="field__label">
+                  {extensionSource === 'chrome_web_store'
+                    ? 'Extension ID or official detail URL'
+                    : 'Absolute directory path'}
+                </span>
+                <input
+                  className="input"
+                  value={extensionValue}
+                  aria-invalid={Boolean(extensionInputError)}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  placeholder={
+                    extensionSource === 'chrome_web_store'
+                      ? 'abcdefghijklmnopabcdefghijklmnop'
+                      : '/home/user/extensions/my-extension'
+                  }
+                  onChange={(event) => {
+                    setExtensionValue(event.target.value);
+                    setExtensionInputError(null);
+                  }}
+                />
+              </label>
+              <div className="field field--wide">
+                <button type="button" className="btn btn--secondary" onClick={addExtension}>
+                  Add extension
+                </button>
+                {extensionInputError ? (
+                  <p className="notice notice--error" role="alert">
+                    {extensionInputError}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <div className="extension-list">
+              {form.extensions.length === 0 ? (
+                <p className="field-hint">No extensions configured.</p>
+              ) : (
+                form.extensions.map((extension, index) => {
+                  const label =
+                    extension.name ||
+                    extension.id ||
+                    extension.url ||
+                    extension.path ||
+                    `Extension ${index + 1}`;
+                  const state = !extension.enabled
+                    ? 'Disabled'
+                    : extension.installState === 'error'
+                      ? 'Install failed'
+                      : extension.installState === 'ready'
+                        ? 'Ready'
+                        : 'Will install at next launch';
+                  return (
+                    <div className="extension-row" key={`${extension.source}-${label}-${index}`}>
+                      <label className="check-row">
+                        <input
+                          type="checkbox"
+                          checked={extension.enabled}
+                          onChange={(event) =>
+                            setForm((previous) => ({
+                              ...previous,
+                              extensions: previous.extensions.map((item, itemIndex) =>
+                                itemIndex === index
+                                  ? {
+                                      ...item,
+                                      enabled: event.target.checked,
+                                      installState: event.target.checked ? 'pending' : 'disabled',
+                                    }
+                                  : item,
+                              ),
+                            }))
+                          }
+                        />
+                        <span>
+                          <strong>{label}</strong>
+                          <small>
+                            {extension.source === 'chrome_web_store'
+                              ? 'Chrome Web Store'
+                              : 'Local unpacked'}{' '}
+                            · {state}
+                          </small>
+                        </span>
+                      </label>
+                      {extension.installError ? (
+                        <p className="notice notice--error">{extension.installError}</p>
+                      ) : null}
+                      <button
+                        type="button"
+                        className="btn btn--ghost btn--compact"
+                        onClick={() =>
+                          setForm((previous) => ({
+                            ...previous,
+                            extensions: previous.extensions.filter(
+                              (_item, itemIndex) => itemIndex !== index,
+                            ),
+                          }))
+                        }
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            <p className="field-hint">
+              Store packages are fetched only for explicitly configured IDs from Google’s update
+              service, then CRX3 identity/signature-verified and safely unpacked. Availability and
+              use remain subject to Chrome Web Store terms.
+            </p>
           </section>
         ) : null}
 
-        {error ? <p className="notice notice--error">{error}</p> : null}
+        {currentStepIssues.length > 0 ? (
+          <div className="notice notice--error validation-summary" role="alert">
+            <strong>Review this section</strong>
+            <ul>
+              {currentStepIssues.map((issue) => (
+                <li key={issue.message}>{issue.message}</li>
+              ))}
+            </ul>
+          </div>
+        ) : error ? (
+          <p className="notice notice--error" role="alert">
+            {error}
+          </p>
+        ) : null}
       </div>
 
       <footer className="modal-footer">
@@ -1296,7 +1855,13 @@ export function NewProfileForm({
           Cancel
         </button>
         <button type="submit" className="btn btn--primary" disabled={!canSubmit}>
-          {submitting ? 'Creating…' : 'Create Profile'}
+          {submitting
+            ? editing
+              ? 'Saving…'
+              : 'Creating…'
+            : editing
+              ? 'Save profile'
+              : 'Create profile'}
         </button>
       </footer>
     </form>

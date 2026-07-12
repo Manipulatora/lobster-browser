@@ -23,9 +23,9 @@ export type SidecarMethod =
   | 'launch'
   | 'stop'
   | 'status'
+  | 'exportCookies'
   | 'ping'
   | 'ensureHostCalibration';
-
 
 export interface SidecarRequest<M extends SidecarMethod = SidecarMethod, P = unknown> {
   /** Correlation id echoed back in the response. */
@@ -67,6 +67,13 @@ export interface LaunchParams {
   cookiesImport?: CookieImportDraft;
   extensions?: BrowserExtensionRef[];
   headless?: boolean;
+  /**
+   * True for an Android persona launched as an emulated mobile Chrome (native Lobium, a real window,
+   * no ADB/APK) — see `start-android-emulated-profile.ts`. The launcher centers the window and
+   * applies CDP touch/device-metrics emulation so the window behaves like a phone viewport instead
+   * of a plain desktop window that merely claims a mobile UA.
+   */
+  isMobileProfile?: boolean;
 }
 
 /**
@@ -80,17 +87,24 @@ export interface StartProfileParams {
   profileName?: string;
   engine: EngineKind;
   /**
-   * Launch OS. Desktop targets are `windows`/`macos`/`linux` (product targets like `macos_arm` are
-   * normalized before sidecar IPC). `android` routes to the ADB/APK runner — never desktop UA spoof.
+   * Launch OS. Desktop targets are `windows`/`macos`/`linux`. `android` defaults to an EMULATED
+   * mobile Chrome — native Lobium, a real phone-sized window, no hardware required (see
+   * `start-android-emulated-profile.ts`); set `androidTransport: 'adb'` to instead route to the
+   * ADB/APK real-device runner.
    */
   os: OsFamily | 'android';
   /** Optional architecture requested by a user-facing target such as macOS Intel vs macOS Arm. */
   arch?: CpuArch;
   osVersion?: string;
   /**
+   * How an `os: 'android'` profile launches. Default (omitted) is the emulated native path. `'adb'`
+   * requires a connected device/emulator with the Lobium APK installed. Ignored for non-Android OS.
+   */
+  androidTransport?: 'adb';
+  /**
    * Optional host snapshot captured by the desktop control plane. When present, the sidecar derives the
    * profile from the real host hardware instead of the fallback catalog. The snapshot OS must match
-   * `os`; Android uses a separate runner path and never arrives here.
+   * `os`; Android (either transport) never arrives here.
    */
   hostCalibration?: HostCalibrationProfile;
   fingerprintSeed: FingerprintSeed;
@@ -110,6 +124,8 @@ export interface LaunchResult {
   ws: string;
   /** host:port for Selenium debuggerAddress. */
   debuggerAddress: string;
+  /** True only after the pending one-shot import completed successfully over CDP. */
+  cookieImportApplied?: boolean;
 }
 
 export interface StopParams {
@@ -122,4 +138,16 @@ export interface StatusParams {
 
 export interface StatusResult {
   running: Array<{ profileId: string; pid: number; ws: string; debuggerAddress: string }>;
+  /** Recent out-of-band exits caused by a fail-closed network/upstream error. */
+  errors?: Array<{ profileId: string; message: string }>;
+}
+
+export interface ExportCookiesParams {
+  profileId: string;
+}
+
+export interface ExportCookiesResult {
+  profileId: string;
+  /** Playwright/CDP-style JSON. This is a local, explicit secret export. */
+  json: string;
 }

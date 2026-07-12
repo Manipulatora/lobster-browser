@@ -6,6 +6,7 @@ import type {
   StopParams,
 } from '@lobster/shared-types';
 import type { EngineRunner } from '../runner.js';
+import type { LobiumBuildCapabilities } from '../lobium-capabilities.js';
 import { buildCdpEmulation, buildFingerprintInitScript, buildLaunchOptions } from '../launch.js';
 import { defaultLaunchers } from './default-launchers.js';
 import type { LaunchContext, LaunchHandle, LauncherRegistry } from './types.js';
@@ -22,15 +23,27 @@ import type { LaunchContext, LaunchHandle, LauncherRegistry } from './types.js';
 export class CompositeRunner implements EngineRunner {
   private readonly launchers: LauncherRegistry;
   private readonly running = new Map<string, LaunchHandle>();
+  private readonly recentErrors = new Map<string, string>();
 
   constructor(launchers: LauncherRegistry = defaultLaunchers) {
     this.launchers = launchers;
+  }
+
+  getLobiumBuildCapabilities(): Promise<LobiumBuildCapabilities> {
+    const launcher = this.launchers.lobium;
+    if (!launcher?.getBuildCapabilities) {
+      return Promise.reject(
+        new Error('registered Lobium launcher does not expose an exact-build capability probe'),
+      );
+    }
+    return launcher.getBuildCapabilities();
   }
 
   async launch(params: LaunchParams): Promise<LaunchResult> {
     if (this.running.has(params.profileId)) {
       throw new Error(`profile ${params.profileId} is already running`);
     }
+    this.recentErrors.delete(params.profileId);
     const launcher = this.launchers[params.engine];
     if (!launcher) {
       throw new Error(`no launcher registered for engine "${params.engine}"`);
@@ -48,6 +61,8 @@ export class CompositeRunner implements EngineRunner {
       ...(params.webrtcPolicy !== undefined ? { webrtcPolicy: params.webrtcPolicy } : {}),
       ...(params.fingerprintSeed !== undefined ? { fingerprintSeed: params.fingerprintSeed } : {}),
       ...(params.cookiesImport !== undefined ? { cookiesImport: params.cookiesImport } : {}),
+      ...(params.extensions !== undefined ? { extensions: params.extensions } : {}),
+      ...(params.isMobileProfile ? { isMobileProfile: true } : {}),
       options: buildLaunchOptions(params),
       emulation: buildCdpEmulation(params.fingerprint),
       initScript: buildFingerprintInitScript(params.fingerprint),
@@ -59,9 +74,10 @@ export class CompositeRunner implements EngineRunner {
     // the map entry survives and `launch` rejects with "already running" forever — a crash would brick
     // the profile until restart. Guarded so we only delete THIS handle (a fast relaunch may have
     // replaced it). Explicit stop() also deletes; Map.delete is idempotent.
-    handle.onClose?.(() => {
+    handle.onClose?.((reason) => {
       if (this.running.get(params.profileId) === handle) {
         this.running.delete(params.profileId);
+        if (reason) this.recentErrors.set(params.profileId, reason);
       }
     });
     return {
@@ -69,6 +85,9 @@ export class CompositeRunner implements EngineRunner {
       pid: handle.pid,
       ws: handle.ws,
       debuggerAddress: handle.debuggerAddress,
+      ...(handle.cookieImportApplied !== undefined
+        ? { cookieImportApplied: handle.cookieImportApplied }
+        : {}),
     };
   }
 
@@ -79,6 +98,7 @@ export class CompositeRunner implements EngineRunner {
     }
     await handle.close();
     this.running.delete(params.profileId);
+    this.recentErrors.delete(params.profileId);
   }
 
   status(params: StatusParams): Promise<StatusResult> {
@@ -90,6 +110,18 @@ export class CompositeRunner implements EngineRunner {
         ws: h.ws,
         debuggerAddress: h.debuggerAddress,
       }));
-    return Promise.resolve({ running });
+    const errors = [...this.recentErrors.entries()]
+      .filter(([id]) => params.profileId === undefined || id === params.profileId)
+      .map(([profileId, message]) => ({ profileId, message }));
+    return Promise.resolve({ running, ...(errors.length > 0 ? { errors } : {}) });
+  }
+
+  async exportCookies(profileId: string): Promise<{ profileId: string; json: string }> {
+    const handle = this.running.get(profileId);
+    if (!handle) throw new Error(`profile ${profileId} is not running`);
+    if (!handle.exportCookies) {
+      throw new Error(`profile ${profileId} launcher does not support live cookie export`);
+    }
+    return { profileId, json: await handle.exportCookies() };
   }
 }
