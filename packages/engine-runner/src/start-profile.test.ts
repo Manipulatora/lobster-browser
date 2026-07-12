@@ -7,11 +7,25 @@ import type {
   StartProfileParams,
 } from '@lobster/shared-types';
 import type { EngineRunner } from './runner.js';
+import { WINDOWS_RENDERER_PRESETS } from '@lobster/fingerprint';
+import {
+  LOBIUM_CAPABILITY_CONTRACT_VERSION,
+  LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
+  type LobiumBuildCapabilities,
+} from './lobium-capabilities.js';
 import { startProfile } from './start-profile.js';
 
 /** Records launch() calls without spawning a browser, so the coherence gate is testable in isolation. */
 class RecordingRunner implements EngineRunner {
   launched: LaunchParams[] = [];
+  capabilities: LobiumBuildCapabilities = {
+    contractVersion: LOBIUM_CAPABILITY_CONTRACT_VERSION,
+    product: 'Lobium',
+    capabilities: [...LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES],
+  };
+  async getLobiumBuildCapabilities(): Promise<LobiumBuildCapabilities> {
+    return this.capabilities;
+  }
   async launch(params: LaunchParams): Promise<LaunchResult> {
     this.launched.push(params);
     return { profileId: params.profileId, pid: 0, ws: 'ws://x', debuggerAddress: '127.0.0.1:1' };
@@ -19,6 +33,9 @@ class RecordingRunner implements EngineRunner {
   async stop(): Promise<void> {}
   async status(): Promise<{ running: never[] }> {
     return { running: [] };
+  }
+  async exportCookies(profileId: string): Promise<{ profileId: string; json: string }> {
+    return { profileId, json: '[]' };
   }
 }
 
@@ -28,17 +45,49 @@ const base: StartProfileParams = {
   os: 'windows',
   engine: 'lobium',
   userDataDir: '/tmp/does-not-matter',
+  hostCalibration: hostCalibration(),
 };
 
-function hostCalibration(): HostCalibrationProfile {
+function withoutHostCalibration(
+  params: StartProfileParams = base,
+): Omit<StartProfileParams, 'hostCalibration'> {
+  const clone = { ...params };
+  delete clone.hostCalibration;
+  return clone;
+}
+
+function precisionStage() {
+  const float = { rangeMin: 127, rangeMax: 127, precision: 23 };
+  const integer = { rangeMin: 31, rangeMax: 30, precision: 0 };
+  return {
+    lowFloat: { ...float },
+    mediumFloat: { ...float },
+    highFloat: { ...float },
+    lowInt: { ...integer },
+    mediumInt: { ...integer },
+    highInt: { ...integer },
+  };
+}
+
+function hostCalibration(
+  os: 'windows' | 'macos' | 'linux' = 'windows',
+  arch: 'x86_64' | 'arm64' = 'x86_64',
+): HostCalibrationProfile {
+  const isMac = os === 'macos';
+  const renderer = isMac
+    ? 'ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)'
+    : 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+  const vendor = isMac ? 'Google Inc. (Apple)' : 'Google Inc. (NVIDIA)';
   return {
     version: 1,
     capturedAt: '2026-07-08T12:00:00.000Z',
-    os: 'windows',
-    arch: 'x86_64',
+    os,
+    arch,
     browserVersion: '152.0.7928.0',
     navigator: {
-      platform: 'Win32',
+      platform: isMac ? 'MacIntel' : os === 'linux' ? 'Linux x86_64' : 'Win32',
+      languages: ['en-US', 'en'],
+      locale: 'en-US',
       hardwareConcurrency: 12,
       deviceMemory: 64,
       maxTouchPoints: 0,
@@ -47,20 +96,36 @@ function hostCalibration(): HostCalibrationProfile {
       width: 2560,
       height: 1440,
       availWidth: 2560,
-      availHeight: 1400,
+      availHeight: isMac ? 1415 : 1400,
       availLeft: 0,
-      availTop: 0,
+      availTop: isMac ? 25 : 0,
       colorDepth: 24,
       devicePixelRatio: 1,
     },
     webgl: {
-      vendor: 'Google Inc. (NVIDIA)',
-      renderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-      unmaskedVendor: 'Google Inc. (NVIDIA)',
-      unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+      vendor,
+      renderer,
+      unmaskedVendor: vendor,
+      unmaskedRenderer: renderer,
       version: 'WebGL 1.0 (OpenGL ES 2.0 Chromium)',
       shadingLanguageVersion: 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)',
       extensions: ['WEBGL_debug_renderer_info', 'ANGLE_instanced_arrays'],
+      caps: {
+        maxTextureSize: 16384,
+        maxCubeMapTextureSize: 16384,
+        maxRenderbufferSize: 16384,
+        maxViewportDims: [16384, 16384],
+        maxVertexAttribs: 16,
+        maxVertexUniformVectors: 4096,
+        maxFragmentUniformVectors: 1024,
+        maxVaryingVectors: 30,
+        maxTextureImageUnits: 16,
+        maxVertexTextureImageUnits: 16,
+        maxCombinedTextureImageUnits: 32,
+        aliasedLineWidthRange: [1, 1],
+        aliasedPointSizeRange: [1, 1024],
+      },
+      shaderPrecision: { vertex: precisionStage(), fragment: precisionStage() },
     },
     fonts: ['Arial', 'Calibri', 'Segoe UI'],
     timezone: 'America/New_York',
@@ -80,7 +145,7 @@ test('startProfile carries UI launch policy fields to the runner', async () => {
     ...base,
     osVersion: 'Windows 11 23H2',
     fingerprintOverrides: {
-      webrtc: 'proxy_only',
+      webrtc: 'disabled',
       renderer: { mode: 'normalized_host' },
       hardwareNoise: { canvas: false, clientRects: true },
       mediaDevices: { cameras: 2, microphones: 1, speakers: 3, stableDeviceIds: false },
@@ -92,7 +157,7 @@ test('startProfile carries UI launch policy fields to the runner', async () => {
   const launched = runner.launched[0];
   assert.ok(launched);
   assert.equal(launched.osVersion, 'Windows 11 23H2');
-  assert.equal(launched.webrtcPolicy, 'proxy_only');
+  assert.equal(launched.webrtcPolicy, 'disabled');
   assert.deepEqual(launched.fingerprintPolicy?.renderer, { mode: 'normalized_host' });
   assert.equal(launched.fingerprintPolicy?.hardwareNoise.webgl, true, 'default preserved');
   assert.equal(launched.fingerprintPolicy?.hardwareNoise.canvas, false);
@@ -105,14 +170,135 @@ test('startProfile carries UI launch policy fields to the runner', async () => {
   });
   assert.equal(launched.cookiesImport?.parsedCount, 1);
   assert.equal(launched.extensions?.[0]?.source, 'chrome_web_store');
+  assert.equal(
+    launched.fingerprint.navigator.uaPlatformVersion,
+    '15.0.0',
+    'persisted Windows 11 selection is authoritative for UA-CH',
+  );
 });
 
-test('startProfile honors a requested macOS architecture in catalog derivation', async () => {
+test('startProfile applies edited Windows/macOS version labels even without a matching override', async () => {
+  const windows = new RecordingRunner();
+  await startProfile(windows, { ...base, osVersion: 'Windows 10' });
+  assert.equal(windows.launched[0]?.fingerprint.navigator.uaPlatformVersion, '10.0.0');
+
+  const mac = new RecordingRunner();
+  await startProfile(mac, {
+    ...base,
+    os: 'macos',
+    arch: 'arm64',
+    osVersion: 'macOS 15 Sequoia',
+    hostCalibration: hostCalibration('macos', 'arm64'),
+  });
+  assert.equal(mac.launched[0]?.fingerprint.navigator.uaPlatformVersion, '15.0.0');
+});
+
+test('WebRTC Based on IP does not accidentally block direct profiles without a proxy', async () => {
+  const runner = new RecordingRunner();
+  await startProfile(runner, {
+    ...base,
+    fingerprintOverrides: { webrtcMode: 'based_ip', webrtc: 'proxy_only' },
+  });
+  assert.equal(runner.launched[0]?.webrtcPolicy, 'default_public_interface_only');
+});
+
+test('startProfile rejects proxy_only WebRTC without a proxy before launch', async () => {
+  const runner = new RecordingRunner();
+  await assert.rejects(
+    startProfile(runner, {
+      ...base,
+      fingerprintOverrides: { webrtc: 'proxy_only' },
+    }),
+    /proxy_only policy requires a configured proxy/,
+  );
+  assert.equal(runner.launched.length, 0);
+});
+
+test('startProfile rejects host-leaking default WebRTC policy on a proxied profile', async () => {
+  const runner = new RecordingRunner();
+  await assert.rejects(
+    startProfile(runner, {
+      ...base,
+      proxy: { id: 'p', type: 'http', host: 'proxy.example', port: 8080 },
+      fingerprintOverrides: { webrtc: 'default_public_interface_only' },
+    }),
+    /unsafe with a proxy/,
+  );
+  assert.equal(runner.launched.length, 0);
+});
+
+test('renderer policies fail closed without complete evidence', async () => {
+  const hostRunner = new RecordingRunner();
+  await assert.rejects(
+    startProfile(hostRunner, withoutHostCalibration()),
+    /renderer policy "host" requires a complete compatible host calibration/,
+  );
+
+  const presetRunner = new RecordingRunner();
+  await assert.rejects(
+    startProfile(presetRunner, {
+      ...withoutHostCalibration(),
+      fingerprintOverrides: {
+        renderer: { mode: 'validated_preset', presetId: 'windows-nvidia-10de-2503' },
+      },
+    }),
+    /is not present in the sourced GPU catalog/,
+  );
+});
+
+test('a restored sourced renderer preset launches with its complete WebGL surface', async () => {
+  const preset = WINDOWS_RENDERER_PRESETS[0];
+  assert.ok(preset);
+  const runner = new RecordingRunner();
+  await startProfile(runner, {
+    ...withoutHostCalibration(),
+    fingerprintOverrides: {
+      renderer: { mode: 'validated_preset', presetId: preset.id },
+      webgl: preset.webgl,
+    },
+  });
+  assert.equal(runner.launched.length, 1);
+  assert.equal(runner.launched[0]?.fingerprint.webgl.renderer, preset.webgl.renderer);
+  assert.deepEqual(runner.launched[0]?.fingerprint.webgl.caps, preset.webgl.caps);
+});
+
+test('startProfile rejects a selected native policy when the exact build lacks its hook', async () => {
+  const runner = new RecordingRunner();
+  runner.capabilities = {
+    ...runner.capabilities,
+    capabilities: runner.capabilities.capabilities.filter(
+      (capability) => capability !== 'client-rects',
+    ),
+  };
+  await assert.rejects(
+    startProfile(runner, {
+      ...base,
+      fingerprintOverrides: { hardwareNoise: { clientRects: true } },
+    }),
+    /lacks required native fingerprint hooks: client-rects/,
+  );
+  assert.equal(runner.launched.length, 0);
+});
+
+test('startProfile rejects unsafe media-device counts from untyped persisted JSON', async () => {
+  const runner = new RecordingRunner();
+  await assert.rejects(
+    startProfile(runner, {
+      ...base,
+      fingerprintOverrides: { mediaDevices: { cameras: 50_000 } },
+    }),
+    /mediaDevices\.cameras must be an integer in 0-16/,
+  );
+  assert.equal(runner.launched.length, 0);
+});
+
+test('startProfile honors a requested macOS architecture from complete host calibration', async () => {
   const runner = new RecordingRunner();
   await startProfile(runner, {
     ...base,
     os: 'macos',
     arch: 'arm64',
+    hostCalibration: hostCalibration('macos', 'arm64'),
   });
 
   const launched = runner.launched[0];
@@ -152,7 +338,7 @@ test('startProfile uses a PERSISTED host profile as the default when captured (H
   try {
     const runner = new RecordingRunner();
     // No explicit hostCalibration in params — the persisted file must become the default source.
-    await startProfile(runner, base);
+    await startProfile(runner, withoutHostCalibration());
     const launched = runner.launched[0];
     assert.ok(launched);
     assert.equal(launched.fingerprint.webgl.renderer, hostCalibration().webgl.renderer);
@@ -167,7 +353,43 @@ test('startProfile uses a PERSISTED host profile as the default when captured (H
   }
 });
 
-test('startProfile ignores a persisted host profile whose OS differs (falls back to catalog)', async () => {
+test('a persisted host calibration must NOT override an explicitly requested validated_preset (regression)', async () => {
+  // Found by a 20-profile fleet battle test: every Linux fixture reported the real host SwiftShader
+  // renderer on Sannysoft instead of its requested NVIDIA/AMD/Intel preset. Root cause: the persisted-
+  // calibration auto-load ran whenever a compatible file existed for the profile's OS, regardless of
+  // the requested renderer mode, so a `validated_preset` profile silently took the host-derived
+  // fingerprint's webgl instead of the chosen preset's.
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'hc-preset-'));
+  const file = join(dir, 'host-calibration.json');
+  await writeFile(file, JSON.stringify(hostCalibration()));
+  const prev = process.env.LOBSTER_HOST_CALIBRATION_FILE;
+  process.env.LOBSTER_HOST_CALIBRATION_FILE = file;
+  try {
+    const preset = WINDOWS_RENDERER_PRESETS[0];
+    assert.ok(preset);
+    const runner = new RecordingRunner();
+    await startProfile(runner, {
+      ...withoutHostCalibration(),
+      fingerprintOverrides: {
+        renderer: { mode: 'validated_preset', presetId: preset.id },
+        webgl: preset.webgl,
+      },
+    });
+    const launched = runner.launched[0];
+    assert.ok(launched);
+    assert.equal(launched.fingerprint.webgl.renderer, preset.webgl.renderer);
+    assert.notEqual(launched.fingerprint.webgl.renderer, hostCalibration().webgl.renderer);
+  } finally {
+    if (prev === undefined) delete process.env.LOBSTER_HOST_CALIBRATION_FILE;
+    else process.env.LOBSTER_HOST_CALIBRATION_FILE = prev;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('startProfile refuses host renderer mode when persisted calibration is incompatible', async () => {
   const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
@@ -180,9 +402,11 @@ test('startProfile ignores a persisted host profile whose OS differs (falls back
   process.env.LOBSTER_HOST_CALIBRATION_FILE = file;
   try {
     const runner = new RecordingRunner();
-    await startProfile(runner, base); // windows profile
-    const launched = runner.launched[0];
-    assert.ok(launched, 'falls back to the catalog path and still launches');
+    await assert.rejects(
+      startProfile(runner, withoutHostCalibration()),
+      /renderer policy "host" requires a complete compatible host calibration/,
+    );
+    assert.equal(runner.launched.length, 0);
   } finally {
     if (prev === undefined) delete process.env.LOBSTER_HOST_CALIBRATION_FILE;
     else process.env.LOBSTER_HOST_CALIBRATION_FILE = prev;

@@ -4,8 +4,16 @@
  */
 export { CompositeRunner } from './runners/composite.js';
 export { startProfile } from './start-profile.js';
-export { startAndroidProfile } from './start-android-profile.js';
+export {
+  androidProfileStatus,
+  startAndroidProfile,
+  stopAndroidProfile,
+} from './start-android-profile.js';
 export type { StartAndroidProfileOptions } from './start-android-profile.js';
+export { startAndroidEmulatedProfile } from './start-android-emulated-profile.js';
+export { dispatch } from './rpc.js';
+export { buildAndroidMirrorArgs, launchAndroidMirror } from './android-mirror.js';
+export type { AndroidMirrorHandle, AndroidMirrorOptions } from './android-mirror.js';
 export {
   buildLaunchers,
   defaultLaunchers,
@@ -20,6 +28,7 @@ export {
   buildNativeLobiumProcessArgs,
   createLobiumLauncher,
   ensureChromiumProfileName,
+  ensureChromiumPersonaPreferences,
   isLobiumAvailable,
   lobiumBinaryCandidates,
   proxySummaryFromServer,
@@ -28,10 +37,43 @@ export {
   scrubLegacyBrandingSessions,
 } from './runners/lobium-launcher.js';
 export type { NativeLobiumLauncherOptions } from './runners/lobium-launcher.js';
-export { buildFontConfig, hasFontPersona, writeFontConfig } from './fonts.js';
+export {
+  availableFontFamilies,
+  buildFontConfig,
+  hasFontPersona,
+  loadFontPackManifest,
+  writeFontConfig,
+} from './fonts.js';
+export type { FontPackFile, FontPackManifest } from './fonts.js';
+export {
+  downloadChromeWebStoreCrx,
+  extensionLaunchArgs,
+  extractExtensionZip,
+  parseChromeWebStoreId,
+  prepareProfileExtensions,
+  verifyCrx3,
+} from './extensions.js';
+export type { PrepareExtensionsOptions } from './extensions.js';
 export { buildCdpEmulation, buildFingerprintInitScript, buildLaunchOptions } from './launch.js';
 export type { CdpEmulation, PersistentLaunchOptions, UserAgentMetadata } from './launch.js';
-export { buildGpuArgs, isSoftwareRenderer, resolveGpuMode } from './gpu.js';
+export {
+  allowProvisionalSoftwareGpu,
+  buildGpuArgs,
+  isSoftwareRenderer,
+  resolveGpuMode,
+} from './gpu.js';
+export {
+  assertLobiumBuildCapabilities,
+  LOBIUM_CAPABILITY_CONTRACT_VERSION,
+  LOBIUM_CAPABILITY_SWITCH,
+  LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
+  probeLobiumBuildCapabilities,
+  requiredLobiumCapabilities,
+} from './lobium-capabilities.js';
+export type {
+  LobiumBuildCapabilities,
+  LobiumNativeFingerprintCapability,
+} from './lobium-capabilities.js';
 export { buildProxyHardeningArgs } from './proxy-hardening.js';
 export type { ProxyHardeningOptions } from './proxy-hardening.js';
 export {
@@ -75,6 +117,7 @@ export {
   lobiumConfigArg,
   LOBIUM_CONFIG_VERSION,
   LOBIUM_CONFIG_FILENAME,
+  LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES,
 } from './lobium-config.js';
 export type {
   LobiumConfig,
@@ -130,6 +173,7 @@ export {
   resolveHostCalibrationPath,
 } from './host-calibration-store.js';
 export { defaultHostCalibrationPath, ensureHostCalibration } from './ensure-host-calibration.js';
+export { captureHostCalibrationRawSnapshot } from './capture-host-calibration.js';
 export type {
   EnsureHostCalibrationOptions,
   EnsureHostCalibrationResult,
