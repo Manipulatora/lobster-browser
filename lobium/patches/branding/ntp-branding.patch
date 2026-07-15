@@ -1,0 +1,163 @@
+diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/resources/new_tab_page/app.css
+index 4dd7a53745..76e5f02eff 100644
+--- a/chrome/browser/resources/new_tab_page/app.css
++++ b/chrome/browser/resources/new_tab_page/app.css
+@@ -198,6 +198,29 @@ cr-most-visited {
+   z-index: 2;
+ }
+ 
++/* Lobster Browser ad directly under the search box. */
++#lobiumSubBrand {
++  display: flex;
++  justify-content: center;
++  align-items: center;
++  margin: 4px auto 16px;
++  width: var(--ntp-search-box-width, min(337px, 80vw));
++}
++
++#lobiumSubBrand[hidden] {
++  display: none;
++}
++
++#lobiumSubBrand img {
++  display: block;
++  width: 100%;
++  height: auto;
++  max-width: var(--ntp-search-box-width, min(337px, 80vw));
++  object-fit: contain;
++  user-select: none;
++  -webkit-user-drag: none;
++}
++
+ #modules:not([hidden]) {
+   /* We use animation instead of transition to allow a fade-in out of
+      display: none. */
+diff --git a/chrome/browser/resources/new_tab_page/app.html b/chrome/browser/resources/new_tab_page/app.html
+index 7b648b82ea..fc6f8c5cc0 100644
+--- a/chrome/browser/resources/new_tab_page/app.html
++++ b/chrome/browser/resources/new_tab_page/app.html
+@@ -120,6 +120,10 @@ import {SubmitButtonIconType} from '//resources/cr_components/composebox/compose
+       </ntp-lens-upload-dialog>
+     ` : ''}
+   </div>
++  <!-- Lobster Browser ad directly under the search box. -->
++  <div id="lobiumSubBrand" ?hidden="${!this.logoEnabled_}">
++    <img src="icons/lobster_ad.png" alt="Lobster Browser for multiple profile management" draggable="false">
++  </div>
+   ${this.lazyRender_ && this.ntpNextFeaturesEnabled_
+   && this.isActionChipsVisible_ ? html`
+     <ntp-action-chips
+diff --git a/chrome/browser/resources/new_tab_page/icons/BUILD.gn b/chrome/browser/resources/new_tab_page/icons/BUILD.gn
+index d0bfb6693e..6bbbe47525 100644
+--- a/chrome/browser/resources/new_tab_page/icons/BUILD.gn
++++ b/chrome/browser/resources/new_tab_page/icons/BUILD.gn
+@@ -11,6 +11,10 @@ generate_grd("build_grdp") {
+   grd_prefix = "new_tab_page"
+   out_grd = "$target_gen_dir/resources.grdp"
+   input_files = [
++    "lobster_ad.png",
++    "lobium_master.png",
++    "lobster_wordmark.png",
++    "lobster_wordmark_horizontal.png",
+     "chevron.svg",
+     "copy.svg",
+     "drag_drop_illustration.svg",
+diff --git a/chrome/browser/resources/new_tab_page/logo.css b/chrome/browser/resources/new_tab_page/logo.css
+index d9830f0abc..ece252aa68 100644
+--- a/chrome/browser/resources/new_tab_page/logo.css
++++ b/chrome/browser/resources/new_tab_page/logo.css
+@@ -31,20 +31,31 @@
+ }
+ 
+ #logo {
++  background: none;
+   forced-color-adjust: none;
+-  height: 92px;
+-  width: 272px;
++  height: auto;
++  width: auto;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  margin: 0 auto;
+ }
+ 
+-:host([single-colored]) #logo {
+-  -webkit-mask-image: url(./icons/google_logo.svg);
+-  -webkit-mask-repeat: no-repeat;
+-  -webkit-mask-size: 100%;
+-  background-color: var(--ntp-logo-color);
++#logoImage {
++  display: block;
++  width: auto;
++  height: auto;
++  max-width: min(440px, 74vw);
++  max-height: 260px;
++  object-fit: contain;
++  user-select: none;
++  -webkit-user-drag: none;
+ }
+ 
++:host([single-colored]) #logo,
+ :host(:not([single-colored])) #logo {
+-  background-image: url(./icons/google_logo.svg);
++  -webkit-mask-image: none;
++  background-image: none;
+ }
+ 
+ #imageDoodle {
+diff --git a/chrome/browser/resources/new_tab_page/logo.html b/chrome/browser/resources/new_tab_page/logo.html
+index efb32fff8f..bfa86b9375 100644
+--- a/chrome/browser/resources/new_tab_page/logo.html
++++ b/chrome/browser/resources/new_tab_page/logo.html
+@@ -1,5 +1,7 @@
+ ${this.showLogo_ ? html`
+-  <div id="logo"></div>
++  <div id="logo" aria-label="Lobster Browser">
++    <img id="logoImage" src="icons/lobium_master.png" alt="Lobster Browser" draggable="false">
++  </div>
+ ` : ''}
+ ${this.showDoodle_ ? html`
+   <div id="doodle" title="${this.doodle_!.description}">
+diff --git a/chrome/browser/resources/new_tab_page/logo.ts b/chrome/browser/resources/new_tab_page/logo.ts
+index d63d0527d5..b9e14554fc 100644
+--- a/chrome/browser/resources/new_tab_page/logo.ts
++++ b/chrome/browser/resources/new_tab_page/logo.ts
+@@ -168,7 +168,10 @@ export class LogoElement extends CrLitElement {
+   }
+ 
+   private computeShowDoodle_(): boolean {
+-    return !!this.imageDoodle_;
++    // Lobium: NEVER show the Google logo or the animated Google doodle. Only our own brand image
++    // (icons/lobium_master.png) appears above the search box — gated by showLogo_ = loaded_ &&
++    // !showDoodle_, which stays true because the doodle is always suppressed here.
++    return false;
+   }
+ 
+   /**
+diff --git a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+index 2e48e58257..e4cc6895a7 100644
+--- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
++++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+@@ -691,17 +691,10 @@ void NewTabPageHandler::GetMostVisitedSettings(
+ }
+ 
+ void NewTabPageHandler::GetDoodle(GetDoodleCallback callback) {
+-  bool enable_animated_logo =
+-      base::FeatureList::IsEnabled(ntp_features::kNtpAnimatedDoodles) &&
+-      !gfx::Animation::PrefersReducedMotion();
+-  search_provider_logos::LogoCallbacks callbacks;
+-  callbacks.on_cached_encoded_logo_available =
+-      base::BindOnce(&NewTabPageHandler::OnLogoAvailable,
+-                     weak_ptr_factory_.GetWeakPtr(), std::move(callback));
+-  // This will trigger re-downloading the doodle and caching it. This means a
+-  // new doodle will be returned on subsequent NTP loads.
+-  logo_service_->GetLogo(std::move(callbacks), /*for_webui_ntp=*/true,
+-                         enable_animated_logo);
++  // Lobium: never fetch or serve the Google doodle. The NTP shows only our own brand logo
++  // (see logo.ts computeShowDoodle_ => false). Returning null here also stops the wasted network
++  // request to Google's doodle endpoint on every NTP load.
++  std::move(callback).Run(nullptr);
+ }
+ 
+ void NewTabPageHandler::UpdatePromoData() {

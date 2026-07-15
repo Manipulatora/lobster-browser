@@ -1,0 +1,141 @@
+diff --git a/chrome/browser/profiles/profile_window.cc b/chrome/browser/profiles/profile_window.cc
+index c13b772bc2..baee390a41 100644
+--- a/chrome/browser/profiles/profile_window.cc
++++ b/chrome/browser/profiles/profile_window.cc
+@@ -28,6 +28,7 @@
+ #include "chrome/browser/profiles/profile_attributes_entry.h"
+ #include "chrome/browser/profiles/profile_attributes_storage.h"
+ #include "chrome/browser/profiles/profile_avatar_icon_util.h"
++#include "chrome/browser/profiles/profiles_state.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+ #include "chrome/browser/signin/account_reconcilor_factory.h"
+ #include "chrome/browser/signin/identity_manager_factory.h"
+@@ -224,6 +225,12 @@ void SwitchToProfile(const base::FilePath& path,
+ }
+ 
+ void SwitchToGuestProfile(base::OnceCallback<void(Browser*)> callback) {
++  // Lobium: guest mode is never offered. Guard the central switch so NO entry point — browser actions,
++  // menus, the Linux global menu, or any future caller — can open a guest session even if it bypasses
++  // the UI-level gating.
++  if (!IsGuestModeEnabled()) {
++    return;
++  }
+   SwitchToProfile(ProfileManager::GetGuestProfilePath(),
+                   /*always_create=*/false, std::move(callback));
+ }
+diff --git a/chrome/browser/profiles/profiles_state.cc b/chrome/browser/profiles/profiles_state.cc
+index f7e623e42a..f3c97ac262 100644
+--- a/chrome/browser/profiles/profiles_state.cc
++++ b/chrome/browser/profiles/profiles_state.cc
+@@ -213,16 +213,18 @@ bool IsGuestModeRequested(const base::CommandLine& command_line,
+ }
+ 
+ bool IsProfileCreationAllowed() {
+-  const PrefService* const pref_service = g_browser_process->local_state();
+-  DCHECK(pref_service);
+-  return pref_service->GetBoolean(prefs::kBrowserAddPersonEnabled);
++  // Lobium: profile creation is NEVER allowed from the browser UI — each Lobium profile is a separate,
++  // isolated launch managed by the Lobster desktop app, not the in-browser profile system. Hardcoding
++  // false here (rather than flipping the pref default) disables "Add profile" across the app menu, the
++  // profile bubble, the profile picker window, guest/add browser actions, and enterprise auto-create
++  // flows at once — un-overridable by policy or user pref.
++  return false;
+ }
+ 
+ // Whether guest mode is globally disabled (for all entry points and users).
+ bool IsGuestModeGloballyDisabledInternal() {
+-  const PrefService* const pref_service = g_browser_process->local_state();
+-  DCHECK(pref_service);
+-  return !pref_service->GetBoolean(prefs::kBrowserGuestModeEnabled);
++  // Lobium: guest mode is never offered (same rationale as IsProfileCreationAllowed above).
++  return true;
+ }
+ 
+ bool IsGuestModeEnabled() {
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
+index fb1db8e036..00c1a6b74d 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.cc
++++ b/chrome/browser/ui/toolbar/app_menu_model.cc
+@@ -470,7 +470,6 @@ class ProfileSubMenuModel : public ui::SimpleMenuModel,
+  private:
+   bool BuildSyncSection();
+ 
+-  void BuildGuestProfileRow(Profile* profile);
+   void BuildCustomizeProfileRow(Profile* profile);
+   void BuildCloseProfileRow(Profile* profile);
+   void BuildManageGoogleAccountRow(Profile* profile);
+@@ -554,52 +553,12 @@ ProfileSubMenuModel::ProfileSubMenuModel(
+   BuildCustomizeProfileRow(profile);
+   BuildCloseProfileRow(profile);
+ 
+-  bool needs_separator = false;
+-  const bool is_guest_mode_enabled = profiles::IsGuestModeEnabled(*profile);
+-
+-  if (!profile->IsIncognitoProfile() && !profile->IsGuestSession()) {
+-    AddSeparator(ui::NORMAL_SEPARATOR);
+-    AddTitle(l10n_util::GetStringUTF16(IDS_OTHER_CHROME_PROFILES_TITLE));
+-    auto profile_entries = GetAllOtherProfileEntriesForProfileSubMenu(profile);
+-    needs_separator = !profile_entries.empty();
+-    profiles::PlaceholderAvatarIconParams icon_params =
+-        GetPlaceholderAvatarIconParamsVisibleAgainstColor(
+-            color_provider->GetColor(ui::kColorMenuBackground));
+-    for (ProfileAttributesEntry* profile_entry : profile_entries) {
+-      std::u16string display_name = GetProfileMenuDisplayName(profile_entry);
+-      int menu_id = GetAndIncrementNextMenuID();
+-      AddItemWithIcon(
+-          menu_id,
+-          ui::EscapeMenuLabelAmpersands(gfx::TruncateString(
+-              display_name,
+-              GetLayoutConstant(LayoutConstant::kAppMenuMaximumCharacterLength),
+-              gfx::CHARACTER_BREAK)),
+-          ui::ImageModel::FromImage(profiles::GetSizedAvatarIcon(
+-              profile_entry->GetAvatarIcon(
+-                  avatar_icon_size, /*use_high_res_file=*/true, icon_params),
+-              avatar_icon_size, avatar_icon_size, profiles::SHAPE_CIRCLE)));
+-      other_profiles_.insert({menu_id, profile_entry->GetPath()});
+-    }
+-
+-    if (needs_separator) {
+-      AddSeparator(ui::NORMAL_SEPARATOR);
+-    }
+-
+-    if (profiles::IsProfileCreationAllowed()) {
+-      AddItemWithStringIdAndVectorIcon(
+-          this, IDC_ADD_NEW_PROFILE, IDS_ADD_NEW_PROFILE,
+-          features::IsRoundedIconsEnabled() ? kPersonAddIcon
+-                                            : kAccountAddChromeRefreshOldIcon);
+-    }
+-    if (is_guest_mode_enabled) {
+-      BuildGuestProfileRow(profile);
+-    }
+-
+-    AddItemWithStringIdAndVectorIcon(
+-        this, IDC_MANAGE_CHROME_PROFILES, IDS_MANAGE_CHROME_PROFILES,
+-        features::IsRoundedIconsEnabled() ? kManageAccountsIcon
+-                                          : kAccountManageChromeRefreshOldIcon);
+-  }
++  // Lobium: the entire "Other Lobium profiles" section is removed — the list of other profiles plus
++  // the "Add new profile", "Open Guest profile", and "Manage Lobium profiles" items. Each Lobium
++  // profile is a separate, isolated launch managed by the Lobster desktop app; the browser UI must
++  // never let the user create, switch to, guest into, or manage in-browser profiles. (Add/Guest are
++  // also globally disabled via profiles::IsProfileCreationAllowed/IsGuestModeEnabled, which covers the
++  // profile picker and other surfaces too.)
+ }
+ 
+ bool ProfileSubMenuModel::IsCommandIdChecked(int command_id) const {
+@@ -766,13 +725,8 @@ bool ProfileSubMenuModel::BuildSyncSection() {
+   return true;
+ }
+ 
+-void ProfileSubMenuModel::BuildGuestProfileRow(Profile* profile) {
+-  AddItemWithStringIdAndVectorIcon(
+-      this, IDC_OPEN_GUEST_PROFILE, IDS_OPEN_GUEST_PROFILE,
+-      features::IsRoundedIconsEnabled() ? kAccountBoxIcon : kAccountBoxOldIcon);
+-  SetElementIdentifierAt(GetIndexOfCommandId(IDC_OPEN_GUEST_PROFILE).value(),
+-                         AppMenuModel::kProfileOpenGuestItem);
+-}
++// Lobium: BuildGuestProfileRow removed — guest mode is never offered (see the Profile submenu ctor and
++// profiles::IsGuestModeEnabled, forced off globally).
+ 
+ void ProfileSubMenuModel::BuildCustomizeProfileRow(Profile* profile) {
+   if (!profile->IsIncognitoProfile() && !profile->IsGuestSession()) {

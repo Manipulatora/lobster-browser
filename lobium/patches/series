@@ -82,3 +82,5 @@ branding/omnibox-profile-chip.patch
 # script (binary PNGs), not a patch.
 branding/product-icon-lobster.patch
 branding/signin-disable.patch
+branding/ntp-branding.patch
+branding/profile-lockdown.patch
