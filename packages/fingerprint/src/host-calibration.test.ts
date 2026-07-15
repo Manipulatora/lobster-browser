@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { HostCalibrationProfile, WebGlShaderPrecisionProfile } from '@lobster/shared-types';
 import {
   deriveFingerprintFromHost,
+  normalizeHostWebglIdentity,
   validateFingerprintCoherence,
   validateHostCalibrationProfile,
 } from './index.js';
@@ -35,6 +36,8 @@ function host(): HostCalibrationProfile {
     browserVersion: '152.0.7928.0',
     navigator: {
       platform: 'Linux x86_64',
+      languages: ['de-DE', 'de', 'en-US'],
+      locale: 'de-DE',
       hardwareConcurrency: 12,
       deviceMemory: 64,
       maxTouchPoints: 0,
@@ -57,6 +60,21 @@ function host(): HostCalibrationProfile {
       version: 'WebGL 1.0 (OpenGL ES 2.0 Chromium)',
       shadingLanguageVersion: 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)',
       extensions: ['ANGLE_instanced_arrays', 'EXT_texture_filter_anisotropic', 'WEBGL_debug_renderer_info'],
+      caps: {
+        maxTextureSize: 16384,
+        maxCubeMapTextureSize: 16384,
+        maxRenderbufferSize: 16384,
+        maxViewportDims: [16384, 16384],
+        maxVertexAttribs: 16,
+        maxVertexUniformVectors: 4096,
+        maxFragmentUniformVectors: 1024,
+        maxVaryingVectors: 30,
+        maxTextureImageUnits: 16,
+        maxVertexTextureImageUnits: 16,
+        maxCombinedTextureImageUnits: 32,
+        aliasedLineWidthRange: [1, 1],
+        aliasedPointSizeRange: [1, 1024],
+      },
       shaderPrecision: precision,
     },
     fonts: ['Noto Sans', 'DejaVu Sans', 'Liberation Sans', 'Noto Sans'],
@@ -70,6 +88,10 @@ test('deriveFingerprintFromHost inherits captured host hardware while keeping Ch
   assert.equal(fp.os, 'linux');
   assert.equal(fp.arch, 'x86_64');
   assert.equal(fp.navigator.platform, 'Linux x86_64');
+  assert.deepEqual(fp.navigator.languages, ['de-DE', 'de', 'en-US']);
+  assert.equal(fp.locale.locale, 'de-DE');
+  assert.equal(fp.locale.timezone, 'Europe/Berlin');
+  assert.equal(fp.locale.acceptLanguage, 'de-DE,de;q=0.9,en-US;q=0.8');
   assert.equal(fp.navigator.hardwareConcurrency, 12);
   assert.equal(fp.navigator.deviceMemory, 8, 'navigator.deviceMemory is spec-capped at 8');
   assert.equal(fp.webgl.renderer, host().webgl.renderer);
@@ -88,10 +110,47 @@ test('deriveFingerprintFromHost is deterministic per seed and host snapshot', ()
   assert.deepEqual(a, b);
 });
 
+test('normalized host renderer removes formatting noise without changing captured depth', () => {
+  const source = host().webgl;
+  source.renderer = `  ${source.renderer}   `;
+  source.unmaskedRenderer = `${source.unmaskedRenderer}\0`;
+  const normalized = normalizeHostWebglIdentity(source);
+  assert.equal(normalized.renderer, source.renderer.trim());
+  assert.equal(normalized.unmaskedRenderer.includes('\0'), false);
+  assert.deepEqual(normalized.extensions, source.extensions);
+  assert.deepEqual(normalized.caps, source.caps);
+  assert.deepEqual(normalized.shaderPrecision, source.shaderPrecision);
+});
+
 test('validateHostCalibrationProfile rejects software-rendered hosts', () => {
   const h = host();
   h.webgl.vendor = 'Mesa';
   h.webgl.renderer = 'llvmpipe (LLVM 20.1.2, 256 bits)';
   const issues = validateHostCalibrationProfile(h);
   assert.ok(issues.some((issue) => issue.includes('software renderer')));
+});
+
+test('software-rendered calibration can be admitted only for explicit provisional runs', () => {
+  const h = host();
+  h.webgl.vendor = 'Mesa';
+  h.webgl.renderer = 'llvmpipe (LLVM 20.1.2, 256 bits)';
+  const issues = validateHostCalibrationProfile(h, { allowSoftwareRenderer: true });
+  assert.ok(!issues.some((issue) => /software renderer|llvmpipe/i.test(issue)));
+});
+
+test('Linux host calibration accepts a top panel in the real available screen rect', () => {
+  const h = host();
+  h.screen.availTop = 26;
+  h.screen.availHeight = h.screen.height - 26;
+  const issues = validateHostCalibrationProfile(h);
+  assert.ok(!issues.some((issue) => issue.includes('availTop')));
+});
+
+test('validateHostCalibrationProfile rejects partial GPU evidence', () => {
+  const h = host();
+  delete h.webgl.caps;
+  delete h.webgl.shaderPrecision;
+  const issues = validateHostCalibrationProfile(h);
+  assert.ok(issues.includes('host WebGL numeric capabilities are required'));
+  assert.ok(issues.includes('host WebGL shader-precision profile is required'));
 });

@@ -55,8 +55,13 @@ sha2 = "0.10"
 # ISO-8601 / RFC3339 timestamps for profile rows.
 chrono = "0.4"
 
-# HTTP client used for proxy testing from the Tauri core.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
+# HTTP client used for proxy testing and streaming the engine download from the Tauri core.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks", "stream"] }
+
+# First-run engine provisioning: stream-download a .tar.gz engine runtime and extract it.
+tar = "0.4"
+flate2 = "1"
+futures-util = "0.3"
 
 # Ergonomic error handling across the core.
 anyhow = "1"

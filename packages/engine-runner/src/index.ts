@@ -3,11 +3,12 @@ import type { SidecarRequest } from '@lobster/shared-types';
 import { dispatch } from './rpc.js';
 import { CompositeRunner } from './runners/composite.js';
 import { buildLaunchers } from './runners/default-launchers.js';
+import { buildDevShmArgs } from './dev-shm.js';
 
 /**
  * Sidecar entry point. Reads newline-delimited JSON {@link SidecarRequest}s on stdin and
  * writes {@link import('@lobster/shared-types').SidecarResponse}s on stdout — the stable
- * contract with the Rust desktop core (see docs/contracts/sidecar-ipc.md).
+ * contract with the Rust desktop core (see docs/OPERATIONS.md (§4)).
  */
 async function main(): Promise<void> {
   // Wire the direct native Lobium launcher when a binary is provisioned; missing Lobium reports a clear
@@ -15,8 +16,10 @@ async function main(): Promise<void> {
   const runner = new CompositeRunner(
     await buildLaunchers({
       headless: process.env.LOBSTER_HEADLESS === '1',
-      extraArgs:
-        process.env.LOBSTER_NO_SANDBOX === '1' ? ['--no-sandbox', '--disable-dev-shm-usage'] : [],
+      extraArgs: [
+        ...(process.env.LOBSTER_NO_SANDBOX === '1' ? ['--no-sandbox'] : []),
+        ...buildDevShmArgs(),
+      ],
     }),
   );
   const rl = createInterface({ input: process.stdin });

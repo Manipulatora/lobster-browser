@@ -1,0 +1,269 @@
+{
+  "version": 1,
+  "families": [
+    {
+      "family": "DejaVu Sans",
+      "filePattern": "^DejaVuSans(?:-(?:Regular|Bold|Oblique|BoldOblique))?\\.(?:ttf|otf)$",
+      "license": "Bitstream-Vera-and-DejaVu",
+      "licenseUrl": "https://dejavu-fonts.github.io/License.html"
+    },
+    {
+      "family": "DejaVu Serif",
+      "filePattern": "^DejaVuSerif(?:-(?:Regular|Bold|Italic|BoldItalic))?\\.(?:ttf|otf)$",
+      "license": "Bitstream-Vera-and-DejaVu",
+      "licenseUrl": "https://dejavu-fonts.github.io/License.html"
+    },
+    {
+      "family": "DejaVu Sans Mono",
+      "filePattern": "^DejaVuSansMono(?:-(?:Regular|Bold|Oblique|BoldOblique))?\\.(?:ttf|otf)$",
+      "license": "Bitstream-Vera-and-DejaVu",
+      "licenseUrl": "https://dejavu-fonts.github.io/License.html"
+    },
+    {
+      "family": "Liberation Sans",
+      "filePattern": "^LiberationSans-(?:Regular|Bold|Italic|BoldItalic)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/liberationfonts/liberation-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Liberation Serif",
+      "filePattern": "^LiberationSerif-(?:Regular|Bold|Italic|BoldItalic)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/liberationfonts/liberation-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Liberation Mono",
+      "filePattern": "^LiberationMono-(?:Regular|Bold|Italic|BoldItalic)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/liberationfonts/liberation-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Carlito",
+      "filePattern": "^Carlito-(?:Regular|Bold|Italic|BoldItalic)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://fonts.google.com/specimen/Carlito/about"
+    },
+    {
+      "family": "Caladea",
+      "filePattern": "^Caladea-(?:Regular|Bold|Italic|BoldItalic)\\.(?:ttf|otf)$",
+      "license": "Apache-2.0",
+      "licenseUrl": "https://fonts.google.com/specimen/Caladea/about"
+    },
+    {
+      "family": "Noto Sans",
+      "filePattern": "^NotoSans-(?:Regular|Bold|Italic|BoldItalic)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/latin-greek-cyrillic/blob/main/OFL.txt"
+    },
+    {
+      "family": "Noto Serif",
+      "filePattern": "^NotoSerif-(?:Regular|Bold|Italic|BoldItalic)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/latin-greek-cyrillic/blob/main/OFL.txt"
+    },
+    {
+      "family": "Noto Sans Mono",
+      "filePattern": "^NotoSansMono-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/latin-greek-cyrillic/blob/main/OFL.txt"
+    },
+    {
+      "family": "Noto Sans Arabic",
+      "filePattern": "^NotoSansArabic-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Armenian",
+      "filePattern": "^NotoSansArmenian-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Bengali",
+      "filePattern": "^NotoSansBengali-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans CJK JP",
+      "filePattern": "^NotoSansCJK-(?:Regular|Bold)\\.ttc$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-cjk/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Devanagari",
+      "filePattern": "^NotoSansDevanagari-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Ethiopic",
+      "filePattern": "^NotoSansEthiopic-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Georgian",
+      "filePattern": "^NotoSansGeorgian-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Gujarati",
+      "filePattern": "^NotoSansGujarati-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Gurmukhi",
+      "filePattern": "^NotoSansGurmukhi-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Hebrew",
+      "filePattern": "^NotoSansHebrew-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Kannada",
+      "filePattern": "^NotoSansKannada-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Khmer",
+      "filePattern": "^NotoSansKhmer-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Lao",
+      "filePattern": "^NotoSansLao-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Malayalam",
+      "filePattern": "^NotoSansMalayalam-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Myanmar",
+      "filePattern": "^NotoSansMyanmar-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Sinhala",
+      "filePattern": "^NotoSansSinhala-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Tamil",
+      "filePattern": "^NotoSansTamil-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Telugu",
+      "filePattern": "^NotoSansTelugu-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Thai",
+      "filePattern": "^NotoSansThai-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Math",
+      "filePattern": "^NotoSansMath-Regular\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Symbols",
+      "filePattern": "^NotoSansSymbols-(?:Regular|Bold)\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Sans Symbols2",
+      "filePattern": "^NotoSansSymbols2-Regular\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Music",
+      "filePattern": "^NotoMusic-Regular\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-fonts/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Serif CJK JP",
+      "filePattern": "^NotoSerifCJK-(?:Regular|Bold)\\.ttc$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/notofonts/noto-cjk/blob/main/LICENSE"
+    },
+    {
+      "family": "Noto Color Emoji",
+      "filePattern": "^NotoColorEmoji\\.(?:ttf|otf)$",
+      "license": "OFL-1.1",
+      "licenseUrl": "https://github.com/googlefonts/noto-emoji/blob/main/fonts/LICENSE"
+    },
+    {
+      "family": "Roboto",
+      "filePattern": "^Roboto-(?:Black|BlackItalic|Bold|BoldItalic|Italic|Light|LightItalic|Medium|MediumItalic|Regular|Thin|ThinItalic)\\.(?:ttf|otf)$",
+      "license": "Apache-2.0",
+      "licenseUrl": "https://github.com/googlefonts/roboto-3-classic/blob/main/LICENSE"
+    },
+    {
+      "family": "Roboto Condensed",
+      "filePattern": "^RobotoCondensed-(?:Bold|BoldItalic|Italic|Light|LightItalic|Medium|MediumItalic|Regular)\\.(?:ttf|otf)$",
+      "license": "Apache-2.0",
+      "licenseUrl": "https://github.com/googlefonts/roboto-3-classic/blob/main/LICENSE"
+    },
+    {
+      "family": "Ubuntu",
+      "filePattern": "^Ubuntu(?:-Italic)?\\[wdth,wght\\]\\.(?:ttf|otf)$",
+      "license": "Ubuntu-Font-License-1.0",
+      "licenseUrl": "https://ubuntu.com/legal/font-licence"
+    },
+    {
+      "family": "Ubuntu Sans",
+      "filePattern": "^UbuntuSans(?:-Italic)?\\[wdth,wght\\]\\.(?:ttf|otf)$",
+      "license": "Ubuntu-Font-License-1.0",
+      "licenseUrl": "https://ubuntu.com/legal/font-licence"
+    },
+    {
+      "family": "Ubuntu Mono",
+      "filePattern": "^UbuntuMono(?:-Italic)?\\[wght\\]\\.(?:ttf|otf)$",
+      "license": "Ubuntu-Font-License-1.0",
+      "licenseUrl": "https://ubuntu.com/legal/font-licence"
+    },
+    {
+      "family": "FreeSans",
+      "filePattern": "^FreeSans(?:Bold|Oblique|BoldOblique)?\\.(?:ttf|otf)$",
+      "license": "GPL-3.0-with-font-exception",
+      "licenseUrl": "https://www.gnu.org/software/freefont/license.html"
+    },
+    {
+      "family": "FreeSerif",
+      "filePattern": "^FreeSerif(?:Bold|Italic|BoldItalic)?\\.(?:ttf|otf)$",
+      "license": "GPL-3.0-with-font-exception",
+      "licenseUrl": "https://www.gnu.org/software/freefont/license.html"
+    },
+    {
+      "family": "FreeMono",
+      "filePattern": "^FreeMono(?:Bold|Oblique|BoldOblique)?\\.(?:ttf|otf)$",
+      "license": "GPL-3.0-with-font-exception",
+      "licenseUrl": "https://www.gnu.org/software/freefont/license.html"
+    }
+  ]
+}

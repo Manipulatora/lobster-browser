@@ -13,7 +13,7 @@
 //                          (the known host-calibration gap: the config channel does not carry them).
 //   5. Geo overlay       — a proxy-country overlay keeps timezone/locale/languages coherent.
 // Android personas are validated statically + at the config layer only: a desktop binary must never be
-// a real Android launch target (see docs/AGENT-HANDOFF-GPU.md), so launching them is intentionally N/A.
+// a real Android launch target (see docs/ENGINEERING.md (§6)), so launching them is intentionally N/A.
 //
 //   LOBSTER_LOBIUM_BIN=/path/to/chrome LOBSTER_GPU=gpu LOBSTER_ANGLE_BACKEND=vulkan \
 //   VK_ICD_FILENAMES=/path/nvidia_icd.json node ci/validation/battle-test.mjs
@@ -34,8 +34,8 @@ import {
   validateFingerprintCoherence,
 } from '@lobster/fingerprint';
 import {
-  applyCdpFingerprint,
   buildAndroidLobiumConfig,
+  buildDevShmArgs,
   buildGpuArgs,
   buildLaunchOptions,
   buildLobiumConfig,
@@ -199,6 +199,10 @@ async function probe(page, claim) {
         document.createElement('canvas').getContext('experimental-webgl');
       if (gl) {
         const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+        const advertisedExtensions = (gl.getSupportedExtensions() || []).slice().sort();
+        const unavailableAdvertisedExtensions = advertisedExtensions.filter(
+          (name) => gl.getExtension(name) === null,
+        );
         out.webgl = {
           vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
           renderer: dbg
@@ -207,7 +211,8 @@ async function probe(page, claim) {
           version: gl.getParameter(gl.VERSION),
           glsl: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
           maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
-          extensions: (gl.getSupportedExtensions() || []).slice().sort(),
+          extensions: advertisedExtensions,
+          unavailableAdvertisedExtensions,
         };
         const fh = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
         out.webgl.fragHighFloat = fh
@@ -285,7 +290,7 @@ async function launchAndProbe(persona) {
   const args = [
     '--headless=new',
     '--no-sandbox',
-    '--disable-dev-shm-usage',
+    ...buildDevShmArgs(),
     ...(GPU_MODE === 'gpu' ? [] : ['--enable-unsafe-swiftshader']),
     `--user-data-dir=${userDataDir}`,
     lobiumConfigArg(cfgPath),
@@ -297,7 +302,20 @@ async function launchAndProbe(persona) {
   if (GPU_MODE === 'gpu' && !args.some((a) => a.startsWith('--use-angle='))) {
     args.push(...buildGpuArgs({ mode: 'gpu' }));
   }
-  const proc = spawn(LOBIUM, args, { stdio: 'ignore' });
+  // Pure native, exactly like a shipped profile: Chromium's timezone/locale come from the child env
+  // (the sidecar sets these per persona), and every fingerprint surface is applied by the engine from
+  // --lobium-fp-config. No CDP fingerprint overlay — patchright here only drives/reads.
+  const localeUnix = `${fp.locale.locale.replaceAll('-', '_')}.UTF-8`;
+  const proc = spawn(LOBIUM, args, {
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      TZ: fp.locale.timezone,
+      LANG: localeUnix,
+      LC_ALL: localeUnix,
+      FC_LANG: fp.locale.locale,
+    },
+  });
   try {
     const ws = await readCdpEndpoint(userDataDir);
     const { chromium } = await import('patchright');
@@ -305,8 +323,6 @@ async function launchAndProbe(persona) {
     try {
       const context = browser.contexts()[0];
       const page = context.pages()[0] ?? (await context.newPage());
-      const cdp = await context.newCDPSession(page);
-      await applyCdpFingerprint(cdp, fp);
       // Navigate to a secure loopback origin (not about:blank) so [SecureContext] surfaces like
       // navigator.deviceMemory are exposed and can be verified.
       await page.goto(PROBE_URL);
@@ -345,6 +361,7 @@ function evaluateDesktop(persona, obs) {
     languages: obs.languages.join(',') === fp.navigator.languages.join(','),
     timezone: obs.timezone === fp.locale.timezone,
     webglString: obs.webgl?.matchesClaim === true,
+    webglExtensionContract: obs.webgl?.unavailableAdvertisedExtensions.length === 0,
     screen:
       obs.screen.width === fp.screen.width &&
       obs.screen.height === fp.screen.height &&
@@ -415,6 +432,7 @@ async function main() {
         maxTextureSize: obs.webgl?.maxTextureSize ?? null,
         extCount: obs.webgl?.extCount ?? null,
         extHash: obs.webgl?.extHash ?? null,
+        unavailableAdvertisedExtensions: obs.webgl?.unavailableAdvertisedExtensions ?? null,
         fragHighFloat: obs.webgl?.fragHighFloat ?? null,
       },
       hashes: { canvas: obs.canvasHash, audio: obs.audioHash },
@@ -497,11 +515,35 @@ async function main() {
   process.stdout.write(`\ndeepGpuAnalysis:\n${JSON.stringify(report.deepGpuAnalysis, null, 2)}\n`);
   process.stdout.write(`\nsaved: ${outPath}\n`);
 
+  // Deep-GPU host-leak: personas claim different GPU families but share ONE real WebGL extension set,
+  // i.e. the deep surfaces are the host, not the claimed device. This is a genuine cross-check tell —
+  // but ONLY on real hardware. Under software rendering every persona legitimately shares SwiftShader's
+  // one extension set, so it is environmental there, not a bug. Gate the hard failure on GPU mode.
+  const hostLeakConfirmed = extHashes.size <= 1 && claimedFamilies.size > 1;
+  // Canvas farbling must be deterministic-yet-distinct PER PROFILE on any renderer; a collision (two
+  // profiles sharing a canvas hash) is a real coherence bug regardless of GPU.
+  const farblingCollision = distinctCanvas < canvasHashes.length;
+
   const hardFail =
     report.counts.desktopLaunchErrors > 0 ||
     results.some((r) => r.staticIssues && r.staticIssues.length > 0) ||
-    androidResults.some((r) => r.staticIssues.length > 0 || r.configError);
-  if (hardFail) process.exitCode = 1;
+    androidResults.some((r) => r.staticIssues.length > 0 || r.configError) ||
+    farblingCollision ||
+    (GPU_MODE === 'gpu' && hostLeakConfirmed);
+  if (hardFail) {
+    process.exitCode = 1;
+    if (GPU_MODE === 'gpu' && hostLeakConfirmed) {
+      process.stderr.write(
+        '\nHARD FAIL: deep-GPU host-leak — personas share one WebGL extension set across claimed GPU ' +
+          'families on real hardware (see docs/ENGINEERING.md W1).\n',
+      );
+    }
+    if (farblingCollision) {
+      process.stderr.write(
+        `\nHARD FAIL: canvas farbling collision — only ${distinctCanvas}/${canvasHashes.length} distinct hashes.\n`,
+      );
+    }
+  }
 }
 
 main().catch((e) => {

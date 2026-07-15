@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildGpuArgs, isSoftwareRenderer, resolveGpuMode } from './gpu.js';
+import {
+  allowProvisionalSoftwareGpu,
+  buildGpuArgs,
+  isSoftwareRenderer,
+  resolveGpuMode,
+} from './gpu.js';
 
 test('resolveGpuMode defaults to auto with no env and preserves prior behavior (no flags)', () => {
   assert.equal(resolveGpuMode({}), 'auto');
@@ -39,6 +44,18 @@ test('software mode forces SwiftShader deterministically (CI/no-GPU)', () => {
   const args = buildGpuArgs({ mode: 'software', env: {} });
   assert.ok(args.includes('--use-angle=swiftshader'));
   assert.ok(args.includes('--enable-unsafe-swiftshader'));
+});
+
+test('software calibration requires an explicit provisional acknowledgement', () => {
+  assert.equal(allowProvisionalSoftwareGpu({}), false);
+  assert.equal(
+    allowProvisionalSoftwareGpu({ LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION: 'true' }),
+    true,
+  );
+  assert.equal(
+    allowProvisionalSoftwareGpu({ LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION: '0' }),
+    false,
+  );
 });
 
 test('isSoftwareRenderer flags SwiftShader/llvmpipe and clears real GPU strings', () => {

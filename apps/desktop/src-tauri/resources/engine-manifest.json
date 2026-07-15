@@ -1,0 +1,8 @@
+{
+  "engine": "lobium",
+  "platform": "linux-x64",
+  "version": "152.0.7928.0",
+  "url": "https://github.com/Manipulatora/lobster-browser/releases/download/engine-v152.0.7928.0/lobium-linux-x64.tar.gz",
+  "sha256": "92bf2724fa4d48c7876b84ab617d74ff24c849846f80db5f5736202babf33e1a",
+  "note": "The .deb ships without the ~840MB engine (downloader model). Upload lobium-linux-x64.tar.gz to the release above; LOBSTER_ENGINE_URL/LOBSTER_ENGINE_SHA256 env vars override this for testing/self-hosting."
+}

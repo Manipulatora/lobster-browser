@@ -32,7 +32,9 @@ diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.cc b/t
 +      if (!md.stable_device_ids) {
 +        return String();
 +      }
-+      uint32_t h = cfg->seeds.canvas ^ cfg->seeds.webgl ^ 0x4D454449u;  // 'MEDI'
++      // Dedicated per-profile seed: canvas/WebGL noise can both be disabled (their seeds become 0),
++      // but stable media IDs must still differ across profiles rather than collapse to one linkable ID.
++      uint32_t h = cfg->seeds.media_devices ^ 0x4D454449u;  // 'MEDI'
 +      for (unsigned char c : kind) {
 +        h = (h ^ static_cast<uint32_t>(c)) * 16777619u;
 +      }

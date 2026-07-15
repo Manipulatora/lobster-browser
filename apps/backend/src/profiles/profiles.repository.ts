@@ -1,4 +1,14 @@
-import type { EngineKind, FingerprintOverrides, Profile, ProfileOsTarget } from '@lobster/shared-types';
+import type {
+  BrowserExtensionRef,
+  CookieImportMetadata,
+  EngineKind,
+  FingerprintOverrides,
+  Profile,
+  ProfileOsTarget,
+} from '@lobster/shared-types';
+
+/** Persistable cookie import metadata; raw cookie text is never accepted by cloud storage. */
+export type SafeCookieImportMetadata = CookieImportMetadata;
 
 /**
  * Fields required to create a profile row. The repository owns `id`, `status`, and the
@@ -10,8 +20,13 @@ export interface CreateProfileRecord {
   name: string;
   engine: EngineKind;
   os: ProfileOsTarget;
+  osVersion?: string;
   fingerprintSeed: string;
   fingerprintOverrides?: FingerprintOverrides;
+  proxyId?: string;
+  templateId?: string;
+  cookiesImport?: SafeCookieImportMetadata;
+  extensions?: BrowserExtensionRef[];
   tags: string[];
   folder?: string;
   notes?: string;
@@ -25,7 +40,12 @@ export interface UpdateProfileRecord {
   name?: string;
   engine?: EngineKind;
   os?: ProfileOsTarget;
+  osVersion?: string;
   fingerprintOverrides?: FingerprintOverrides;
+  proxyId?: string;
+  templateId?: string;
+  cookiesImport?: SafeCookieImportMetadata;
+  extensions?: BrowserExtensionRef[];
   tags?: string[];
   folder?: string;
   notes?: string;

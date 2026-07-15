@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   EllipsisHorizontalIcon,
   FunnelIcon,
@@ -8,7 +9,6 @@ import {
   StopIcon,
   TrashIcon,
   UserGroupIcon,
-  XMarkIcon,
 } from '@heroicons/react/24/outline';
 
 import type {
@@ -23,25 +23,24 @@ import type {
 
 import {
   proxiesClient,
+  profilesClient,
   templatesClient,
   type LaunchInfo,
   type ProfilePatch,
 } from '../../api/tauri';
 import { LaunchPanel } from '../automation/LaunchPanel';
-import { FingerprintEditor } from '../fingerprint/FingerprintEditor';
-import {
-  isOnboarded,
-  markOnboarded,
-  OnboardingModal,
-} from '../onboarding/OnboardingModal';
+import { isOnboarded, markOnboarded, OnboardingModal } from '../onboarding/OnboardingModal';
 import { t } from '../../i18n';
-import { Button, EmptyState, Skeleton, useToast } from '../../ui';
+import { ActionDialog, Button, EmptyState, Skeleton, useToast } from '../../ui';
 import { EditProfileForm } from './EditProfileForm';
-import { NewProfileForm } from './NewProfileForm';
-import { ENGINE_OPTIONS, isAndroidTarget, OS_OPTIONS, STATUS_META } from './options';
+import { ENGINE_OPTIONS, OS_OPTIONS, STATUS_META } from './options';
 import { ProfileList, type ProfileSortKey, type SortDir } from './ProfileList';
 import { TrashModal } from './TrashModal';
 import { useProfiles } from './useProfiles';
+
+const NewProfileForm = lazy(() =>
+  import('./NewProfileForm').then((module) => ({ default: module.NewProfileForm })),
+);
 
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -54,6 +53,119 @@ function isLive(status: Profile['status']): boolean {
 function proxySortKey(profile: Profile): string {
   if (!profile.proxy) return '';
   return profile.proxy.label ?? `${profile.proxy.host}:${profile.proxy.port}`;
+}
+
+type PendingProfileAction =
+  | { kind: 'launch'; profile: Profile }
+  | { kind: 'password'; profile: Profile }
+  | { kind: 'trash'; ids: string[]; label: string }
+  | { kind: 'permanent-delete'; id: string; label: string };
+
+function pendingActionCopy(action: PendingProfileAction | null): {
+  title: string;
+  description: string;
+  confirmLabel: string;
+} {
+  if (!action) return { title: '', description: '', confirmLabel: '' };
+  if (action.kind === 'launch') {
+    return {
+      title: 'Unlock profile',
+      description: `Enter the password for “${action.profile.name}” to launch it in Lobium.`,
+      confirmLabel: 'Launch profile',
+    };
+  }
+  if (action.kind === 'password') {
+    return {
+      title: 'Profile password',
+      description: action.profile.passwordProtected
+        ? 'Enter a new password, or leave the field empty to remove password protection.'
+        : 'Enter a password to protect this profile. Leave the field empty to keep it unprotected.',
+      confirmLabel: 'Save password',
+    };
+  }
+  if (action.kind === 'permanent-delete') {
+    return {
+      title: 'Permanently delete profile?',
+      description: `${action.label} and its local data will be deleted. This cannot be undone.`,
+      confirmLabel: 'Delete permanently',
+    };
+  }
+  return {
+    title: 'Move profiles to trash?',
+    description: `${action.label} will be removed from the active workspace and can be restored later.`,
+    confirmLabel: 'Move to trash',
+  };
+}
+
+function AccessibleModalOverlay({
+  children,
+  onClose,
+  locked = false,
+}: {
+  children: ReactNode;
+  onClose: () => void;
+  locked?: boolean;
+}): JSX.Element {
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const closeRef = useRef(onClose);
+  const lockedRef = useRef(locked);
+  closeRef.current = onClose;
+  lockedRef.current = locked;
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const root = overlayRef.current;
+    const first =
+      root?.querySelector<HTMLElement>('[autofocus]') ??
+      root?.querySelector<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+    first?.focus();
+
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key === 'Escape' && !lockedRef.current) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeRef.current();
+        return;
+      }
+      if (event.key !== 'Tab' || !root) return;
+      const focusable = Array.from(
+        root.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => element.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const firstElement = focusable[0];
+      const lastElement = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === firstElement) {
+        event.preventDefault();
+        lastElement?.focus();
+      } else if (!event.shiftKey && document.activeElement === lastElement) {
+        event.preventDefault();
+        firstElement?.focus();
+      }
+    }
+
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown, true);
+      previouslyFocused?.focus();
+    };
+  }, []);
+
+  return (
+    <div
+      ref={overlayRef}
+      className="modal-overlay"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !locked) onClose();
+      }}
+    >
+      {children}
+    </div>
+  );
 }
 
 /**
@@ -87,7 +199,6 @@ export function ProfilesView({
   const [showToolbarMenu, setShowToolbarMenu] = useState(false);
   const [showTrash, setShowTrash] = useState(false);
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
-  const [editing, setEditing] = useState<Profile | null>(null);
   const [saving, setSaving] = useState(false);
   const [query, setQuery] = useState('');
   const [showFilters, setShowFilters] = useState(false);
@@ -112,8 +223,18 @@ export function ProfilesView({
     info: LaunchInfo;
   } | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [pendingAction, setPendingAction] = useState<PendingProfileAction | null>(null);
+  const [actionInput, setActionInput] = useState('');
+  const [actionBusy, setActionBusy] = useState(false);
   const toolbarMenuRef = useRef<HTMLDivElement | null>(null);
   const prevCreateSignal = useRef(createProfileSignal);
+
+  // Stable identity so the create/edit modal's font-catalog effect (keyed on this prop) does NOT
+  // re-fire on every parent re-render — part of the fix for the flickering create-profile modal.
+  const loadFontFamilies = useCallback(
+    (os: ProfileOsTarget) => profilesClient.list_font_families(os),
+    [],
+  );
 
   useEffect(() => {
     if (createProfileSignal > prevCreateSignal.current) {
@@ -239,23 +360,13 @@ export function ProfilesView({
     return created;
   }
 
-  async function handleLaunch(id: string): Promise<void> {
+  async function launchProfile(id: string, password?: string): Promise<void> {
     const target = profiles.find((profile) => profile.id === id);
-    if (target && isAndroidTarget(target.os)) {
-      toast.error('Android profiles require the Android Lobium APK runner.');
-      return;
-    }
-    let password: string | undefined;
-    if (target?.passwordProtected) {
-      const value = window.prompt('Enter this profile password to launch.');
-      if (value === null) return;
-      password = value;
-    }
     setBusy(id, true);
     try {
       const info = await launch(id, password);
       setLaunchInfo((prev) => new Map(prev).set(id, info));
-      // Do not auto-open the CDP/automation modal — Octo-style: go straight to the browser.
+      // Go straight to Lobium; connection details remain an explicit advanced action.
       // Connection details remain available via the profile ⋮ menu while running.
       toast.success(`Launched ${target?.name ?? 'profile'}.`);
     } catch (e: unknown) {
@@ -263,6 +374,16 @@ export function ProfilesView({
     } finally {
       setBusy(id, false);
     }
+  }
+
+  async function handleLaunch(id: string): Promise<void> {
+    const target = profiles.find((profile) => profile.id === id);
+    if (target?.passwordProtected) {
+      setActionInput('');
+      setPendingAction({ kind: 'launch', profile: target });
+      return;
+    }
+    await launchProfile(id);
   }
 
   function handleShowConnection(id: string): void {
@@ -273,6 +394,22 @@ export function ProfilesView({
       return;
     }
     setLaunchPanel({ profileName: target?.name ?? 'Profile', info });
+  }
+
+  async function handleExportCookies(id: string): Promise<void> {
+    const target = profiles.find((profile) => profile.id === id);
+    try {
+      const json = await profilesClient.export_profile_cookies(id);
+      const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${(target?.name ?? id).replace(/[^a-z0-9._-]+/gi, '_')}-cookies.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      toast.success('Live cookies exported locally.');
+    } catch (e: unknown) {
+      toast.error(`Cookie export failed: ${errMessage(e)}`);
+    }
   }
 
   async function handleStop(id: string): Promise<void> {
@@ -307,20 +444,25 @@ export function ProfilesView({
   async function handleMoveToTrash(id: string): Promise<void> {
     const target = profiles.find((p) => p.id === id);
     const label = target ? `“${target.name}”` : 'this profile';
-    if (!window.confirm(`Move ${label} to trash?`)) return;
+    setPendingAction({ kind: 'trash', ids: [id], label });
+  }
+
+  async function moveProfilesToTrash(ids: string[]): Promise<void> {
     try {
-      await moveToTrash(id);
-      setLaunchInfo((prev) => {
-        const next = new Map(prev);
-        next.delete(id);
-        return next;
-      });
+      for (const id of ids) {
+        await moveToTrash(id);
+        setLaunchInfo((prev) => {
+          const next = new Map(prev);
+          next.delete(id);
+          return next;
+        });
+      }
       setSelectedIds((prev) => {
         const next = new Set(prev);
-        next.delete(id);
+        for (const id of ids) next.delete(id);
         return next;
       });
-      toast.success('Profile moved to trash.');
+      toast.success(ids.length === 1 ? 'Profile moved to trash.' : 'Profiles moved to trash.');
     } catch (e: unknown) {
       toast.error(`Move to trash failed: ${errMessage(e)}`);
     }
@@ -343,7 +485,10 @@ export function ProfilesView({
   async function handlePermanentDelete(id: string): Promise<void> {
     const target = trashProfiles.find((profile) => profile.id === id);
     const label = target ? `“${target.name}”` : 'this profile';
-    if (!window.confirm(`Permanently delete ${label}? This cannot be undone.`)) return;
+    setPendingAction({ kind: 'permanent-delete', id, label });
+  }
+
+  async function permanentlyDeleteProfile(id: string): Promise<void> {
     setTrashBusy(id, true);
     setTrashError(null);
     try {
@@ -359,11 +504,12 @@ export function ProfilesView({
 
   async function handleSetPassword(id: string): Promise<void> {
     const target = profiles.find((profile) => profile.id === id);
-    const action = target?.passwordProtected
-      ? 'Enter a new password, or leave blank to remove password protection.'
-      : 'Enter a password for this profile. Leave blank to keep it unprotected.';
-    const value = window.prompt(action);
-    if (value === null) return;
+    if (!target) return;
+    setActionInput('');
+    setPendingAction({ kind: 'password', profile: target });
+  }
+
+  async function updateProfilePassword(id: string, value: string): Promise<void> {
     try {
       const password = value.trim().length > 0 ? value : null;
       await setPassword(id, password);
@@ -373,23 +519,17 @@ export function ProfilesView({
     }
   }
 
-  async function handleSaveFingerprint(patch: ProfilePatch): Promise<void> {
-    if (!editing) return;
-    setSaving(true);
-    try {
-      await update(editing.id, patch);
-      setEditing(null);
-      toast.success('Fingerprint overrides saved.');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleSaveProfile(patch: ProfilePatch): Promise<void> {
+  async function handleSaveProfile(
+    patch: ProfilePatch,
+    options?: { password?: string | null },
+  ): Promise<void> {
     if (!editingProfile) return;
     setSaving(true);
     try {
       await update(editingProfile.id, patch);
+      if (options && 'password' in options) {
+        await setPassword(editingProfile.id, options.password ?? null);
+      }
       setEditingProfile(null);
       toast.success('Profile saved.');
     } finally {
@@ -400,7 +540,7 @@ export function ProfilesView({
   async function handleBulkLaunch(): Promise<void> {
     const ids = [...selectedIds].filter((id) => {
       const p = profiles.find((x) => x.id === id);
-      return p && !isLive(p.status) && !isAndroidTarget(p.os);
+      return p && !isLive(p.status);
     });
     if (ids.length === 0) {
       toast.error('No selected desktop Lobium profiles can be launched.');
@@ -430,22 +570,27 @@ export function ProfilesView({
       toast.info('Stop running profiles before moving them to trash.');
       return;
     }
-    if (!window.confirm(`Move ${ids.length} profile(s) to trash?`)) return;
-    for (const id of ids) {
-      try {
-        await moveToTrash(id);
-        setLaunchInfo((prev) => {
-          const next = new Map(prev);
-          next.delete(id);
-          return next;
-        });
-      } catch (e: unknown) {
-        toast.error(`Move to trash failed: ${errMessage(e)}`);
-        return;
-      }
+    setPendingAction({
+      kind: 'trash',
+      ids,
+      label: `${ids.length} selected profiles`,
+    });
+  }
+
+  async function confirmPendingAction(): Promise<void> {
+    const action = pendingAction;
+    if (!action) return;
+    setActionBusy(true);
+    try {
+      if (action.kind === 'launch') await launchProfile(action.profile.id, actionInput);
+      if (action.kind === 'password') await updateProfilePassword(action.profile.id, actionInput);
+      if (action.kind === 'trash') await moveProfilesToTrash(action.ids);
+      if (action.kind === 'permanent-delete') await permanentlyDeleteProfile(action.id);
+      setPendingAction(null);
+      setActionInput('');
+    } finally {
+      setActionBusy(false);
     }
-    setSelectedIds(new Set());
-    toast.success('Profile moved to trash.');
   }
 
   function handleSort(key: ProfileSortKey): void {
@@ -468,7 +613,23 @@ export function ProfilesView({
   const filteredProfiles = useMemo(() => {
     const list = profiles.filter((profile) => {
       const needle = query.trim().toLowerCase();
-      const text = [profile.name, profile.folder, profile.notes, ...profile.tags]
+      // Search everything the row can show, not just the name/tags — so searching by ID, OS, status,
+      // engine, version, or proxy actually matches (the box previously ignored all of these).
+      const text = [
+        profile.name,
+        profile.id,
+        profile.folder,
+        profile.notes,
+        profile.engine,
+        profile.osVersion,
+        profile.os,
+        OS_OPTIONS.find((option) => option.value === profile.os)?.label,
+        STATUS_META[profile.status]?.label,
+        profile.proxy?.label,
+        profile.proxy ? `${profile.proxy.host}:${profile.proxy.port}` : undefined,
+        profile.proxyId,
+        ...profile.tags,
+      ]
         .filter(Boolean)
         .join(' ')
         .toLowerCase();
@@ -498,6 +659,12 @@ export function ProfilesView({
         case 'proxy':
           cmp = proxySortKey(a).localeCompare(proxySortKey(b));
           break;
+        case 'description':
+          cmp = (a.notes ?? '').localeCompare(b.notes ?? '');
+          break;
+        case 'tags':
+          cmp = (a.tags[0] ?? '').localeCompare(b.tags[0] ?? '');
+          break;
         case 'updatedAt':
         default:
           cmp = a.updatedAt.localeCompare(b.updatedAt);
@@ -520,6 +687,7 @@ export function ProfilesView({
 
   const runningCount = profiles.filter((profile) => profile.status === 'running').length;
   const selectedCount = selectedIds.size;
+  const actionCopy = pendingActionCopy(pendingAction);
 
   return (
     <section className="page profiles-view">
@@ -747,6 +915,7 @@ export function ProfilesView({
       ) : (
         <ProfileList
           profiles={filteredProfiles}
+          availableProxies={availableProxies}
           busyIds={busyIds}
           launchInfo={launchInfo}
           selectedIds={selectedIds}
@@ -773,35 +942,36 @@ export function ProfilesView({
           onEditProfile={setEditingProfile}
           onSetPassword={handleSetPassword}
           onShowConnection={handleShowConnection}
+          onExportCookies={(id) => {
+            void handleExportCookies(id);
+          }}
         />
       )}
 
       {showForm ? (
-        <div
-          className="modal-overlay"
-          role="presentation"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setShowForm(false);
-          }}
-        >
-          <NewProfileForm
-            proxies={availableProxies}
-            templates={availableTemplates}
-            onCreate={handleCreate}
-            onCreateProxy={handleCreateProxyFromProfile}
-            onCancel={() => setShowForm(false)}
-          />
-        </div>
+        <AccessibleModalOverlay onClose={() => setShowForm(false)}>
+          <Suspense
+            fallback={
+              <div className="modal modal-loading" role="dialog" aria-label="Loading profile form">
+                <p>Loading profile settings…</p>
+              </div>
+            }
+          >
+            <NewProfileForm
+              proxies={availableProxies}
+              templates={availableTemplates}
+              onCreate={handleCreate}
+              onCreateProxy={handleCreateProxyFromProfile}
+              onTestProxy={(config) => proxiesClient.test_proxy(null, config)}
+              loadFontFamilies={loadFontFamilies}
+              onCancel={() => setShowForm(false)}
+            />
+          </Suspense>
+        </AccessibleModalOverlay>
       ) : null}
 
       {showTrash ? (
-        <div
-          className="modal-overlay"
-          role="presentation"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setShowTrash(false);
-          }}
-        >
+        <AccessibleModalOverlay onClose={() => setShowTrash(false)}>
           <TrashModal
             profiles={trashProfiles}
             loading={trashLoading}
@@ -818,64 +988,23 @@ export function ProfilesView({
             }}
             onClose={() => setShowTrash(false)}
           />
-        </div>
+        </AccessibleModalOverlay>
       ) : null}
 
       {editingProfile ? (
-        <div
-          className="modal-overlay"
-          role="presentation"
-          onClick={(e) => {
-            if (e.target === e.currentTarget && !saving) setEditingProfile(null);
-          }}
-        >
+        <AccessibleModalOverlay onClose={() => setEditingProfile(null)} locked={saving}>
           <EditProfileForm
             profile={editingProfile}
             saving={saving}
             onSave={handleSaveProfile}
             onCancel={() => setEditingProfile(null)}
-            onEditFingerprint={() => {
-              setEditing(editingProfile);
-              setEditingProfile(null);
-            }}
+            proxies={availableProxies}
+            templates={availableTemplates}
+            onCreateProxy={handleCreateProxyFromProfile}
+            onTestProxy={(config) => proxiesClient.test_proxy(null, config)}
+            loadFontFamilies={loadFontFamilies}
           />
-        </div>
-      ) : null}
-
-      {editing ? (
-        <div
-          className="modal-overlay"
-          role="presentation"
-          onClick={(e) => {
-            if (e.target === e.currentTarget && !saving) setEditing(null);
-          }}
-        >
-          <div className="modal" role="dialog" aria-modal="true" aria-label="Edit fingerprint">
-            <header className="modal-header">
-              <div>
-                <h2>Fingerprint</h2>
-                <p className="modal-subtitle">{editing.name}</p>
-              </div>
-              <button
-                type="button"
-                className="icon-button"
-                onClick={() => setEditing(null)}
-                disabled={saving}
-                aria-label="Close"
-              >
-                <XMarkIcon aria-hidden />
-              </button>
-            </header>
-            <div className="modal-body">
-              <FingerprintEditor
-                profile={editing}
-                onSave={handleSaveFingerprint}
-                onClose={() => setEditing(null)}
-                saving={saving}
-              />
-            </div>
-          </div>
-        </div>
+        </AccessibleModalOverlay>
       ) : null}
 
       <LaunchPanel
@@ -895,6 +1024,32 @@ export function ProfilesView({
           markOnboarded();
           setShowOnboarding(false);
           setShowForm(true);
+        }}
+      />
+      <ActionDialog
+        open={pendingAction !== null}
+        title={actionCopy.title}
+        description={actionCopy.description}
+        confirmLabel={actionCopy.confirmLabel}
+        busy={actionBusy}
+        destructive={pendingAction?.kind === 'trash' || pendingAction?.kind === 'permanent-delete'}
+        input={
+          pendingAction?.kind === 'launch' || pendingAction?.kind === 'password'
+            ? {
+                label: pendingAction.kind === 'launch' ? 'Profile password' : 'New password',
+                value: actionInput,
+                onChange: setActionInput,
+                type: 'password',
+                required: pendingAction.kind === 'launch',
+              }
+            : undefined
+        }
+        onConfirm={() => {
+          void confirmPendingAction();
+        }}
+        onClose={() => {
+          setPendingAction(null);
+          setActionInput('');
         }}
       />
     </section>

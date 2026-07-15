@@ -1,4 +1,4 @@
-import type { Profile } from '@lobster/shared-types';
+import type { Profile, StoredProxy } from '@lobster/shared-types';
 import {
   ChevronDownIcon,
   ChevronUpIcon,
@@ -7,19 +7,34 @@ import {
   PlayIcon,
   StopIcon,
 } from '@heroicons/react/24/outline';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import type { LaunchInfo } from '../../api/tauri';
 import appIcon from '../../assets/brand/icon.png';
 import { EmptyState } from '../../ui';
 import { isAndroidTarget, osLabel, STATUS_META } from './options';
+import { OsIcon, countryFlag } from './OsIcon';
 
-export type ProfileSortKey = 'name' | 'updatedAt' | 'status' | 'proxy';
+export type ProfileSortKey = 'name' | 'updatedAt' | 'status' | 'proxy' | 'description' | 'tags';
 export type SortDir = 'asc' | 'desc';
+
+// Resizable data columns (the leading checkbox is fixed). Widths persist across sessions.
+const RESIZABLE_COLUMNS = ['title', 'description', 'proxy', 'tags'] as const;
+type ResizableColumn = (typeof RESIZABLE_COLUMNS)[number];
+const DEFAULT_COLUMN_WIDTHS: Record<ResizableColumn, number> = {
+  title: 320,
+  description: 240,
+  proxy: 260,
+  tags: 180,
+};
+const COLUMN_WIDTHS_STORAGE_KEY = 'lobster.profiles.columnWidths.v1';
+const MIN_COLUMN_WIDTH = 96;
 
 interface ProfileListProps {
   profiles: Profile[];
+  /** Stored proxies, so a profile referencing one by id shows its real name/host/country. */
+  availableProxies: StoredProxy[];
   /** Ids with an in-flight launch/stop call — their action buttons show a busy state. */
   busyIds: ReadonlySet<string>;
   /** Connection endpoints for profiles launched in this session. */
@@ -57,16 +72,44 @@ function formatDate(value: string): string {
   }).format(date);
 }
 
-function proxyLabel(profile: Profile): { title: string; detail: string } {
-  if (!profile.proxy) {
-    return profile.proxyId
-      ? { title: 'Stored proxy', detail: profile.proxyId }
-      : { title: 'No proxy', detail: 'Set a proxy' };
+interface ResolvedProxy {
+  /** Line 1: the user-given proxy name. */
+  name: string;
+  /** Line 2: host:port. */
+  address: string;
+  /** 2-letter country code for the flag, when known. */
+  countryCode?: string;
+  present: boolean;
+}
+
+/** A stored `location` is built as "CC · region · city" (see ProxiesView); take the leading country. */
+function countryCodeFromLocation(location?: string): string | undefined {
+  const first = location?.split(/[·,|/]/)[0]?.trim();
+  return first && /^[A-Za-z]{2}$/.test(first) ? first : undefined;
+}
+
+function resolveProxy(profile: Profile, stored: StoredProxy[]): ResolvedProxy {
+  if (profile.proxy) {
+    const { host, port, label } = profile.proxy;
+    return {
+      name: label ?? `${host}:${port}`,
+      address: `${host}:${port}`,
+      present: true,
+    };
   }
-  return {
-    title: profile.proxy.label ?? `${profile.proxy.host}:${profile.proxy.port}`,
-    detail: `${profile.proxy.host}:${profile.proxy.port}`,
-  };
+  if (profile.proxyId) {
+    const match = stored.find((p) => p.id === profile.proxyId);
+    if (match) {
+      return {
+        name: match.label || `${match.config.host}:${match.config.port}`,
+        address: `${match.config.host}:${match.config.port}`,
+        countryCode: countryCodeFromLocation(match.location),
+        present: true,
+      };
+    }
+    return { name: 'Stored proxy', address: profile.proxyId, present: true };
+  }
+  return { name: 'No proxy', address: 'Set a proxy', present: false };
 }
 
 function SortHeader({
@@ -175,6 +218,7 @@ function StatusActionButton({
 /** Dense profile table with per-profile lifecycle + management actions. */
 export function ProfileList({
   profiles,
+  availableProxies,
   busyIds,
   launchInfo,
   selectedIds,
@@ -198,6 +242,46 @@ export function ProfileList({
   const triggerRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const allSelected = profiles.length > 0 && profiles.every((p) => selectedIds.has(p.id));
   const someSelected = profiles.some((p) => selectedIds.has(p.id));
+
+  // Per-column widths (draggable, persisted). table-layout:fixed honors these + enables text ellipsis.
+  const [columnWidths, setColumnWidths] = useState<Record<ResizableColumn, number>>(() => {
+    try {
+      const saved = localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
+      if (saved) return { ...DEFAULT_COLUMN_WIDTHS, ...(JSON.parse(saved) as Partial<Record<ResizableColumn, number>>) };
+    } catch {
+      // ignore malformed storage
+    }
+    return DEFAULT_COLUMN_WIDTHS;
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(columnWidths));
+    } catch {
+      // storage unavailable — widths simply won't persist
+    }
+  }, [columnWidths]);
+
+  const startResize = useCallback(
+    (column: ResizableColumn, event: React.MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const startX = event.clientX;
+      const startWidth = columnWidths[column];
+      const onMove = (moveEvent: MouseEvent) => {
+        const next = Math.max(MIN_COLUMN_WIDTH, startWidth + (moveEvent.clientX - startX));
+        setColumnWidths((current) => ({ ...current, [column]: next }));
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        document.body.style.cursor = '';
+      };
+      document.body.style.cursor = 'col-resize';
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    },
+    [columnWidths],
+  );
 
   useLayoutEffect(() => {
     if (!openMenuId) {
@@ -261,7 +345,14 @@ export function ProfileList({
 
   return (
     <div className="data-panel">
-      <table className="data-table profiles-table">
+      <table className="data-table profiles-table profiles-table--fixed">
+        <colgroup>
+          <col style={{ width: 40 }} />
+          <col style={{ width: columnWidths.title }} />
+          <col style={{ width: columnWidths.description }} />
+          <col style={{ width: columnWidths.proxy }} />
+          <col style={{ width: columnWidths.tags }} />
+        </colgroup>
         <thead>
           <tr>
             <th className="check-cell">
@@ -275,31 +366,54 @@ export function ProfileList({
                 onChange={onToggleSelectAll}
               />
             </th>
-            <th>
+            <th className="th--resizable">
               <SortHeader
                 label="Title"
                 active={sortKey === 'name'}
                 dir={sortDir}
                 onClick={() => onSort('name')}
               />
+              <span className="col-resize" onMouseDown={(e) => startResize('title', e)} aria-hidden />
             </th>
-            <th>Description</th>
-            <th>
+            <th className="th--resizable">
+              <SortHeader
+                label="Description"
+                active={sortKey === 'description'}
+                dir={sortDir}
+                onClick={() => onSort('description')}
+              />
+              <span
+                className="col-resize"
+                onMouseDown={(e) => startResize('description', e)}
+                aria-hidden
+              />
+            </th>
+            <th className="th--resizable">
               <SortHeader
                 label="Proxy"
                 active={sortKey === 'proxy'}
                 dir={sortDir}
                 onClick={() => onSort('proxy')}
               />
+              <span className="col-resize" onMouseDown={(e) => startResize('proxy', e)} aria-hidden />
             </th>
-            <th>Tags</th>
+            <th className="th--resizable">
+              <SortHeader
+                label="Tags"
+                active={sortKey === 'tags'}
+                dir={sortDir}
+                onClick={() => onSort('tags')}
+              />
+              <span className="col-resize" onMouseDown={(e) => startResize('tags', e)} aria-hidden />
+            </th>
           </tr>
         </thead>
         <tbody>
           {profiles.map((profile) => {
             const busy = busyIds.has(profile.id);
             const info = launchInfo.get(profile.id);
-            const proxy = proxyLabel(profile);
+            const proxy = resolveProxy(profile, availableProxies);
+            const description = profile.notes ?? info?.debuggerAddress ?? '';
             const androidTarget = isAndroidTarget(profile.os);
             return (
               <tr
@@ -318,11 +432,14 @@ export function ProfileList({
                   <div className="profile-title-cell">
                     <img className="row-mark" src={appIcon} alt="" aria-hidden />
                     <div className="profile-title-text">
-                      <div className="table-title">{profile.name}</div>
+                      <div className="table-title cell-ellipsis" title={profile.name}>
+                        {profile.name}
+                      </div>
                       <div className="table-subtitle">
-                        {osLabel(profile.os)} · {STATUS_META[profile.status].label} ·{' '}
+                        <OsIcon os={profile.os} className="table-os-icon" />
+                        <span title={osLabel(profile.os)}>{STATUS_META[profile.status].label}</span> ·{' '}
                         {formatDate(profile.updatedAt)}
-                        {profile.passwordProtected ? ' · Password protected' : ''}
+                        {profile.passwordProtected ? ' · 🔒' : ''}
                       </div>
                     </div>
                     <div className="table-actions">
@@ -355,14 +472,27 @@ export function ProfileList({
                   </div>
                 </td>
                 <td>
-                  <span className="muted">{profile.notes ?? info?.debuggerAddress ?? ''}</span>
+                  <span className="muted cell-ellipsis" title={description || undefined}>
+                    {description || '—'}
+                  </span>
                 </td>
                 <td>
-                  <div className="proxy-cell">
+                  <div className={`proxy-cell${proxy.present ? '' : ' proxy-cell--empty'}`}>
                     <LockClosedIcon aria-hidden />
-                    <div>
-                      <div>{proxy.title}</div>
-                      <div className="table-subtitle">{proxy.detail}</div>
+                    <div className="proxy-cell__text">
+                      <div className="proxy-cell__name cell-ellipsis" title={proxy.name}>
+                        {proxy.name}
+                      </div>
+                      <div className="table-subtitle proxy-cell__addr">
+                        <span className="cell-ellipsis" title={proxy.address}>
+                          {proxy.address}
+                        </span>
+                        {proxy.countryCode ? (
+                          <span className="proxy-flag" title={proxy.countryCode}>
+                            {countryFlag(proxy.countryCode)}
+                          </span>
+                        ) : null}
+                      </div>
                     </div>
                   </div>
                 </td>

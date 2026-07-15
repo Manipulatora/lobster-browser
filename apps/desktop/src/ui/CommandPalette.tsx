@@ -28,15 +28,46 @@ export function CommandPalette({
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
-    if (open) {
-      setQuery('');
-      setActive(0);
-      // Focus after paint.
-      window.setTimeout(() => inputRef.current?.focus(), 0);
+    if (!open) return;
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
+    setQuery('');
+    setActive(0);
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+
+    function trapFocus(event: KeyboardEvent): void {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== 'Tab' || !dialogRef.current) return;
+      const focusable = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => element.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     }
-  }, [open]);
+
+    document.addEventListener('keydown', trapFocus, true);
+    return () => {
+      document.removeEventListener('keydown', trapFocus, true);
+      previouslyFocused.current?.focus();
+    };
+  }, [open, onClose]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -91,7 +122,13 @@ export function CommandPalette({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="lb-palette" role="dialog" aria-modal="true" aria-label="Command palette">
+      <div
+        ref={dialogRef}
+        className="lb-palette"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+      >
         <input
           ref={inputRef}
           className="lb-palette__input"
@@ -101,7 +138,7 @@ export function CommandPalette({
           onKeyDown={onKeyDown}
           aria-label="Command search"
         />
-        <div className="lb-palette__list" ref={listRef}>
+        <div className="lb-palette__list" ref={listRef} role="listbox" aria-label="Commands">
           {flat.length === 0 ? (
             <div className="lb-palette__group">No matches</div>
           ) : (
@@ -116,6 +153,8 @@ export function CommandPalette({
                       key={c.id}
                       type="button"
                       className={`lb-palette__item ${isActive ? 'lb-palette__item--active' : ''}`}
+                      role="option"
+                      aria-selected={isActive}
                       onMouseEnter={() => setActive(flat.indexOf(c))}
                       onClick={() => {
                         onClose();

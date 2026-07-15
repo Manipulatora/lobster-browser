@@ -15,7 +15,7 @@ import type { ProxyConfig } from './proxy.js';
  * Node engine-runner sidecar. Newline-delimited JSON over stdio. The Rust side owns
  * privilege/auth; the sidecar only launches and controls engines.
  *
- * See docs/contracts/sidecar-ipc.md for the full spec.
+ * See docs/OPERATIONS.md (§4) for the full spec.
  */
 
 export type SidecarMethod =
@@ -69,11 +69,13 @@ export interface LaunchParams {
   headless?: boolean;
   /**
    * True for an Android persona launched as an emulated mobile Chrome (native Lobium, a real window,
-   * no ADB/APK) — see `start-android-emulated-profile.ts`. The launcher centers the window and
-   * applies CDP touch/device-metrics emulation so the window behaves like a phone viewport instead
-   * of a plain desktop window that merely claims a mobile UA.
+   * no ADB/APK) — see `start-android-emulated-profile.ts`. Lobium stays a normal desktop window;
+   * its native content workspace centers the real WebContents inside the selected phone/tablet
+   * frame while CDP supplies touch and coherent Android device metrics on every tab.
    */
   isMobileProfile?: boolean;
+  /** Native rectangle device frame surrounding the emulated WebContents inside BrowserView. */
+  mobileFormFactor?: 'phone' | 'tablet';
 }
 
 /**

@@ -63,6 +63,7 @@ export class CompositeRunner implements EngineRunner {
       ...(params.cookiesImport !== undefined ? { cookiesImport: params.cookiesImport } : {}),
       ...(params.extensions !== undefined ? { extensions: params.extensions } : {}),
       ...(params.isMobileProfile ? { isMobileProfile: true } : {}),
+      ...(params.mobileFormFactor ? { mobileFormFactor: params.mobileFormFactor } : {}),
       options: buildLaunchOptions(params),
       emulation: buildCdpEmulation(params.fingerprint),
       initScript: buildFingerprintInitScript(params.fingerprint),

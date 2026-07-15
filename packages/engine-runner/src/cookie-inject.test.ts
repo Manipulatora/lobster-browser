@@ -39,7 +39,7 @@ test('parseCookieText auto-detects JSON vs Netscape', () => {
   assert.equal(j.httpOnly, true);
 });
 
-test('toCdpCookie strips a leading dot and keeps session cookies expiry-less', () => {
+test('toCdpCookie preserves domain-vs-host-only scope and keeps session cookies expiry-less', () => {
   const withDot = toCdpCookie({
     name: 'a',
     value: '1',
@@ -48,7 +48,8 @@ test('toCdpCookie strips a leading dot and keeps session cookies expiry-less', (
     httpOnly: false,
     secure: true,
   });
-  assert.equal(withDot.domain, 'example.com');
+  assert.equal(withDot.domain, '.example.com');
+  assert.equal(withDot.url, undefined);
   assert.equal(withDot.expires, undefined);
   const withExp = toCdpCookie({
     name: 'a',
@@ -59,7 +60,29 @@ test('toCdpCookie strips a leading dot and keeps session cookies expiry-less', (
     secure: true,
     expires: 123,
   });
+  assert.equal(withExp.domain, undefined);
+  assert.equal(withExp.url, 'https://x.com/');
   assert.equal(withExp.expires, 123);
+});
+
+test('invalid cookie security combinations fail before an all-or-nothing CDP injection', () => {
+  assert.throws(
+    () =>
+      cdpCookiesFromDraft({
+        mode: 'merge',
+        rawText: JSON.stringify([
+          {
+            name: '__Secure-session',
+            value: 'v',
+            domain: 'example.com',
+            path: '/',
+            secure: false,
+            sameSite: 'None',
+          },
+        ]),
+      }),
+    /SameSite=None requires Secure.*__Secure- cookies require Secure/,
+  );
 });
 
 test('cdpCookiesFromDraft honors mode and empty/absent drafts', () => {
@@ -133,6 +156,21 @@ test('applyCookieImport with empty draft injects nothing', async () => {
   const n = await applyCookieImport(cdp, { mode: 'empty' });
   assert.equal(n, 0);
   assert.equal(cdp.calls.filter((c) => c.method === 'Network.setCookies').length, 0);
+  assert.equal(cdp.calls[0]?.method, 'Network.clearBrowserCookies');
+});
+
+test('failed injection rejects so the caller can preserve the pending one-shot import', async () => {
+  const cdp = {
+    send(method: string): Promise<unknown> {
+      return method === 'Network.setCookies'
+        ? Promise.reject(new Error('browser rejected cookies'))
+        : Promise.resolve(null);
+    },
+  };
+  await assert.rejects(
+    () => applyCookieImport(cdp, { mode: 'merge', rawText: JSON_COOKIES }),
+    /browser rejected cookies/,
+  );
 });
 
 test('exportCookies maps CDP cookies back to canonical, session cookies expiry-less', async () => {

@@ -1,0 +1,817 @@
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+index 3e26337389..030e7876d4 100644
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -5243,6 +5243,8 @@ static_library("ui") {
+         "views/frame/browser_frame_view_linux.h",
+         "views/frame/browser_frame_view_linux_native.cc",
+         "views/frame/browser_frame_view_linux_native.h",
++        "views/frame/lobium_device_frame_view.cc",
++        "views/frame/lobium_device_frame_view.h",
+       ]
+     }
+ 
+diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 2da4e711b9..2f01fee82c 100644
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -149,6 +149,9 @@
+ #include "chrome/browser/ui/views/frame/browser_native_widget.h"
+ #include "chrome/browser/ui/views/frame/browser_widget.h"
+ #include "chrome/browser/ui/views/frame/contents_container_view.h"
++#if BUILDFLAG(IS_LINUX)
++#include "chrome/browser/ui/views/frame/lobium_device_frame_view.h"
++#endif
+ #include "chrome/browser/ui/views/frame/contents_layout_manager.h"
+ #include "chrome/browser/ui/views/frame/contents_separator.h"
+ #include "chrome/browser/ui/views/frame/custom_floating_corner.h"
+@@ -958,6 +961,12 @@ BrowserView::BrowserView(Browser* browser)
+   top_container_separator_->SetProperty(views::kElementIdentifierKey,
+                                         kContentsSeparatorTopEdgeElementId);
+ 
++#if BUILDFLAG(IS_LINUX)
++  if (LobiumDeviceFrameView::IsEnabled()) {
++    lobium_device_frame_view_ =
++        AddChildView(std::make_unique<LobiumDeviceFrameView>(this));
++  }
++#endif
+   contents_container_ = AddChildView(std::move(contents_container));
+   set_contents_view(contents_container_);
+ 
+@@ -1145,6 +1154,9 @@ BrowserView::~BrowserView() {
+   context_highlight_view_ = nullptr;
+   window_scrim_view_ = nullptr;
+   contents_container_ = nullptr;
++#if BUILDFLAG(IS_LINUX)
++  lobium_device_frame_view_ = nullptr;
++#endif
+   vertical_tab_strip_region_view_ = nullptr;
+   vertical_tab_strip_top_corner_ = nullptr;
+   vertical_tab_strip_bottom_corner_ = nullptr;
+@@ -1939,6 +1951,12 @@ void BrowserView::OnActiveTabChanged(content::WebContents* old_contents,
+ 
+   WebContentsObserver::Observe(new_contents);
+ 
++#if BUILDFLAG(IS_LINUX)
++  if (lobium_device_frame_view_) {
++    lobium_device_frame_view_->ApplyCurrentScaleToWebContents(new_contents);
++  }
++#endif
++
+   // If |contents_container_| already has the correct WebContents, we can save
+   // some work.  This also prevents extra events from being reported by the
+   // Visibility API under Windows, as ChangeWebContents will briefly hide
+@@ -4932,6 +4950,9 @@ void BrowserView::AddedToWidget() {
+   layout_views.toolbar = toolbar_;
+   layout_views.infobar_container = infobar_container_;
+   layout_views.contents_container = contents_container_;
++#if BUILDFLAG(IS_LINUX)
++  layout_views.lobium_device_frame_view = lobium_device_frame_view_;
++#endif
+   layout_views.multi_contents_view = multi_contents_view_;
+   layout_views.side_panel = side_panel_;
+   layout_views.top_container_separator = top_container_separator_;
+@@ -5079,6 +5100,24 @@ bool BrowserView::AcceleratorPressed(const ui::Accelerator& accelerator) {
+ 
+   UpdateAcceleratorMetrics(accelerator, command_id);
+ 
++#if BUILDFLAG(IS_LINUX)
++  if (lobium_device_frame_view_) {
++    switch (command_id) {
++      case IDC_ZOOM_PLUS:
++        lobium_device_frame_view_->ZoomIn();
++        return true;
++      case IDC_ZOOM_MINUS:
++        lobium_device_frame_view_->ZoomOut();
++        return true;
++      case IDC_ZOOM_NORMAL:
++        lobium_device_frame_view_->ResetZoom();
++        return true;
++      default:
++        break;
++    }
++  }
++#endif
++
+   if (command_id == IDC_CLEAR_BROWSING_DATA) {
+     views::ElementTrackerViews::GetInstance()->NotifyCustomEvent(
+         browsing_data_important_sites_util::
+diff --git a/chrome/browser/ui/views/frame/browser_view.h b/chrome/browser/ui/views/frame/browser_view.h
+index 7847f1e545..703a319f88 100644
+--- a/chrome/browser/ui/views/frame/browser_view.h
++++ b/chrome/browser/ui/views/frame/browser_view.h
+@@ -82,6 +82,7 @@ struct DropData;
+ class ExclusiveAccessBubbleViews;
+ class ExclusiveAccessBubbleViewsContext;
+ class InfoBarContainerView;
++class LobiumDeviceFrameView;
+ class LocationBarView;
+ class MultiContentsView;
+ class ProjectsPanelView;
+@@ -1239,6 +1240,12 @@ class BrowserView : public BrowserWindow,
+   // Handled by ContentsLayoutManager.
+   raw_ptr<views::View> contents_container_ = nullptr;
+ 
++#if BUILDFLAG(IS_LINUX)
++  // Native phone/tablet workspace behind the real WebContents for Android
++  // profiles.
++  raw_ptr<LobiumDeviceFrameView> lobium_device_frame_view_ = nullptr;
++#endif
++
+   // The view responsible for housing the contents of the vertical tab strip.
+   raw_ptr<VerticalTabStripRegionView> vertical_tab_strip_region_view_ = nullptr;
+ 
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_layout.h b/chrome/browser/ui/views/frame/layout/browser_view_layout.h
+index 4d5b544dff..1f6718035f 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_layout.h
++++ b/chrome/browser/ui/views/frame/layout/browser_view_layout.h
+@@ -8,6 +8,7 @@
+ #include <memory>
+ 
+ #include "base/memory/raw_ptr.h"
++#include "build/build_config.h"
+ #include "chrome/browser/ui/views/frame/custom_floating_corner.h"
+ #include "ui/base/interaction/element_identifier.h"
+ #include "ui/gfx/geometry/rect.h"
+@@ -20,6 +21,7 @@ class Browser;
+ class BrowserViewLayoutDelegate;
+ class InfoBarContainerView;
+ class MultiContentsView;
++class LobiumDeviceFrameView;
+ class ProjectsPanelView;
+ class SidePanel;
+ class TabStrip;
+@@ -73,6 +75,9 @@ struct BrowserViewLayoutViews {
+   raw_ptr<views::View> toolbar = nullptr;
+   raw_ptr<InfoBarContainerView> infobar_container = nullptr;
+   raw_ptr<views::View> contents_container = nullptr;
++#if BUILDFLAG(IS_LINUX)
++  raw_ptr<LobiumDeviceFrameView> lobium_device_frame_view = nullptr;
++#endif
+   raw_ptr<MultiContentsView> multi_contents_view = nullptr;
+   raw_ptr<SidePanel> side_panel = nullptr;
+   raw_ptr<views::View> side_panel_animation_content = nullptr;
+diff --git a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+index 8a9a7c3ef3..e8900fd1ef 100644
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+@@ -14,6 +14,9 @@
+ #include "base/trace_event/common/trace_event_common.h"
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
++#if BUILDFLAG(IS_LINUX)
++#include "chrome/browser/ui/views/frame/lobium_device_frame_view.h"
++#endif
+ #include "chrome/browser/ui/animation/browser_animation_controller.h"
+ #include "chrome/browser/ui/color/chrome_color_id.h"
+ #include "chrome/browser/ui/immersive/immersive_mode_controller.h"
+@@ -1109,11 +1112,18 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+     content_right =
+         std::min(content_right, browser_params.visual_client_area.right());
+   }
++  gfx::Rect contents_bounds(content_left, params.visual_client_area.y(),
++                            content_right - content_left,
++                            params.visual_client_area.height());
++#if BUILDFLAG(IS_LINUX)
++  if (views().lobium_device_frame_view) {
++    layout.AddChild(views().lobium_device_frame_view, contents_bounds);
++    contents_bounds = views().lobium_device_frame_view->GetDeviceScreenBounds(
++        contents_bounds);
++  }
++#endif
+   auto& contents_layout =
+-      layout.AddChild(views().contents_container,
+-                      gfx::Rect(content_left, params.visual_client_area.y(),
+-                                content_right - content_left,
+-                                params.visual_client_area.height()));
++      layout.AddChild(views().contents_container, contents_bounds);
+ 
+   // Maybe expand and clip the web contents to avoid issues during animation.
+   if (features::UseSidePanelFlyoverAnimation()) {
+diff --git a/chrome/browser/ui/views/frame/lobium_device_frame_view.cc b/chrome/browser/ui/views/frame/lobium_device_frame_view.cc
+new file mode 100644
+index 0000000000..83488ac64d
+--- /dev/null
++++ b/chrome/browser/ui/views/frame/lobium_device_frame_view.cc
+@@ -0,0 +1,406 @@
++// Copyright 2026 The Lobster Browser Authors.
++
++#include "chrome/browser/ui/views/frame/lobium_device_frame_view.h"
++
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <string>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/functional/bind.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/time/time.h"
++#include "cc/paint/paint_flags.h"
++#include "chrome/browser/ui/views/frame/browser_view.h"
++#include "content/public/browser/lobium_device_emulation.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/events/event.h"
++#include "ui/gfx/canvas.h"
++#include "ui/gfx/geometry/insets.h"
++#include "ui/gfx/geometry/rect_f.h"
++
++namespace {
++
++constexpr char kDeviceFrameSwitch[] = "lobium-device-frame";
++constexpr char kDeviceScreenSwitch[] = "lobium-device-screen";
++// A small breathing margin between the phone/tablet shell and the browser
++// content area; kept modest so the device is as large as the shared scale
++// allows.
++constexpr int kStagePadding = 16;
++// Hairline device outline. Painted as a 1px stroke (see OnPaint) so the phone frame is a thin line, not
++// a heavy bezel, and does not thicken with zoom.
++constexpr float kFrameBorder = 1.0f;
++
++// Reserved strip at the RIGHT edge of the stage for the vertical scrollbar, shown
++// only when the zoomed device is taller than the content area. The aperture width
++// is clamped to leave this gutter so the scrollbar — painted by this view, which
++// sits behind the WebContents — stays visible and clickable.
++constexpr int kScrollbarGutter = 16;
++constexpr int kScrollbarThumbWidth = 6;
++constexpr int kScrollbarMinThumb = 28;
++constexpr int kScrollWheelStep = 90;
++
++// Multipliers around the native fit-to-window scale. Keeping these discrete
++// mirrors Chromium's familiar Ctrl +/- behavior without mutating page zoom.
++constexpr std::array<float, 15> kZoomMultipliers = {
++    0.25f, 0.33f, 0.50f, 0.67f, 0.75f, 0.80f, 0.90f, 1.00f,
++    1.10f, 1.25f, 1.50f, 1.75f, 2.00f, 2.50f, 3.00f};
++constexpr int kDefaultZoomStep = 7;
++
++gfx::Size DeviceScreen() {
++  const std::string value =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++          kDeviceScreenSwitch);
++  const std::vector<std::string> parts = base::SplitString(
++      value, "x", base::KEEP_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++  int width = 0;
++  int height = 0;
++  if (parts.size() != 2 || !base::StringToInt(parts[0], &width) ||
++      !base::StringToInt(parts[1], &height) || width <= 0 || height <= 0) {
++    return gfx::Size(393, 873);
++  }
++  return gfx::Size(width, height);
++}
++
++// Scale at which the device exactly fills the stage (content area minus padding). This is the hard
++// upper bound for the device scale: beyond it the frame + WebContents aperture would exceed the stage
++// and, being centered, spill over the toolbar/window chrome.
++float FillScale(const gfx::Rect& workspace) {
++  const gfx::Size screen = DeviceScreen();
++  gfx::Rect available = workspace;
++  available.Inset(gfx::Insets(kStagePadding));
++  const float natural_width = screen.width() + kFrameBorder * 2.0f;
++  const float natural_height = screen.height() + kFrameBorder * 2.0f;
++  return std::max(0.05f, std::min(available.width() / natural_width,
++                                  available.height() / natural_height));
++}
++
++}  // namespace
++
++LobiumDeviceFrameView::LobiumDeviceFrameView(BrowserView* browser_view)
++    : browser_view_(browser_view), zoom_step_(kDefaultZoomStep) {}
++
++LobiumDeviceFrameView::~LobiumDeviceFrameView() = default;
++
++bool LobiumDeviceFrameView::IsEnabled() {
++  const std::string value =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++          kDeviceFrameSwitch);
++  return value == "phone" || value == "tablet";
++}
++
++LobiumDeviceFrameView::Geometry LobiumDeviceFrameView::CalculateGeometry(
++    const gfx::Rect& local_workspace) const {
++  const gfx::Size screen = DeviceScreen();
++  const float border = kFrameBorder;
++  gfx::Rect available = local_workspace;
++  available.Inset(gfx::Insets(kStagePadding));
++  const float natural_width = screen.width() + border * 2.0f;
++  const float natural_height = screen.height() + border * 2.0f;
++
++  // The default (zero) step fits the device to the current content area, capped at 1:1. The 1:1 cap is
++  // what makes the phone fit its frame on first paint: the sidecar's DevTools device-emulation scale is
++  // itself clamped to <=1.0 (Math.min(1, ...) in device-frame.ts), so both sides independently land on
++  // the SAME default scale (min(fit, 1.0)) with no async handshake, avoiding the old ~8% bottom gap.
++  const float fill_scale = FillScale(local_workspace);
++  const float base = std::min(1.0f, fill_scale);
++  // User zoom multiplies around the base fit and MAY exceed fill — the device deliberately grows LARGER
++  // than the stage on zoom-in (that is what "zoom in" must do). Overrun is kept off the browser chrome by
++  // clamping the device POSITION below, not by capping the scale, so zoom-in is never a no-op.
++  const float scale =
++      std::clamp(base * kZoomMultipliers[zoom_step_], 0.05f, 10.0f);
++
++  const gfx::Size frame_size(std::lround(natural_width * scale),
++                             std::lround(natural_height * scale));
++
++  // Vertical overflow: the zoomed device is taller than the content area. Expose a
++  // scrollbar and let the user scroll the stage down instead of clipping the lower
++  // part of the phone off-screen under the window edge.
++  const int overflow_y = std::max(0, frame_size.height() - available.height());
++  max_scroll_ = overflow_y;
++  const int scroll = std::clamp(scroll_offset_, 0, overflow_y);
++
++  // Center the device while it fits the stage. Horizontally, once it is wider than the stage, PIN its left
++  // edge inside the stage so it can never ride off the left — it overflows right, where the window clips
++  // it. Vertically, when it overflows PIN the top and move UP by the scroll offset (so scrolling down
++  // reveals the lower part); otherwise center it. This keeps the phone off the toolbar/omnibox while
++  // letting zoom-in enlarge it and the scrollbar reach the bottom.
++  const int fx = std::max(available.x(),
++                          available.x() + (available.width() - frame_size.width()) / 2);
++  const int fy =
++      overflow_y > 0
++          ? available.y() - scroll
++          : std::max(available.y(),
++                     available.y() + (available.height() - frame_size.height()) / 2);
++  const gfx::Rect frame(fx, fy, frame_size.width(), frame_size.height());
++  gfx::Rect screen_bounds = frame;
++  // Fixed 1px aperture inset (NOT border*scale) so the outline stays a hairline at every zoom level and
++  // the WebContents aperture aligns with the 1px ring drawn in OnPaint.
++  screen_bounds.Inset(std::max(1, static_cast<int>(std::lround(border))));
++  // When scrolling is active, keep the aperture's right edge clear of the scrollbar
++  // gutter so the scrollbar (painted behind the WebContents) is not covered and can
++  // receive mouse events.
++  if (overflow_y > 0) {
++    const int max_right = available.right() - kScrollbarGutter;
++    if (screen_bounds.right() > max_right) {
++      screen_bounds.set_width(std::max(1, max_right - screen_bounds.x()));
++    }
++  }
++  return {frame, screen_bounds, scale};
++}
++
++gfx::Rect LobiumDeviceFrameView::GetDeviceScreenBounds(
++    const gfx::Rect& workspace) {
++  const Geometry geometry = CalculateGeometry(gfx::Rect(workspace.size()));
++  if (std::abs(current_scale_ - geometry.scale) > 0.0001f) {
++    current_scale_ = geometry.scale;
++    ScheduleEmulationScaleSync(browser_view_->GetActiveWebContents(),
++                               current_scale_);
++  }
++  return geometry.screen + workspace.OffsetFromOrigin();
++}
++
++bool LobiumDeviceFrameView::SetZoomStep(int step) {
++  const int clamped = std::clamp(step, 0,
++                                 static_cast<int>(kZoomMultipliers.size()) - 1);
++  if (clamped == zoom_step_) {
++    return false;
++  }
++  zoom_step_ = clamped;
++  // Reset the stage scroll on every zoom change so the view predictably re-centers
++  // on (or pins to) the top of the device rather than staying scrolled mid-phone.
++  scroll_offset_ = 0;
++  browser_view_->InvalidateLayout();
++  SchedulePaint();
++  return true;
++}
++
++bool LobiumDeviceFrameView::ZoomIn() {
++  // Always advance: the device is allowed to grow past the stage (CalculateGeometry pins its top-left so
++  // it overflows into the window's clip region, not over the chrome), so zoom-in is never a no-op.
++  return SetZoomStep(zoom_step_ + 1);
++}
++
++bool LobiumDeviceFrameView::ZoomOut() {
++  return SetZoomStep(zoom_step_ - 1);
++}
++
++bool LobiumDeviceFrameView::ResetZoom() {
++  return SetZoomStep(kDefaultZoomStep);
++}
++
++void LobiumDeviceFrameView::SyncEmulationScale(
++    base::WeakPtr<content::WebContents> web_contents,
++    float scale,
++    int attempts_remaining) {
++  // Ignore delayed work from an older window size or zoom step: a newer layout
++  // has since changed current_scale_ and started its own retry chain.
++  if (!web_contents || std::abs(current_scale_ - scale) > 0.0001f) {
++    return;
++  }
++  // SetLobiumDeviceEmulationScale only carries the scale (merge-only) and returns
++  // false while Blink device emulation is not yet enabled. The sidecar enables it
++  // AFTER endpoint-ready + cookie import, so the aperture's fit scale is computed
++  // (at first layout) before there is anything to push it to. Retry until the push
++  // actually lands — otherwise the emulated image stays at the sidecar's bootstrap
++  // scale (1.0) while the native aperture sits at the real fit (~1.10), leaving the
++  // ~8% bottom gap that previously only a manual Ctrl+zoom could correct.
++  if (content::SetLobiumDeviceEmulationScale(web_contents.get(), scale)) {
++    // The scale landed — Blink device emulation is now enabled for this (possibly brand-new) tab. Re-fit
++    // the aperture and repaint so the WebContents covers the whole device screen. Without this, a new tab
++    // created while zoomed in stayed at the bootstrap scale until a manual zoom, leaving the phone screen
++    // partly dark.
++    browser_view_->InvalidateLayout();
++    SchedulePaint();
++    return;
++  }
++  if (attempts_remaining <= 0) {
++    return;
++  }
++  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce(&LobiumDeviceFrameView::SyncEmulationScale,
++                     weak_factory_.GetWeakPtr(), web_contents, scale,
++                     attempts_remaining - 1),
++      base::Milliseconds(100));
++}
++
++void LobiumDeviceFrameView::ScheduleEmulationScaleSync(
++    content::WebContents* web_contents,
++    float scale) {
++  if (!web_contents) {
++    return;
++  }
++  // One self-terminating chain (100ms x 240 ≈ up to 24s) rather than a fixed
++  // burst: it tries immediately, then keeps retrying only until emulation is
++  // enabled and the scale lands, so it wins regardless of how late the sidecar
++  // turns emulation on. The fast 100ms cadence shrinks the window in which a
++  // freshly created tab shows a dark emulation letterbox before the stage scale
++  // lands. A newer layout/zoom starts a fresh chain and the current_scale_ guard
++  // abandons this stale one.
++  constexpr int kMaxAttempts = 240;
++  SyncEmulationScale(web_contents->GetWeakPtr(), scale, kMaxAttempts);
++}
++
++void LobiumDeviceFrameView::ApplyCurrentScaleToWebContents(
++    content::WebContents* web_contents) {
++  // A new tab starts at the top of the device.
++  scroll_offset_ = 0;
++  // Recompute the CURRENT stage fit-scale from live geometry (not the possibly
++  // stale current_scale_) and arm the emulation-scale sync directly for THIS tab,
++  // which may be brand new. The sync retries until the sidecar has enabled device
++  // emulation on the tab, then pushes this scale so the emulated image fills the
++  // whole aperture. Without a correct scale, a tab created while zoomed in kept the
++  // sidecar's bootstrap fit-scale and showed a dark emulation letterbox in the part
++  // of the aperture the smaller image did not cover — until a manual zoom re-armed
++  // the sync. Setting current_scale_ here keeps the retry guard consistent.
++  const float scale = CalculateGeometry(GetLocalBounds()).scale;
++  current_scale_ = scale;
++  ScheduleEmulationScaleSync(web_contents, scale);
++  // Re-fit + repaint immediately on tab switch (the zoom path already does this via SetZoomStep).
++  browser_view_->InvalidateLayout();
++  SchedulePaint();
++}
++
++void LobiumDeviceFrameView::OnPaint(gfx::Canvas* canvas) {
++  views::View::OnPaint(canvas);
++  // Neutral desk behind the device.
++  canvas->DrawColor(SkColorSetRGB(246, 248, 251));
++
++  const Geometry geometry = CalculateGeometry(GetLocalBounds());
++  // Paint ONLY a thin border ring around the device screen — not a filled rectangle. The real WebContents
++  // sibling covers the aperture; anything it does not yet cover (a brand-new tab momentarily at the wrong
++  // emulation scale, a mid-zoom frame) now shows the light desk instead of a black block. That is the fix
++  // for "part of the phone goes dark after zoom-in + new tab", and the thin stroke doubles as the hairline
++  // device border.
++  cc::PaintFlags border_flags;
++  border_flags.setColor(SkColorSetRGB(18, 23, 31));
++  border_flags.setStyle(cc::PaintFlags::kStroke_Style);
++  border_flags.setStrokeWidth(kFrameBorder);
++  border_flags.setAntiAlias(true);
++  gfx::RectF ring(geometry.frame);
++  ring.Inset(kFrameBorder / 2.0f);  // keep the stroke fully inside the frame rect
++  canvas->DrawRect(ring, border_flags);
++
++  // Vertical scrollbar in the reserved right-edge gutter, shown only when the
++  // zoomed device is taller than the stage (max_scroll_ set by CalculateGeometry
++  // just above). The WebContents aperture was clamped to leave this gutter clear.
++  const gfx::Rect track = ScrollTrackBounds();
++  if (!track.IsEmpty()) {
++    const float radius = kScrollbarThumbWidth / 2.0f;
++    cc::PaintFlags track_flags;
++    track_flags.setColor(SkColorSetARGB(38, 18, 23, 31));
++    track_flags.setAntiAlias(true);
++    canvas->DrawRoundRect(gfx::RectF(track), radius, track_flags);
++
++    cc::PaintFlags thumb_flags;
++    thumb_flags.setColor(SkColorSetARGB(150, 18, 23, 31));
++    thumb_flags.setAntiAlias(true);
++    canvas->DrawRoundRect(gfx::RectF(ScrollThumbBounds()), radius, thumb_flags);
++  }
++}
++
++gfx::Rect LobiumDeviceFrameView::ScrollTrackBounds() const {
++  if (max_scroll_ <= 0) {
++    return gfx::Rect();
++  }
++  gfx::Rect stage = GetLocalBounds();
++  stage.Inset(gfx::Insets(kStagePadding));
++  const int x =
++      stage.right() - kScrollbarGutter + (kScrollbarGutter - kScrollbarThumbWidth) / 2;
++  return gfx::Rect(x, stage.y(), kScrollbarThumbWidth, stage.height());
++}
++
++gfx::Rect LobiumDeviceFrameView::ScrollThumbBounds() const {
++  const gfx::Rect track = ScrollTrackBounds();
++  if (track.IsEmpty()) {
++    return gfx::Rect();
++  }
++  const int track_h = track.height();
++  // Thumb size is proportional to the visible fraction of the device. Computed in
++  // float to stay overflow-safe regardless of device/stage size.
++  const float visible_fraction =
++      static_cast<float>(track_h) / static_cast<float>(track_h + max_scroll_);
++  const int thumb_h =
++      std::max(kScrollbarMinThumb, static_cast<int>(track_h * visible_fraction));
++  const int travel = std::max(0, track_h - thumb_h);
++  const int scroll = std::clamp(scroll_offset_, 0, max_scroll_);
++  const int thumb_y =
++      track.y() + (max_scroll_ > 0 ? travel * scroll / max_scroll_ : 0);
++  return gfx::Rect(track.x(), thumb_y, track.width(), thumb_h);
++}
++
++void LobiumDeviceFrameView::ScrollToThumbCenterY(int local_y) {
++  const gfx::Rect track = ScrollTrackBounds();
++  if (track.IsEmpty()) {
++    return;
++  }
++  const int thumb_h = ScrollThumbBounds().height();
++  const int travel = track.height() - thumb_h;
++  if (travel <= 0) {
++    return;
++  }
++  const int desired_top =
++      std::clamp(local_y - thumb_h / 2, track.y(), track.y() + travel);
++  const int scroll = (desired_top - track.y()) * max_scroll_ / travel;
++  const int clamped = std::clamp(scroll, 0, max_scroll_);
++  if (clamped == scroll_offset_) {
++    return;
++  }
++  scroll_offset_ = clamped;
++  browser_view_->InvalidateLayout();
++  SchedulePaint();
++}
++
++bool LobiumDeviceFrameView::OnMousePressed(const ui::MouseEvent& event) {
++  // Refresh max_scroll_ for the current geometry, then only capture presses that
++  // land in the scrollbar gutter (so clicks elsewhere on the desk are ignored).
++  CalculateGeometry(GetLocalBounds());
++  if (max_scroll_ <= 0 || !event.IsOnlyLeftMouseButton()) {
++    return false;
++  }
++  const gfx::Rect track = ScrollTrackBounds();
++  gfx::Rect gutter(track.x() - 5, track.y(), track.width() + 10, track.height());
++  if (!gutter.Contains(event.location())) {
++    return false;
++  }
++  ScrollToThumbCenterY(event.location().y());
++  return true;
++}
++
++bool LobiumDeviceFrameView::OnMouseDragged(const ui::MouseEvent& event) {
++  CalculateGeometry(GetLocalBounds());
++  if (max_scroll_ <= 0) {
++    return false;
++  }
++  ScrollToThumbCenterY(event.location().y());
++  return true;
++}
++
++bool LobiumDeviceFrameView::OnMouseWheel(const ui::MouseWheelEvent& event) {
++  // Only reachable when the pointer is over the desk/gutter (the WebContents on
++  // top consumes wheel events over the phone screen, so the page still scrolls).
++  CalculateGeometry(GetLocalBounds());
++  if (max_scroll_ <= 0) {
++    return false;
++  }
++  const int delta = event.y_offset() != 0
++                        ? event.y_offset()
++                        : (event.x_offset() > 0 ? kScrollWheelStep
++                                                : -kScrollWheelStep);
++  const int clamped = std::clamp(scroll_offset_ - delta, 0, max_scroll_);
++  if (clamped != scroll_offset_) {
++    scroll_offset_ = clamped;
++    browser_view_->InvalidateLayout();
++    SchedulePaint();
++  }
++  return true;
++}
++
++BEGIN_METADATA(LobiumDeviceFrameView)
++END_METADATA
+diff --git a/chrome/browser/ui/views/frame/lobium_device_frame_view.h b/chrome/browser/ui/views/frame/lobium_device_frame_view.h
+new file mode 100644
+index 0000000000..7b86773b13
+--- /dev/null
++++ b/chrome/browser/ui/views/frame/lobium_device_frame_view.h
+@@ -0,0 +1,87 @@
++// Copyright 2026 The Lobster Browser Authors.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_FRAME_LOBIUM_DEVICE_FRAME_VIEW_H_
++#define CHROME_BROWSER_UI_VIEWS_FRAME_LOBIUM_DEVICE_FRAME_VIEW_H_
++
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/views/view.h"
++
++class BrowserView;
++
++namespace content {
++class WebContents;
++}
++
++// Native Android device workspace shown inside a normal Lobium browser window.
++// The real WebContents is a sibling laid inside a thin device outline.
++//
++// The stage auto-fits the browser content area and owns window-level zoom. The
++// native aperture and DevTools emulation image scale move together, while the
++// emulated CSS screen/view dimensions and DPR stay exactly as configured.
++class LobiumDeviceFrameView : public views::View {
++  METADATA_HEADER(LobiumDeviceFrameView, views::View)
++
++ public:
++  explicit LobiumDeviceFrameView(BrowserView* browser_view);
++  LobiumDeviceFrameView(const LobiumDeviceFrameView&) = delete;
++  LobiumDeviceFrameView& operator=(const LobiumDeviceFrameView&) = delete;
++  ~LobiumDeviceFrameView() override;
++
++  static bool IsEnabled();
++
++  // Returns BrowserView coordinates for the real interactive WebContents
++  // aperture.
++  gfx::Rect GetDeviceScreenBounds(const gfx::Rect& workspace);
++
++  // Handles the browser's Ctrl +/-/0 commands as device-stage zoom instead of
++  // per-page zoom. Returns false only when the requested limit is reached.
++  bool ZoomIn();
++  bool ZoomOut();
++  bool ResetZoom();
++
++  // Reapplies the current stage scale to a newly selected/attached tab.
++  void ApplyCurrentScaleToWebContents(content::WebContents* web_contents);
++
++ private:
++  struct Geometry {
++    gfx::Rect frame;
++    gfx::Rect screen;
++    float scale = 1.0f;
++  };
++
++  Geometry CalculateGeometry(const gfx::Rect& local_workspace) const;
++  bool SetZoomStep(int step);
++  void SyncEmulationScale(base::WeakPtr<content::WebContents> web_contents,
++                          float scale,
++                          int attempts_remaining);
++  void ScheduleEmulationScaleSync(content::WebContents* web_contents,
++                                  float scale);
++
++  // Vertical scrollbar (only present when the zoomed device is taller than the
++  // stage). Returns the track rect in this view's coordinates, or an empty rect
++  // when there is nothing to scroll.
++  gfx::Rect ScrollTrackBounds() const;
++  gfx::Rect ScrollThumbBounds() const;
++  // Moves the stage so the given local Y sits at the middle of the thumb.
++  void ScrollToThumbCenterY(int local_y);
++
++  // views::View:
++  void OnPaint(gfx::Canvas* canvas) override;
++  bool OnMousePressed(const ui::MouseEvent& event) override;
++  bool OnMouseDragged(const ui::MouseEvent& event) override;
++  bool OnMouseWheel(const ui::MouseWheelEvent& event) override;
++
++  raw_ptr<BrowserView> browser_view_;
++  int zoom_step_ = 0;
++  float current_scale_ = 1.0f;
++  // Vertical stage scroll offset (in stage pixels) used when the zoomed device
++  // is taller than the content area. max_scroll_ is the largest valid offset and
++  // is recomputed by CalculateGeometry (hence mutable — that method is const).
++  int scroll_offset_ = 0;
++  mutable int max_scroll_ = 0;
++  base::WeakPtrFactory<LobiumDeviceFrameView> weak_factory_{this};
++};
++
++#endif  // CHROME_BROWSER_UI_VIEWS_FRAME_LOBIUM_DEVICE_FRAME_VIEW_H_
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index 082bc083ee..ac35bb80a4 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -909,6 +909,7 @@ source_set("browser") {
+     "devtools/devtools_io_context.h",
+     "devtools/devtools_issue_storage.cc",
+     "devtools/devtools_issue_storage.h",
++    "devtools/lobium_device_emulation.cc",
+     "devtools/devtools_manager.cc",
+     "devtools/devtools_manager.h",
+     "devtools/devtools_pipe_handler.cc",
+diff --git a/content/browser/devtools/lobium_device_emulation.cc b/content/browser/devtools/lobium_device_emulation.cc
+new file mode 100644
+index 0000000000..64c8aa3426
+--- /dev/null
++++ b/content/browser/devtools/lobium_device_emulation.cc
+@@ -0,0 +1,32 @@
++// Copyright 2026 The Lobster Browser Authors.
++
++#include "content/public/browser/lobium_device_emulation.h"
++
++#include "content/browser/devtools/devtools_agent_host_impl.h"
++#include "content/browser/devtools/protocol/emulation_handler.h"
++#include "content/public/browser/devtools_agent_host.h"
++
++namespace content {
++
++bool SetLobiumDeviceEmulationScale(WebContents* web_contents, float scale) {
++  if (!web_contents || scale <= 0.0f) {
++    return false;
++  }
++
++  scoped_refptr<DevToolsAgentHost> agent_host =
++      DevToolsAgentHost::GetOrCreateFor(web_contents);
++  if (!agent_host) {
++    return false;
++  }
++
++  bool updated = false;
++  auto* agent_host_impl =
++      static_cast<DevToolsAgentHostImpl*>(agent_host.get());
++  for (protocol::EmulationHandler* handler :
++       protocol::EmulationHandler::ForAgentHost(agent_host_impl)) {
++    updated = handler->SetDeviceEmulationScale(scale) || updated;
++  }
++  return updated;
++}
++
++}  // namespace content
+diff --git a/content/browser/devtools/protocol/emulation_handler.cc b/content/browser/devtools/protocol/emulation_handler.cc
+index 17934976bd..fc312f894e 100644
+--- a/content/browser/devtools/protocol/emulation_handler.cc
++++ b/content/browser/devtools/protocol/emulation_handler.cc
+@@ -1070,6 +1070,16 @@ void EmulationHandler::SetDeviceEmulationParams(
+   UpdateDeviceEmulationState();
+ }
+ 
++bool EmulationHandler::SetDeviceEmulationScale(float scale) {
++  if (!host_ || !device_emulation_enabled_ || scale <= 0.0f) {
++    return false;
++  }
++  blink::DeviceEmulationParams params = device_emulation_params_;
++  params.scale = scale;
++  SetDeviceEmulationParams(params);
++  return true;
++}
++
+ WebContentsImpl* EmulationHandler::GetWebContents() {
+   DCHECK(host_);  // Only call if |host_| is set.
+   return static_cast<WebContentsImpl*>(WebContents::FromRenderFrameHost(host_));
+diff --git a/content/browser/devtools/protocol/emulation_handler.h b/content/browser/devtools/protocol/emulation_handler.h
+index 069f55babd..f764b2111d 100644
+--- a/content/browser/devtools/protocol/emulation_handler.h
++++ b/content/browser/devtools/protocol/emulation_handler.h
+@@ -129,6 +129,7 @@ class EmulationHandler : public DevToolsDomainHandler,
+ 
+   blink::DeviceEmulationParams GetDeviceEmulationParams();
+   void SetDeviceEmulationParams(const blink::DeviceEmulationParams& params);
++  bool SetDeviceEmulationScale(float scale);
+ 
+   bool device_emulation_enabled() { return device_emulation_enabled_; }
+ 
+diff --git a/content/public/browser/BUILD.gn b/content/public/browser/BUILD.gn
+index 95fe796458..55bd7cdd99 100644
+--- a/content/public/browser/BUILD.gn
++++ b/content/public/browser/BUILD.gn
+@@ -241,6 +241,7 @@ source_set("browser_sources") {
+     "keyboard_event_processing_result.h",
+     "legacy_tech_cookie_issue_details.cc",
+     "legacy_tech_cookie_issue_details.h",
++    "lobium_device_emulation.h",
+     "login_delegate.h",
+     "manifest_icon_downloader.h",
+     "media_capture_devices.h",
+diff --git a/content/public/browser/lobium_device_emulation.h b/content/public/browser/lobium_device_emulation.h
+new file mode 100644
+index 0000000000..e7dcde5e21
+--- /dev/null
++++ b/content/public/browser/lobium_device_emulation.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 The Lobster Browser Authors.
++
++#ifndef CONTENT_PUBLIC_BROWSER_LOBIUM_DEVICE_EMULATION_H_
++#define CONTENT_PUBLIC_BROWSER_LOBIUM_DEVICE_EMULATION_H_
++
++#include "content/common/content_export.h"
++
++namespace content {
++
++class WebContents;
++
++// Updates only the compositor scale of an already enabled device-metrics
++// emulation session. The emulated screen/view dimensions and device scale
++// factor are intentionally left unchanged. Returns true when at least one
++// attached DevTools emulation session was updated.
++CONTENT_EXPORT bool SetLobiumDeviceEmulationScale(WebContents* web_contents,
++                                                  float scale);
++
++}  // namespace content
++
++#endif  // CONTENT_PUBLIC_BROWSER_LOBIUM_DEVICE_EMULATION_H_

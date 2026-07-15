@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useId, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { XMarkIcon } from '@heroicons/react/24/outline';
 
@@ -11,6 +11,8 @@ export interface ModalProps {
   size?: 'sm' | 'md' | 'lg';
   /** Accessible label when there is no visible title. */
   ariaLabel?: string;
+  /** Id of explanatory text inside the dialog. */
+  ariaDescribedBy?: string;
 }
 
 /**
@@ -25,9 +27,11 @@ export function Modal({
   footer,
   size = 'md',
   ariaLabel,
+  ariaDescribedBy,
 }: ModalProps): JSX.Element | null {
   const dialogRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
+  const generatedTitleId = useId();
 
   useEffect(() => {
     if (!open) return;
@@ -84,13 +88,22 @@ export function Modal({
         className={`lb-modal lb-modal--${size}`}
         role="dialog"
         aria-modal="true"
-        aria-label={ariaLabel ?? (typeof title === 'string' ? title : undefined)}
+        aria-label={title ? undefined : ariaLabel}
+        aria-labelledby={title ? generatedTitleId : undefined}
+        aria-describedby={ariaDescribedBy}
         tabIndex={-1}
       >
         {title ? (
           <div className="lb-modal__header">
-            <h2 className="lb-modal__title">{title}</h2>
-            <button type="button" className="lb-btn lb-btn--ghost lb-btn--icon lb-btn--sm" aria-label="Close" onClick={onClose}>
+            <h2 id={generatedTitleId} className="lb-modal__title">
+              {title}
+            </h2>
+            <button
+              type="button"
+              className="lb-btn lb-btn--ghost lb-btn--icon lb-btn--sm"
+              aria-label="Close"
+              onClick={onClose}
+            >
               <XMarkIcon aria-hidden />
             </button>
           </div>

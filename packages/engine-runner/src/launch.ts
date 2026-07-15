@@ -32,6 +32,24 @@ export interface PersistentLaunchOptions {
  */
 export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOptions {
   const { fingerprint } = params;
+  if (params.webrtcPolicy === 'proxy_only' && !params.proxy) {
+    throw new Error('WebRTC proxy_only policy requires a configured proxy');
+  }
+  if (params.webrtcPolicy === 'default_public_interface_only' && params.proxy) {
+    throw new Error(
+      'WebRTC default_public_interface_only is unsafe with a proxy because host ICE may bypass it',
+    );
+  }
+  const proxyHardening = buildProxyHardeningArgs(params.proxy);
+  const proxyDisabledFeatures = proxyHardening
+    .find((arg) => arg.startsWith('--disable-features='))
+    ?.slice('--disable-features='.length)
+    .split(',')
+    .filter(Boolean) ?? [];
+  // Chrome 152's ReduceAcceptLanguage feature collapses navigator.languages to its first item. The
+  // profile model intentionally supports an ordered user-selected list, so disable that reduction and
+  // merge it into the SAME switch as proxy hardening (Chromium only honors one value per switch).
+  const disabledFeatures = [...new Set(['ReduceAcceptLanguage', ...proxyDisabledFeatures])];
   const args = [
     '--no-first-run',
     '--no-default-browser-check',
@@ -54,7 +72,8 @@ export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOption
     // degrading to SwiftShader/llvmpipe (a headless tell — see gpu.ts / roadmap RG-0).
     ...buildGpuArgs(),
     // PROX-7/8: when proxied, disable QUIC/AsyncDns so UDP/DoH cannot bypass the tunnel.
-    ...buildProxyHardeningArgs(params.proxy),
+    ...proxyHardening.filter((arg) => !arg.startsWith('--disable-features=')),
+    `--disable-features=${disabledFeatures.join(',')}`,
   ];
   const options: PersistentLaunchOptions = {
     userDataDir: params.userDataDir,
@@ -143,11 +162,12 @@ export function buildCdpEmulation(fp: Fingerprint): CdpEmulation {
  * Build the main-world init script used by the legacy/internal CDP harness for navigator surfaces that
  * no CDP override owns: `deviceMemory` and `maxTouchPoints`.
  *
- * The UA string, platform, UA-CH, hardwareConcurrency, timezone, locale, languages and geolocation
- * are all applied authoritatively by `applyCdpFingerprint` via dedicated CDP overrides — and CDP
- * pins some of those as **non-configurable** own properties. Redefining a non-configurable property
- * throws, so we (a) never touch the CDP-owned surfaces here and (b) wrap each `def` in try/catch so
- * one failure can't abort the rest (the bug that used to leave `deviceMemory` undefined).
+ * In production, the UA string, platform, UA-CH, hardwareConcurrency, screen, WebGL, timezone, locale,
+ * languages and geolocation are all applied authoritatively by the **native** Lobium engine via
+ * `--lobium-fp-config` (C++ at the Blink surface), NOT by any CDP/JS overlay. This init script is a
+ * fallback for the internal harness/regression comparisons only; it wraps each `def` in try/catch so a
+ * non-configurable-property redefine can't abort the rest (the bug that used to leave `deviceMemory`
+ * undefined) and never touches the natively-owned surfaces.
  *
  * IMPORTANT: this deliberately does NOT touch canvas/WebGL/AudioContext/TLS. Overriding them from JS is
  * detectable, so production Lobium owns them natively (see MASTER_PLAN §5).

@@ -30,6 +30,8 @@ import type {
 
 export const LOBIUM_CONFIG_VERSION = 1;
 export const LOBIUM_CONFIG_FILENAME = 'lobium-fp.json';
+/** Must stay equal to kMaxLobiumFpDataBytes in core/config-channel.patch. */
+export const LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES = 28 * 1024;
 
 /** The per-profile farbling seeds the native canvas/WebGL/audio patches read (stable per profile). */
 export interface LobiumFarblingSeeds {
@@ -38,6 +40,8 @@ export interface LobiumFarblingSeeds {
   audio: number;
   /** Sub-pixel getClientRects / getBoundingClientRect noise; 0 disables the native hook. */
   clientRects: number;
+  /** Always-on profile identity seed for stable media device IDs (independent of noise switches). */
+  mediaDevices: number;
 }
 
 export interface LobiumNetConfig {
@@ -107,6 +111,51 @@ function fingerprintSignature(fp: Fingerprint): string {
  * deterministically from the profile seed (or a fingerprint signature), so canvas/WebGL/audio noise
  * is **stable per profile** across launches — the anti-detect requirement.
  */
+/**
+ * Fail-closed guard: assert the generated native config carries every critical spoofing surface before
+ * it is handed to the engine. The native parser fails OPEN (a missing field leaves the HOST value), so a
+ * silently-incomplete config would ship a mixed host/persona fingerprint while the launch reported
+ * success. Aborting here turns that into a loud launch failure instead of a stealth leak.
+ */
+export function validateLobiumConfig(config: LobiumConfig): void {
+  const missing: string[] = [];
+  const need = (ok: boolean, field: string): void => {
+    if (!ok) missing.push(field);
+  };
+  const str = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0;
+  const posNum = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v) && v > 0;
+
+  need(config.version === LOBIUM_CONFIG_VERSION, `version (expected ${LOBIUM_CONFIG_VERSION})`);
+  const n = config.navigator;
+  need(str(n?.userAgent), 'navigator.userAgent');
+  need(str(n?.platform), 'navigator.platform');
+  need(posNum(n?.hardwareConcurrency), 'navigator.hardwareConcurrency');
+  need(posNum(n?.deviceMemory), 'navigator.deviceMemory');
+  need(Array.isArray(n?.languages) && n.languages.length > 0, 'navigator.languages');
+  need(Array.isArray(n?.uaBrands) && n.uaBrands.length > 0, 'navigator.uaBrands');
+  need(str(n?.uaPlatform), 'navigator.uaPlatform');
+  const s = config.screen;
+  need(posNum(s?.width), 'screen.width');
+  need(posNum(s?.height), 'screen.height');
+  need(posNum(s?.devicePixelRatio), 'screen.devicePixelRatio');
+  need(posNum(s?.colorDepth), 'screen.colorDepth');
+  const w = config.webgl;
+  need(str(w?.unmaskedVendor), 'webgl.unmaskedVendor');
+  need(str(w?.unmaskedRenderer), 'webgl.unmaskedRenderer');
+  const l = config.locale;
+  need(str(l?.timezone), 'locale.timezone');
+  need(str(l?.locale), 'locale.locale');
+  need(str(l?.acceptLanguage), 'locale.acceptLanguage');
+
+  if (missing.length > 0) {
+    throw new Error(
+      `refusing to launch: incomplete Lobium fingerprint config — missing/invalid ${missing.join(', ')}. ` +
+        'Launching would leave the HOST value on these surfaces (the native config channel fails open), ' +
+        'producing a mixed host/persona fingerprint.',
+    );
+  }
+}
+
 export function buildLobiumConfig(
   fp: Fingerprint,
   opts: BuildLobiumConfigOptions = {},
@@ -114,6 +163,14 @@ export function buildLobiumConfig(
   const base = opts.seed ?? fingerprintSignature(fp);
   const webrtcPolicy =
     opts.webrtcPolicy ?? (opts.proxy ? 'disable_non_proxied_udp' : 'default_public_interface_only');
+  if (webrtcPolicy === 'proxy_only' && !opts.proxy) {
+    throw new Error('Lobium WebRTC proxy_only policy requires a configured proxy');
+  }
+  if (webrtcPolicy === 'default_public_interface_only' && opts.proxy) {
+    throw new Error(
+      'Lobium WebRTC default_public_interface_only is unsafe with a proxy because host ICE may bypass it',
+    );
+  }
   const net: LobiumNetConfig = {
     webrtcPolicy,
   };
@@ -137,7 +194,7 @@ export function buildLobiumConfig(
   // (macOS ~2500 names) base64-blows past the renderer command-line size guard (~24 KiB), so the
   // browser silently drops --lobium-fp-data and workers leak host platform/HWC — a CreepJS lie.
   // Keep the field for schema stability; populate only when a non-cmdline transport exists.
-  return {
+  const config: LobiumConfig = {
     version: LOBIUM_CONFIG_VERSION,
     arch: fp.arch,
     navigator: fp.navigator,
@@ -150,10 +207,16 @@ export function buildLobiumConfig(
       webgl: noise.webgl ? hashStringToUint32(`${base}:webgl`) : 0,
       audio: noise.audio ? hashStringToUint32(`${base}:audio`) : 0,
       clientRects: noise.clientRects ? hashStringToUint32(`${base}:clientRects`) : 0,
+      // Do not derive media IDs from the gated canvas/WebGL seeds. With both noise toggles off those
+      // seeds are zero, which previously made every profile expose the same linkable device IDs.
+      mediaDevices: hashStringToUint32(`${base}:mediaDevices`),
     },
     policy,
     net,
   };
+  // Fail-closed: abort the launch rather than ship a silently-incomplete (host-leaking) config.
+  validateLobiumConfig(config);
+  return config;
 }
 
 /** Write the config to `<userDataDir>/lobium-fp.json` (owner-only, 0600) and return its path. */
@@ -165,7 +228,18 @@ export async function writeLobiumConfig(
   const path = join(userDataDir, LOBIUM_CONFIG_FILENAME);
   // Compact JSON: the browser base64-forwards this onto the renderer command line (Windows ~32K
   // CreateProcess cap). Pretty-print would waste budget for no benefit at runtime.
-  await writeFile(path, `${JSON.stringify(config)}\n`, { mode: 0o600 });
+  const serialized = `${JSON.stringify(config)}\n`;
+  const bytes = Buffer.byteLength(serialized, 'utf8');
+  const base64Bytes = Math.ceil(bytes / 3) * 4;
+  if (base64Bytes > LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES) {
+    // Native forwarding otherwise logs and SKIPS --lobium-fp-data, producing a mixed host/persona
+    // fingerprint. Refuse before browser spawn instead of silently leaking host values.
+    throw new Error(
+      `Lobium fingerprint config is too large for the renderer channel ` +
+        `(${base64Bytes} > ${LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES} base64 bytes)`,
+    );
+  }
+  await writeFile(path, serialized, { mode: 0o600 });
   return path;
 }
 

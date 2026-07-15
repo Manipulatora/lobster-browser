@@ -46,6 +46,19 @@ test('Android farbling seeds are stable per profile seed and differ across seeds
   assert.notEqual(a.webgl, a.audio);
 });
 
+test('Android hardware-noise switches gate their matching seeds without collapsing media identity', () => {
+  const fp = deriveAndroidFingerprint('android-noise-gates', { engine: 'lobium' });
+  const config = buildAndroidLobiumConfig(fp, {
+    seed: 'profile-noise-off',
+    hardwareNoise: { canvas: false, webgl: false, audio: false, clientRects: false },
+  });
+  assert.equal(config.seeds.canvas, 0);
+  assert.equal(config.seeds.webgl, 0);
+  assert.equal(config.seeds.audio, 0);
+  assert.equal(config.seeds.clientRects, 0);
+  assert.ok(config.seeds.mediaDevices > 0);
+});
+
 test('Android config is proxy-aware but never serializes proxy credentials', () => {
   const fp = deriveAndroidFingerprint('android-proxy-config', { engine: 'lobium' });
   const proxy: ProxyConfig = {

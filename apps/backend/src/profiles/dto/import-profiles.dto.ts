@@ -9,8 +9,14 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { ENGINE_KINDS, PROFILE_OS_TARGETS } from '@lobster/shared-types';
+import { PROFILE_OS_TARGETS, ENGINE_KINDS } from '@lobster/shared-types';
 import type { EngineKind, FingerprintOverrides, ProfileOsTarget } from '@lobster/shared-types';
+
+import {
+  BrowserExtensionRefDto,
+  CookieImportMetadataDto,
+  MAX_PROFILE_EXTENSIONS,
+} from './profile-metadata.dto';
 
 /** Upper bound on a single import bundle. */
 export const MAX_IMPORT_PROFILES = 200;
@@ -30,6 +36,11 @@ export class ProfileImportItemDto {
   @IsIn([...PROFILE_OS_TARGETS])
   os!: ProfileOsTarget;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  osVersion?: string;
+
   @IsString()
   @MaxLength(256)
   fingerprintSeed!: string;
@@ -37,6 +48,28 @@ export class ProfileImportItemDto {
   @IsOptional()
   @IsObject()
   fingerprintOverrides?: FingerprintOverrides;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  proxyId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  templateId?: string;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CookieImportMetadataDto)
+  cookiesImport?: CookieImportMetadataDto;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_PROFILE_EXTENSIONS)
+  @ValidateNested({ each: true })
+  @Type(() => BrowserExtensionRefDto)
+  extensions?: BrowserExtensionRefDto[];
 
   // Lenient on import: a bundle from another tool may omit tags; the service defaults to [].
   @IsOptional()

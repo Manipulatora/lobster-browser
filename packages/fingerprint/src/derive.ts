@@ -10,6 +10,7 @@ import type {
 import { SeededRandom } from './prng.js';
 import { languagesToAcceptLanguage } from './coherence.js';
 import { ENGINE_CHROME, chromeVersionForms, DEVICE_TEMPLATES } from './pools.js';
+import { deriveCoherentDevice } from './device-tiers.js';
 
 export interface DeriveOptions {
   os: OsFamily;
@@ -74,11 +75,18 @@ export function deriveFromPools(
   // seed-diverse — it is pinned to the running engine (all profiles share one binary), so the UA never
   // contradicts a feature-probe or the fullVersionList high-entropy read. The UA string carries the
   // reduced form (major.0.0.0); uaFullVersion carries the real build, exactly as Chrome 152 reports.
+  // Diversity: draw from the large sourced renderer catalog (thousands of real GPUs) paired with
+  // tier-coherent hardware (device-tiers.ts), so every seed can land on a distinct real machine. A ~15%
+  // share still draws the curated flagship pool so popular exact machines stay well-represented, and it is
+  // the fallback when a catalog is empty for an OS/arch. Both sources yield a coherent whole device, so the
+  // result still always passes validateFingerprintCoherence.
   const macCandidates =
     os === 'macos'
       ? tpl.devices.filter((device) => deviceArchFromRenderer(device.webgl.renderer) === arch)
       : tpl.devices;
-  const device = rng.pick(macCandidates.length > 0 ? macCandidates : tpl.devices);
+  const flagship = () => rng.pick(macCandidates.length > 0 ? macCandidates : tpl.devices);
+  const generated = rng.int(0, 99) >= 15 ? deriveCoherentDevice(rng, os, arch) : null;
+  const device = generated ?? flagship();
   const ver = chromeVersionForms(browserVersion ?? ENGINE_CHROME.full);
 
   // Architecture is a PROPERTY OF THE PICKED DEVICE, not a free parameter: an Apple-Silicon Mac (Metal

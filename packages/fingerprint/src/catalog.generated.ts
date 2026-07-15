@@ -56,9 +56,10 @@ export interface RendererCatalogEntry {
   os: 'windows' | 'macos' | 'linux';
   label: string;
   vendorFamily: 'NVIDIA' | 'Intel' | 'AMD' | 'Apple';
-  /** PCI device ID (0xXXXX) or apple-* product id. Required for verified_source entries. */
+  /** PCI device ID (0xXXXX) or apple-* product id. This proves model provenance, not browser capture. */
   deviceId: string;
   source: string;
+  /** The model/device source is verified; page-visible WebGL fields may still be synthesized. */
   validationLevel: 'verified_source';
   webgl: WebGlFingerprint;
 }

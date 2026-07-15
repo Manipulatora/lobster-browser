@@ -20,13 +20,14 @@ test('upstreamProxyUrl uses socks5h and embeds credentials without leaking into 
     upstreamProxyUrl({ server: 'socks5://proxy.example:1080', username: 'user', password: 'p@ss' }),
     'socks5h://user:p%40ss@proxy.example:1080',
   );
-  assert.equal(
-    upstreamProxyUrl({ server: 'socks://10.0.0.1:1080' }),
-    'socks5h://10.0.0.1:1080',
-  );
+  assert.equal(upstreamProxyUrl({ server: 'socks://10.0.0.1:1080' }), 'socks5h://10.0.0.1:1080');
   assert.equal(
     upstreamProxyUrl({ server: 'http://proxy.example:8080', username: 'u', password: 'p' }),
     'http://u:p@proxy.example:8080',
+  );
+  assert.equal(
+    upstreamProxyUrl({ server: 'https://proxy.example:443', username: 'u', password: 'p' }),
+    'https://u:p@proxy.example:443',
   );
 });
 

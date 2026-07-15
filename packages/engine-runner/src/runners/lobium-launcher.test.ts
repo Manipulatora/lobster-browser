@@ -4,11 +4,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { deriveFingerprint } from '@lobster/fingerprint';
+import {
+  LOBIUM_CAPABILITY_CONTRACT_VERSION,
+  LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
+} from '../lobium-capabilities.js';
 import { LOBIUM_CONFIG_FILENAME } from '../lobium-config.js';
 import {
   buildLobiumLaunchArgs,
   buildNativeLobiumProcessArgs,
   createLobiumLauncher,
+  ensureChromiumPersonaPreferences,
   isLobiumAvailable,
   lobiumBinaryCandidates,
   proxySummaryFromServer,
@@ -17,6 +22,11 @@ import {
 import type { LaunchContext } from './types.js';
 
 const fp = deriveFingerprint('seed-lobium-test', { os: 'windows', engine: 'lobium' });
+const capabilityManifest = JSON.stringify({
+  contractVersion: LOBIUM_CAPABILITY_CONTRACT_VERSION,
+  product: 'Lobium',
+  capabilities: LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
+});
 
 function ctxWith(
   userDataDir: string,
@@ -248,6 +258,25 @@ test('buildLobiumLaunchArgs writes profile policy into the native config', async
   }
 });
 
+test('ensureChromiumPersonaPreferences persists language sources for main frames and workers', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-persona-prefs-'));
+  try {
+    const ctx = ctxWith(userDataDir);
+    ctx.fingerprint.navigator.languages = ['ja-JP', 'ja'];
+    ctx.fingerprint.locale.locale = 'ja-JP';
+    ensureChromiumPersonaPreferences(ctx);
+    const prefs = JSON.parse(
+      await readFile(join(userDataDir, 'Default', 'Preferences'), 'utf8'),
+    );
+    assert.equal(prefs.intl.accept_languages, 'ja-JP,ja');
+    assert.equal(prefs.intl.selected_languages, 'ja-JP,ja');
+    const localState = JSON.parse(await readFile(join(userDataDir, 'Local State'), 'utf8'));
+    assert.equal(localState.intl.app_locale, 'ja-JP');
+  } finally {
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
 test('buildNativeLobiumProcessArgs is direct native Chromium args, not Patchright context config', async () => {
   const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-native-args-'));
   try {
@@ -260,7 +289,32 @@ test('buildNativeLobiumProcessArgs is direct native Chromium args, not Patchrigh
     assert.ok(args.includes('--headless=new'));
     assert.ok(args.includes('--no-sandbox'));
     assert.ok(args.includes(`--lobium-fp-config=${join(userDataDir, LOBIUM_CONFIG_FILENAME)}`));
-    assert.ok(args.includes('about:blank'));
+    // No forced startup URL: the launcher relies on --restore-last-session so the profile's
+    // previous tabs reopen instead of a forced New Tab Page (which discarded unpinned tabs).
+    assert.ok(args.includes('--restore-last-session'));
+    assert.ok(!args.includes('chrome://newtab/'));
+  } finally {
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('buildNativeLobiumProcessArgs keeps Android inside a maximized Lobium device stage', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-native-android-stage-'));
+  try {
+    const ctx = ctxWith(userDataDir);
+    ctx.isMobileProfile = true;
+    ctx.mobileFormFactor = 'tablet';
+    ctx.fingerprint.screen.width = 1280;
+    ctx.fingerprint.screen.height = 800;
+    ctx.options.args = ['--window-size=640,480', '--window-position=10,20'];
+
+    const args = await buildNativeLobiumProcessArgs(ctx);
+
+    assert.ok(args.includes('--start-maximized'));
+    assert.ok(args.includes('--lobium-device-frame=tablet'));
+    assert.ok(args.includes('--lobium-device-screen=1280x800'));
+    assert.ok(!args.some((arg) => arg.startsWith('--window-size=')));
+    assert.ok(!args.some((arg) => arg.startsWith('--window-position=')));
   } finally {
     await rm(userDataDir, { recursive: true, force: true });
   }
@@ -317,7 +371,15 @@ test('createLobiumLauncher fail-closes when the upstream proxy TCP is unreachabl
   const root = await mkdtemp(join(tmpdir(), 'lobium-proxy-dead-'));
   const userDataDir = join(root, 'profile');
   const fakeBin = join(root, 'fake-lobium.cjs');
-  await writeFile(fakeBin, '#!/usr/bin/env node\nprocess.exit(0)\n');
+  await writeFile(
+    fakeBin,
+    `#!/usr/bin/env node
+if (process.argv.includes('--lobium-fingerprint-capabilities')) {
+  process.stdout.write(${JSON.stringify(capabilityManifest)});
+}
+process.exit(0);
+`,
+  );
   await chmod(fakeBin, 0o755);
   try {
     const launcher = createLobiumLauncher({
@@ -350,6 +412,10 @@ test('createLobiumLauncher spawns a native binary directly and reads DevToolsAct
 const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
+if (process.argv.includes('--lobium-fingerprint-capabilities')) {
+  process.stdout.write(${JSON.stringify(capabilityManifest)});
+  process.exit(0);
+}
 const uddArg = process.argv.find((arg) => arg.startsWith('--user-data-dir='));
 if (!uddArg) process.exit(7);
 const userDataDir = uddArg.slice('--user-data-dir='.length);

@@ -47,6 +47,26 @@ export function useProfiles(): UseProfiles {
 
   useEffect(() => {
     void refresh();
+    // Poll so a browser window the user closes is reflected quickly. The sidecar drops the profile from
+    // its running-set the instant the process exits, and list_profiles runs the reconcile that flips the
+    // DB status back to idle — which restores the Run button. This is a QUIET poll (no loading flip, no
+    // error surfacing) so it never flickers the UI; the mount refresh + mutations own real errors.
+    //
+    // Critically, it BAILS OUT when the list is unchanged: returning the previous array reference makes
+    // React skip the re-render entirely. Without this, the 2s poll re-rendered the whole Profiles view —
+    // including an OPEN create/edit modal — every 2 seconds, which re-fired the modal's font-catalog
+    // effect and flickered its controls (the "blipping" that interrupted typing/selection).
+    const timer = setInterval(() => {
+      profilesClient
+        .list_profiles()
+        .then((list) =>
+          setProfiles((prev) =>
+            JSON.stringify(prev) === JSON.stringify(list) ? prev : list,
+          ),
+        )
+        .catch(() => undefined);
+    }, 2000);
+    return () => clearInterval(timer);
   }, [refresh]);
 
   const create = useCallback(
@@ -74,7 +94,7 @@ export function useProfiles(): UseProfiles {
       if (src.proxyId) input.proxyId = src.proxyId;
       if (src.templateId) input.templateId = src.templateId;
       if (src.osVersion) input.osVersion = src.osVersion;
-      if (src.cookiesImport) input.cookiesImport = src.cookiesImport;
+      // Pending cookie imports are one-shot local secrets. Cloning must never replay them.
       if (src.extensions) input.extensions = src.extensions;
       if (src.folder) input.folder = src.folder;
       if (src.notes) input.notes = src.notes;

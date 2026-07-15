@@ -17,6 +17,7 @@ export { ENGINE_CHROME } from './pools.js';
 export { deriveAndroidFingerprint, validateAndroidFingerprintCoherence } from './android.js';
 export {
   applyGeoToFingerprint,
+  resolveFingerprintPersonaModes,
   validateFingerprintCoherence,
   normalizeDeviceMemory,
   normalizeColorDepth,
@@ -24,24 +25,34 @@ export {
   DESKTOP_MIN_DEVICE_MEMORY,
 } from './coherence.js';
 export { applyOverrides } from './overrides.js';
-export { deriveFingerprintFromHost, validateHostCalibrationProfile } from './host-calibration.js';
+export {
+  deriveFingerprintFromHost,
+  normalizeHostWebglIdentity,
+  validateHostCalibrationProfile,
+} from './host-calibration.js';
 export {
   ANDROID_PHONE_MODEL_CATALOG,
   ANDROID_TABLET_MODEL_CATALOG,
   CATALOG_PROVENANCE,
   FINGERPRINT_CATALOG_SOURCES,
   LINUX_FONT_NAMES,
+  MACOS_FONT_NAMES,
+  WINDOWS_FONT_NAMES,
+} from './catalog.generated.js';
+export {
   LINUX_RENDERER_PRESETS,
   MACOS_ARM_RENDERER_PRESETS,
-  MACOS_FONT_NAMES,
   MACOS_INTEL_RENDERER_PRESETS,
-  WINDOWS_FONT_NAMES,
+  resolveValidatedRendererPreset,
+  resolveSourcedRendererPreset,
+  VALIDATED_RENDERER_PRESETS,
   WINDOWS_RENDERER_PRESETS,
-} from './catalog.generated.js';
+} from './catalog.js';
 export type { DeriveOptions } from './derive.js';
 export type { DeriveAndroidOptions } from './android.js';
 export type { DeriveFromHostOptions } from './host-calibration.js';
 export type { AndroidDeviceCatalogEntry, RendererCatalogEntry } from './catalog.generated.js';
+export type { FullCaptureRendererCatalogEntry, ProductRendererCatalogEntry } from './catalog.js';
 export {
   DEFAULT_FONT_SELECTION_TARGET,
   androidMajorFromOsVersionLabel,

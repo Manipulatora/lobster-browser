@@ -14,6 +14,8 @@ function rawSnapshot(): HostCalibrationRawSnapshot {
       userAgent:
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.7928.0 Safari/537.36',
       platform: 'Linux x86_64',
+      languages: ['de-DE', 'de', 'de-DE'],
+      locale: 'de-DE',
       hardwareConcurrency: 12,
       deviceMemory: 64,
       maxTouchPoints: 0,
@@ -51,6 +53,24 @@ function rawSnapshot(): HostCalibrationRawSnapshot {
         aliasedLineWidthRange: [1, 1],
         aliasedPointSizeRange: [1, 2047],
       },
+      shaderPrecision: {
+        vertex: {
+          lowFloat: { rangeMin: 127, rangeMax: 127, precision: 23 },
+          mediumFloat: { rangeMin: 127, rangeMax: 127, precision: 23 },
+          highFloat: { rangeMin: 127, rangeMax: 127, precision: 23 },
+          lowInt: { rangeMin: 31, rangeMax: 30, precision: 0 },
+          mediumInt: { rangeMin: 31, rangeMax: 30, precision: 0 },
+          highInt: { rangeMin: 31, rangeMax: 30, precision: 0 },
+        },
+        fragment: {
+          lowFloat: { rangeMin: 127, rangeMax: 127, precision: 23 },
+          mediumFloat: { rangeMin: 127, rangeMax: 127, precision: 23 },
+          highFloat: { rangeMin: 127, rangeMax: 127, precision: 23 },
+          lowInt: { rangeMin: 31, rangeMax: 30, precision: 0 },
+          mediumInt: { rangeMin: 31, rangeMax: 30, precision: 0 },
+          highInt: { rangeMin: 31, rangeMax: 30, precision: 0 },
+        },
+      },
     },
     fonts: ['Noto Sans', 'DejaVu Sans', 'Noto Sans'],
     timezone: 'Europe/Berlin',
@@ -79,6 +99,8 @@ test('normalizeHostCalibrationSnapshot produces a host profile with sorted uniqu
   assert.equal(profile.os, 'linux');
   assert.equal(profile.arch, 'x86_64');
   assert.equal(profile.browserVersion, '152.0.7928.0');
+  assert.deepEqual(profile.navigator.languages, ['de-DE', 'de']);
+  assert.equal(profile.navigator.locale, 'de-DE');
   assert.deepEqual(profile.fonts, ['DejaVu Sans', 'Noto Sans']);
   assert.deepEqual(profile.webgl.extensions, [
     'ANGLE_instanced_arrays',

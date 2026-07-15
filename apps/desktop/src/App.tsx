@@ -1,30 +1,23 @@
 import {
-  BellIcon,
-  CreditCardIcon,
   DocumentDuplicateIcon,
   MagnifyingGlassIcon,
-  MoonIcon,
   ServerStackIcon,
-  SunIcon,
-  UserCircleIcon,
   UserGroupIcon,
 } from '@heroicons/react/24/outline';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { isDesktopRuntime, profilesClient } from './api/tauri';
-import { PricingView } from './features/pricing/PricingView';
 import { ProfilesView } from './features/profiles/ProfilesView';
 import { ProxiesView } from './features/proxies/ProxiesView';
 import { TemplatesView } from './features/templates/TemplatesView';
 import siteLogo from './assets/brand/site-logo.png';
-import { CommandPalette, Kbd, useTheme, type Command } from './ui';
+import { ActionDialog, CommandPalette, ErrorDialog, Kbd, type Command } from './ui';
 import type { Profile } from '@lobster/shared-types';
 
 const NAV_ITEMS = [
   { key: 'profiles', label: 'Profiles', icon: UserGroupIcon },
   { key: 'proxies', label: 'Proxies', icon: ServerStackIcon },
   { key: 'templates', label: 'Templates', icon: DocumentDuplicateIcon },
-  { key: 'pricing', label: 'Pricing', icon: CreditCardIcon },
 ] as const;
 
 export type NavKey = (typeof NAV_ITEMS)[number]['key'];
@@ -43,17 +36,22 @@ function ActiveView({
       return <ProxiesView />;
     case 'templates':
       return <TemplatesView />;
-    case 'pricing':
-      return <PricingView />;
   }
 }
 
 export function App(): JSX.Element {
-  const { theme, toggle } = useTheme();
   const [active, setActive] = useState<NavKey>('profiles');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [createProfileSignal, setCreateProfileSignal] = useState(0);
+  const [quickLaunchProfile, setQuickLaunchProfile] = useState<Profile | null>(null);
+  const [quickLaunchPassword, setQuickLaunchPassword] = useState('');
+  const [quickLaunchBusy, setQuickLaunchBusy] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const isMac = useMemo(
+    () => typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform),
+    [],
+  );
 
   // Keep a lightweight profile list for command-palette search / quick-launch.
   useEffect(() => {
@@ -96,6 +94,36 @@ export function App(): JSX.Element {
     setCreateProfileSignal((n) => n + 1);
   }, []);
 
+  const runQuickLaunch = useCallback(async (profile: Profile, password?: string) => {
+    try {
+      if (profile.status === 'running') {
+        await profilesClient.stop_profile(profile.id);
+      } else {
+        await profilesClient.launch_profile(profile.id, password);
+      }
+      setProfiles(await profilesClient.list_profiles());
+    } catch (error: unknown) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
+
+  async function confirmQuickLaunch(): Promise<void> {
+    if (!quickLaunchProfile) return;
+    setQuickLaunchBusy(true);
+    try {
+      await profilesClient.launch_profile(quickLaunchProfile.id, quickLaunchPassword);
+      setProfiles(await profilesClient.list_profiles());
+      setQuickLaunchProfile(null);
+      setQuickLaunchPassword('');
+    } catch (error: unknown) {
+      setQuickLaunchProfile(null);
+      setQuickLaunchPassword('');
+      setErrorMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setQuickLaunchBusy(false);
+    }
+  }
+
   const commands = useMemo<Command[]>(() => {
     const nav: Command[] = NAV_ITEMS.map((item) => ({
       id: `nav-${item.key}`,
@@ -114,13 +142,6 @@ export function App(): JSX.Element {
         keywords: 'new profile',
         run: requestCreateProfile,
       },
-      {
-        id: 'action-toggle-theme',
-        title: theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme',
-        group: 'Actions',
-        keywords: 'theme dark light',
-        run: toggle,
-      },
     ];
 
     const profileCmds: Command[] = profiles.map((p) => ({
@@ -131,36 +152,23 @@ export function App(): JSX.Element {
       keywords: `${p.tags.join(' ')} ${p.engine} ${p.os}`,
       run: () => {
         setActive('profiles');
-        void (async () => {
-          try {
-            if (p.status === 'running') {
-              await profilesClient.stop_profile(p.id);
-            } else {
-              let password: string | undefined;
-              if (p.passwordProtected) {
-                const value = window.prompt('Enter this profile password to launch.');
-                if (value === null) return;
-                password = value;
-              }
-              await profilesClient.launch_profile(p.id, password);
-            }
-            const list = await profilesClient.list_profiles();
-            setProfiles(list);
-          } catch (e: unknown) {
-            window.alert(e instanceof Error ? e.message : String(e));
-          }
-        })();
+        if (p.passwordProtected && p.status !== 'running') {
+          setQuickLaunchPassword('');
+          setQuickLaunchProfile(p);
+          return;
+        }
+        void runQuickLaunch(p);
       },
     }));
 
     return [...nav, ...actions, ...profileCmds];
-  }, [profiles, requestCreateProfile, theme, toggle]);
+  }, [profiles, requestCreateProfile, runQuickLaunch]);
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="topbar__brand">
-          <img className="topbar__logo" src={siteLogo} alt="Lobium" />
+          <img className="topbar__logo" src={siteLogo} alt="Lobster Browser" />
         </div>
         <div className="topbar__spacer" />
         <div className="topbar__actions">
@@ -172,22 +180,7 @@ export function App(): JSX.Element {
             title="Command palette"
           >
             <MagnifyingGlassIcon aria-hidden />
-            <Kbd>⌘K</Kbd>
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-            onClick={toggle}
-            title="Toggle theme"
-          >
-            {theme === 'dark' ? <SunIcon aria-hidden /> : <MoonIcon aria-hidden />}
-          </button>
-          <button type="button" className="icon-button" aria-label="Notifications">
-            <BellIcon aria-hidden />
-          </button>
-          <button type="button" className="icon-button" aria-label="Profile">
-            <UserCircleIcon aria-hidden />
+            <Kbd>{isMac ? '⌘K' : 'Ctrl K'}</Kbd>
           </button>
         </div>
       </header>
@@ -203,6 +196,8 @@ export function App(): JSX.Element {
                   type="button"
                   className={item.key === active ? 'nav-item nav-item--active' : 'nav-item'}
                   onClick={() => setActive(item.key)}
+                  aria-current={item.key === active ? 'page' : undefined}
+                  title={item.label}
                 >
                   <Icon className="nav-item__icon" aria-hidden />
                   <span>{item.label}</span>
@@ -220,7 +215,38 @@ export function App(): JSX.Element {
         </main>
       </div>
 
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        commands={commands}
+      />
+      <ActionDialog
+        open={quickLaunchProfile !== null}
+        title="Unlock profile"
+        description={`Enter the password for “${quickLaunchProfile?.name ?? 'this profile'}” to launch it in Lobium.`}
+        confirmLabel="Launch profile"
+        busy={quickLaunchBusy}
+        input={{
+          label: 'Profile password',
+          value: quickLaunchPassword,
+          onChange: setQuickLaunchPassword,
+          type: 'password',
+          required: true,
+        }}
+        onConfirm={() => {
+          void confirmQuickLaunch();
+        }}
+        onClose={() => {
+          setQuickLaunchProfile(null);
+          setQuickLaunchPassword('');
+        }}
+      />
+      <ErrorDialog
+        open={errorMessage !== null}
+        title="Profile action failed"
+        message={errorMessage ?? ''}
+        onClose={() => setErrorMessage(null)}
+      />
     </div>
   );
 }

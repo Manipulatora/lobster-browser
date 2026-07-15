@@ -5,7 +5,14 @@
  * feeds `applyGeoToFingerprint` so timezone/locale/language always match the proxy.
  * Day 0 ships parsing + the provider contract; Day 3 adds the networked implementation.
  */
-export { parseProxy, formatProxyUrl, toEnginePlaywrightProxy } from './parse.js';
+export {
+  assertValidProxyConfig,
+  formatProxyUrl,
+  parseProxy,
+  toEnginePlaywrightProxy,
+  validateProxyConfig,
+  validateProxyRotationUrl,
+} from './parse.js';
 export type { GeoProvider, DeriveGeoOptions } from './geo.js';
 export {
   StaticGeoProvider,

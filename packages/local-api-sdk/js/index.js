@@ -9,7 +9,7 @@
  * enforces a per-request timeout, retries transient network failures, and unwraps the
  * `{ code, data, msg }` envelope so callers work with plain result objects.
  *
- * Contract: ../../docs/contracts/local-automation-api.md
+ * Contract: ../../docs/OPERATIONS.md (§4)
  *
  * @example Start a profile and drive it with Playwright.
  *   import { LobsterClient } from '@lobster/local-api-sdk';

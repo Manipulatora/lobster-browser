@@ -2,7 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 
 import { App } from './App';
-import { ThemeProvider } from './ui/theme';
+import { EngineGate } from './features/engine/EngineGate';
 import { ToastProvider } from './ui/Toast';
 import './ui/tokens.css';
 import './styles.css';
@@ -25,10 +25,10 @@ window.addEventListener('unhandledrejection', (e) => {
 
 ReactDOM.createRoot(rootEl).render(
   <React.StrictMode>
-    <ThemeProvider>
-      <ToastProvider>
+    <ToastProvider>
+      <EngineGate>
         <App />
-      </ToastProvider>
-    </ThemeProvider>
+      </EngineGate>
+    </ToastProvider>
   </React.StrictMode>,
 );

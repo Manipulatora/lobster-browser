@@ -10,6 +10,10 @@ import {
   WINDOWS_RENDERER_PRESETS,
 } from './catalog.generated.js';
 import { DEVICE_TEMPLATES } from './pools.js';
+import {
+  LINUX_RENDERER_PRESETS as PRODUCT_LINUX_RENDERERS,
+  WINDOWS_RENDERER_PRESETS as PRODUCT_WINDOWS_RENDERERS,
+} from './catalog.js';
 
 function labels(items: ReadonlyArray<{ label: string }>): string[] {
   return items.map((item) => item.label);
@@ -71,10 +75,23 @@ test('renderer catalog depth and backend formats match the claimed OS', () => {
   }
 });
 
-test('catalog provenance records verified sources and counts', async () => {
+test('catalog provenance records model sources and counts', async () => {
   const { CATALOG_PROVENANCE } = await import('./catalog.generated.js');
   assert.ok(CATALOG_PROVENANCE.retrievedAt);
   assert.ok(CATALOG_PROVENANCE.counts.windowsFonts >= 300);
   assert.ok(CATALOG_PROVENANCE.counts.macFonts >= 1000);
   assert.ok(CATALOG_PROVENANCE.counts.windowsRenderers >= 300);
+});
+
+test('product renderer facade removes malformed/obsolete default choices and states validation scope', () => {
+  assert.ok(PRODUCT_WINDOWS_RENDERERS.length >= 50);
+  assert.ok(PRODUCT_LINUX_RENDERERS.length >= 50);
+  for (const preset of [...PRODUCT_WINDOWS_RENDERERS, ...PRODUCT_LINUX_RENDERERS]) {
+    assert.equal(preset.validationLevel, 'model_source_only');
+    assert.equal(preset.validationScope, 'model_device_id_only');
+    assert.doesNotMatch(preset.label, /\]$/);
+    assert.doesNotMatch(preset.webgl.renderer, /\]\s*\(/);
+    assert.doesNotMatch(preset.label, /GeForce 6800|Engineering Sample|Mining/i);
+  }
+  assert.match(PRODUCT_WINDOWS_RENDERERS[0]?.label ?? '', /GTX|RTX|Radeon|Intel/i);
 });

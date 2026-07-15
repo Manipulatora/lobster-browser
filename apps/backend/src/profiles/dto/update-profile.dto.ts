@@ -1,6 +1,22 @@
-import { IsArray, IsIn, IsObject, IsOptional, IsString, MaxLength } from 'class-validator';
-import { ENGINE_KINDS, PROFILE_OS_TARGETS } from '@lobster/shared-types';
+import { Type } from 'class-transformer';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsIn,
+  IsObject,
+  IsOptional,
+  IsString,
+  MaxLength,
+  ValidateNested,
+} from 'class-validator';
+import { PROFILE_OS_TARGETS, ENGINE_KINDS } from '@lobster/shared-types';
 import type { EngineKind, FingerprintOverrides, ProfileOsTarget } from '@lobster/shared-types';
+
+import {
+  BrowserExtensionRefDto,
+  CookieImportMetadataDto,
+  MAX_PROFILE_EXTENSIONS,
+} from './profile-metadata.dto';
 
 /**
  * Body for PATCH /profiles/:id. Every field is optional (partial update). The desktop editor
@@ -23,11 +39,38 @@ export class UpdateProfileDto {
   @IsIn([...PROFILE_OS_TARGETS])
   os?: ProfileOsTarget;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  osVersion?: string;
+
   // User-editable overrides applied on top of the seed-derived fingerprint. Accepted as opaque
   // JSON here; deep coherence validation lives in @lobster/fingerprint.
   @IsOptional()
   @IsObject()
   fingerprintOverrides?: FingerprintOverrides;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  proxyId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  templateId?: string;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CookieImportMetadataDto)
+  cookiesImport?: CookieImportMetadataDto;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_PROFILE_EXTENSIONS)
+  @ValidateNested({ each: true })
+  @Type(() => BrowserExtensionRefDto)
+  extensions?: BrowserExtensionRefDto[];
 
   @IsOptional()
   @IsArray()

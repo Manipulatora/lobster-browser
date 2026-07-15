@@ -213,6 +213,10 @@ export type AnyFingerprint = Fingerprint | AndroidFingerprint;
 
 export interface HostNavigatorProfile {
   platform: string;
+  /** Host browser language order captured before any persona is applied (for PersonaMode `real`). */
+  languages?: string[];
+  /** Host Intl locale captured alongside languages; older v1 snapshots may omit it. */
+  locale?: string;
   hardwareConcurrency: number;
   deviceMemory: number;
   maxTouchPoints: number;

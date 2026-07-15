@@ -44,6 +44,61 @@ function isSessionExpiry(expires: number | undefined): boolean {
   return expires === undefined || expires === -1 || expires === 0;
 }
 
+/** Validate a canonical cookie before it is sent to Chromium's all-or-nothing setCookies call. */
+export function validateCookie(cookie: Cookie): string[] {
+  const issues: string[] = [];
+  if (typeof cookie.name !== 'string' || /[\u0000-\u001f\u007f;=]/.test(cookie.name)) {
+    issues.push('name contains a control character, semicolon, or equals sign');
+  }
+  if (typeof cookie.value !== 'string' || /[\u0000-\u0008\u000a-\u001f\u007f]/.test(cookie.value)) {
+    issues.push('value contains a forbidden control character');
+  }
+  const bareDomain = cookie.domain.startsWith('.') ? cookie.domain.slice(1) : cookie.domain;
+  if (
+    !bareDomain ||
+    /\s|[\u0000-\u001f\u007f/@?#]/.test(bareDomain) ||
+    bareDomain.includes('://')
+  ) {
+    issues.push(`domain "${cookie.domain}" is invalid`);
+  } else {
+    try {
+      const host = bareDomain.includes(':') && !bareDomain.startsWith('[')
+        ? `[${bareDomain}]`
+        : bareDomain;
+      if (!new URL(`http://${host}/`).hostname) issues.push(`domain "${cookie.domain}" is invalid`);
+    } catch {
+      issues.push(`domain "${cookie.domain}" is invalid`);
+    }
+  }
+  if (typeof cookie.path !== 'string' || !cookie.path.startsWith('/')) {
+    issues.push('path must start with /');
+  }
+  if (
+    cookie.expires !== undefined &&
+    (!Number.isFinite(cookie.expires) || cookie.expires <= 0)
+  ) {
+    issues.push('expires must be positive Unix seconds or absent for a session cookie');
+  }
+  if (cookie.sameSite === 'None' && !cookie.secure) {
+    issues.push('SameSite=None requires Secure');
+  }
+  if (cookie.name.startsWith('__Secure-') && !cookie.secure) {
+    issues.push('__Secure- cookies require Secure');
+  }
+  if (cookie.name.startsWith('__Host-')) {
+    if (!cookie.secure) issues.push('__Host- cookies require Secure');
+    if (cookie.path !== '/') issues.push('__Host- cookies require path=/');
+    if (cookie.domain.startsWith('.')) issues.push('__Host- cookies must be host-only');
+  }
+  return issues;
+}
+
+export function validateCookies(cookies: readonly Cookie[]): string[] {
+  return cookies.flatMap((cookie, index) =>
+    validateCookie(cookie).map((issue) => `cookie[${index}] "${cookie.name}": ${issue}`),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Netscape cookies.txt
 // ---------------------------------------------------------------------------
@@ -78,7 +133,7 @@ export function parseNetscape(text: string): Cookie[] {
     const fields = line.split('\t');
     if (fields.length !== 7) continue; // Malformed: not the canonical 7-column shape.
 
-    const [domain, , path, secureField, expiryField, name, value] = fields as [
+    const [rawDomain, includeSubdomainsField, path, secureField, expiryField, name, value] = fields as [
       string,
       string,
       string,
@@ -90,6 +145,12 @@ export function parseNetscape(text: string): Cookie[] {
 
     const expiry = Number(expiryField);
     if (!Number.isFinite(expiry)) continue; // Malformed expiry column.
+    if (includeSubdomainsField !== 'TRUE' && includeSubdomainsField !== 'FALSE') continue;
+    if (secureField !== 'TRUE' && secureField !== 'FALSE') continue;
+    const domain =
+      includeSubdomainsField === 'TRUE' && !rawDomain.startsWith('.')
+        ? `.${rawDomain}`
+        : rawDomain;
 
     const cookie: Cookie = {
       name,

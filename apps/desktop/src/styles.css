@@ -263,7 +263,7 @@ input[type='checkbox'] {
 }
 
 .toolbar-actions {
-  gap: 0;
+  gap: 8px;
 }
 
 .toolbar-menu {
@@ -426,14 +426,6 @@ textarea:focus {
 .btn--square {
   width: 40px;
   padding: 0;
-  border-left-color: rgba(255, 255, 255, 0.2);
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-}
-
-.toolbar-actions .btn--primary:first-child {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
 }
 
 .btn--secondary {
@@ -552,20 +544,148 @@ textarea:focus {
   text-align: center;
 }
 
-.profiles-table th:nth-child(2) {
-  width: 34%;
+/* Profiles table: fixed layout so the draggable <colgroup> widths are honored and overflowing cell
+   text clips (which is what enables the ellipsis). Column widths come from JS state, not fixed %. */
+.profiles-table--fixed {
+  table-layout: fixed;
+}
+.data-panel {
+  overflow-x: auto;
 }
 
-.profiles-table th:nth-child(3) {
-  width: 22%;
+/* Denser, uniform rows: identical + reduced height and font size (column widths are unaffected). */
+.profiles-table th,
+.profiles-table td {
+  padding: 7px 10px;
+}
+.profiles-table th {
+  height: 40px;
+  font-size: 14px;
+}
+.profiles-table td {
+  height: 52px;
+  font-size: 15px;
+}
+.profiles-table .table-title {
+  font-size: 15px;
+  max-width: 100%;
+}
+.profiles-table .table-subtitle {
+  max-width: 100%;
+  font-size: 13px;
+}
+.profiles-table .tag {
+  font-size: 12px;
+  min-height: 22px;
+}
+.profile-title-text {
+  min-width: 0;
 }
 
-.profiles-table th:nth-child(4) {
-  width: 22%;
+/* One-line clip + ellipsis for any long cell text. */
+.cell-ellipsis {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.profiles-table th:nth-child(5) {
-  width: 18%;
+/* Draggable column-resize grip on the right edge of each header. */
+.th--resizable {
+  position: relative;
+}
+.col-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+}
+.col-resize::after {
+  content: '';
+  position: absolute;
+  top: 25%;
+  right: 3px;
+  width: 2px;
+  height: 50%;
+  border-radius: 2px;
+  background: var(--border);
+}
+.col-resize:hover::after,
+.col-resize:active::after {
+  background: var(--accent, #7c3aed);
+}
+
+/* Tiny OS glyph in the row subtitle. */
+.os-icon {
+  display: inline-block;
+  flex: none;
+  vertical-align: middle;
+}
+.table-os-icon {
+  vertical-align: -2px;
+  margin-right: 5px;
+}
+
+/* Proxy cell → line 1 name, line 2 host + country flag. */
+.proxy-cell__text {
+  min-width: 0;
+  flex: 1;
+}
+.proxy-cell__name {
+  color: var(--text);
+  font-weight: 500;
+}
+.proxy-cell__addr {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.proxy-flag {
+  flex: none;
+  font-size: 14px;
+  line-height: 1;
+}
+.proxy-cell--empty {
+  opacity: 0.7;
+}
+
+/* OS picker rendered as an icon segmented control (native <select> can't show per-option icons). */
+.os-segmented {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.os-segmented__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+.os-segmented__item:hover:not(:disabled) {
+  border-color: var(--accent, #7c3aed);
+}
+.os-segmented__item--active {
+  border-color: var(--accent, #7c3aed);
+  background: var(--accent-soft, rgba(124, 58, 237, 0.12));
+  font-weight: 500;
+}
+.os-segmented__item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .templates-table th:nth-child(2) {
@@ -1031,7 +1151,10 @@ textarea:focus {
 }
 
 .wizard-body {
-  min-height: 492px;
+  /* Fixed height (not just a min) so the modal never resizes when switching between the top tabs —
+     short tabs (General/Security) no longer collapse and tall tabs (Fingerprint) no longer grow the
+     dialog. Content taller than this scrolls inside via .modal-body's overflow:auto. */
+  height: min(680px, calc(100dvh - 180px));
 }
 
 .wizard-section,
@@ -1065,6 +1188,111 @@ textarea:focus {
 
 .os-version-row > .field {
   min-width: 0;
+}
+
+/* Fingerprint step: a clean vertical stack of controls. A control whose "Manual" mode
+   reveals extra inputs shows them inline (horizontally) via .fp-row, so choosing Manual
+   widens the row instead of adding more vertical clutter. */
+.fp-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.fp-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.fp-row > .field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.fp-row__grow {
+  flex: 2 1 0;
+}
+
+/* Custom OS dropdown: the platform glyph sits INSIDE the field and on every option
+   (a native <select> can't render per-option SVG icons). */
+.os-select {
+  position: relative;
+}
+
+.os-select__trigger {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+
+.os-select__glyph {
+  flex: none;
+  color: var(--text);
+}
+
+.os-select__value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.os-select__chevron {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--text-soft);
+}
+
+.os-select__list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: var(--z-dropdown);
+  max-height: 280px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-md, 0 8px 24px rgba(18, 23, 34, 0.16));
+}
+
+.os-select__option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.os-select__option:hover {
+  background: var(--active-muted);
+}
+
+.os-select__option--active {
+  background: var(--accent-soft);
+  color: var(--brand-700);
+  font-weight: var(--fw-medium);
+}
+
+.os-select__option .os-icon {
+  flex: none;
+  color: currentColor;
 }
 
 .custom-proxy-grid {
@@ -1104,8 +1332,6 @@ textarea:focus {
   left: 0;
   right: 0;
   z-index: var(--z-dropdown);
-  display: flex;
-  flex-direction: column;
   max-height: 260px;
   overflow: auto;
   padding: 6px;
@@ -1115,10 +1341,19 @@ textarea:focus {
   box-shadow: var(--shadow-md, 0 8px 24px rgba(18, 23, 34, 0.16));
 }
 
+.combobox__viewport {
+  position: relative;
+  width: 100%;
+}
+
 .combobox__option {
+  position: absolute;
+  left: 0;
+  right: 0;
   display: block;
   width: 100%;
-  padding: 7px 10px;
+  height: 36px;
+  padding: 0 10px;
   border: 0;
   border-radius: var(--radius);
   background: transparent;
@@ -1952,9 +2187,78 @@ code {
     grid-template-columns: 1fr;
   }
 
+  .fp-row {
+    flex-direction: column;
+    gap: 12px;
+  }
+
   .modal-footer--split,
   .profile-identity-summary > div {
     align-items: stretch;
     flex-direction: column;
   }
+}
+
+/* First-run engine download gate (DOWNLOADER distribution model). */
+.engine-gate {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg, #0f1117);
+}
+.engine-gate__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  max-width: 460px;
+  width: 100%;
+  padding: 32px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  text-align: center;
+}
+.engine-gate__logo {
+  height: 40px;
+  width: auto;
+}
+.engine-gate__desc {
+  color: var(--text-soft);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  margin: 0;
+}
+.engine-gate__status {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  margin: 0;
+}
+.engine-gate__bar {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--active-muted);
+  overflow: hidden;
+}
+.engine-gate__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent, #7c3aed);
+  transition: width 0.2s ease;
+}
+.engine-gate__fill--indet {
+  width: 40%;
+  animation: engine-gate-indet 1.1s ease-in-out infinite;
+}
+@keyframes engine-gate-indet {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+.engine-gate__error {
+  width: 100%;
 }

@@ -7,7 +7,7 @@
  *
  * This is a senior-engineer breadth test of the ENGINE across configurations, not a replacement for the
  * matrix doc's required scenarios (proxied controls, stock-browser control, etc. — see
- * docs/specs/antidetect-verification-matrix.md). No proxy is attached in this run (none is configured in
+ * docs/ENGINEERING.md (§4)). No proxy is attached in this run (none is configured in
  * this environment); IP/WebRTC-focused tools therefore reflect direct host egress and are informational
  * only here, not a proxy-leak assertion.
  *

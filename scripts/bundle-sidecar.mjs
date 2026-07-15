@@ -5,7 +5,7 @@
  * Output: apps/desktop/src-tauri/resources/sidecar/
  *   index.js          — entry (copies dist/index.js)
  *   lib/…             — engine-runner dist
- *   node_modules/     — @lobster/* + patchright (+ patchright-core)
+ *   node_modules/     — @lobster/* + proxy-chain/undici (no patchright: CDP is first-party)
  *   package.json      — marks the bundle as ESM
  *
  * The Rust core spawns: `$LOBSTER_NODE_BIN <resources>/sidecar/index.js`
@@ -118,10 +118,10 @@ for (const name of ['shared-types', 'proxy', 'fingerprint', 'cookies', 'crypto',
 }
 
 // 6. Third-party runtime deps (and their transitive deps) from the hoisted root node_modules.
-// proxy-chain (+ tslib) backs the authenticated SOCKS/HTTP local shim (docs/specs/proxy.md §7.2).
+// proxy-chain (+ tslib) backs the authenticated SOCKS/HTTP local shim (docs/OPERATIONS.md).
+// NOTE: patchright is intentionally NOT bundled — the sidecar drives CDP via the first-party
+// cdp-client.ts (raw DevTools WebSocket). patchright is a dev-only tool for ci/validation tests.
 for (const name of [
-  'patchright',
-  'patchright-core',
   'undici',
   'socks-proxy-agent',
   'socks',
@@ -132,6 +132,9 @@ for (const name of [
   'smart-buffer',
   'proxy-chain',
   'tslib',
+  // CRX/unpacked extension preparation.
+  'yauzl',
+  'pend',
 ]) {
   try {
     copyPkg(name);

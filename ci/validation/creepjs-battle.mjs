@@ -30,7 +30,6 @@ import {
   validateFingerprintCoherence,
 } from '@lobster/fingerprint';
 import {
-  applyCdpFingerprint,
   buildGpuArgs,
   buildLaunchOptions,
   buildLobiumConfig,
@@ -51,27 +50,93 @@ const WAIT_ROUNDS = Number(process.env.LOBSTER_CREEPJS_WAIT_ROUNDS || 25);
 const WAIT_MS = Number(process.env.LOBSTER_CREEPJS_WAIT_MS || 2000);
 
 const GEOS = {
-  US: { ip: '0.0.0.0', countryCode: 'US', timezone: 'America/New_York', latitude: 40.71, longitude: -74.0 },
-  DE: { ip: '0.0.0.0', countryCode: 'DE', timezone: 'Europe/Berlin', latitude: 52.52, longitude: 13.4 },
-  JP: { ip: '0.0.0.0', countryCode: 'JP', timezone: 'Asia/Tokyo', latitude: 35.68, longitude: 139.69 },
-  BR: { ip: '0.0.0.0', countryCode: 'BR', timezone: 'America/Sao_Paulo', latitude: -23.55, longitude: -46.63 },
-  GB: { ip: '0.0.0.0', countryCode: 'GB', timezone: 'Europe/London', latitude: 51.5, longitude: -0.12 },
-  AU: { ip: '0.0.0.0', countryCode: 'AU', timezone: 'Australia/Sydney', latitude: -33.87, longitude: 151.21 },
-  IN: { ip: '0.0.0.0', countryCode: 'IN', timezone: 'Asia/Kolkata', latitude: 28.61, longitude: 77.21 },
-  SG: { ip: '0.0.0.0', countryCode: 'SG', timezone: 'Asia/Singapore', latitude: 1.35, longitude: 103.82 },
+  US: {
+    ip: '0.0.0.0',
+    countryCode: 'US',
+    timezone: 'America/New_York',
+    latitude: 40.71,
+    longitude: -74.0,
+  },
+  DE: {
+    ip: '0.0.0.0',
+    countryCode: 'DE',
+    timezone: 'Europe/Berlin',
+    latitude: 52.52,
+    longitude: 13.4,
+  },
+  JP: {
+    ip: '0.0.0.0',
+    countryCode: 'JP',
+    timezone: 'Asia/Tokyo',
+    latitude: 35.68,
+    longitude: 139.69,
+  },
+  BR: {
+    ip: '0.0.0.0',
+    countryCode: 'BR',
+    timezone: 'America/Sao_Paulo',
+    latitude: -23.55,
+    longitude: -46.63,
+  },
+  GB: {
+    ip: '0.0.0.0',
+    countryCode: 'GB',
+    timezone: 'Europe/London',
+    latitude: 51.5,
+    longitude: -0.12,
+  },
+  AU: {
+    ip: '0.0.0.0',
+    countryCode: 'AU',
+    timezone: 'Australia/Sydney',
+    latitude: -33.87,
+    longitude: 151.21,
+  },
+  IN: {
+    ip: '0.0.0.0',
+    countryCode: 'IN',
+    timezone: 'Asia/Kolkata',
+    latitude: 28.61,
+    longitude: 77.21,
+  },
+  SG: {
+    ip: '0.0.0.0',
+    countryCode: 'SG',
+    timezone: 'Asia/Singapore',
+    latitude: 1.35,
+    longitude: 103.82,
+  },
 };
 
 const NOISE_VARIANTS = [
   { id: 'noise-all', hardwareNoise: { webgl: true, canvas: true, audio: true, clientRects: true } },
-  { id: 'noise-default', hardwareNoise: { webgl: true, canvas: true, audio: true, clientRects: false } },
-  { id: 'noise-canvas-off', hardwareNoise: { webgl: true, canvas: false, audio: true, clientRects: false } },
-  { id: 'noise-minimal', hardwareNoise: { webgl: false, canvas: false, audio: false, clientRects: false } },
+  {
+    id: 'noise-default',
+    hardwareNoise: { webgl: true, canvas: true, audio: true, clientRects: false },
+  },
+  {
+    id: 'noise-canvas-off',
+    hardwareNoise: { webgl: true, canvas: false, audio: true, clientRects: false },
+  },
+  {
+    id: 'noise-minimal',
+    hardwareNoise: { webgl: false, canvas: false, audio: false, clientRects: false },
+  },
 ];
 
 const MEDIA_VARIANTS = [
-  { id: 'media-default', mediaDevices: { cameras: 1, microphones: 1, speakers: 2, stableDeviceIds: true } },
-  { id: 'media-rich', mediaDevices: { cameras: 2, microphones: 2, speakers: 4, stableDeviceIds: true } },
-  { id: 'media-sparse', mediaDevices: { cameras: 0, microphones: 1, speakers: 1, stableDeviceIds: true } },
+  {
+    id: 'media-default',
+    mediaDevices: { cameras: 1, microphones: 1, speakers: 2, stableDeviceIds: true },
+  },
+  {
+    id: 'media-rich',
+    mediaDevices: { cameras: 2, microphones: 2, speakers: 4, stableDeviceIds: true },
+  },
+  {
+    id: 'media-sparse',
+    mediaDevices: { cameras: 0, microphones: 1, speakers: 1, stableDeviceIds: true },
+  },
 ];
 
 function attachHostDeepWebgl(fp, host) {
@@ -261,7 +326,10 @@ async function runSituation(sit) {
     '--headless=new',
     '--no-sandbox',
     '--disable-dev-shm-usage',
-    '--enable-unsafe-swiftshader',
+    // Never force SwiftShader during an explicit real-GPU run. The strict gate checks the host probe,
+    // but the detector situations themselves must also exercise the physical driver; otherwise a
+    // real-GPU label can hide 120 software-rendered situations.
+    ...(GPU_MODE === 'gpu' ? [] : ['--enable-unsafe-swiftshader']),
     `--user-data-dir=${userDataDir}`,
     lobiumConfigArg(cfgPath),
     '--remote-debugging-port=0',
@@ -272,7 +340,20 @@ async function runSituation(sit) {
   if (GPU_MODE === 'gpu' && !args.some((a) => a.startsWith('--use-angle='))) {
     args.push(...buildGpuArgs({ mode: 'gpu' }));
   }
-  const proc = spawn(LOBIUM, args, { stdio: 'ignore' });
+  // Pure native, exactly as shipped: timezone/locale come from the child env; every fingerprint
+  // surface is applied by the engine from --lobium-fp-config. No CDP overlay — patchright only
+  // drives/reads CreepJS.
+  const localeUnix = `${fp.locale.locale.replaceAll('-', '_')}.UTF-8`;
+  const proc = spawn(LOBIUM, args, {
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      TZ: fp.locale.timezone,
+      LANG: localeUnix,
+      LC_ALL: localeUnix,
+      FC_LANG: fp.locale.locale,
+    },
+  });
   try {
     const ws = await readCdpEndpoint(userDataDir);
     const { chromium } = await import('patchright');
@@ -281,7 +362,6 @@ async function runSituation(sit) {
       const context = browser.contexts()[0];
       const page = context.pages()[0] ?? (await context.newPage());
       const cdp = await context.newCDPSession(page);
-      await applyCdpFingerprint(cdp, fp);
       await page.goto(CREEPJS_URL, { waitUntil: 'domcontentloaded', timeout: 90_000 });
       const creep = await scrapeCreepjs(page, cdp);
       const pass =
@@ -298,6 +378,7 @@ async function runSituation(sit) {
         noise: sit.noise.id,
         media: sit.media.id,
         claimedRenderer: fp.webgl.unmaskedRenderer || fp.webgl.renderer,
+        softwareFallbackForced: args.includes('--enable-unsafe-swiftshader'),
         staticIssues: sit.staticIssues,
         creep,
         verdict: pass ? 'pass' : creep.available ? 'fail' : 'unavailable',
@@ -332,7 +413,9 @@ async function captureHost() {
     '--headless=new',
     '--no-sandbox',
     '--disable-dev-shm-usage',
-    '--enable-unsafe-swiftshader',
+    // The host snapshot is the gate's hardware evidence. Forcing SwiftShader here made an explicit
+    // `LOBSTER_GPU=gpu` run fail (or, worse, tempted readers to trust the spoofed persona renderer).
+    ...(GPU_MODE === 'gpu' ? [] : ['--enable-unsafe-swiftshader']),
     `--user-data-dir=${userDataDir}`,
     '--remote-debugging-port=0',
     '--no-first-run',
@@ -383,7 +466,9 @@ async function captureHost() {
         };
         if (gl) {
           const dbg = gl.getExtension('WEBGL_debug_renderer_info');
-          const vendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+          const vendor = dbg
+            ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)
+            : gl.getParameter(gl.VENDOR);
           const renderer = dbg
             ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)
             : gl.getParameter(gl.RENDERER);
@@ -423,8 +508,12 @@ async function captureHost() {
               maxTextureImageUnits: gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS),
               maxVertexTextureImageUnits: gl.getParameter(gl.MAX_VERTEX_TEXTURE_IMAGE_UNITS),
               maxCombinedTextureImageUnits: gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS),
-              aliasedLineWidthRange: Array.from(gl.getParameter(gl.ALIASED_LINE_WIDTH_RANGE) || [0, 0]),
-              aliasedPointSizeRange: Array.from(gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE) || [0, 0]),
+              aliasedLineWidthRange: Array.from(
+                gl.getParameter(gl.ALIASED_LINE_WIDTH_RANGE) || [0, 0],
+              ),
+              aliasedPointSizeRange: Array.from(
+                gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE) || [0, 0],
+              ),
             },
           };
         } else {
@@ -467,7 +556,12 @@ async function captureHost() {
         os: 'linux',
         arch: 'x86_64',
       });
-      return { profile, issues: [], source: 'lobium-unspoofed' };
+      return {
+        profile,
+        issues: [],
+        source: 'lobium-unspoofed',
+        softwareFallbackForced: args.includes('--enable-unsafe-swiftshader'),
+      };
     } finally {
       await browser.close().catch(() => {});
     }
@@ -535,10 +629,12 @@ async function main() {
   const scored = results.filter((r) => r.verdict === 'pass' || r.verdict === 'fail');
   const lieFreq = aggregateLies(scored);
   const report = {
+    schemaVersion: 1,
     kind: 'creepjs-battle',
     capturedAt: new Date().toISOString(),
     binary: LOBIUM,
     gpuMode: GPU_MODE,
+    headless: true,
     creepjsUrl: CREEPJS_URL,
     host: hostInfo.profile
       ? {
@@ -547,6 +643,7 @@ async function main() {
           renderer: hostInfo.profile.webgl?.unmaskedRenderer || hostInfo.profile.webgl?.renderer,
           extCount: hostInfo.profile.webgl?.extensions?.length ?? 0,
           source: hostInfo.source,
+          softwareFallbackForced: hostInfo.softwareFallbackForced,
         }
       : { source: hostInfo.source, issues: hostInfo.issues },
     counts: {
@@ -569,7 +666,10 @@ async function main() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const outPath = join(REPORTS_DIR, `creepjs-battle-${stamp}.json`);
   await writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`);
-  await writeFile(join(REPORTS_DIR, 'creepjs-battle-latest.json'), `${JSON.stringify(report, null, 2)}\n`);
+  await writeFile(
+    join(REPORTS_DIR, 'creepjs-battle-latest.json'),
+    `${JSON.stringify(report, null, 2)}\n`,
+  );
   process.stdout.write(
     JSON.stringify(
       {

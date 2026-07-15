@@ -14,10 +14,10 @@ use std::path::Path;
 use anyhow::Result;
 use argon2::Argon2;
 use password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use rusqlite::{params, Connection, Row};
+use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
 
-use crate::secrets::{SecretCipher, PROXY_SECRET_FIELDS};
+use crate::secrets::{PROXY_SECRET_FIELDS, SecretCipher};
 
 /// SQLite schema for the local profile catalog. `IF NOT EXISTS` keeps `init` idempotent.
 pub const SCHEMA: &str = "
@@ -44,6 +44,36 @@ CREATE TABLE IF NOT EXISTS profiles (
     updated_at             TEXT NOT NULL           -- ISO-8601
 );
 ";
+
+/// Profile OS targets accepted by the control plane. Android launches through the ADB/APK runner.
+const PROFILE_OS_TARGETS: &[&str] = &[
+    "windows",
+    "macos",
+    "macos_intel",
+    "macos_arm",
+    "linux",
+    "android",
+];
+
+fn assert_creatable_os(os: &str) -> Result<()> {
+    if PROFILE_OS_TARGETS.contains(&os) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "desktop profiles cannot use OS target `{os}`; allowed: {}",
+        PROFILE_OS_TARGETS.join(", ")
+    )
+}
+
+fn assert_updatable_os(_existing_os: &str, next_os: &str) -> Result<()> {
+    if PROFILE_OS_TARGETS.contains(&next_os) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "desktop profiles cannot use OS target `{next_os}`; allowed: {}",
+        PROFILE_OS_TARGETS.join(", ")
+    )
+}
 
 /// A profile row, serialized to the UI in the exact shape of `@lobster/shared-types` `Profile`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +348,7 @@ pub fn create(
     cipher: &SecretCipher,
     input: CreateProfileInput,
 ) -> Result<Profile> {
+    assert_creatable_os(&input.os)?;
     let id = format!("prf_{}", uuid::Uuid::new_v4().simple());
     // Every profile gets a UNIQUE seed unless one is explicitly supplied — never a shared constant.
     let seed = input.fingerprint_seed.unwrap_or_else(new_seed);
@@ -336,8 +367,15 @@ pub fn create(
             input.os_version,
             seed,
             to_text(&input.fingerprint_overrides),
-            proxy_to_text(cipher, &input.proxy)?,
-            input.proxy_id,
+            proxy_to_text(
+                cipher,
+                &if input.proxy_id.as_deref().is_some_and(|id| !id.is_empty()) {
+                    None
+                } else {
+                    input.proxy
+                },
+            )?,
+            input.proxy_id.filter(|id| !id.is_empty()),
             input.template_id,
             cookies_to_text(cipher, &input.cookies_import)?,
             to_text(&input.extensions),
@@ -367,7 +405,8 @@ pub fn update(
 
     let name = patch.name.unwrap_or(existing.name);
     let engine = patch.engine.unwrap_or(existing.engine);
-    let os = patch.os.unwrap_or(existing.os);
+    let os = patch.os.unwrap_or_else(|| existing.os.clone());
+    assert_updatable_os(&existing.os, &os)?;
     let os_version = if patch.os_version.is_some() {
         patch.os_version
     } else {
@@ -378,13 +417,17 @@ pub fn update(
     } else {
         existing.fingerprint_overrides
     };
+    let proxy_selection_changed = patch.proxy_id.is_some();
     let proxy = if patch.proxy.is_some() {
         patch.proxy
+    } else if proxy_selection_changed {
+        // Selecting a stored proxy or "none" invalidates any legacy inline snapshot.
+        None
     } else {
         existing.proxy
     };
-    let proxy_id = if patch.proxy_id.is_some() {
-        patch.proxy_id
+    let proxy_id = if proxy_selection_changed {
+        patch.proxy_id.filter(|id| !id.is_empty())
     } else {
         existing.proxy_id
     };
@@ -445,7 +488,8 @@ pub fn update(
 pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
     let now = chrono::Utc::now().to_rfc3339();
     let affected = conn.execute(
-        "UPDATE profiles SET trashed_at = ?2, updated_at = ?2 WHERE id = ?1 AND trashed_at IS NULL",
+        "UPDATE profiles SET trashed_at = ?2, updated_at = ?2 WHERE id = ?1 AND trashed_at IS NULL \
+         AND status NOT IN ('launching', 'running', 'stopping')",
         params![id, now],
     )?;
     Ok(affected > 0)
@@ -505,10 +549,74 @@ pub fn restore(conn: &Connection, id: &str) -> Result<bool> {
 
 pub fn purge(conn: &Connection, id: &str) -> Result<bool> {
     let affected = conn.execute(
-        "DELETE FROM profiles WHERE id = ?1 AND trashed_at IS NOT NULL",
+        "DELETE FROM profiles WHERE id = ?1 AND trashed_at IS NOT NULL \
+         AND status NOT IN ('launching', 'running', 'stopping')",
         params![id],
     )?;
     Ok(affected > 0)
+}
+
+pub fn set_status(conn: &Connection, id: &str, status: &str) -> Result<bool> {
+    if !matches!(
+        status,
+        "idle" | "launching" | "running" | "stopping" | "error"
+    ) {
+        anyhow::bail!("invalid profile status {status}");
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    Ok(conn.execute(
+        "UPDATE profiles SET status = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, status, now],
+    )? > 0)
+}
+
+/// Consume a pending one-shot import only after the sidecar confirms CDP application.
+pub fn clear_cookie_import(conn: &Connection, id: &str) -> Result<bool> {
+    let now = chrono::Utc::now().to_rfc3339();
+    Ok(conn.execute(
+        "UPDATE profiles SET cookies_import = NULL, updated_at = ?2 \
+         WHERE id = ?1 AND cookies_import IS NOT NULL",
+        params![id, now],
+    )? > 0)
+}
+
+/// Make persisted lifecycle state agree with the sidecar's authoritative running set.
+pub fn reconcile_statuses(
+    conn: &Connection,
+    running_ids: &[String],
+    error_ids: &[String],
+) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE profiles SET status = 'idle', updated_at = ?1 \
+         WHERE status IN ('launching', 'running', 'stopping')",
+        [now.as_str()],
+    )?;
+    for id in error_ids {
+        conn.execute(
+            "UPDATE profiles SET status = 'error', updated_at = ?2 \
+             WHERE id = ?1 AND trashed_at IS NULL",
+            params![id, now],
+        )?;
+    }
+    for id in running_ids {
+        conn.execute(
+            "UPDATE profiles SET status = 'running', updated_at = ?2 \
+             WHERE id = ?1 AND trashed_at IS NULL",
+            params![id, now],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn get_trashed(conn: &Connection, cipher: &SecretCipher, id: &str) -> Result<Option<Profile>> {
+    let mut stmt =
+        conn.prepare("SELECT * FROM profiles WHERE id = ?1 AND trashed_at IS NOT NULL")?;
+    let mut rows = stmt.query_map([id], |row| row_to_profile(cipher, row))?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -556,6 +664,47 @@ mod tests {
             "each profile needs its own seed"
         );
         assert_eq!(list(&conn, &cipher).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn create_accepts_android_os_target() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let mut android = input("Android");
+        android.os = "android".to_string();
+        let created = create(&conn, &cipher, android).expect("android create must succeed");
+        assert_eq!(created.os, "android");
+        assert_eq!(list(&conn, &cipher).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn update_accepts_switching_desktop_profile_to_android() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("Desktop")).unwrap();
+        let updated = update(
+            &conn,
+            &cipher,
+            &created.id,
+            UpdateProfilePatch {
+                name: None,
+                engine: None,
+                os: Some("android".to_string()),
+                os_version: None,
+                fingerprint_overrides: None,
+                proxy: None,
+                proxy_id: None,
+                template_id: None,
+                cookies_import: None,
+                extensions: None,
+                tags: None,
+                folder: None,
+                notes: None,
+            },
+        )
+        .expect("android switch must succeed")
+        .expect("profile exists");
+        assert_eq!(updated.os, "android");
     }
 
     #[test]
@@ -730,5 +879,72 @@ mod tests {
             fetched.cookies_import.unwrap()["cookies"][0]["value"],
             "super-secret-session-token"
         );
+    }
+
+    #[test]
+    fn stored_proxy_selection_clears_inline_snapshot_and_pending_cookie_is_consumed_once() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let mut new_profile = input("Lifecycle");
+        new_profile.proxy = Some(serde_json::json!({
+            "id": "inline", "type": "http", "host": "old.example", "port": 80
+        }));
+        new_profile.cookies_import = Some(serde_json::json!({
+            "mode": "empty"
+        }));
+        let created = create(&conn, &cipher, new_profile).unwrap();
+        let updated = update(
+            &conn,
+            &cipher,
+            &created.id,
+            UpdateProfilePatch {
+                name: None,
+                engine: None,
+                os: None,
+                os_version: None,
+                fingerprint_overrides: None,
+                proxy: None,
+                proxy_id: Some("px_current".to_string()),
+                template_id: None,
+                cookies_import: None,
+                extensions: None,
+                tags: None,
+                folder: None,
+                notes: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(updated.proxy.is_none());
+        assert_eq!(updated.proxy_id.as_deref(), Some("px_current"));
+        assert!(clear_cookie_import(&conn, &created.id).unwrap());
+        assert!(!clear_cookie_import(&conn, &created.id).unwrap());
+        assert!(
+            get(&conn, &cipher, &created.id)
+                .unwrap()
+                .unwrap()
+                .cookies_import
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lifecycle_reconciliation_and_live_delete_are_fail_closed() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("Running")).unwrap();
+        assert!(set_status(&conn, &created.id, "launching").unwrap());
+        assert!(!delete(&conn, &created.id).unwrap());
+        reconcile_statuses(&conn, std::slice::from_ref(&created.id), &[]).unwrap();
+        assert_eq!(
+            get(&conn, &cipher, &created.id).unwrap().unwrap().status,
+            "running"
+        );
+        reconcile_statuses(&conn, &[], &[]).unwrap();
+        assert_eq!(
+            get(&conn, &cipher, &created.id).unwrap().unwrap().status,
+            "idle"
+        );
+        assert!(delete(&conn, &created.id).unwrap());
     }
 }

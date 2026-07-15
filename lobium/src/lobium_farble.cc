@@ -10,6 +10,8 @@
 
 #include "components/lobium_fp/lobium_farble.h"
 
+#include <algorithm>
+
 namespace lobium {
 namespace {
 
@@ -112,16 +114,24 @@ void FarbleClientRect(float* x,
                       float* height,
                       uint32_t rect_index,
                       uint32_t seed) {
-  // CreepJS hashes known rotated/ghost DOMRect dimensions (e.g. Blink dpr=1 hash 9d9215cc). Any
-  // sub-pixel nudge fails "unknown rotate/ghost dimensions". Keep the hook wired (seed path) but
-  // do not mutate geometry until a non-detectable strategy exists. Unlinkability for rects is
-  // deferred; canvas/WebGL/audio remain the active farbling surfaces.
-  (void)x;
-  (void)y;
-  (void)width;
-  (void)height;
-  (void)rect_index;
-  (void)seed;
+  if (!x || !y || !width || !height || seed == 0u) {
+    return;
+  }
+  // Use LayoutUnit-sized (1/64 CSS px) deterministic offsets. This is small enough not to change
+  // layout or hit-testing, but remains visible in DOMRect's double values. Position and size use
+  // independent signs; the same seed/index path is used by getClientRects and getBoundingClientRect.
+  uint32_t h = seed ^ (rect_index * 0x9E3779B1u);
+  h ^= h >> 16;
+  h *= 0x7FEB352Du;
+  h ^= h >> 15;
+  h *= 0x846CA68Bu;
+  h ^= h >> 16;
+  constexpr float kUnit = 1.0f / 64.0f;
+  const auto delta = [&](uint32_t bit) { return (h & bit) ? kUnit : -kUnit; };
+  *x += delta(1u);
+  *y += delta(2u);
+  *width = std::max(kUnit, *width + delta(4u));
+  *height = std::max(kUnit, *height + delta(8u));
 }
 
 }  // namespace lobium

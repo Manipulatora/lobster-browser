@@ -1,5 +1,5 @@
 /**
- * Local authenticated-proxy adapter for native Lobium (PROX / docs/specs/proxy.md §7.2).
+ * Local authenticated-proxy adapter for native Lobium (PROX / docs/OPERATIONS.md).
  *
  * Chromium cannot pass SOCKS5/HTTP proxy credentials via `--proxy-server`. We front the upstream
  * with a loopback HTTP proxy (proxy-chain) that holds the credentials; Lobium attaches to
@@ -24,6 +24,8 @@ export interface LocalProxyAdapter {
   port: number;
   /** Tear down the local listener (call on profile stop / launch failure). */
   close: () => Promise<void>;
+  /** Observe an upstream request failure without exposing credentials. */
+  onFailure: (listener: (message: string) => void) => void;
 }
 
 function encodeUserinfo(username: string, password?: string): string {
@@ -44,10 +46,26 @@ export function upstreamProxyUrl(proxy: UpstreamProxy): string {
       ? 'socks5h'
       : protocol === 'https'
         ? 'https'
-        : 'http';
+        : protocol === 'http'
+          ? 'http'
+          : undefined;
+  if (!scheme) throw new Error(`unsupported upstream proxy scheme "${protocol}"`);
+  const port = raw.port
+    ? Number(raw.port)
+    : scheme === 'https'
+      ? 443
+      : scheme === 'http'
+        ? 80
+        : 1080;
+  if (!raw.hostname || !Number.isInteger(port) || port <= 0 || port > 65_535) {
+    throw new Error(`invalid upstream proxy host/port in ${proxy.server}`);
+  }
+  if (proxy.password !== undefined && proxy.username === undefined) {
+    throw new Error('upstream proxy password cannot be supplied without a username');
+  }
   const auth =
     proxy.username !== undefined ? `${encodeUserinfo(proxy.username, proxy.password)}@` : '';
-  return `${scheme}://${auth}${raw.hostname}:${raw.port}`;
+  return `${scheme}://${auth}${raw.hostname}:${port}`;
 }
 
 /** True when the launch proxy carries credentials Chromium cannot consume directly. */
@@ -98,7 +116,7 @@ export async function assertUpstreamReachable(
       reject(
         new Error(
           `proxy ${host}:${port} is unreachable (${err.message}). ` +
-            'Check the proxy host/port, firewall, and provider allowlists for this machine\'s IP.',
+            "Check the proxy host/port, firewall, and provider allowlists for this machine's IP.",
         ),
       );
     });
@@ -122,6 +140,20 @@ export async function startLocalProxyAdapter(proxy: UpstreamProxy): Promise<Loca
       upstreamProxyUrl: upstream,
     }),
   });
+  const failureListeners = new Set<(message: string) => void>();
+  server.on('requestFailed', ({ error }: { error?: Error }) => {
+    const message = (error?.message || 'upstream proxy request failed').replace(
+      /\/\/[^@\s]+@/g,
+      '//***@',
+    );
+    for (const listener of failureListeners) listener(message);
+  });
+  server.on('tunnelConnectFailed', ({ response }: { response?: { statusCode?: number } }) => {
+    const message = `upstream proxy tunnel failed${
+      response?.statusCode ? ` (HTTP ${response.statusCode})` : ''
+    }`;
+    for (const listener of failureListeners) listener(message);
+  });
 
   try {
     await server.listen();
@@ -143,6 +175,9 @@ export async function startLocalProxyAdapter(proxy: UpstreamProxy): Promise<Loca
     port,
     close: async () => {
       await server.close(true).catch(() => {});
+    },
+    onFailure: (listener) => {
+      failureListeners.add(listener);
     },
   };
 }

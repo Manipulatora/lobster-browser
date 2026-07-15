@@ -9,6 +9,7 @@ import type {
   WebGlFingerprint,
 } from '@lobster/shared-types';
 import {
+  languagesToAcceptLanguage,
   normalizeColorDepth,
   normalizeDeviceMemory,
   validateFingerprintCoherence,
@@ -74,11 +75,34 @@ function cloneHostWebgl(host: WebGlFingerprint): WebGlFingerprint {
   if (host.extensions) webgl.extensions = [...host.extensions];
   if (host.shaderPrecision) {
     webgl.shaderPrecision = {
-      vertex: { ...host.shaderPrecision.vertex },
-      fragment: { ...host.shaderPrecision.fragment },
+      vertex: Object.fromEntries(
+        Object.entries(host.shaderPrecision.vertex).map(([key, value]) => [key, { ...value }]),
+      ) as typeof host.shaderPrecision.vertex,
+      fragment: Object.fromEntries(
+        Object.entries(host.shaderPrecision.fragment).map(([key, value]) => [key, { ...value }]),
+      ) as typeof host.shaderPrecision.fragment,
     };
   }
   return webgl;
+}
+
+/**
+ * Canonicalize only unstable formatting in a captured host identity. The GPU model, backend,
+ * extensions, limits, shader precision and pixel path remain host-derived.
+ */
+export function normalizeHostWebglIdentity(host: WebGlFingerprint): WebGlFingerprint {
+  const normalize = (value: string): string => value.replaceAll('\0', '').replace(/\s+/g, ' ').trim();
+  return {
+    ...cloneHostWebgl(host),
+    vendor: normalize(host.vendor),
+    renderer: normalize(host.renderer),
+    unmaskedVendor: normalize(host.unmaskedVendor),
+    unmaskedRenderer: normalize(host.unmaskedRenderer),
+    ...(host.version ? { version: normalize(host.version) } : {}),
+    ...(host.shadingLanguageVersion
+      ? { shadingLanguageVersion: normalize(host.shadingLanguageVersion) }
+      : {}),
+  };
 }
 
 /**
@@ -100,6 +124,19 @@ export function deriveFingerprintFromHost(
     opts.browserVersion ?? host.browserVersion,
   );
   const locale = opts.locale ? { ...base.locale, ...opts.locale } : base.locale;
+  const hostLanguages = host.navigator.languages?.map((language) => language.trim()).filter(Boolean);
+  const languages = hostLanguages && hostLanguages.length > 0 ? hostLanguages : base.navigator.languages;
+  const hostLocale = host.navigator.locale?.trim() || languages[0] || base.locale.locale;
+  const calibratedLocale: LocaleFingerprint = {
+    ...locale,
+    timezone: opts.locale?.timezone ?? host.timezone ?? locale.timezone,
+    locale: opts.locale?.locale ?? hostLocale,
+    acceptLanguage:
+      opts.locale?.acceptLanguage ??
+      (hostLanguages && hostLanguages.length > 0
+        ? languagesToAcceptLanguage(languages)
+        : locale.acceptLanguage),
+  };
 
   return {
     ...base,
@@ -108,13 +145,14 @@ export function deriveFingerprintFromHost(
     navigator: {
       ...base.navigator,
       platform: host.navigator.platform,
+      languages: [...languages],
       hardwareConcurrency: clampInt(host.navigator.hardwareConcurrency, 1, 128),
       deviceMemory: normalizeDeviceMemory(host.navigator.deviceMemory),
       maxTouchPoints: Math.max(0, Math.round(host.navigator.maxTouchPoints)),
     },
     screen: normalizeHostScreen(host.os, host.screen, base.screen),
     webgl: cloneHostWebgl(host.webgl),
-    locale,
+    locale: calibratedLocale,
     fonts: normalizedFonts(host.fonts, base.fonts),
   };
 }
@@ -123,21 +161,77 @@ export function deriveFingerprintFromHost(
  * Validate a host snapshot before it becomes the primary derivation source. This intentionally rejects
  * software renderers; CI/headless can still use `deriveFingerprint` from the fallback catalog.
  */
-export function validateHostCalibrationProfile(host: HostCalibrationProfile): string[] {
+export interface HostCalibrationValidationOptions {
+  /**
+   * Development-only escape hatch for explicitly provisional software-GPU runs. Release evidence must
+   * never enable this; it exists so no-GPU build hosts can exercise the exact product path honestly.
+   */
+  allowSoftwareRenderer?: boolean;
+}
+
+export function validateHostCalibrationProfile(
+  host: HostCalibrationProfile,
+  options: HostCalibrationValidationOptions = {},
+): string[] {
   const issues: string[] = [];
   if (host.version !== 1) issues.push(`unsupported host calibration version: ${host.version}`);
   if (!host.capturedAt) issues.push('capturedAt is required');
-  if (host.fonts.length === 0) issues.push('host font list is empty');
+  if (!host.browserVersion?.trim()) issues.push('host browserVersion is required');
+  // Fonts are isolated by the packaged per-OS fontconfig set. Host enumeration may be unavailable
+  // without an interactive local-font permission; an empty capture safely falls back to the OS pool.
+  if (!host.navigator.languages || host.navigator.languages.length === 0)
+    issues.push('host navigator.languages is required');
+  if (!host.navigator.locale?.trim()) issues.push('host navigator.locale is required');
+  if (!host.timezone?.trim()) issues.push('host timezone is required');
+  if (
+    host.navigator.languages?.length &&
+    host.navigator.locale &&
+    host.navigator.languages[0] !== host.navigator.locale
+  ) {
+    issues.push('host navigator.languages[0] does not match host locale');
+  }
   if (!host.webgl.extensions || host.webgl.extensions.length === 0) {
     issues.push('host WebGL extension list is empty');
   }
+  if (!host.webgl.version?.trim()) issues.push('host WebGL version is required');
+  if (!host.webgl.shadingLanguageVersion?.trim()) {
+    issues.push('host WebGL shading-language version is required');
+  }
+  if (!host.webgl.caps) {
+    issues.push('host WebGL numeric capabilities are required');
+  } else if (
+    [
+      host.webgl.caps.maxTextureSize,
+      host.webgl.caps.maxCubeMapTextureSize,
+      host.webgl.caps.maxRenderbufferSize,
+      ...host.webgl.caps.maxViewportDims,
+      host.webgl.caps.maxVertexAttribs,
+      host.webgl.caps.maxVertexUniformVectors,
+      host.webgl.caps.maxFragmentUniformVectors,
+      host.webgl.caps.maxVaryingVectors,
+      host.webgl.caps.maxTextureImageUnits,
+      host.webgl.caps.maxVertexTextureImageUnits,
+      host.webgl.caps.maxCombinedTextureImageUnits,
+    ].some((value) => !Number.isFinite(value) || value <= 0)
+  ) {
+    issues.push('host WebGL numeric capabilities are incomplete');
+  }
+  if (!host.webgl.shaderPrecision) {
+    issues.push('host WebGL shader-precision profile is required');
+  }
   const webglText = `${host.webgl.vendor} ${host.webgl.renderer}`;
-  if (/SwiftShader|llvmpipe|Software|Microsoft Basic Render/i.test(webglText)) {
+  if (
+    !options.allowSoftwareRenderer &&
+    /SwiftShader|llvmpipe|Software|Microsoft Basic Render/i.test(webglText)
+  ) {
     issues.push(`host WebGL uses a software renderer: ${webglText}`);
   }
 
   const derived = deriveFingerprintFromHost('host-validation', host, { engine: 'lobium' });
   for (const issue of validateFingerprintCoherence(derived)) {
+    if (options.allowSoftwareRenderer && /software renderer|SwiftShader|llvmpipe/i.test(issue)) {
+      continue;
+    }
     issues.push(`derived fingerprint: ${issue}`);
   }
   return issues;

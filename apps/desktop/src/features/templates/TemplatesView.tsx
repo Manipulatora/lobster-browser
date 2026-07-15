@@ -1,10 +1,8 @@
 import {
   DocumentDuplicateIcon,
-  LockClosedIcon,
   MagnifyingGlassIcon,
   PlayIcon,
   SparklesIcon,
-  XMarkIcon,
 } from '@heroicons/react/24/outline';
 import { useEffect, useState } from 'react';
 
@@ -17,8 +15,8 @@ import type {
 } from '@lobster/shared-types';
 
 import { profilesClient, templatesClient } from '../../api/tauri';
-import lobsterIcon from '../../assets/brand/lobster-icon.png';
-import { EmptyState, Skeleton, useToast } from '../../ui';
+import appIcon from '../../assets/brand/icon.png';
+import { EmptyState, Modal, Skeleton, useToast } from '../../ui';
 import { ENGINE_OPTIONS, OS_OPTIONS, OS_VERSION_OPTIONS } from '../profiles/options';
 
 interface TemplateFormState {
@@ -118,120 +116,122 @@ function CreateTemplateModal({
   }
 
   return (
-    <div
-      className="modal-overlay"
-      role="presentation"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <form className="modal modal--template" onSubmit={handleSubmit} aria-label="Create template">
-        <header className="modal-header">
-          <h2>Create Template</h2>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
-            <XMarkIcon aria-hidden />
-          </button>
-        </header>
-        <div className="modal-body">
-          <div className="field-grid">
-            <label className="field field--wide">
-              <span className="field__label">Title</span>
-              <input
-                className="input"
-                type="text"
-                value={form.name}
-                placeholder="Template name"
-                onChange={(e) => set('name', e.target.value)}
-                autoFocus
-              />
-            </label>
-            <label className="field">
-              <span className="field__label">Engine</span>
-              <select
-                className="input"
-                value={form.engine}
-                onChange={(e) => set('engine', e.target.value as EngineKind)}
-              >
-                {ENGINE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span className="field__label">OS</span>
-              <select
-                className="input"
-                value={form.os}
-                onChange={(e) => {
-                  const os = e.target.value as ProfileOsTarget;
-                  setForm((prev) => ({ ...prev, os, osVersion: OS_VERSION_OPTIONS[os][0] }));
-                }}
-              >
-                {OS_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span className="field__label">OS version</span>
-              <select
-                className="input"
-                value={form.osVersion}
-                onChange={(e) => set('osVersion', e.target.value)}
-              >
-                {OS_VERSION_OPTIONS[form.os].map((version) => (
-                  <option key={version} value={version}>
-                    {version}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field field--wide">
-              <span className="field__label">Preset parameters</span>
-              <input
-                className="input"
-                type="text"
-                value={form.preset}
-                onChange={(e) => set('preset', e.target.value)}
-              />
-            </label>
-            <label className="field field--wide">
-              <span className="field__label">Proxy</span>
-              <input
-                className="input"
-                type="text"
-                value={form.proxy}
-                placeholder="Proxy label or endpoint"
-                onChange={(e) => set('proxy', e.target.value)}
-              />
-            </label>
-            <label className="field field--wide">
-              <span className="field__label">Tags</span>
-              <input
-                className="input"
-                type="text"
-                value={form.tags}
-                placeholder="comma separated"
-                onChange={(e) => set('tags', e.target.value)}
-              />
-            </label>
-          </div>
-          {error ? <p className="notice notice--error">{error}</p> : null}
-        </div>
-        <footer className="modal-footer">
+    <Modal
+      open
+      onClose={submitting ? () => undefined : onClose}
+      title="Create template"
+      size="sm"
+      footer={
+        <>
           <button type="button" className="btn btn--secondary" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" className="btn btn--primary" disabled={!canSubmit}>
-            Confirm
+          <button
+            type="submit"
+            form="create-template-form"
+            className="btn btn--primary"
+            disabled={!canSubmit}
+          >
+            {submitting ? 'Creating…' : 'Create template'}
           </button>
-        </footer>
+        </>
+      }
+    >
+      <form id="create-template-form" onSubmit={handleSubmit} aria-label="Template details">
+        <div className="field-grid">
+          <label className="field field--wide">
+            <span className="field__label">Title</span>
+            <input
+              className="input"
+              type="text"
+              value={form.name}
+              placeholder="Template name"
+              onChange={(e) => set('name', e.target.value)}
+              autoFocus
+            />
+          </label>
+          <label className="field">
+            <span className="field__label">Engine</span>
+            <select
+              className="input"
+              value={form.engine}
+              onChange={(e) => set('engine', e.target.value as EngineKind)}
+            >
+              {ENGINE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span className="field__label">OS</span>
+            <select
+              className="input"
+              value={form.os}
+              onChange={(e) => {
+                const os = e.target.value as ProfileOsTarget;
+                setForm((prev) => ({ ...prev, os, osVersion: OS_VERSION_OPTIONS[os][0] }));
+              }}
+            >
+              {OS_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span className="field__label">OS version</span>
+            <select
+              className="input"
+              value={form.osVersion}
+              onChange={(e) => set('osVersion', e.target.value)}
+            >
+              {OS_VERSION_OPTIONS[form.os].map((version) => (
+                <option key={version} value={version}>
+                  {version}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field field--wide">
+            <span className="field__label">Preset parameters</span>
+            <input
+              className="input"
+              type="text"
+              value={form.preset}
+              onChange={(e) => set('preset', e.target.value)}
+            />
+          </label>
+          <label className="field field--wide">
+            <span className="field__label">Proxy</span>
+            <input
+              className="input"
+              type="text"
+              value={form.proxy}
+              placeholder="Proxy label or endpoint"
+              onChange={(e) => set('proxy', e.target.value)}
+            />
+          </label>
+          <label className="field field--wide">
+            <span className="field__label">Tags</span>
+            <input
+              className="input"
+              type="text"
+              value={form.tags}
+              placeholder="comma separated"
+              onChange={(e) => set('tags', e.target.value)}
+            />
+          </label>
+        </div>
+        {error ? (
+          <p className="notice notice--error" role="alert">
+            {error}
+          </p>
+        ) : null}
       </form>
-    </div>
+    </Modal>
   );
 }
 
@@ -293,7 +293,7 @@ export function TemplatesView(): JSX.Element {
       <header className="table-toolbar">
         <div className="toolbar-total">
           <span>Total:</span>
-          <strong>{rows.length} / 100</strong>
+          <strong>{rows.length}</strong>
         </div>
         <label className="search-field search-field--templates">
           <MagnifyingGlassIcon aria-hidden />
@@ -322,13 +322,23 @@ export function TemplatesView(): JSX.Element {
       {!loading && rows.length === 0 ? (
         <EmptyState
           icon={<DocumentDuplicateIcon aria-hidden />}
-          title="No templates yet"
-          description="Save a reusable profile preset — engine, OS, proxy, and fingerprint policy."
+          title={query.trim() ? 'No matching templates' : 'No templates yet'}
+          description={
+            query.trim()
+              ? 'Try a different search term.'
+              : 'Save a reusable profile preset — engine, OS, proxy, and fingerprint policy.'
+          }
           action={
-            <button type="button" className="btn btn--primary" onClick={() => setShowCreate(true)}>
-              <SparklesIcon aria-hidden />
-              Create Template
-            </button>
+            query.trim() ? undefined : (
+              <button
+                type="button"
+                className="btn btn--primary"
+                onClick={() => setShowCreate(true)}
+              >
+                <SparklesIcon aria-hidden />
+                Create Template
+              </button>
+            )
           }
         />
       ) : null}
@@ -338,39 +348,27 @@ export function TemplatesView(): JSX.Element {
           <table className="data-table templates-table">
             <thead>
               <tr>
-                <th className="check-cell">
-                  <input type="checkbox" aria-label="Select all templates" />
-                </th>
                 <th>Title</th>
                 <th>OS</th>
                 <th>Preset parameters</th>
                 <th>Proxy</th>
                 <th>Tags</th>
-                <th>Password</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((template) => (
                 <tr key={template.id}>
-                  <td className="check-cell">
-                    <input type="checkbox" aria-label={`Select ${template.name}`} />
-                  </td>
                   <td>
                     <div className="profile-title-cell profile-title-cell--compact">
-                      <img className="row-mark" src={lobsterIcon} alt="" aria-hidden />
+                      <img className="row-mark" src={appIcon} alt="" aria-hidden />
                       <div className="table-title">{template.name}</div>
                     </div>
                   </td>
-                  <td>
-                    <span className="os-glyph" title={template.osVersion ?? osName(template.os)}>
-                      ⊞
-                    </span>
-                  </td>
+                  <td>{template.osVersion ?? osName(template.os)}</td>
                   <td className="muted">{presetText(template)}</td>
                   <td>
                     <div className="proxy-cell">
-                      <span className="proxy-refresh">C</span>
                       <div>
                         <div>{proxyTitle(template)}</div>
                         <div className="table-subtitle">{proxyDetail(template)}</div>
@@ -385,9 +383,6 @@ export function TemplatesView(): JSX.Element {
                         </span>
                       ))}
                     </div>
-                  </td>
-                  <td>
-                    <LockClosedIcon className="table-lock" aria-hidden />
                   </td>
                   <td>
                     <button
@@ -406,24 +401,6 @@ export function TemplatesView(): JSX.Element {
             </tbody>
           </table>
         </div>
-      ) : null}
-
-      {!loading && rows.length > 0 ? (
-        <footer className="pagination">
-          <button type="button" className="pagination-arrow" aria-label="Previous page">
-            ‹
-          </button>
-          <button type="button" className="pagination-page">
-            1
-          </button>
-          <button type="button" className="pagination-arrow" aria-label="Next page">
-            ›
-          </button>
-          <select className="pagination-size" defaultValue="10">
-            <option value="10">10 / page</option>
-            <option value="25">25 / page</option>
-          </select>
-        </footer>
       ) : null}
 
       {showCreate ? (

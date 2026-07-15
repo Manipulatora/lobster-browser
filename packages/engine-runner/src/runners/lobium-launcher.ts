@@ -4,13 +4,13 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  rmSync,
+  renameSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { once } from 'node:events';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { ProxyConfig } from '@lobster/shared-types';
 import { readDevToolsEndpoint, clearDevToolsActivePort } from '../devtools-endpoint.js';
 import {
@@ -19,6 +19,7 @@ import {
   type PrepareExtensionsOptions,
 } from '../extensions.js';
 import { writeFontConfig } from '../fonts.js';
+import { withCdpSession } from '../cdp-client.js';
 import { buildLobiumConfig, lobiumConfigArg, writeLobiumConfig } from '../lobium-config.js';
 import {
   assertLobiumBuildCapabilities,
@@ -33,7 +34,11 @@ import {
   type LocalProxyAdapter,
 } from '../proxy-auth-adapter.js';
 import { resolveGpuMode } from '../gpu.js';
-import { dirname } from 'node:path';
+import { deviceFrameGeometry, resolveDesktopWorkArea } from '../device-frame.js';
+import {
+  installMobileEmulationForAllTargets,
+  type MobileEmulationController,
+} from '../mobile-emulation.js';
 // NTP branding is native (patched engine resources); no CDP start-page injection.
 import type { Launcher, LaunchContext, LaunchHandle } from './types.js';
 
@@ -132,8 +137,18 @@ export function resolveFontsBaseDir(): string | undefined {
   const p = process.env.LOBSTER_FONTS_DIR;
   if (p && existsSync(join(p, 'font-pack.manifest.json'))) return p;
   const bin = resolveLobiumBinary();
+  const entryDir = process.argv[1] ? dirname(resolve(process.argv[1])) : undefined;
+  const nodeDir = dirname(process.execPath);
   const candidates = [
     ...(bin ? [join(dirname(bin), 'fonts')] : []),
+    // Tauri Linux bundles place the sidecar at <resources>/sidecar/index.js and the pack at
+    // <resources>/fonts. This path must work even when the desktop entry was launched directly and
+    // therefore did not source the optional user-local wrapper environment.
+    ...(entryDir ? [join(entryDir, '..', 'fonts')] : []),
+    // Bundled Node is <resources>/node/bin/node. Keep this second resource-relative route so a
+    // custom sidecar entry point cannot disconnect an otherwise valid packaged font pack.
+    join(nodeDir, '..', '..', 'fonts'),
+    join(homedir(), '.local', 'share', 'lobster', 'lobium', 'fonts'),
     join(process.cwd(), 'lobium', 'fonts'),
     join(process.cwd(), 'resources', 'fonts'),
   ];
@@ -161,6 +176,10 @@ export async function buildLobiumLaunchEnv(
     TZ: ctx.fingerprint.locale.timezone,
     LANG: `${ctx.fingerprint.locale.locale.replaceAll('-', '_')}.UTF-8`,
     LC_ALL: `${ctx.fingerprint.locale.locale.replaceAll('-', '_')}.UTF-8`,
+    // Fontconfig accepts BCP-47 directly even when the matching libc locale is not installed on the
+    // host. This selects the correct localized face from bundled CJK collections without weakening
+    // the private font-directory isolation.
+    FC_LANG: ctx.fingerprint.locale.locale,
   };
   const base = resolveFontsBaseDir();
   if (!base) {
@@ -170,7 +189,7 @@ export async function buildLobiumLaunchEnv(
   }
   env.FONTCONFIG_FILE = await writeFontConfig(
     ctx.options.userDataDir,
-    ctx.fingerprint.os,
+    ctx.isMobileProfile ? 'android' : ctx.fingerprint.os,
     base,
     ctx.fingerprint.fonts,
   );
@@ -252,20 +271,6 @@ export async function buildLobiumLaunchArgs(ctx: LaunchContext): Promise<string[
   return [lobiumConfigArg(path)];
 }
 
-/**
- * Best-effort `--window-position` centering the phone-sized window would otherwise land wherever
- * the window manager defaults to (often a top-left cascade). Node has no portable way to query the
- * real monitor resolution without a native dependency, so this centers against a common 1920x1080
- * reference — close enough on the common case, and merely off-center (never broken/clipped) on
- * unusual monitor setups since Chromium clamps an off-screen position back on-screen.
- */
-function centeredWindowPositionArg(width: number, height: number): string {
-  const REFERENCE_SCREEN = { width: 1920, height: 1080 };
-  const x = Math.max(0, Math.round((REFERENCE_SCREEN.width - width) / 2));
-  const y = Math.max(0, Math.round((REFERENCE_SCREEN.height - height) / 2));
-  return `--window-position=${x},${y}`;
-}
-
 export async function buildNativeLobiumProcessArgs(
   ctx: LaunchContext,
   opts: NativeLobiumLauncherOptions = {},
@@ -292,30 +297,57 @@ export async function buildNativeLobiumProcessArgs(
       'authenticated proxy requires the local proxy auth adapter — call createLobiumLauncher (not buildNativeLobiumProcessArgs alone)',
     );
   }
+  const deviceFrame =
+    ctx.isMobileProfile && ctx.mobileFormFactor
+      ? deviceFrameGeometry(
+          ctx.fingerprint.screen,
+          ctx.mobileFormFactor,
+          await resolveDesktopWorkArea(),
+        )
+      : undefined;
   return [
     `--user-data-dir=${ctx.options.userDataDir}`,
     '--remote-debugging-port=0',
     '--no-first-run',
     '--no-default-browser-check',
+    // Pin the cookie/password encryption to the stable "basic" OSCrypt key. Without this, headless/Xvfb
+    // Linux resolves the key from a desktop keyring that may be absent or differ between launches, so a
+    // later launch cannot decrypt Default/Cookies and the user is silently logged out (e.g. a Google
+    // account needing re-login). The basic store uses a fixed key, so the cookie jar always decrypts.
+    '--password-store=basic',
+    // Restore the previous session (open tabs) on relaunch. The launcher also seeds
+    // session.restore_on_startup=1; this flag forces it regardless of any startup URL.
+    '--restore-last-session',
     // Profile name for the NATIVE toolbar chip (rendered left of the omnibox by the Lobium engine
     // patch). Replaces the old in-page profile chip drawn by the injected NTP.
     ...(ctx.profileName ? [`--lobium-profile-name=${ctx.profileName}`] : []),
-    // Mobile persona: center the phone-sized window (--window-size already comes from
-    // ctx.options.args, sized to the persona's screen). A phone-sized window in the WM's default
-    // top-left placement reads as "a small desktop window", not "a phone" — centering is what makes
-    // it visually read as a device sitting in the middle of the screen.
-    ...(ctx.isMobileProfile
-      ? [centeredWindowPositionArg(ctx.fingerprint.screen.availWidth, ctx.fingerprint.screen.availHeight)]
+    // Android keeps a normal full-size Lobium window. Native BrowserView lays the real WebContents
+    // inside the sourced centered device stage below the desktop tab strip/omnibox.
+    ...(deviceFrame
+      ? [
+          '--start-maximized',
+          `--lobium-device-frame=${ctx.mobileFormFactor}`,
+          `--lobium-device-screen=${ctx.fingerprint.screen.width}x${ctx.fingerprint.screen.height}`,
+          // Native BrowserView computes the exact content-area fit scale from its real layout and, via
+          // the retry-until-applied sync in LobiumDeviceFrameView, keeps the renderer's device-emulation
+          // image scale locked to the aperture through startup, resize, and whole-device zoom. There is no
+          // command-line scale bootstrap: a static estimate could never match the live fit and had no
+          // native consumer.
+        ]
       : []),
-    ...ctx.options.args,
+    ...ctx.options.args.filter(
+      (arg) =>
+        !deviceFrame ||
+        (!arg.startsWith('--window-size=') && !arg.startsWith('--window-position=')),
+    ),
     ...(opts.extraArgs ?? []),
     ...extensionLaunchArgs(extensionPaths),
     ...nativeProxyArgs(resolvedProxy),
     ...((opts.headless ?? ctx.options.headless) ? ['--headless=new'] : []),
     ...dynamicArgs,
-    // Open Lobium's native New Tab Page (not an injected data:/about:blank mock). After a native
-    // rebuild it uses browser-logo.png above search and ad.png below it; see the branding pipeline.
-    'chrome://newtab/',
+    // No forced startup URL: with --restore-last-session the previous tabs are reopened. On the very
+    // first run (no saved session) Chromium opens its default New Tab Page — Lobium's native branded NTP
+    // (browser-logo.png above search, ad.png below) — so branding still shows without suppressing restore.
   ];
 }
 
@@ -342,6 +374,30 @@ function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
  * profile name. True omnibox-left profile chips still need engine chrome patches — this is the
  * Preferences-level approach available without rebuilding Lobium.
  */
+/**
+ * Read a JSON preferences file for read-modify-write. Returns `{}` when the file is ABSENT (a fresh
+ * profile) but `null` when it EXISTS yet is unparseable — so callers skip writing rather than clobber
+ * the user's real preferences with a fresh object (LOBIUM data-safety: a corrupt/half-written file must
+ * never be silently replaced).
+ */
+function readPrefsForUpdate(path: string): Record<string, unknown> | null {
+  if (!existsSync(path)) return {};
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function ensureChromiumProfileName(userDataDir: string, profileName: string): void {
   const name = profileName.trim();
   if (!name) return;
@@ -352,51 +408,40 @@ export function ensureChromiumProfileName(userDataDir: string, profileName: stri
     /* ignore */
   }
   const prefsPath = join(defaultDir, 'Preferences');
-  let prefs: Record<string, unknown> = {};
-  try {
-    if (existsSync(prefsPath)) {
-      prefs = JSON.parse(readFileSync(prefsPath, 'utf8')) as Record<string, unknown>;
-    }
-  } catch {
-    prefs = {};
+  const prefs = readPrefsForUpdate(prefsPath);
+  if (prefs === null) {
+    // Preferences exists but is unparseable (corrupt or a partial write). Never overwrite it with a
+    // fresh object — that would discard all of the user's real Chromium preferences. Skip this
+    // cosmetic, best-effort name injection for this launch and preserve the file intact.
+    return;
   }
   const profile =
     prefs.profile && typeof prefs.profile === 'object' && !Array.isArray(prefs.profile)
       ? ({ ...(prefs.profile as Record<string, unknown>) } as Record<string, unknown>)
       : {};
-  profile.name = name;
+  // Every profile presents its LOCAL browser identity as the fixed brand name "Your Lobium"
+  // (matches the native profile-menu title). The real per-profile name is NOT written here — it
+  // is carried only on the --lobium-profile-name switch, which the engine shows as the leading
+  // omnibox chip on chrome:// pages. This keeps the top-right account menu from leaking the
+  // per-profile label.
+  profile.name = 'Your Lobium';
   // Keep the name from being overwritten by Gaia / sync defaults on first run.
   profile.name_truncated = true;
-  // Surface the Lobster profile name in Chromium's profile UI (avatar menu / local profile).
-  // A true omnibox-left chip still needs Lobium chrome patches; NTP chip covers the start page.
   prefs.profile = profile;
   // Prefer New Tab on startup so restored legacy data:text/html branding tabs do not win the omnibox.
   const session =
     prefs.session && typeof prefs.session === 'object' && !Array.isArray(prefs.session)
       ? ({ ...(prefs.session as Record<string, unknown>) } as Record<string, unknown>)
       : {};
-  // 5 = Open New Tab Page (Chromium SessionStartupPref::Type::LAST is 1).
-  session.restore_on_startup = 5;
+  // 1 = "Continue where you left off" (Chromium SessionStartupPref::Type::LAST). Restores the previous
+  // tabs on relaunch instead of forcing a fresh New Tab Page (which discarded unpinned tabs).
+  session.restore_on_startup = 1;
   prefs.session = session;
   try {
     writeFileSync(prefsPath, JSON.stringify(prefs), { mode: 0o600 });
   } catch {
     /* ignore — branding still works via NTP chip */
   }
-}
-
-function readJsonObject(path: string): Record<string, unknown> {
-  try {
-    if (existsSync(path)) {
-      const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-    }
-  } catch {
-    /* malformed/missing preference file is rebuilt below */
-  }
-  return {};
 }
 
 /**
@@ -412,34 +457,39 @@ export function ensureChromiumPersonaPreferences(ctx: LaunchContext): void {
   }
   const languages = ctx.fingerprint.navigator.languages.join(',');
   const prefsPath = join(defaultDir, 'Preferences');
-  const prefs = readJsonObject(prefsPath);
-  const intl =
-    prefs.intl && typeof prefs.intl === 'object' && !Array.isArray(prefs.intl)
-      ? { ...(prefs.intl as Record<string, unknown>) }
-      : {};
-  intl.accept_languages = languages;
-  intl.selected_languages = languages;
-  prefs.intl = intl;
-  try {
-    writeFileSync(prefsPath, JSON.stringify(prefs), { mode: 0o600 });
-  } catch {
-    /* launch will still carry --lang + environment fallback */
+  // Skip (never clobber) an existing-but-unparseable Preferences file; --lang + env carry the locale.
+  const prefs = readPrefsForUpdate(prefsPath);
+  if (prefs !== null) {
+    const intl =
+      prefs.intl && typeof prefs.intl === 'object' && !Array.isArray(prefs.intl)
+        ? { ...(prefs.intl as Record<string, unknown>) }
+        : {};
+    intl.accept_languages = languages;
+    intl.selected_languages = languages;
+    prefs.intl = intl;
+    try {
+      writeFileSync(prefsPath, JSON.stringify(prefs), { mode: 0o600 });
+    } catch {
+      /* launch will still carry --lang + environment fallback */
+    }
   }
 
   // Application locale is a Local State pref (not a profile pref). `--lang` remains authoritative,
   // while this keeps restart/profile UI state from resetting it to the host locale.
   const localStatePath = join(ctx.options.userDataDir, 'Local State');
-  const localState = readJsonObject(localStatePath);
-  const localIntl =
-    localState.intl && typeof localState.intl === 'object' && !Array.isArray(localState.intl)
-      ? { ...(localState.intl as Record<string, unknown>) }
-      : {};
-  localIntl.app_locale = ctx.fingerprint.locale.locale;
-  localState.intl = localIntl;
-  try {
-    writeFileSync(localStatePath, JSON.stringify(localState), { mode: 0o600 });
-  } catch {
-    /* no-op */
+  const localState = readPrefsForUpdate(localStatePath);
+  if (localState !== null) {
+    const localIntl =
+      localState.intl && typeof localState.intl === 'object' && !Array.isArray(localState.intl)
+        ? { ...(localState.intl as Record<string, unknown>) }
+        : {};
+    localIntl.app_locale = ctx.fingerprint.locale.locale;
+    localState.intl = localIntl;
+    try {
+      writeFileSync(localStatePath, JSON.stringify(localState), { mode: 0o600 });
+    } catch {
+      /* no-op */
+    }
   }
 }
 
@@ -464,7 +514,17 @@ export function scrubLegacyBrandingSessions(userDataDir: string): void {
         const st = statSync(path);
         if (!st.isFile() || st.size > 64 * 1024 * 1024) continue;
         const buf = readFileSync(path);
-        if (buf.includes(needle)) rmSync(path, { force: true });
+        if (buf.includes(needle)) {
+          // Do NOT irreversibly delete the session file — an SNSS session encodes many tabs/windows, so
+          // deleting the whole file to drop one legacy branding tab can destroy unrelated user tabs.
+          // Move it aside instead: Chromium starts without the legacy tab, and the session data is
+          // preserved (recoverable) rather than lost.
+          try {
+            renameSync(path, `${path}.lobium-legacy-bak`);
+          } catch {
+            /* if the backup rename fails, leave the file untouched rather than destroy it */
+          }
+        }
       } catch {
         /* ignore */
       }
@@ -483,7 +543,9 @@ export function scrubLegacyBrandingSessions(userDataDir: string): void {
       prefs.session && typeof prefs.session === 'object' && !Array.isArray(prefs.session)
         ? ({ ...(prefs.session as Record<string, unknown>) } as Record<string, unknown>)
         : {};
-    session.restore_on_startup = 5;
+    // 1 = restore the previous session (see the note in ensureChromiumPersonaPreferences). This legacy
+    // branding-session scrub must not force a fresh NTP and discard the user's open tabs.
+    session.restore_on_startup = 1;
     prefs.session = session;
     writeFileSync(prefsPath, JSON.stringify(prefs), { mode: 0o600 });
   } catch {
@@ -557,141 +619,25 @@ async function waitForEndpointOrExit(
 }
 
 /**
- * Inject imported cookies into a live native Lobium process over raw CDP (PROX-1).
- * Uses the browser WebSocket endpoint directly — Patchright's connectOverCDP + browser.close()
- * can tear down the detached chrome process, so we avoid that path here.
+ * Inject imported cookies into a live native Lobium process over raw CDP (PROX-1), using the
+ * first-party {@link withCdpSession} client (no automation fork). It talks to the DevTools endpoint
+ * directly — patchright's `connectOverCDP` + `browser.close()` can tear down the detached chrome
+ * process, so that path is avoided here.
  */
-async function resolveCdpTarget(wsUrl: string): Promise<string> {
-  // Prefer a page/target websocket when available; fall back to the browser endpoint.
-  let targetWs = wsUrl;
-  try {
-    const u = new URL(wsUrl);
-    const listUrl = `http://${u.hostname}:${u.port}/json/list`;
-    const targets = (await fetch(listUrl).then((r) => r.json())) as Array<{
-      type?: string;
-      webSocketDebuggerUrl?: string;
-    }>;
-    const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
-    if (page?.webSocketDebuggerUrl) targetWs = page.webSocketDebuggerUrl;
-  } catch {
-    /* browser endpoint is fine for Network.setCookies */
-  }
-  return targetWs;
-}
-
-async function withNativeCdp<T>(
-  wsUrl: string,
-  operation: (session: {
-    send(method: string, params?: Record<string, unknown>): Promise<unknown>;
-  }) => Promise<T>,
-): Promise<T> {
-  const targetWs = await resolveCdpTarget(wsUrl);
-  return new Promise<T>((resolve, reject) => {
-    const ws = new WebSocket(targetWs);
-    let nextId = 1;
-    const pending = new Map<
-      number,
-      { resolve: (v: unknown) => void; reject: (e: Error) => void }
-    >();
-    const send = (method: string, params?: Record<string, unknown>) =>
-      new Promise<unknown>((res, rej) => {
-        const id = nextId++;
-        pending.set(id, { resolve: res, reject: rej });
-        ws.send(JSON.stringify({ id, method, params }));
-      });
-
-    const timer = setTimeout(() => {
-      ws.close();
-      reject(new Error('cookie CDP operation timed out'));
-    }, 15_000);
-
-    ws.addEventListener('open', () => {
-      void (async () => {
-        try {
-          const result = await operation({ send });
-          clearTimeout(timer);
-          ws.close();
-          resolve(result);
-        } catch (err) {
-          clearTimeout(timer);
-          ws.close();
-          reject(err instanceof Error ? err : new Error(String(err)));
-        }
-      })();
-    });
-    ws.addEventListener('message', (ev) => {
-      try {
-        const msg = JSON.parse(String(ev.data)) as {
-          id?: number;
-          result?: unknown;
-          error?: { message?: string };
-        };
-        if (msg.id === undefined) return;
-        const p = pending.get(msg.id);
-        if (!p) return;
-        pending.delete(msg.id);
-        if (msg.error) p.reject(new Error(msg.error.message || 'CDP error'));
-        else p.resolve(msg.result);
-      } catch {
-        /* ignore non-JSON */
-      }
-    });
-    ws.addEventListener('error', () => {
-      clearTimeout(timer);
-      reject(new Error('cookie CDP websocket error'));
-    });
-  });
-}
-
 async function applyCookiesToNativeLobium(
   wsUrl: string,
   draft: LaunchContext['cookiesImport'],
 ): Promise<boolean> {
   if (!draft) return false;
   const { applyCookieImport } = await import('../cookie-inject.js');
-  await withNativeCdp(wsUrl, (session) => applyCookieImport(session, draft));
+  await withCdpSession(wsUrl, (session) => applyCookieImport(session, draft));
   return true;
-}
-
-/**
- * Make the real OS window (already sized to the persona's phone screen via `--window-size`) behave
- * like a phone viewport, not just a small desktop window: `mobile: true` device-metrics override so
- * CSS `@media (pointer/hover)` and the mobile viewport meta tag path engage, plus touch emulation so
- * mouse input is delivered as touch events (a desktop mouse otherwise never fires touchstart/
- * touchmove, which many "real Android Chrome" mobile sites branch on). Applied once, to the initial
- * tab CDP resolves to a page target for — a tab opened later from user action gets its own CDP
- * session and does not inherit this override (Target-level, not browser-wide).
- */
-async function applyAndroidMobileEmulation(
-  wsUrl: string,
-  fingerprint: LaunchContext['fingerprint'],
-): Promise<void> {
-  const { width, height, devicePixelRatio } = fingerprint.screen;
-  const maxTouchPoints = fingerprint.navigator.maxTouchPoints || 5;
-  await withNativeCdp(wsUrl, async (session) => {
-    await session.send('Emulation.setTouchEmulationEnabled', {
-      enabled: true,
-      maxTouchPoints,
-    });
-    await session.send('Emulation.setEmitTouchEventsForMouse', {
-      enabled: true,
-      configuration: 'mobile',
-    });
-    await session.send('Emulation.setDeviceMetricsOverride', {
-      width,
-      height,
-      deviceScaleFactor: devicePixelRatio || 1,
-      mobile: true,
-      screenWidth: width,
-      screenHeight: height,
-    });
-  });
 }
 
 /** Explicit local export of the current cookie jar from a running browser. */
 export async function exportCookiesFromNativeLobium(wsUrl: string): Promise<string> {
   const { exportCookiesJson } = await import('../cookie-inject.js');
-  return withNativeCdp(wsUrl, (session) => exportCookiesJson(session));
+  return withCdpSession(wsUrl, (session) => exportCookiesJson(session));
 }
 
 /**
@@ -707,6 +653,7 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
   }
   const launch: Launcher = async (ctx: LaunchContext): Promise<LaunchHandle> => {
     let adapter: LocalProxyAdapter | undefined;
+    let mobileEmulation: MobileEmulationController | undefined;
     try {
       const capabilities = await probeLobiumBuildCapabilities(bin);
       assertLobiumBuildCapabilities(
@@ -763,7 +710,14 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
         // connection on browser.close() without SIGTERM'ing our detached chrome (verified by E2E).
         const cookieImportApplied = await applyCookiesToNativeLobium(ws, ctx.cookiesImport);
         if (ctx.isMobileProfile) {
-          await applyAndroidMobileEmulation(ws, ctx.fingerprint);
+          mobileEmulation = await installMobileEmulationForAllTargets(ws, ctx.fingerprint, {
+            formFactor: ctx.mobileFormFactor ?? 'phone',
+            initialScale: deviceFrameGeometry(
+              ctx.fingerprint.screen,
+              ctx.mobileFormFactor ?? 'phone',
+              await resolveDesktopWorkArea(),
+            ).visualScale,
+          });
         }
         // NTP branding is now NATIVE (chrome://newtab, patched engine resources) — no CDP injection.
         const closeListeners = new Set<(reason?: string) => void>();
@@ -774,6 +728,7 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
           }
         };
         child.once('exit', () => {
+          mobileEmulation?.close();
           void shutdownAdapter();
           for (const listener of closeListeners) listener(networkFailure);
         });
@@ -784,6 +739,7 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
           cookieImportApplied,
           exportCookies: () => exportCookiesFromNativeLobium(ws),
           close: async () => {
+            mobileEmulation?.close();
             await closeProcess(child, ws);
             await shutdownAdapter();
           },
@@ -792,10 +748,12 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
           },
         };
       } catch (err) {
+        mobileEmulation?.close();
         await closeProcess(child).catch(() => {});
         throw err;
       }
     } catch (err) {
+      mobileEmulation?.close();
       if (adapter) await adapter.close().catch(() => {});
       throw err;
     }

@@ -18,6 +18,8 @@ export interface AndroidLobiumFarblingSeeds {
   canvas: number;
   webgl: number;
   audio: number;
+  clientRects: number;
+  mediaDevices: number;
 }
 
 export interface AndroidLobiumNetConfig {
@@ -98,6 +100,7 @@ export function buildAndroidLobiumConfig(
   if (opts.proxy) {
     net.proxy = { type: opts.proxy.type, host: opts.proxy.host, port: opts.proxy.port };
   }
+  const hardwareNoise = { ...DEFAULT_HARDWARE_NOISE, ...opts.hardwareNoise };
 
   return {
     version: ANDROID_LOBIUM_CONFIG_VERSION,
@@ -110,14 +113,16 @@ export function buildAndroidLobiumConfig(
     locale: fp.locale,
     fonts: fp.fonts,
     seeds: {
-      canvas: hashStringToUint32(`${base}:canvas`),
-      webgl: hashStringToUint32(`${base}:webgl`),
-      audio: hashStringToUint32(`${base}:audio`),
+      canvas: hardwareNoise.canvas ? hashStringToUint32(`${base}:canvas`) : 0,
+      webgl: hardwareNoise.webgl ? hashStringToUint32(`${base}:webgl`) : 0,
+      audio: hardwareNoise.audio ? hashStringToUint32(`${base}:audio`) : 0,
+      clientRects: hardwareNoise.clientRects ? hashStringToUint32(`${base}:clientRects`) : 0,
+      mediaDevices: hashStringToUint32(`${base}:mediaDevices`),
     },
     policy: {
       renderer: opts.rendererPolicy ?? defaultRendererPolicy(fp),
       webrtc: webrtcPolicy,
-      hardwareNoise: { ...DEFAULT_HARDWARE_NOISE, ...opts.hardwareNoise },
+      hardwareNoise,
       mediaDevices: { ...DEFAULT_MEDIA_DEVICES, ...opts.mediaDevices },
       androidRunner: {
         configDelivery: opts.configDelivery ?? 'adb-external-app-files',

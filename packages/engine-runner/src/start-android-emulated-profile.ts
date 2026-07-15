@@ -46,7 +46,8 @@ function isProxyUnreachableError(err: unknown): boolean {
 /**
  * Launch an Android persona as an EMULATED mobile Chrome: native Lobium (the same engine, config
  * channel, farbling, proxy, cookie-import, and font pipeline every desktop profile uses), in a real,
- * phone-sized, centered window with CDP touch/device-metrics emulation — not a physical device/APK.
+ * centered, native rectangle device stage inside the normal Lobium window with CDP touch/device-metrics
+ * emulation — not a physical device/APK.
  *
  * This is the default Android path (see `rpc.ts` dispatch); `startAndroidProfile` (ADB/APK, a real
  * connected device) remains available via `params.androidTransport === 'adb'` for anyone who wants
@@ -162,6 +163,7 @@ export async function startAndroidEmulatedProfile(
     ...(Array.isArray(params.extensions) ? { extensions: params.extensions } : {}),
     ...(params.headless !== undefined ? { headless: params.headless } : {}),
     isMobileProfile: true,
+    mobileFormFactor: android.android.formFactor,
   };
   return runner.launch(launchParams);
 }

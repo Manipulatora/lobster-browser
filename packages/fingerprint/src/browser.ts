@@ -10,6 +10,7 @@ export { ENGINE_CHROME } from './pools.js';
 export type { DeriveOptions } from './derive.js';
 export {
   applyGeoToFingerprint,
+  resolveFingerprintPersonaModes,
   validateFingerprintCoherence,
   normalizeDeviceMemory,
   normalizeColorDepth,
@@ -25,14 +26,18 @@ export {
   CATALOG_PROVENANCE,
   FINGERPRINT_CATALOG_SOURCES,
   LINUX_FONT_NAMES,
+  MACOS_FONT_NAMES,
+  WINDOWS_FONT_NAMES,
+} from './catalog.generated.js';
+export {
   LINUX_RENDERER_PRESETS,
   MACOS_ARM_RENDERER_PRESETS,
-  MACOS_FONT_NAMES,
   MACOS_INTEL_RENDERER_PRESETS,
-  WINDOWS_FONT_NAMES,
   WINDOWS_RENDERER_PRESETS,
-} from './catalog.generated.js';
+  resolveSourcedRendererPreset,
+} from './catalog.js';
 export type { AndroidDeviceCatalogEntry, RendererCatalogEntry } from './catalog.generated.js';
+export type { ProductRendererCatalogEntry } from './catalog.js';
 export {
   DEFAULT_FONT_SELECTION_TARGET,
   androidMajorFromOsVersionLabel,

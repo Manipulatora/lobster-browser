@@ -8,10 +8,15 @@
 # Status: authored against the pinned ref (build.sh CHROMIUM_REF); each is refreshed + compiled on the
 # build machine (T-010/T-011). See hooks.md for the hook point + code of each.
 #
+# --- Native product shell ---
+branding/device-frame.patch
+#
 # --- Core: config channel + navigator/UA-CH (T-011 — first native surfaces) ---
 # core/build-gn.patch — ✅ registers the added //components/lobium_fp module in the build graph
 #   (blink core dep + core/DEPS include-rule).
 core/build-gn.patch
+# Exact-build contract consumed by startProfile; must precede capability-gated surface patches.
+core/capability-contract.patch
 # core/config-channel.patch — ✅ BUILT + DEV-PROVEN on Chromium 152. Browser reads --lobium-fp-config and
 #   forwards base64 --lobium-fp-data to the renderer (cached, size-guarded, logged); the renderer's
 #   LobiumFpConfig::Current() serves it. Surfaces folded here now include hardwareConcurrency,
@@ -44,21 +49,35 @@ fingerprint/audio-worklet-tap.patch
 fingerprint/screen-dpr.patch
 # matchMedia('(device-width/height)') must agree with screen.width/height (CreepJS Screen lie).
 fingerprint/media-values-device-size.patch
+# navigator language(s) in all contexts + configured geolocation after normal permission grant.
+fingerprint/locale-geolocation.patch
 # HC-4 deep WebGL (version / shadingLanguageVersion / extensions / shaderPrecision). Config reader +
 #   sidecar already carry the fields; this routes them through Blink. Rebuild Lobium to prove in binary.
 fingerprint/host-gpu-profile.patch
+fingerprint/webgl-runtime-safety.patch
 # clientRects farbling (seeds.clientRects) + mediaDevices enumerateDevices (policy.mediaDevices).
 fingerprint/client-rects.patch
 fingerprint/media-devices.patch
+fingerprint/mobile-persona.patch
+# Four observably distinct policies; proxy_only relay-only, disabled rejects RTCPeerConnection.
+fingerprint/webrtc-policy.patch
 # Still to author / prove:
 #   Renderer normalization policy (HC-5, RendererPolicy.normalized_host) stays a separate follow-up.
-# fonts: NOT a Blink patch. The launcher can already write a private fontconfig and set FONTCONFIG_FILE
-#   when LOBSTER_FONTS_DIR is provisioned; production still needs licensed metric-compatible bundles
-#   shipped as app resources. A queryLocalFonts filter alone remains a trap (FontMetadata.blob() throws
-#   for host-absent fonts -> cross-surface incoherence).
+# fonts: NOT a Blink patch. The packaged runtime and desktop resources carry a hashed, redistributable
+#   open-font pack. The launcher writes a private per-profile fontconfig, aliases each persona's claimed
+#   catalog to a physical same-class face, and sets FONTCONFIG_FILE. Exact proprietary metrics remain a
+#   licensed-bundle follow-up; queryLocalFonts intentionally enumerates only physical bundled faces.
 # fingerprint/webgpu-adapter.patch    # coherent WebGPU adapter
 #
 # --- Network (Phase 2 — TLS/JA4 parity) ---
 # net/webrtc-ip-policy.patch          # WebRTC IP handling from config.net
 # net/tls-ja3-ja4.patch               # BoringSSL ClientHello order → match claimed Chrome
 # net/http2-settings-order.patch      # HTTP/2 SETTINGS + pseudo-header order
+branding/account-menu-trim.patch
+# Omnibox: remove the trailing per-profile name chip; the LEADING location-icon chip on
+# chrome:// pages now shows the profile name (from --lobium-profile-name) instead of "Lobium".
+branding/omnibox-profile-chip.patch
+# Product glyph → lobster brand mark (traced from the app icon). Left omnibox chip on chrome://
+# pages + all omnibox product-icon spots. chrome://version page logos are done by the branding
+# script (binary PNGs), not a patch.
+branding/product-icon-lobster.patch

@@ -99,38 +99,67 @@ fn try_store_keychain(key: &[u8; 32]) -> Result<bool> {
 }
 
 fn try_load_file(path: &Path) -> Result<Option<[u8; 32]>> {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return Ok(None);
-    };
-    let Ok(bytes) = BASE64.decode(contents.trim()) else {
-        tracing::warn!(
-            path = %path.display(),
-            "secrets key file is corrupt; will generate a new key"
-        );
-        return Ok(None);
-    };
-    match <[u8; 32]>::try_from(bytes.as_slice()) {
-        Ok(key) => Ok(Some(key)),
-        Err(_) => {
-            tracing::warn!(
-                path = %path.display(),
-                "secrets key file has wrong length; will generate a new key"
-            );
-            Ok(None)
+    // Only an ABSENT file means "first run, generate a key". A file that EXISTS but is unreadable or
+    // corrupt must FAIL LOUD — silently rotating the key here would make every existing encrypted secret
+    // (proxy credentials, cookies) permanently undecryptable. (When the OS keychain holds the key, the
+    // caller resolves it first and rewrites this file, so this error path is only reached when the
+    // keychain is unavailable AND the file is damaged — exactly the unrecoverable case.)
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(anyhow!(err).context(format!(
+                "cannot read secrets key file {} — refusing to rotate the key",
+                path.display()
+            )));
         }
-    }
+    };
+    let bytes = BASE64.decode(contents.trim()).map_err(|_| {
+        anyhow!(
+            "secrets key file {} is corrupt (invalid base64). Refusing to rotate the key, which would \
+             make existing encrypted secrets undecryptable. Restore it from backup, or delete it to \
+             start fresh (existing encrypted secrets will be lost).",
+            path.display()
+        )
+    })?;
+    <[u8; 32]>::try_from(bytes.as_slice()).map(Some).map_err(|_| {
+        anyhow!(
+            "secrets key file {} has the wrong length ({} bytes, expected 32). Refusing to rotate the \
+             key. Restore it from backup, or delete it to start fresh.",
+            path.display(),
+            bytes.len()
+        )
+    })
 }
 
 fn write_file_key(path: &Path, key: &[u8; 32]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, BASE64.encode(key))?;
+    let encoded = BASE64.encode(key);
+    // Atomic + private write: create a sibling temp file with 0o600 FROM THE START (never a window with
+    // default-umask permissions), write + fsync it, then rename over the target. A crash mid-write can
+    // therefore never truncate/corrupt the real key file, and the key is never briefly world-readable.
+    let tmp = path.with_extension("key.tmp");
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        use std::io::Write;
+        f.write_all(encoded.as_bytes())?;
+        f.sync_all()?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     }
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 

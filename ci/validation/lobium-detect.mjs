@@ -2,8 +2,7 @@
 // Lobium native-engine detector run.
 //
 // Launches the REAL Lobium binary (out/Lobium/chrome) with a full coherent persona — the native
-// config channel (--lobium-fp-config: deep surfaces + navigator hardware) PLUS the CDP JS-safe
-// surfaces (UA/UA-CH/timezone/locale) — connects over CDP, and:
+// config channel + production process/prefs (NO Patchright fingerprint overlay), connects over CDP, and:
 //   (a) scores it against the live bot.sannysoft.com automation matrix, and
 //   (b) directly measures the NATIVE deep surfaces (WebGL unmasked vendor/renderer, canvas hash,
 //       audio hash) + navigator hardware, asserting the config actually applied.
@@ -24,8 +23,8 @@ import {
   buildLobiumConfig,
   writeLobiumConfig,
   lobiumConfigArg,
-  applyCdpFingerprint,
   buildLaunchOptions,
+  probeLobiumBuildCapabilities,
   resolveLobiumBinary,
   buildGpuArgs,
   isSoftwareRenderer,
@@ -193,6 +192,7 @@ async function probePage(page, claimedRenderer, claimedVendor) {
         platform: navigator.platform,
         languages: Array.from(navigator.languages),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        intlLocale: Intl.DateTimeFormat().resolvedOptions().locale,
         uaData,
         webgl,
         webglMatchesClaim: webgl.renderer === claimR && webgl.vendor === claimV,
@@ -349,8 +349,23 @@ async function main() {
     longitude: 13.405,
   });
   const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-detect-'));
+  await probeLobiumBuildCapabilities(LOBIUM);
   const cfg = buildLobiumConfig(fp, { seed });
   const cfgPath = await writeLobiumConfig(userDataDir, cfg);
+  await mkdir(join(userDataDir, 'Default'), { recursive: true });
+  await writeFile(
+    join(userDataDir, 'Default', 'Preferences'),
+    `${JSON.stringify({
+      intl: {
+        accept_languages: fp.navigator.languages.join(','),
+        selected_languages: fp.navigator.languages.join(','),
+      },
+    })}\n`,
+  );
+  await writeFile(
+    join(userDataDir, 'Local State'),
+    `${JSON.stringify({ intl: { app_locale: fp.locale.locale } })}\n`,
+  );
 
   // Use the PRODUCT's own launch options so this is a faithful integration test — same WebRTC
   // IP-handling policy, --lang, --window-size, and automation-control flag the real launcher applies —
@@ -385,7 +400,11 @@ async function main() {
   if (gpuMode === 'gpu' && !args.some((a) => a.startsWith('--use-angle='))) {
     args.push(...buildGpuArgs({ mode: 'gpu' }));
   }
-  const proc = spawn(LOBIUM, args, { stdio: 'ignore' });
+  const processLocale = `${fp.locale.locale.replaceAll('-', '_')}.UTF-8`;
+  const proc = spawn(LOBIUM, args, {
+    stdio: 'ignore',
+    env: { ...process.env, TZ: fp.locale.timezone, LANG: processLocale, LC_ALL: processLocale },
+  });
 
   let report;
   try {
@@ -396,7 +415,6 @@ async function main() {
       const context = browser.contexts()[0];
       const page = context.pages()[0] ?? (await context.newPage());
       const cdp = await context.newCDPSession(page);
-      await applyCdpFingerprint(cdp, fp);
       await page.goto(DETECTOR_URL, { waitUntil: 'networkidle', timeout: 60_000 });
 
       const rows = await page.$$eval('table tr', (trs) =>
@@ -469,6 +487,7 @@ async function main() {
         maxTouchPointsApplied: nat.maxTouchPoints === fp.navigator.maxTouchPoints,
         languagesApplied: nat.languages.join(',') === fp.navigator.languages.join(','),
         timezoneApplied: nat.timezone === fp.locale.timezone,
+        intlLocaleApplied: nat.intlLocale === fp.locale.locale,
         webglMatchesClaim: nat.webglMatchesClaim,
         // Workers must not leak the real host UA/platform (null = not measured, don't fail the gate).
         workerCoherent: nat.workers?.ok !== false,
@@ -486,12 +505,14 @@ async function main() {
       const softwareRenderer = isSoftwareRenderer(observedRenderer);
 
       report = {
+        schemaVersion: 1,
         kind: 'lobium-detect',
         capturedAt: new Date().toISOString(),
         engine: 'lobium',
         binary: LOBIUM,
         seed,
         gpuMode,
+        headless: true,
         softwareRenderer,
         detector: DETECTOR_URL,
         claimed: {

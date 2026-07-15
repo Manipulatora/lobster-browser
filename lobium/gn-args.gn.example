@@ -1,13 +1,22 @@
-# Example GN build args for Lobium. Tune in T-010.
+# Shipping GN build args for Lobium.
+#
+# Chromium's BUILDCONFIG explicitly says that `is_debug = false` alone is not
+# sufficient for an end-user build: DCHECKs and the development component
+# layout can materially reduce performance. Keep the product runtime on the
+# official, static, PGO + ThinLTO configuration. Developers who need fast
+# incremental links should use a separate out/LobiumDev directory instead of
+# weakening the binary packaged by build-linux-product.sh.
 is_debug = false
 is_official_build = true
+is_component_build = false
+dcheck_always_on = false
+chrome_pgo_phase = 2
+use_thin_lto = true
 symbol_level = 0
 blink_symbol_level = 0
-enable_nacl = false
 proprietary_codecs = true
 ffmpeg_branding = "Chrome"
-# Speed:
+# Build throughput only (does not alter the produced runtime):
 # cc_wrapper = "ccache"
 # use_remoteexec = true
 # Branding (rebrand for distribution):
-# chrome_pgo_phase = 0

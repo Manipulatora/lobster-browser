@@ -32,5 +32,8 @@ export function buildProxyHardeningArgs(
   return [
     '--disable-quic',
     '--disable-features=AsyncDns,DnsOverHttpsUpgrade',
+    // Do not let Chromium silently bypass the configured upstream for localhost/intranet names.
+    // This is browser-process fail-closed behavior, not an OS firewall.
+    '--proxy-bypass-list=<-loopback>',
   ];
 }

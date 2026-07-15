@@ -1,13 +1,21 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import type { EngineKind, FingerprintOverrides, Profile, ProfileOsTarget } from '@lobster/shared-types';
+import type {
+  BrowserExtensionRef,
+  EngineKind,
+  FingerprintOverrides,
+  Profile,
+  ProfileOsTarget,
+} from '@lobster/shared-types';
 
 import { PrismaService } from '../prisma/prisma.service';
 import type {
   CreateProfileRecord,
   ProfilesRepository,
+  SafeCookieImportMetadata,
   UpdateProfileRecord,
 } from './profiles.repository';
+import { sanitizeCookieImportMetadata } from './sanitize-cookie-import';
 
 /**
  * Non-secret, non-indexed profile fields packed into the Prisma `Profile.metadata` JSON column
@@ -16,7 +24,12 @@ import type {
 interface ProfileMetadata {
   engine: EngineKind;
   os: ProfileOsTarget;
+  osVersion?: string;
   fingerprintOverrides?: FingerprintOverrides;
+  proxyId?: string;
+  templateId?: string;
+  cookiesImport?: SafeCookieImportMetadata;
+  extensions?: BrowserExtensionRef[];
   tags: string[];
   folder?: string;
   notes?: string;
@@ -49,7 +62,12 @@ export class PrismaProfilesRepository implements ProfilesRepository {
     const metadata: ProfileMetadata = {
       engine: input.engine,
       os: input.os,
+      osVersion: input.osVersion,
       fingerprintOverrides: input.fingerprintOverrides,
+      proxyId: input.proxyId,
+      templateId: input.templateId,
+      cookiesImport: sanitizeCookieImportMetadata(input.cookiesImport),
+      extensions: input.extensions,
       tags: input.tags,
       folder: input.folder,
       notes: input.notes,
@@ -90,8 +108,23 @@ export class PrismaProfilesRepository implements ProfilesRepository {
     if (patch.os !== undefined) {
       metadata.os = patch.os;
     }
+    if (patch.osVersion !== undefined) {
+      metadata.osVersion = patch.osVersion;
+    }
     if (patch.fingerprintOverrides !== undefined) {
       metadata.fingerprintOverrides = patch.fingerprintOverrides;
+    }
+    if (patch.proxyId !== undefined) {
+      metadata.proxyId = patch.proxyId;
+    }
+    if (patch.templateId !== undefined) {
+      metadata.templateId = patch.templateId;
+    }
+    if (patch.cookiesImport !== undefined) {
+      metadata.cookiesImport = sanitizeCookieImportMetadata(patch.cookiesImport);
+    }
+    if (patch.extensions !== undefined) {
+      metadata.extensions = patch.extensions;
     }
     if (patch.tags !== undefined) {
       metadata.tags = patch.tags;
@@ -132,7 +165,12 @@ export class PrismaProfilesRepository implements ProfilesRepository {
     return {
       engine: metadata.engine ?? 'lobium',
       os: metadata.os ?? 'windows',
+      osVersion: metadata.osVersion,
       fingerprintOverrides: metadata.fingerprintOverrides,
+      proxyId: metadata.proxyId,
+      templateId: metadata.templateId,
+      cookiesImport: sanitizeCookieImportMetadata(metadata.cookiesImport),
+      extensions: metadata.extensions,
       tags: metadata.tags ?? [],
       folder: metadata.folder,
       notes: metadata.notes,
@@ -146,8 +184,13 @@ export class PrismaProfilesRepository implements ProfilesRepository {
       name: row.name,
       engine: metadata.engine,
       os: metadata.os,
+      osVersion: metadata.osVersion,
       fingerprintSeed: row.fingerprintSeed,
       fingerprintOverrides: metadata.fingerprintOverrides,
+      proxyId: metadata.proxyId,
+      templateId: metadata.templateId,
+      cookiesImport: metadata.cookiesImport,
+      extensions: metadata.extensions,
       tags: metadata.tags,
       folder: metadata.folder,
       notes: metadata.notes,

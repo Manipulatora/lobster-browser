@@ -1,7 +1,6 @@
 // Copyright 2026 The Lobster Browser Authors.
 //
-// Lobium fingerprint config channel — native reader implementation (build-machine artifact).
-// See lobium_fp_config.h. NOT compiled in the dev sandbox; finalized on the build machine.
+// Lobium fingerprint config channel — native reader implementation. See lobium_fp_config.h.
 
 #include "components/lobium_fp/lobium_fp_config.h"
 
@@ -57,6 +56,7 @@ void ReadNavigator(const base::DictValue& dict, NavigatorConfig& nav) {
   if (const std::string* s = dict.FindString("uaPlatformVersion"))
     nav.ua_platform_version = *s;
   if (const std::string* s = dict.FindString("uaFullVersion")) nav.ua_full_version = *s;
+  if (const std::string* s = dict.FindString("uaModel")) nav.ua_model = *s;
   nav.ua_mobile = dict.FindBool("uaMobile").value_or(false);
   if (const base::ListValue* brands = dict.FindList("uaBrands")) {
     for (const base::Value& b : *brands) {
@@ -190,6 +190,8 @@ std::optional<LobiumFpConfig> ParseConfig(std::string_view contents) {
     cfg.seeds.audio = static_cast<uint32_t>(seeds->FindDouble("audio").value_or(0));
     cfg.seeds.client_rects =
         static_cast<uint32_t>(seeds->FindDouble("clientRects").value_or(0));
+    cfg.seeds.media_devices =
+        static_cast<uint32_t>(seeds->FindDouble("mediaDevices").value_or(0));
   }
   // Prefer policy.mediaDevices (sidecar shape); accept a top-level mediaDevices for forward-compat.
   if (const base::DictValue* policy = root.FindDict("policy")) {

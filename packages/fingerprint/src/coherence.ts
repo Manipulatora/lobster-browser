@@ -1,6 +1,7 @@
 import type {
   AndroidFingerprint,
   Fingerprint,
+  FingerprintOverrides,
   GeoInfo,
   LocaleFingerprint,
   OsFamily,
@@ -272,6 +273,78 @@ export function applyGeoToFingerprint<T extends Fingerprint | AndroidFingerprint
   } as T;
 }
 
+/**
+ * Resolve the independent Language / Timezone / Geolocation / Fonts persona modes selected in the
+ * profile UI. `base` is the seed/host-derived identity before editable values; `overridden` is the same
+ * identity after ordinary FingerprintOverrides have been merged.
+ *
+ * This distinction matters for `real`: merely applying the overrides and then conditionally applying
+ * geo cannot undo a stale manual value when the user changes its mode back to Real. It also matters for
+ * `manual` language: the UI supplies navigator.languages, while locale + Accept-Language are dependent
+ * fields that must be rebuilt from that selection or the engine's coherence gate rejects the profile.
+ *
+ * Undefined modes preserve legacy behavior: user overrides win without geo; when proxy geo is present,
+ * the full locale cluster follows the exit IP as it did before persona modes were introduced.
+ */
+export function resolveFingerprintPersonaModes<T extends Fingerprint | AndroidFingerprint>(
+  base: T,
+  overridden: T,
+  overrides: FingerprintOverrides | undefined,
+  geo?: GeoInfo,
+): T {
+  const geoFingerprint = geo ? applyGeoToFingerprint(base, geo) : undefined;
+  const legacyMode = geo ? 'based_ip' : 'manual';
+  const languageMode = overrides?.languageMode ?? legacyMode;
+  const timezoneMode = overrides?.timezoneMode ?? legacyMode;
+  const geolocationMode = overrides?.geolocationMode ?? legacyMode;
+  const fontsMode = overrides?.fontsMode ?? 'manual';
+
+  const languageSource =
+    languageMode === 'real'
+      ? base
+      : languageMode === 'based_ip'
+        ? (geoFingerprint ?? base)
+        : overridden;
+  const languages = [...languageSource.navigator.languages];
+  let locale = languageSource.locale.locale;
+  let acceptLanguage = languageSource.locale.acceptLanguage;
+  if (languageMode === 'manual') {
+    // New-profile UI exposes a languages list, not a second locale field. Treat its first entry as the
+    // primary locale unless an explicit locale override exists (the advanced editor exposes both).
+    locale = overrides?.locale?.locale ?? languages[0] ?? locale;
+    acceptLanguage = languagesToAcceptLanguage(languages);
+  }
+
+  const timezone =
+    timezoneMode === 'real'
+      ? base.locale.timezone
+      : timezoneMode === 'based_ip'
+        ? (geoFingerprint?.locale.timezone ?? base.locale.timezone)
+        : overridden.locale.timezone;
+
+  const geolocation =
+    geolocationMode === 'real'
+      ? base.locale.geolocation
+      : geolocationMode === 'based_ip'
+        ? geoFingerprint?.locale.geolocation
+        : overridden.locale.geolocation;
+
+  const resolvedLocale: LocaleFingerprint = {
+    timezone,
+    locale,
+    acceptLanguage,
+    ...(geolocation ? { geolocation: { ...geolocation } } : {}),
+  };
+  const fonts = fontsMode === 'real' || fontsMode === 'based_ip' ? base.fonts : overridden.fonts;
+
+  return {
+    ...overridden,
+    navigator: { ...overridden.navigator, languages },
+    locale: resolvedLocale,
+    fonts: [...fonts],
+  } as T;
+}
+
 const OS_UA_TOKEN: Record<OsFamily, string> = {
   windows: 'Windows',
   macos: 'Mac',
@@ -353,6 +426,33 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
   if (!ua.includes(OS_UA_TOKEN[fp.os])) {
     issues.push(`User-Agent OS token does not match claimed OS "${fp.os}": ${ua}`);
   }
+  if (!ua || /[\u0000-\u001f\u007f]/.test(ua)) {
+    issues.push('User-Agent must be a non-empty string without control characters');
+  }
+  if (fp.navigator.languages.length === 0) {
+    issues.push('navigator.languages must contain at least one language');
+  }
+  for (const language of fp.navigator.languages) {
+    try {
+      if (Intl.getCanonicalLocales(language).length !== 1) {
+        issues.push(`navigator.languages contains an invalid BCP-47 tag "${language}"`);
+      }
+    } catch {
+      issues.push(`navigator.languages contains an invalid BCP-47 tag "${language}"`);
+    }
+  }
+  try {
+    if (Intl.getCanonicalLocales(fp.locale.locale).length !== 1) {
+      issues.push(`locale "${fp.locale.locale}" is not a valid BCP-47 tag`);
+    }
+  } catch {
+    issues.push(`locale "${fp.locale.locale}" is not a valid BCP-47 tag`);
+  }
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: fp.locale.timezone }).format(0);
+  } catch {
+    issues.push(`timezone "${fp.locale.timezone}" is not a valid IANA timezone`);
+  }
   if (fp.navigator.languages[0] !== fp.locale.locale) {
     issues.push(
       `navigator.languages[0] (${fp.navigator.languages[0]}) does not match locale (${fp.locale.locale})`,
@@ -363,21 +463,42 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
       `Accept-Language (${fp.locale.acceptLanguage}) does not lead with locale (${fp.locale.locale})`,
     );
   }
-  // The timezone says where the proxy exit is, and therefore which language a real browser there
-  // reports. A foreign timezone paired with a disagreeing language — most commonly a `Europe/*`
-  // timezone left next to the seed-default en-US after only the timezone was applied from the geo —
-  // is a top bot signal. For a timezone whose region implies a definite primary language, flag a
-  // locale/navigator.languages[0] that speaks a different one.
-  const tzLocale = TIMEZONE_LOCALE[fp.locale.timezone];
-  if (tzLocale && baseLanguage(tzLocale) !== baseLanguage(fp.locale.locale)) {
+  const expectedAcceptLanguage = languagesToAcceptLanguage(fp.navigator.languages);
+  if (fp.locale.acceptLanguage !== expectedAcceptLanguage) {
     issues.push(
-      `timezone "${fp.locale.timezone}" implies language "${baseLanguage(tzLocale)}" but locale is "${fp.locale.locale}" (navigator.languages[0]=${fp.navigator.languages[0]})`,
+      `Accept-Language (${fp.locale.acceptLanguage}) does not match navigator.languages (${expectedAcceptLanguage})`,
     );
   }
+  const geo = fp.locale.geolocation;
+  if (geo) {
+    if (!Number.isFinite(geo.latitude) || geo.latitude < -90 || geo.latitude > 90) {
+      issues.push(`geolocation latitude (${geo.latitude}) must be within [-90, 90]`);
+    }
+    if (!Number.isFinite(geo.longitude) || geo.longitude < -180 || geo.longitude > 180) {
+      issues.push(`geolocation longitude (${geo.longitude}) must be within [-180, 180]`);
+    }
+    if (!Number.isFinite(geo.accuracy) || geo.accuracy <= 0) {
+      issues.push(`geolocation accuracy (${geo.accuracy}) must be a positive finite number`);
+    }
+  }
+  // Do NOT require the browser language to be the local language of the timezone. English Chrome in
+  // Berlin, Japanese Chrome in New York, and expatriate/multilingual setups are ordinary real devices.
+  // `applyGeoToFingerprint` still chooses the exit country's primary language for Based-on-IP mode,
+  // but manual/real persona modes are intentionally independent and must not be mislabeled impossible.
   if (!OS_PLATFORM_MATCHERS[fp.os](fp.navigator.platform)) {
     issues.push(
       `navigator.platform "${fp.navigator.platform}" is not coherent with claimed OS "${fp.os}"`,
     );
+  }
+  for (const [field, value] of Object.entries({
+    width: fp.screen.width,
+    height: fp.screen.height,
+    availWidth: fp.screen.availWidth,
+    availHeight: fp.screen.availHeight,
+  })) {
+    if (!Number.isInteger(value) || value <= 0 || value > 16_384) {
+      issues.push(`screen.${field} (${value}) must be an integer in 1-16384`);
+    }
   }
   if (fp.screen.availHeight > fp.screen.height || fp.screen.availWidth > fp.screen.width) {
     issues.push('screen avail dimensions exceed physical dimensions');
@@ -386,21 +507,40 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
   // Mac with availTop=0 but availHeight<height implies a bottom dock and no menu bar — impossible on
   // default macOS. Windows/Linux keep the deficit at the bottom (availTop=0).
   const availTop = fp.screen.availTop ?? 0;
+  const availLeft = fp.screen.availLeft ?? 0;
+  if (
+    !Number.isInteger(availTop) ||
+    !Number.isInteger(availLeft) ||
+    availTop < 0 ||
+    availLeft < 0 ||
+    availTop + fp.screen.availHeight > fp.screen.height ||
+    availLeft + fp.screen.availWidth > fp.screen.width
+  ) {
+    issues.push('screen available rect must be an integer rect contained within the physical screen');
+  }
   if (fp.os === 'macos' && availTop < 24) {
     issues.push(
       `macOS screen.availTop (${availTop}) must reserve the ~25px menu bar (availTop>=24)`,
     );
   }
-  if (fp.os !== 'macos' && availTop !== 0) {
+  if (fp.os === 'windows' && availTop !== 0) {
     issues.push(
-      `screen.availTop (${availTop}) must be 0 on ${fp.os} (bottom taskbar, no top menu bar)`,
+      `screen.availTop (${availTop}) must be 0 on windows (the supported persona uses a bottom taskbar)`,
     );
   }
   // WebGL vendor/renderer must describe a real GPU and agree with the OS. Direct3D is a
   // Windows-only graphics backend, so a Direct3D renderer on macOS/Linux is an obvious tell.
-  if (fp.webgl.vendor.length === 0 || fp.webgl.renderer.length === 0) {
-    issues.push('WebGL vendor/renderer must not be empty');
+  if (
+    fp.webgl.vendor.length === 0 ||
+    fp.webgl.renderer.length === 0 ||
+    fp.webgl.unmaskedVendor.length === 0 ||
+    fp.webgl.unmaskedRenderer.length === 0
+  ) {
+    issues.push('WebGL vendor/renderer and unmasked vendor/renderer must not be empty');
   }
+  // Masked GL_VENDOR/GL_RENDERER and WEBGL_debug_renderer_info's unmasked pair legitimately differ
+  // on real Chromium, so do not require string equality. The native hook applies the unmasked pair
+  // atomically; all four fields merely need to be present.
   if (fp.os !== 'windows' && /Direct3D/i.test(fp.webgl.renderer)) {
     issues.push(
       `WebGL renderer uses the Windows-only Direct3D backend on OS "${fp.os}": ${fp.webgl.renderer}`,
@@ -559,6 +699,14 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
     issues.push(
       `devicePixelRatio (${fp.screen.devicePixelRatio}) is outside the plausible (0, 4] range`,
     );
+  }
+
+  if (fp.fonts.length === 0) issues.push('font persona must contain at least one family');
+  if (fp.fonts.some((font) => !font.trim() || /[\u0000-\u001f\u007f]/.test(font))) {
+    issues.push('font persona contains an empty/control-character family name');
+  }
+  if (new Set(fp.fonts).size !== fp.fonts.length) {
+    issues.push('font persona contains duplicate family names');
   }
 
   return issues;

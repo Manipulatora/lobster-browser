@@ -1,5 +1,5 @@
 diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
-index 0353e3f0ae..8670036eb3 100644
+index 0353e3f0ae..ccec0f4b9b 100644
 --- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
 +++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
 @@ -16,6 +16,7 @@
@@ -21,75 +21,47 @@ index 0353e3f0ae..8670036eb3 100644
  #include "ui/views/interaction/element_tracker_views.h"
  #include "ui/views/property_effects.h"
  #include "ui/views/style/typography.h"
-@@ -340,6 +344,42 @@ void LocationBarView::Init() {
+@@ -340,6 +344,12 @@ void LocationBarView::Init() {
    location_icon_view->set_drag_controller(this);
    location_icon_view_ = AddChildView(std::move(location_icon_view));
  
-+  // Lobium: per-profile name chip shown INSIDE the omnibox box, at its leading
-+  // (left) edge — a small brand dot + the profile name. Populated from the
-+  // --lobium-profile-name switch the launcher passes per profile; absent switch
-+  // => no chip. Laid out as a leading decoration in Layout().
-+  {
-+    const std::string lobium_profile_name =
-+        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
-+            "lobium-profile-name");
-+    if (!lobium_profile_name.empty()) {
-+      auto chip = std::make_unique<views::View>();
-+      auto* chip_layout =
-+          chip->SetLayoutManager(std::make_unique<views::FlexLayout>());
-+      chip_layout->SetOrientation(views::LayoutOrientation::kHorizontal)
-+          .SetMainAxisAlignment(views::LayoutAlignment::kCenter)
-+          .SetCrossAxisAlignment(views::LayoutAlignment::kCenter)
-+          .SetCollapseMargins(true);
-+      chip->SetBackground(views::CreateRoundedRectBackground(
-+          SkColorSetA(SkColorSetRGB(0x7C, 0x3A, 0xED), 0x1F), 10));
-+      chip->SetBorder(views::CreateEmptyBorder(gfx::Insets::VH(1, 8)));
-+
-+      auto* dot = chip->AddChildView(std::make_unique<views::View>());
-+      dot->SetPreferredSize(gfx::Size(8, 8));
-+      dot->SetBackground(views::CreateRoundedRectBackground(
-+          SkColorSetRGB(0x7C, 0x3A, 0xED), 4));
-+      dot->SetProperty(views::kMarginsKey, gfx::Insets::TLBR(0, 0, 0, 6));
-+
-+      auto* label = chip->AddChildView(std::make_unique<views::Label>(
-+          base::UTF8ToUTF16(lobium_profile_name)));
-+      label->SetElideBehavior(gfx::ELIDE_TAIL);
-+      label->SetMaximumWidthSingleLine(160);
-+      label->SetEnabledColor(SkColorSetRGB(0x7C, 0x3A, 0xED));
-+
-+      lobium_profile_chip_ = AddChildView(std::move(chip));
-+    }
-+  }
++  // Lobium: the per-profile identity now rides on the LEADING location-icon chip
++  // (the small box at the left of the omnibox). On chrome:// pages that chip shows
++  // the profile name (see GetSecurityChipText, which reads --lobium-profile-name)
++  // plus the lobster product glyph. The former trailing (right-side) profile-name
++  // chip was removed so the omnibox reads like stock Chrome.
 +
    // Initialize the Omnibox view. browser_ can be nullptr on ChromeOS in the
    // case of simple_web_view_dialog. Or it can be nulltpr on ChromeOS and on
    // other desktop platforms in the case of presentation_receiver_window_view.
-@@ -994,6 +1034,13 @@ void LocationBarView::Layout(PassKey) {
-   add_trailing_decoration(page_action_container_,
-                           /*intra_item_padding=*/0,
-                           /*edge_padding=*/trailing_decorations_edge_padding);
-+  // Lobium: profile-name chip as a trailing decoration, sitting just to the left of
-+  // the zoom/bookmark page-action icons on the right side of the omnibox.
-+  if (lobium_profile_chip_) {
-+    lobium_profile_chip_->SetVisible(true);
-+    add_trailing_decoration(lobium_profile_chip_, /*intra_item_padding=*/0,
-+                            /*edge_padding=*/trailing_decorations_edge_padding);
-+  }
-   add_trailing_decoration(ai_mode_hint_label_, /*intra_item_padding=*/0,
-                           /*edge_padding=*/trailing_decorations_edge_padding);
-   for (ContentSettingImageView* view : base::Reversed(content_setting_views_)) {
-diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.h b/chrome/browser/ui/views/location_bar/location_bar_view.h
-index 62b5f976ff..d467d84e5e 100644
---- a/chrome/browser/ui/views/location_bar/location_bar_view.h
-+++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
-@@ -569,6 +569,10 @@ class LocationBarView
-   // search icon, EV HTTPS bubble, etc.
-   raw_ptr<LocationIconView> location_icon_view_ = nullptr;
+diff --git a/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc b/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc
+index 16523a13c5..4c53ee3e63 100644
+--- a/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc
++++ b/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc
+@@ -4,6 +4,8 @@
  
-+  // Lobium: optional per-profile name chip at the omnibox's leading edge. Null
-+  // when no --lobium-profile-name switch is present.
-+  raw_ptr<views::View> lobium_profile_chip_ = nullptr;
-+
-   // Views to show inline autocompletion when an IME is active.  In this case,
-   // we shouldn't change the text or selection inside the OmniboxView itself,
-   // since this will conflict with the IME's control over the text.  So instead
+ #include "chrome/browser/ui/views/location_bar/location_icon_state_helper.h"
+ 
++#include "base/command_line.h"
++#include "base/strings/utf_string_conversions.h"
+ #include "build/branding_buildflags.h"
+ #include "chrome/browser/extensions/extension_ui_util.h"
+ #include "chrome/grit/branded_strings.h"
+@@ -39,6 +41,17 @@ std::u16string GetSecurityChipText(const LocationBarModel* model,
+   if (model->GetURL().SchemeIs(content::kChromeUIScheme) ||
+       (contextual_tasks::ShouldShowExpandedSecurityChip() &&
+        model->IsContextualTasksPage())) {
++    // Lobium: on internal (chrome://) pages the leading chip carries the profile
++    // identity — the per-profile name passed via --lobium-profile-name — instead
++    // of the bare product name, so chrome://version etc. read as "<profile>" with
++    // the lobster glyph. Falls back to the product short name when the launcher
++    // supplied no profile name.
++    const std::string lobium_profile_name =
++        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++            "lobium-profile-name");
++    if (!lobium_profile_name.empty()) {
++      return base::UTF8ToUTF16(lobium_profile_name);
++    }
+     return l10n_util::GetStringUTF16(IDS_SHORT_PRODUCT_NAME);
+   }
+ 

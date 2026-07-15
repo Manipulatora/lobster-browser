@@ -11,6 +11,8 @@ import type {
   ProxySource,
   ProxyTestResult,
   StoredProxy,
+  UpdateStoredProxyInput,
+  ProxyRotationResult,
 } from '@lobster/shared-types';
 
 /**
@@ -53,11 +55,16 @@ export interface ProfilesClient {
   set_profile_password(id: string, password: string | null): Promise<void>;
   launch_profile(id: string, password?: string): Promise<LaunchInfo>;
   stop_profile(id: string): Promise<void>;
+  export_profile_cookies(id: string): Promise<string>;
+  list_font_families(os: string): Promise<string[]>;
 }
 
 export interface ProxiesClient {
   list_proxies(source?: ProxySource): Promise<StoredProxy[]>;
   create_proxy(input: CreateStoredProxyInput): Promise<StoredProxy>;
+  update_proxy(id: string, patch: UpdateStoredProxyInput): Promise<StoredProxy>;
+  delete_proxy(id: string): Promise<void>;
+  rotate_proxy(id: string): Promise<ProxyRotationResult>;
   test_proxy(id: string | null, config: ProxyConfig): Promise<ProxyTestResult>;
 }
 
@@ -95,11 +102,16 @@ const tauriClient: ProfilesClient = {
   launch_profile: (id, password) =>
     invoke<LaunchInfo>('launch_profile', { id, password: password ?? null }),
   stop_profile: (id) => invoke<void>('stop_profile', { id }),
+  export_profile_cookies: (id) => invoke<string>('export_profile_cookies', { id }),
+  list_font_families: (os) => invoke<string[]>('list_font_families', { os }),
 };
 
 const tauriProxiesClient: ProxiesClient = {
   list_proxies: (source) => invoke<StoredProxy[]>('list_proxies', { source: source ?? null }),
   create_proxy: (input) => invoke<StoredProxy>('create_proxy', { input }),
+  update_proxy: (id, patch) => invoke<StoredProxy>('update_proxy', { id, patch }),
+  delete_proxy: (id) => invoke<void>('delete_proxy', { id }),
+  rotate_proxy: (id) => invoke<ProxyRotationResult>('rotate_proxy', { id }),
   test_proxy: (id, config) => invoke<ProxyTestResult>('test_proxy', { id, config }),
 };
 
@@ -192,7 +204,12 @@ function buildTemplate(input: CreateProfileTemplateInput): ProfileTemplate {
   if (input.proxyLabel) template.proxyLabel = input.proxyLabel;
   if (input.proxyDetail) template.proxyDetail = input.proxyDetail;
   if (input.fingerprintOverrides) template.fingerprintOverrides = input.fingerprintOverrides;
-  if (input.cookiesImport) template.cookiesImport = input.cookiesImport;
+  if (input.cookiesImport) {
+    if ('rawText' in (input.cookiesImport as object)) {
+      throw new Error('cookie rawText is forbidden in profile templates');
+    }
+    template.cookiesImport = input.cookiesImport;
+  }
   if (input.extensions) template.extensions = input.extensions;
   return template;
 }
@@ -367,6 +384,12 @@ const mockClient: ProfilesClient = {
     if (!existing || existing.trashedAt !== undefined) throw new Error(`Profile ${id} not found`);
     mockStore.set(id, { ...existing, status: 'idle', updatedAt: nowIso() });
   },
+  export_profile_cookies: async (id) => {
+    const existing = mockStore.get(id);
+    if (!existing || existing.status !== 'running') throw new Error(`Profile ${id} is not running`);
+    return '[]';
+  },
+  list_font_families: async () => [],
 };
 
 const mockProxiesClient: ProxiesClient = {
@@ -379,6 +402,27 @@ const mockProxiesClient: ProxiesClient = {
     const proxy = buildStoredProxy(input);
     mockProxyStore.set(proxy.id, proxy);
     return structuredClone(proxy);
+  },
+  update_proxy: async (id, patch) => {
+    const existing = mockProxyStore.get(id);
+    if (!existing) throw new Error(`Proxy ${id} not found`);
+    const updated: StoredProxy = {
+      ...existing,
+      ...patch,
+      config: patch.config ?? existing.config,
+      updatedAt: nowIso(),
+      status: 'warning',
+    };
+    mockProxyStore.set(id, updated);
+    return structuredClone(updated);
+  },
+  delete_proxy: async (id) => {
+    if (!mockProxyStore.delete(id)) throw new Error(`Proxy ${id} not found`);
+  },
+  rotate_proxy: async (id) => {
+    const existing = mockProxyStore.get(id);
+    if (!existing?.rotateUrl) throw new Error(`Proxy ${id} has no rotation URL`);
+    return { proxyId: id, rotatedAt: nowIso(), status: 200 };
   },
 
   test_proxy: async (id, config) => {

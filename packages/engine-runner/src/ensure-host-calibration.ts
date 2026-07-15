@@ -19,6 +19,7 @@ import {
   normalizeHostCalibrationSnapshot,
   type HostCalibrationRawSnapshot,
 } from './host-calibration-probe.js';
+import { allowProvisionalSoftwareGpu } from './gpu.js';
 
 export interface EnsureHostCalibrationOptions {
   /** Override path (defaults to LOBSTER_HOST_CALIBRATION_FILE or app-data default). */
@@ -69,7 +70,9 @@ export async function ensureHostCalibration(
     opts.path ?? resolveHostCalibrationPath() ?? defaultHostCalibrationPath();
   const existing = await loadHostCalibration(path);
   if (existing) {
-    const issues = validateHostCalibrationProfile(existing);
+    const issues = validateHostCalibrationProfile(existing, {
+      allowSoftwareRenderer: allowProvisionalSoftwareGpu(),
+    });
     if (issues.length === 0) {
       return { path, profile: existing, source: 'loaded' };
     }

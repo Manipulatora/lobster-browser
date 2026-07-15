@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import {
+  DeleteObjectsCommand,
   GetObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
@@ -168,6 +169,33 @@ export class S3BlobStore implements BlobStore {
   async head(key: string): Promise<BlobHead | null> {
     const version = await this.currentVersion(key);
     return version > 0 ? { version } : null;
+  }
+
+  async deleteAll(key: string): Promise<void> {
+    const prefix = `${this.keyPrefix}${key}/`;
+    let continuationToken: string | undefined;
+    do {
+      const page = await this.client.send(
+        new ListObjectsV2Command({
+          Bucket: this.bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      );
+      const keys = (page.Contents ?? [])
+        .map((obj) => obj.Key)
+        .filter((k): k is string => typeof k === 'string');
+      if (keys.length > 0) {
+        // DeleteObjects removes up to 1000 keys per call; a page is already ≤1000, so one call per page.
+        await this.client.send(
+          new DeleteObjectsCommand({
+            Bucket: this.bucket,
+            Delete: { Objects: keys.map((k) => ({ Key: k })), Quiet: true },
+          }),
+        );
+      }
+      continuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
+    } while (continuationToken);
   }
 
   /** Object key for one immutable stored version, e.g. `<prefix><teamId>/<profileId>/3.enc`. */

@@ -1,0 +1,35 @@
+Lobium — exact-build native fingerprint capability contract.
+
+Adds --lobium-fingerprint-capabilities. The executable itself prints the versioned JSON contract before
+browser startup, so the sidecar probes the exact binary it will spawn instead of trusting a filename,
+package label, or stale sidecar manifest. Any older/unpatched Chromium build has no contract and profile
+launch fails closed.
+
+Keep this list synchronized with the hooks compiled in patches/series and
+packages/engine-runner/src/lobium-capabilities.ts.
+
+diff --git a/chrome/app/chrome_main.cc b/chrome/app/chrome_main.cc
+--- a/chrome/app/chrome_main.cc
++++ b/chrome/app/chrome_main.cc
+@@ -160,6 +160,21 @@
+ 
+   base::CommandLine* command_line(base::CommandLine::ForCurrentProcess());
+ 
++  // Lobium: machine-readable proof of the native fingerprint hooks in THIS executable. The sidecar
++  // runs this before every first launch of a binary (then caches by path/size/mtime) and rejects a
++  // missing/incompatible capability. Keep output compact and stdout-only for exact JSON parsing.
++  if (command_line->HasSwitch("lobium-fingerprint-capabilities")) {
++    std::cout
++        << "{\"contractVersion\":1,\"product\":\"Lobium\",\"capabilities\":["
++           "\"config-channel-v1\",\"navigator-languages\","
++           "\"network-accept-language\",\"process-locale-timezone\","
++           "\"native-geolocation\",\"webrtc-policy\","
++           "\"webgl-deep\",\"canvas-farbling\",\"webgl-farbling\","
++           "\"audio-farbling\",\"client-rects\",\"media-devices\"]}"
++        << std::endl;
++    return 0;
++  }
++
+   // Capture the unpolluted command line snapshot in the browser process.
+   // This must happen immediately after CommandLine::Init to ensure we capture
+   // the state before any internal programmatic mutations.

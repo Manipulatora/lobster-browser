@@ -74,6 +74,12 @@ export interface BlobStore {
   getLatest(key: string): Promise<BlobRecord | null>;
   /** The current version for `key` without transferring bytes, or null when it does not exist. */
   head(key: string): Promise<BlobHead | null>;
+  /**
+   * Delete ALL stored versions for `key`. Called when the owning profile is deleted so its encrypted
+   * blobs are not orphaned in the object store. Idempotent — deleting a key with nothing stored under
+   * it is a no-op.
+   */
+  deleteAll(key: string): Promise<void>;
 }
 
 /**

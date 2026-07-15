@@ -1,0 +1,127 @@
+diff --git a/chrome/browser/ui/views/profiles/profile_menu_view.cc b/chrome/browser/ui/views/profiles/profile_menu_view.cc
+index 5116453fe9..824cb38a56 100644
+--- a/chrome/browser/ui/views/profiles/profile_menu_view.cc
++++ b/chrome/browser/ui/views/profiles/profile_menu_view.cc
+@@ -152,12 +152,16 @@ std::u16string GetSyncErrorButtonText(
+ std::u16string GetProfileIdentifier(const ProfileAttributesEntry& entry) {
+   switch (entry.GetNameForm()) {
+     case NameForm::kGaiaName:
+-    case NameForm::kLocalName:
++      // Signed into Google: show the real account name (matches an anti-detect
++      // profile that the user has logged in).
+       return entry.GetName();
++    case NameForm::kLocalName:
++      // Lobium: a signed-out profile always presents as "Your Lobium" in the
++      // account menu, never the per-profile launcher label.
++      return u"Your Lobium";
+     case NameForm::kGaiaAndLocalName:
+-      return l10n_util::GetStringFUTF16(
+-          IDS_PROFILE_MENU_PROFILE_IDENTIFIER_WITH_SEPARATOR,
+-          entry.GetGAIANameToDisplay(), entry.GetLocalProfileName());
++      // Show only the Google name so the launcher label never leaks.
++      return entry.GetGAIANameToDisplay();
+   }
+ }
+ 
+@@ -310,7 +314,10 @@ void ProfileMenuView::OnGoogleServicesSettingsButtonClicked() {
+   if (!perform_menu_actions()) {
+     return;
+   }
+-  chrome::ShowSettingsSubPage(&browser(), chrome::kGoogleServicesSubpage);
++  // Lobium: open the top-level settings page (chrome://settings/) rather than the
++  // googleServices subpage — the "Google services settings" item is the menu's
++  // general entry into settings.
++  chrome::ShowSettings(&browser());
+ }
+ 
+ void ProfileMenuView::OnAccountSettingsButtonClicked() {
+@@ -921,6 +928,22 @@ ProfileMenuView::GetIdentitySectionParams(const ProfileAttributesEntry& entry) {
+       break;
+   }
+ 
++  // Lobium: never show the browser-level "Sign in to Lobium" / "Continue as …"
++  // promo pill. Each Lobium profile is a standalone isolated identity, so the
++  // signed-out sign-in promo is noise. Clearing the button text makes the base
++  // class skip building the identity button entirely. The reauth button shown
++  // for a sign-in-pending/paused account is intentionally left intact.
++  {
++    const signin_util::SignedInState lobium_signed_in_state =
++        signin_util::GetSignedInState(identity_manager);
++    if (lobium_signed_in_state == signin_util::SignedInState::kSignedOut ||
++        lobium_signed_in_state ==
++            signin_util::SignedInState::kWebOnlySignedIn) {
++      params.button_text.clear();
++      params.subtitle.clear();
++    }
++  }
++
+   // Sets the default action if needed - if a button text was explicitly set and
+   // no prior action was set.
+   if (!params.button_text.empty() && params.button_action.is_null()) {
+@@ -1083,10 +1106,10 @@ void ProfileMenuView::MaybeBuildGoogleServicesSettingsButton() {
+     return;
+   }
+ 
+-  // Show the services settings button  if signin is disallowed.
+-  if (profile().GetPrefs()->GetBoolean(prefs::kSigninAllowed)) {
+-    return;
+-  }
++  // Lobium: always offer the "Google services settings" entry at the bottom of
++  // the menu (it opens chrome://settings/). Stock Chromium only showed it when
++  // sign-in was disallowed; here it is the menu's standing settings entry, so
++  // the previous kSigninAllowed early-return is removed.
+   AddFeatureButton(
+       l10n_util::GetStringUTF16(IDS_PROFILE_MENU_OPEN_ACCOUNT_SETTINGS),
+       base::BindRepeating(
+@@ -1229,9 +1252,9 @@ void ProfileMenuView::BuildFeatureButtons() {
+     !identity_manager->HasPrimaryAccount(signin::ConsentLevel::kSync)))
+       ? MaybeBuildChromeAccountSettingsButton()
+       : MaybeBuildChromeAccountSettingsButtonWithSync();
+-  if (syncer::IsReplaceSyncPromosWithSignInPromosEnabled()) {
+-    MaybeBuildGoogleServicesSettingsButton();
+-  }
++  // Lobium: always build the "Google services settings" entry (→ chrome://settings/),
++  // regardless of the sign-in-promo experiment flag.
++  MaybeBuildGoogleServicesSettingsButton();
+   MaybeBuildCloseBrowsersButton();
+   MaybeBuildSignoutButton();
+ }
+@@ -1320,33 +1343,9 @@ void ProfileMenuView::BuildOtherProfilesSection(
+ }
+ 
+ void ProfileMenuView::BuildProfileManagementFeatureButtons() {
+-  CHECK(!profile().IsGuestSession());
+-
+-  AddProfileManagementFeaturesSeparator();
+-
+-  if (profiles::IsProfileCreationAllowed()) {
+-    AddProfileManagementFeatureButton(
+-        features::IsRoundedIconsEnabled() ? kPersonAddIcon
+-                                          : kAccountAddChromeRefreshOldIcon,
+-        l10n_util::GetStringUTF16(IDS_PROFILE_MENU_ADD_PROFILE),
+-        base::BindRepeating(&ProfileMenuView::OnAddNewProfileButtonClicked,
+-                            base::Unretained(this)));
+-  }
+-
+-  if (profiles::IsGuestModeEnabled(profile()) &&
+-      !web_app::AppBrowserController::IsWebApp(&browser())) {
+-    AddProfileManagementFeatureButton(
+-        features::IsRoundedIconsEnabled() ? kAccountBoxIcon
+-                                          : kAccountBoxOldIcon,
+-        l10n_util::GetStringUTF16(IDS_PROFILE_MENU_OPEN_GUEST_PROFILE),
+-        base::BindRepeating(&ProfileMenuView::OnGuestProfileButtonClicked,
+-                            base::Unretained(this)));
+-  }
+-
+-  AddProfileManagementFeatureButton(
+-      features::IsRoundedIconsEnabled() ? kManageAccountsIcon
+-                                        : kAccountManageChromeRefreshOldIcon,
+-      l10n_util::GetStringUTF16(IDS_PROFILE_MENU_MANAGE_PROFILES),
+-      base::BindRepeating(&ProfileMenuView::OnManageProfilesButtonClicked,
+-                          base::Unretained(this)));
++  // Lobium: one browser instance IS one isolated profile. Adding / switching / managing Chromium
++  // profiles inside a single Lobster profile is nonsense here, so the entire "Add profile" /
++  // "Open Guest profile" / "Manage profiles" section (and its leading separator) is intentionally
++  // NOT built. Identity, Passwords & autofill, Customize profile, and Google services still show
++  // (they are built by BuildFeatureButtons, which is untouched).
+ }

@@ -4,23 +4,19 @@ import {
   PlusIcon,
   ServerStackIcon,
   SignalIcon,
-  XMarkIcon,
 } from '@heroicons/react/24/outline';
 import { useEffect, useState } from 'react';
 
 import type {
   CreateStoredProxyInput,
   ProxyConfig,
-  ProxySource,
   ProxyTestResult,
   ProxyType,
   StoredProxy,
 } from '@lobster/shared-types';
 
 import { proxiesClient } from '../../api/tauri';
-import { EmptyState, Skeleton, useToast } from '../../ui';
-
-type ProxyTab = ProxySource;
+import { ActionDialog, EmptyState, Modal, Skeleton, useToast } from '../../ui';
 
 interface ProxyFormState {
   title: string;
@@ -31,6 +27,11 @@ interface ProxyFormState {
   password: string;
   rotateUrl: string;
 }
+
+type PendingProxyAction =
+  | { kind: 'rename'; proxy: StoredProxy }
+  | { kind: 'rotate'; proxy: StoredProxy }
+  | { kind: 'delete'; proxy: StoredProxy };
 
 const initialProxyForm: ProxyFormState = {
   title: '',
@@ -47,18 +48,16 @@ function typeLabel(type: ProxyType): string {
 }
 
 function endpointLabel(proxy: StoredProxy): string {
-  if (proxy.source === 'hive') return 'managed by Lobster';
+  if (proxy.source === 'hive') return 'Managed endpoint';
   return `${proxy.config.host}:${proxy.config.port}`;
 }
 
 function locationLabel(proxy: StoredProxy): string {
-  return (
-    proxy.location ?? (proxy.source === 'hive' ? 'Hive Proxy · pending allocation' : 'Not tested')
-  );
+  return proxy.location ?? 'Not tested';
 }
 
 function timezoneLabel(proxy: StoredProxy): string {
-  return proxy.timezone ?? (proxy.source === 'hive' ? 'Auto from exit IP' : 'Not tested');
+  return proxy.timezone ?? 'Not tested';
 }
 
 function latencyLabel(proxy: StoredProxy): string {
@@ -86,17 +85,14 @@ function resultLocation(result: ProxyTestResult): string | undefined {
 }
 
 function AddProxyModal({
-  initialTab,
   onAdd,
   onCheck,
   onClose,
 }: {
-  initialTab: ProxyTab;
   onAdd: (input: CreateStoredProxyInput) => Promise<void>;
   onCheck: (config: ProxyConfig) => Promise<ProxyTestResult>;
   onClose: () => void;
 }): JSX.Element {
-  const [tab, setTab] = useState<ProxyTab>(initialTab);
   const [form, setForm] = useState<ProxyFormState>(initialProxyForm);
   const [message, setMessage] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -130,17 +126,39 @@ function AddProxyModal({
     const config = buildConfig();
     if (!config) return null;
     const input: CreateStoredProxyInput = {
-      source: tab,
+      source: 'mine',
       label: form.title.trim(),
       config,
     };
     const rotateUrl = form.rotateUrl.trim();
     if (rotateUrl) input.rotateUrl = rotateUrl;
-    if (tab === 'hive') {
-      input.location = 'Hive Proxy · pending allocation';
-      input.timezone = 'Auto from exit IP';
-    }
     return input;
+  }
+
+  async function pasteProxy(): Promise<void> {
+    try {
+      const raw = (await navigator.clipboard.readText()).trim();
+      if (!raw) {
+        setMessage('The clipboard is empty.');
+        return;
+      }
+      const normalized = raw.includes('://') ? raw : `socks5://${raw}`;
+      const parsed = new URL(normalized);
+      if (!parsed.hostname || !parsed.port) throw new Error('Missing host or port');
+      setForm((previous) => ({
+        ...previous,
+        type:
+          parsed.protocol === 'http:' ? 'http' : parsed.protocol === 'https:' ? 'https' : 'socks5',
+        host: parsed.hostname,
+        port: parsed.port,
+        login: decodeURIComponent(parsed.username),
+        password: decodeURIComponent(parsed.password),
+        title: previous.title || parsed.hostname,
+      }));
+      setMessage('Proxy details pasted.');
+    } catch {
+      setMessage('Could not read a proxy URL from the clipboard.');
+    }
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
@@ -184,164 +202,155 @@ function AddProxyModal({
   }
 
   return (
-    <div
-      className="modal-overlay"
-      role="presentation"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+    <Modal
+      open
+      onClose={submitting ? () => undefined : onClose}
+      title="Add proxy"
+      size="sm"
+      footer={
+        <>
+          <button type="button" className="btn btn--secondary" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            type="submit"
+            form="add-proxy-form"
+            className="btn btn--primary"
+            disabled={!canSubmit || submitting}
+          >
+            {submitting ? 'Adding…' : 'Add proxy'}
+          </button>
+        </>
+      }
     >
-      <form className="modal modal--proxy" onSubmit={handleSubmit} aria-label="New proxy">
-        <header className="modal-header">
-          <h2>New proxy</h2>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
-            <XMarkIcon aria-hidden />
-          </button>
-        </header>
+      <form
+        id="add-proxy-form"
+        className="proxy-form-body"
+        onSubmit={handleSubmit}
+        aria-label="Proxy details"
+      >
+        <label className="field field--wide">
+          <span className="field__label">
+            <span className="required">*</span> Title
+          </span>
+          <input
+            className="input"
+            type="text"
+            value={form.title}
+            onChange={(e) => set('title', e.target.value)}
+            autoFocus
+          />
+        </label>
 
-        <div className="wizard-steps">
-          <button
-            type="button"
-            className={tab === 'mine' ? 'wizard-step wizard-step--active' : 'wizard-step'}
-            onClick={() => setTab('mine')}
-          >
-            My proxies
-          </button>
-          <button
-            type="button"
-            className={tab === 'hive' ? 'wizard-step wizard-step--active' : 'wizard-step'}
-            onClick={() => setTab('hive')}
-          >
-            Hive Proxy
-          </button>
-        </div>
-
-        <div className="modal-body proxy-form-body">
-          <label className="field field--wide">
-            <span className="field__label">
-              <span className="required">*</span> Title
-            </span>
+        <div className="field field--wide">
+          <span className="field__label">
+            <span className="required">*</span> Proxy
+          </span>
+          <div className="proxy-input-row">
+            <select
+              className="input"
+              value={form.type}
+              onChange={(e) => set('type', e.target.value as ProxyType)}
+            >
+              <option value="socks5">SOCKS5</option>
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+            </select>
             <input
               className="input"
               type="text"
-              value={form.title}
-              onChange={(e) => set('title', e.target.value)}
-              autoFocus
+              value={form.host}
+              placeholder="Enter IP or domain"
+              onChange={(e) => set('host', e.target.value)}
             />
-          </label>
-
-          <div className="field field--wide">
-            <span className="field__label">
-              <span className="required">*</span> Proxy
-            </span>
-            <div className="proxy-input-row">
-              <select
-                className="input"
-                value={form.type}
-                onChange={(e) => set('type', e.target.value as ProxyType)}
-              >
-                <option value="socks5">SOCKS5</option>
-                <option value="http">HTTP</option>
-                <option value="https">HTTPS</option>
-              </select>
-              <input
-                className="input"
-                type="text"
-                value={form.host}
-                placeholder="Enter IP or domain"
-                onChange={(e) => set('host', e.target.value)}
-              />
-              <button type="button" className="proxy-mini-button" aria-label="Paste proxy">
-                <ClipboardDocumentIcon aria-hidden />
-              </button>
-              <input
-                className="input"
-                type="text"
-                value={form.port}
-                aria-label="Port"
-                onChange={(e) => set('port', e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="field-grid">
-            <label className="field">
-              <span className="field__label">Login</span>
-              <input
-                className="input"
-                type="text"
-                value={form.login}
-                onChange={(e) => set('login', e.target.value)}
-              />
-            </label>
-            <label className="field">
-              <span className="field__label">Password</span>
-              <input
-                className="input"
-                type="password"
-                value={form.password}
-                onChange={(e) => set('password', e.target.value)}
-              />
-            </label>
-          </div>
-
-          <label className="field field--wide">
-            <span className="field__label">URL for IP Change</span>
+            <button
+              type="button"
+              className="proxy-mini-button"
+              aria-label="Paste proxy URL"
+              onClick={() => {
+                void pasteProxy();
+              }}
+            >
+              <ClipboardDocumentIcon aria-hidden />
+            </button>
             <input
               className="input"
-              type="url"
-              value={form.rotateUrl}
-              onChange={(e) => set('rotateUrl', e.target.value)}
+              type="text"
+              value={form.port}
+              aria-label="Port"
+              onChange={(e) => set('port', e.target.value)}
             />
-          </label>
-
-          <button
-            type="button"
-            className="btn btn--outline modal-check-button"
-            onClick={() => {
-              void handleCheck();
-            }}
-            disabled={checking || !canSubmit}
-          >
-            <ArrowPathIcon aria-hidden />
-            {checking ? 'Checking...' : 'Check Proxy'}
-          </button>
-
-          {message ? <p className="notice">{message}</p> : null}
+          </div>
         </div>
 
-        <footer className="modal-footer">
-          <button type="button" className="btn btn--ghost btn--disabled" disabled>
-            <ClipboardDocumentIcon aria-hidden />
-            Copy proxy
-          </button>
-          <div className="modal-footer-actions">
-            <button type="button" className="btn btn--secondary" onClick={onClose}>
-              Cancel
-            </button>
-            <button type="submit" className="btn btn--primary" disabled={!canSubmit || submitting}>
-              Confirm
-            </button>
-          </div>
-        </footer>
+        <div className="field-grid">
+          <label className="field">
+            <span className="field__label">Login</span>
+            <input
+              className="input"
+              type="text"
+              value={form.login}
+              onChange={(e) => set('login', e.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span className="field__label">Password</span>
+            <input
+              className="input"
+              type="password"
+              value={form.password}
+              onChange={(e) => set('password', e.target.value)}
+            />
+          </label>
+        </div>
+
+        <label className="field field--wide">
+          <span className="field__label">URL for IP Change</span>
+          <input
+            className="input"
+            type="url"
+            value={form.rotateUrl}
+            onChange={(e) => set('rotateUrl', e.target.value)}
+          />
+        </label>
+
+        <button
+          type="button"
+          className="btn btn--outline modal-check-button"
+          onClick={() => {
+            void handleCheck();
+          }}
+          disabled={checking || !canSubmit}
+        >
+          <ArrowPathIcon aria-hidden />
+          {checking ? 'Checking...' : 'Check Proxy'}
+        </button>
+
+        {message ? (
+          <p className="notice" role="status">
+            {message}
+          </p>
+        ) : null}
       </form>
-    </div>
+    </Modal>
   );
 }
 
 export function ProxiesView(): JSX.Element {
   const toast = useToast();
-  const [tab, setTab] = useState<ProxyTab>('mine');
   const [showAddProxy, setShowAddProxy] = useState(false);
   const [rows, setRows] = useState<StoredProxy[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [checkingIds, setCheckingIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [pendingAction, setPendingAction] = useState<PendingProxyAction | null>(null);
+  const [actionInput, setActionInput] = useState('');
+  const [actionBusy, setActionBusy] = useState(false);
 
-  async function refresh(source: ProxyTab): Promise<void> {
+  async function refresh(): Promise<void> {
     setLoading(true);
     try {
-      setRows(await proxiesClient.list_proxies(source));
+      setRows(await proxiesClient.list_proxies('mine'));
       setError(null);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -351,8 +360,8 @@ export function ProxiesView(): JSX.Element {
   }
 
   useEffect(() => {
-    void refresh(tab);
-  }, [tab]);
+    void refresh();
+  }, []);
 
   function setChecking(id: string, on: boolean): void {
     setCheckingIds((prev) => {
@@ -365,8 +374,7 @@ export function ProxiesView(): JSX.Element {
 
   async function handleAddProxy(input: CreateStoredProxyInput): Promise<void> {
     const created = await proxiesClient.create_proxy(input);
-    if (created.source === tab) setRows((prev) => [created, ...prev]);
-    else setTab(created.source);
+    setRows((prev) => [created, ...prev]);
     toast.success('Proxy added.');
   }
 
@@ -413,6 +421,66 @@ export function ProxiesView(): JSX.Element {
     }
   }
 
+  async function renameProxy(proxy: StoredProxy, value: string): Promise<void> {
+    const label = value.trim();
+    if (!label || label === proxy.label) return;
+    try {
+      const updated = await proxiesClient.update_proxy(proxy.id, { label });
+      setRows((previous) => previous.map((item) => (item.id === proxy.id ? updated : item)));
+      toast.success('Proxy updated.');
+    } catch (e: unknown) {
+      toast.error(`Proxy update failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async function handleRotateProxy(proxy: StoredProxy): Promise<void> {
+    setPendingAction({ kind: 'rotate', proxy });
+  }
+
+  async function rotateProxy(proxy: StoredProxy): Promise<void> {
+    try {
+      await proxiesClient.rotate_proxy(proxy.id);
+      toast.success('Proxy rotation requested.');
+      await handleCheckProxy(proxy);
+    } catch (e: unknown) {
+      toast.error(`Proxy rotation failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async function handleDeleteProxy(proxy: StoredProxy): Promise<void> {
+    setPendingAction({ kind: 'delete', proxy });
+  }
+
+  async function deleteProxy(proxy: StoredProxy): Promise<void> {
+    try {
+      await proxiesClient.delete_proxy(proxy.id);
+      setRows((previous) => previous.filter((item) => item.id !== proxy.id));
+      toast.success('Proxy deleted.');
+    } catch (e: unknown) {
+      toast.error(`Proxy delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  function handleRenameProxy(proxy: StoredProxy): void {
+    setActionInput(proxy.label);
+    setPendingAction({ kind: 'rename', proxy });
+  }
+
+  async function confirmProxyAction(): Promise<void> {
+    const action = pendingAction;
+    if (!action) return;
+    setActionBusy(true);
+    try {
+      if (action.kind === 'rename') await renameProxy(action.proxy, actionInput);
+      if (action.kind === 'rotate') await rotateProxy(action.proxy);
+      if (action.kind === 'delete') await deleteProxy(action.proxy);
+      setPendingAction(null);
+      setActionInput('');
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
   return (
     <section className="page">
       <header className="table-toolbar table-toolbar--simple">
@@ -426,27 +494,6 @@ export function ProxiesView(): JSX.Element {
         </button>
       </header>
 
-      <div className="subtabs" role="tablist" aria-label="Proxy categories">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'mine'}
-          className={tab === 'mine' ? 'subtab subtab--active' : 'subtab'}
-          onClick={() => setTab('mine')}
-        >
-          My Proxies
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'hive'}
-          className={tab === 'hive' ? 'subtab subtab--active' : 'subtab'}
-          onClick={() => setTab('hive')}
-        >
-          Hive Proxy
-        </button>
-      </div>
-
       {error ? <p className="notice notice--error">Could not load proxies: {error}</p> : null}
       {loading ? (
         <div className="skeleton-stack" aria-busy="true" aria-label="Loading proxies">
@@ -459,14 +506,14 @@ export function ProxiesView(): JSX.Element {
       {!loading && rows.length === 0 ? (
         <EmptyState
           icon={<ServerStackIcon aria-hidden />}
-          title={tab === 'hive' ? 'No Hive proxies yet' : 'No proxies yet'}
-          description={
-            tab === 'hive'
-              ? 'Hive Proxy allocations will appear here once provisioned.'
-              : 'Add a SOCKS5 or HTTP(S) proxy to assign it to profiles.'
-          }
+          title="No proxies yet"
+          description="Add a SOCKS5 or HTTP(S) proxy to assign it to profiles."
           action={
-            <button type="button" className="btn btn--primary" onClick={() => setShowAddProxy(true)}>
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={() => setShowAddProxy(true)}
+            >
               <PlusIcon aria-hidden />
               Add Proxy
             </button>
@@ -513,17 +560,41 @@ export function ProxiesView(): JSX.Element {
                       </span>
                     </td>
                     <td>
-                      <button
-                        type="button"
-                        className="btn btn--outline btn--compact"
-                        onClick={() => {
-                          void handleCheckProxy(proxy);
-                        }}
-                        disabled={checking}
-                      >
-                        <ArrowPathIcon aria-hidden />
-                        Check
-                      </button>
+                      <div className="proxy-row-actions">
+                        <button
+                          type="button"
+                          className="btn btn--outline btn--compact"
+                          onClick={() => void handleCheckProxy(proxy)}
+                          disabled={checking}
+                        >
+                          Check
+                        </button>
+                        {proxy.rotateUrl ? (
+                          <button
+                            type="button"
+                            className="btn btn--outline btn--compact"
+                            onClick={() => void handleRotateProxy(proxy)}
+                            disabled={checking}
+                          >
+                            <ArrowPathIcon aria-hidden />
+                            Rotate
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--compact"
+                          onClick={() => void handleRenameProxy(proxy)}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--compact"
+                          onClick={() => void handleDeleteProxy(proxy)}
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -543,12 +614,54 @@ export function ProxiesView(): JSX.Element {
 
       {showAddProxy ? (
         <AddProxyModal
-          initialTab={tab}
           onAdd={handleAddProxy}
           onCheck={(config) => proxiesClient.test_proxy(null, config)}
           onClose={() => setShowAddProxy(false)}
         />
       ) : null}
+      <ActionDialog
+        open={pendingAction !== null}
+        title={
+          pendingAction?.kind === 'rename'
+            ? 'Rename proxy'
+            : pendingAction?.kind === 'rotate'
+              ? 'Rotate proxy?'
+              : 'Delete proxy?'
+        }
+        description={
+          pendingAction?.kind === 'rename'
+            ? 'Choose a clear label for this stored proxy.'
+            : pendingAction?.kind === 'rotate'
+              ? `Request a new exit IP for “${pendingAction.proxy.label}”, then test the connection.`
+              : `Remove “${pendingAction?.proxy.label ?? 'this proxy'}” from Lobster Browser. Profiles using it may require a replacement.`
+        }
+        confirmLabel={
+          pendingAction?.kind === 'rename'
+            ? 'Save name'
+            : pendingAction?.kind === 'rotate'
+              ? 'Rotate proxy'
+              : 'Delete proxy'
+        }
+        busy={actionBusy}
+        destructive={pendingAction?.kind === 'delete'}
+        input={
+          pendingAction?.kind === 'rename'
+            ? {
+                label: 'Proxy name',
+                value: actionInput,
+                onChange: setActionInput,
+                required: true,
+              }
+            : undefined
+        }
+        onConfirm={() => {
+          void confirmProxyAction();
+        }}
+        onClose={() => {
+          setPendingAction(null);
+          setActionInput('');
+        }}
+      />
     </section>
   );
 }

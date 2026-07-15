@@ -30,13 +30,21 @@ export interface AdbClient {
 }
 
 export class NodeAdbClient implements AdbClient {
-  constructor(private readonly adbPath = 'adb') {}
+  constructor(private readonly adbPath = process.env.LOBSTER_ADB_BIN ?? 'adb') {}
 
   async run(args: readonly string[]): Promise<AdbCommandResult> {
-    const { stdout, stderr } = await execFileAsync(this.adbPath, [...args], {
-      encoding: 'utf8',
-    });
-    return { stdout: String(stdout), stderr: String(stderr) };
+    try {
+      const { stdout, stderr } = await execFileAsync(this.adbPath, [...args], {
+        encoding: 'utf8',
+      });
+      return { stdout: String(stdout), stderr: String(stderr) };
+    } catch (error) {
+      throw new Error(
+        `ADB command failed (${this.adbPath} ${args.join(' ')}): ` +
+          `${error instanceof Error ? error.message : String(error)}. ` +
+          'Install Android platform-tools or set LOBSTER_ADB_BIN.',
+      );
+    }
   }
 }
 
@@ -111,10 +119,7 @@ export function sanitizeAndroidProfileId(profileId: string): string {
   return safe;
 }
 
-export function defaultAndroidRemoteConfigPath(
-  packageName: string,
-  profileId: string,
-): string {
+export function defaultAndroidRemoteConfigPath(packageName: string, profileId: string): string {
   return `/sdcard/Android/data/${packageName}/files/lobium/profiles/${sanitizeAndroidProfileId(
     profileId,
   )}/${ANDROID_LOBIUM_CONFIG_FILENAME}`;
@@ -135,7 +140,9 @@ export function buildAndroidCdpForwardCommand(
   return adbArgs(serial, ['forward', `tcp:${cdpLocalPort}`, `localabstract:${cdpSocketName}`]);
 }
 
-export function buildAndroidStartCommand(plan: AndroidConfigDeliveryPlan & { activityName: string }): string[] {
+export function buildAndroidStartCommand(
+  plan: AndroidConfigDeliveryPlan & { activityName: string },
+): string[] {
   return adbArgs(plan.serial, [
     'shell',
     'am',

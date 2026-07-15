@@ -21,6 +21,7 @@ describe('buildProxyHardeningArgs', () => {
     });
     assert.ok(args.includes('--disable-quic'));
     assert.ok(args.some((a) => a.includes('AsyncDns')));
+    assert.ok(args.includes('--proxy-bypass-list=<-loopback>'));
   });
 
   it('emits the same fail-closed set for SOCKS5', () => {

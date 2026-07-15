@@ -39,7 +39,7 @@ export function OnboardingModal({
       open={open}
       onClose={onSkip}
       size="md"
-      title="Welcome to Lobster"
+      title="Welcome to Lobster Browser"
       footer={
         <>
           <Button variant="ghost" onClick={onSkip}>
@@ -56,8 +56,8 @@ export function OnboardingModal({
           <SparklesIcon />
         </div>
         <p>
-          Lobster builds a coherent browser identity per profile — OS, locale, WebGL, and noise
-          surfaces stay consistent so detectors see one real device, not a patchwork.
+          Lobster Browser builds a coherent browser identity per profile — OS, locale, WebGL, and
+          noise surfaces stay consistent so detectors see one real device, not a patchwork.
         </p>
         <ol className="onboarding-steps">
           <li>

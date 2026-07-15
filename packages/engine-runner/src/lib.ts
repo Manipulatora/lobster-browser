@@ -20,8 +20,6 @@ export {
   EngineNotProvisionedError,
 } from './runners/default-launchers.js';
 export type { BuildLaunchersOptions } from './runners/default-launchers.js';
-export { createPatchrightLauncher, isChromiumAvailable } from './runners/patchright-launcher.js';
-export type { PatchrightLauncherOptions } from './runners/patchright-launcher.js';
 export {
   buildLobiumLaunchArgs,
   buildLobiumLaunchEnv,
@@ -84,8 +82,10 @@ export {
 } from './proxy-auth-adapter.js';
 export type { LocalProxyAdapter, UpstreamProxy } from './proxy-auth-adapter.js';
 export type { AngleBackend, GpuArgsOptions, GpuMode } from './gpu.js';
-export { applyCdpFingerprint } from './cdp-fingerprint.js';
-export type { CdpSession } from './cdp-fingerprint.js';
+export { buildDevShmArgs, MIN_CHROMIUM_DEV_SHM_BYTES } from './dev-shm.js';
+export type { DevShmArgsOptions } from './dev-shm.js';
+export { withCdpSession, cdpEvaluate, resolveCdpTarget } from './cdp-client.js';
+export type { CdpSession } from './cdp-client.js';
 export {
   applyCookieImport,
   cdpCookiesFromDraft,

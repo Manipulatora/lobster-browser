@@ -13,6 +13,7 @@ scanner tools/licenses.py rejects for a directory lacking README.chromium/LICENS
 is_official_build credits step). COMPILE-VERIFIED on Chromium 152.0.7928.0.
 
   • components/embedder_support/BUILD.gn — user_agent target deps on //components/lobium_fp (native UA header + Sec-CH-UA metadata).
+  • content/renderer/BUILD.gn — renderer startup applies configured ICU locale before Blink/V8 init.
 diff --git a/components/embedder_support/BUILD.gn b/components/embedder_support/BUILD.gn
 index 847ba42327..b20621d099 100644
 --- a/components/embedder_support/BUILD.gn
@@ -61,3 +62,14 @@ index fecd5c279e..be0d717a5d 100644
      "//components/webrtc:thread_wrapper",
      "//gin",
      "//net",
+diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
+--- a/content/renderer/BUILD.gn
++++ b/content/renderer/BUILD.gn
+@@ -235,6 +235,7 @@ target(link_target_type, "renderer") {
+     "//components/discardable_memory/client",
+     "//components/history/core/browser:features",
+     "//components/input",
++    "//components/lobium_fp",
+     "//components/metrics",
+     "//components/metrics:single_sample_metrics",
+     "//components/performance_manager/scenario_api",

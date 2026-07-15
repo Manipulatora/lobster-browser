@@ -1,6 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { PlanTier } from '@lobster/shared-types';
+
+import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 
 // NOTE: Stripe is a declared dependency but is only used in the COMMENTED stubs below.
 // Uncomment the import + client once STRIPE_SECRET_KEY is wired (Day 2/3).
@@ -28,11 +30,35 @@ export interface WebhookAck {
 export class BillingService {
   // private readonly stripe: Stripe;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    @Inject(TEAMS_REPOSITORY) private readonly teams: TeamsRepository,
+  ) {
     // TODO(Day 2): construct the Stripe client from config (throw if the key is missing).
     // const apiKey = this.config.getOrThrow<string>('STRIPE_SECRET_KEY');
     // this.stripe = new Stripe(apiKey, { apiVersion: '2024-06-20' });
     void this.config;
+  }
+
+  /**
+   * Resolve the team to bill from the AUTHENTICATED caller — mirrors ProfilesService: an explicit
+   * `teamId` is honored only if the caller is a member; otherwise the caller's own team is used. A
+   * team id is never trusted from the request body.
+   */
+  private async resolveTeamId(userId: string, teamId?: string): Promise<string> {
+    if (teamId) {
+      const membership = await this.teams.getMembership(teamId, userId);
+      if (!membership) {
+        throw new ForbiddenException('you are not a member of the requested team');
+      }
+      return teamId;
+    }
+    const teams = await this.teams.findTeamsForUser(userId);
+    const first = teams[0];
+    if (!first) {
+      throw new ForbiddenException('you do not belong to any team');
+    }
+    return first.id;
   }
 
   /**
@@ -52,10 +78,15 @@ export class BillingService {
    *   });
    *   return { sessionId: session.id, url: session.url! };
    */
-  async createCheckoutSession(teamId: string, tier: PlanTier): Promise<CheckoutSession> {
+  async createCheckoutSession(
+    userId: string,
+    tier: PlanTier,
+    teamId?: string,
+  ): Promise<CheckoutSession> {
+    const ownerTeamId = await this.resolveTeamId(userId, teamId);
     return {
-      sessionId: `cs_stub_${teamId}_${tier}`,
-      url: `https://checkout.stripe.com/stub/${teamId}?tier=${tier}`,
+      sessionId: `cs_stub_${ownerTeamId}_${tier}`,
+      url: `https://checkout.stripe.com/stub/${ownerTeamId}?tier=${tier}`,
     };
   }
 

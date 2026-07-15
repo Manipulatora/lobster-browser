@@ -56,3 +56,67 @@ test('two interleaved pushes at the same baseVersion resolve to exactly one succ
   const latest = await blobs.getLatest('team-1/p1');
   assert.equal(latest?.version, 1);
 });
+
+test('export projects only secret-free metadata and sanitizes legacy cookie rawText', async () => {
+  const storedProfile = {
+    id: 'profile-1',
+    ownerTeamId: 'team-1',
+    name: 'Portable',
+    engine: 'lobium',
+    os: 'windows',
+    osVersion: 'Windows 11 23H2',
+    fingerprintSeed: '0123456789abcdef0123456789abcdef',
+    fingerprintOverrides: { navigator: { hardwareConcurrency: 8 } },
+    proxy: {
+      id: 'inline-proxy',
+      type: 'http',
+      host: 'proxy.example.com',
+      port: 8080,
+      username: 'private-user',
+      password: 'private-password',
+    },
+    proxyId: 'proxy-reference',
+    templateId: 'template-reference',
+    cookiesImport: {
+      mode: 'replace',
+      source: 'plain_text',
+      rawText: 'session=private-cookie',
+      parsedCount: 1,
+    },
+    extensions: [{ source: 'chrome_web_store', enabled: true, id: 'extension-id' }],
+    tags: ['portable'],
+    folder: 'Work',
+    notes: 'safe note',
+    status: 'idle',
+    createdAt: '2026-07-11T00:00:00.000Z',
+    updatedAt: '2026-07-11T00:00:00.000Z',
+  } satisfies Profile;
+  const profiles = {
+    findAllByTeam: async () => [storedProfile],
+  } as unknown as ProfilesRepository;
+  const teams = {
+    getMembership: async () => ({ teamId: 'team-1', userId: 'user-1', role: 'admin' }),
+  } as unknown as TeamsRepository;
+  const audit = { record: async () => {} } as unknown as AuditService;
+  const service = new ProfilesService(profiles, teams, new InMemoryBlobStore(), audit);
+
+  const bundle = await service.exportAll('user-1', 'team-1');
+  const exported = bundle.profiles[0]!;
+  const exportedCookies = (
+    exported as typeof exported & {
+      cookiesImport?: { mode: string; source?: string; parsedCount?: number; rawText?: string };
+    }
+  ).cookiesImport;
+
+  assert.equal(exported.proxyId, 'proxy-reference');
+  assert.equal(exported.templateId, 'template-reference');
+  assert.equal(exportedCookies?.rawText, undefined);
+  assert.deepEqual(exportedCookies, {
+    mode: 'replace',
+    source: 'plain_text',
+    parsedCount: 1,
+  });
+  assert.equal('proxy' in exported, false);
+  assert.equal(JSON.stringify(bundle).includes('private-password'), false);
+  assert.equal(JSON.stringify(bundle).includes('private-cookie'), false);
+});

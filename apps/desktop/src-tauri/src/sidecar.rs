@@ -2,7 +2,7 @@
 //!
 //! The Rust core spawns the sidecar once and talks to it over stdin/stdout. A background reader task
 //! dispatches each response to the matching request by `id`, so concurrent `call`s are safe.
-//! See docs/contracts/sidecar-ipc.md.
+//! See docs/OPERATIONS.md (§4).
 
 use std::collections::HashMap;
 use std::process::Stdio;

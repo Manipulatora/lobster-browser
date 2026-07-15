@@ -10,8 +10,8 @@
 //
 // It builds into `//components/lobium_fp` (an ADDED directory, so it survives upstream rebases with
 // zero patch rejects). The small diffs that call into it from existing Chromium files are the quilt
-// patches under `lobium/patches/`. NOTE: this file has NOT been compiled in the dev sandbox — it is
-// authored against the pinned Chromium ref and is finalized/compiled on the build machine (T-010/T-011).
+// patches under `lobium/patches/`. The reader has compiled in the existing dev build; newly added
+// capability-gated consumers still require a fresh Lobium rebuild and their dedicated probes.
 
 #ifndef COMPONENTS_LOBIUM_FP_LOBIUM_FP_CONFIG_H_
 #define COMPONENTS_LOBIUM_FP_LOBIUM_FP_CONFIG_H_
@@ -41,6 +41,7 @@ struct NavigatorConfig {
   std::string ua_platform;
   std::string ua_platform_version;
   std::string ua_full_version;
+  std::string ua_model;
   bool ua_mobile = false;
   // Sec-CH-UA brand list (name, version).
   std::vector<std::pair<std::string, std::string>> ua_brands;
@@ -134,6 +135,9 @@ struct FarblingSeeds {
   uint32_t webgl = 0;
   uint32_t audio = 0;
   uint32_t client_rects = 0;
+  // Dedicated always-on identity seed for stable media-device IDs. It must not depend on canvas/WebGL
+  // noise toggles: those can both be disabled, while IDs still need to remain distinct per profile.
+  uint32_t media_devices = 0;
 };
 
 // Mirrors MediaDeviceProfile in @lobster/shared-types. `present` gates the enumerateDevices hook.
@@ -146,7 +150,7 @@ struct MediaDevicesConfig {
 };
 
 struct NetConfig {
-  // "disable_non_proxied_udp" (proxied) or "default_public_interface_only".
+  // default_public_interface_only | disable_non_proxied_udp | proxy_only | disabled.
   std::string webrtc_policy;
 };
 

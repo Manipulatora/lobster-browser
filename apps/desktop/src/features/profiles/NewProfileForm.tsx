@@ -1,5 +1,5 @@
-import { XMarkIcon } from '@heroicons/react/24/outline';
-import { useEffect, useMemo, useState } from 'react';
+import { ChevronDownIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { parseJson, parseNetscape } from '@lobster/cookies';
 import { normalizeDeviceMemory } from '@lobster/fingerprint';
 
@@ -21,6 +21,14 @@ import type {
 import { isDesktopRuntime, type ProfilePatch } from '../../api/tauri';
 import appIcon from '../../assets/brand/icon.png';
 import { OS_OPTIONS, OS_VERSION_OPTIONS } from './options';
+import {
+  LOCALE_OPTIONS,
+  LOCATION_OPTIONS,
+  TIMEZONE_OPTIONS,
+  expandLocaleToLanguages,
+  primaryLocaleOf,
+} from './geoLocaleData';
+import { OsIcon } from './OsIcon';
 import {
   ANDROID_DEVICE_TYPE_OPTIONS,
   CPU_CORE_OPTIONS,
@@ -402,6 +410,7 @@ function SearchableSelect({
 }): JSX.Element {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value);
+  const [scrollTop, setScrollTop] = useState(0);
 
   useEffect(() => {
     setQuery(value);
@@ -409,9 +418,19 @@ function SearchableSelect({
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const base = q ? options.filter((option) => option.toLowerCase().includes(q)) : options;
-    return base.slice(0, 500);
+    return q ? options.filter((option) => option.toLowerCase().includes(q)) : options;
   }, [options, query]);
+
+  // Rendering the complete phone catalog can mean 15k+ rows. Keep every option reachable while
+  // mounting only the rows around the current scroll position.
+  const optionHeight = 36;
+  const overscan = 6;
+  const firstVisible = Math.max(0, Math.floor(scrollTop / optionHeight) - overscan);
+  const lastVisible = Math.min(
+    filtered.length,
+    firstVisible + Math.ceil(260 / optionHeight) + overscan * 2,
+  );
+  const visibleOptions = filtered.slice(firstVisible, lastVisible);
 
   function select(option: string): void {
     onChange(option);
@@ -429,40 +448,135 @@ function SearchableSelect({
         autoComplete="off"
         spellCheck={false}
         placeholder={placeholder}
-        onFocus={() => setOpen(true)}
+        onFocus={() => {
+          // A selected value is not a search filter. Opening the picker must expose the catalog,
+          // rather than filtering it down to the one device that is already selected.
+          setQuery('');
+          setScrollTop(0);
+          setOpen(true);
+        }}
         onChange={(e) => {
           setQuery(e.target.value);
+          setScrollTop(0);
           setOpen(true);
         }}
         onBlur={() => {
-          window.setTimeout(() => setOpen(false), 120);
+          window.setTimeout(() => {
+            setOpen(false);
+            setQuery(value);
+          }, 120);
         }}
       />
       {open && (
-        <div className="combobox__list" role="listbox">
+        <div
+          className="combobox__list"
+          role="listbox"
+          onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        >
           {filtered.length === 0 ? (
             <div className="combobox__empty">No matches</div>
           ) : (
-            filtered.map((option) => (
-              <button
-                key={option}
-                type="button"
-                role="option"
-                aria-selected={option === value}
-                className={
-                  option === value ? 'combobox__option combobox__option--active' : 'combobox__option'
-                }
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  select(option);
-                }}
-              >
-                {option}
-              </button>
-            ))
+            <div className="combobox__viewport" style={{ height: filtered.length * optionHeight }}>
+              {visibleOptions.map((option, offset) => (
+                <button
+                  key={option}
+                  type="button"
+                  role="option"
+                  aria-selected={option === value}
+                  className={
+                    option === value
+                      ? 'combobox__option combobox__option--active'
+                      : 'combobox__option'
+                  }
+                  style={{ top: (firstVisible + offset) * optionHeight }}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    select(option);
+                  }}
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * OS picker rendered as a custom dropdown so the platform glyph shows INSIDE the field and on EVERY
+ * option (a native <select> cannot render per-option SVG icons). macOS Intel/ARM carry their i/a badge.
+ */
+function OsSelect({
+  value,
+  options,
+  onChange,
+}: {
+  value: ProfileOsTarget;
+  options: ReadonlyArray<{ value: ProfileOsTarget; label: string }>;
+  onChange: (next: ProfileOsTarget) => void;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selected = options.find((option) => option.value === value);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    function onPointerDown(event: PointerEvent): void {
+      if (event.target instanceof Node && rootRef.current?.contains(event.target)) return;
+      setOpen(false);
+    }
+    function onKey(event: KeyboardEvent): void {
+      if (event.key === 'Escape') setOpen(false);
+    }
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="os-select" ref={rootRef}>
+      <button
+        type="button"
+        className="input os-select__trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="Operating system"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <OsIcon os={value} size={18} className="os-select__glyph" />
+        <span className="os-select__value">{selected?.label ?? value}</span>
+        <ChevronDownIcon className="os-select__chevron" aria-hidden />
+      </button>
+      {open ? (
+        <div className="os-select__list" role="listbox">
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="option"
+              aria-selected={option.value === value}
+              className={
+                option.value === value
+                  ? 'os-select__option os-select__option--active'
+                  : 'os-select__option'
+              }
+              onClick={() => {
+                onChange(option.value);
+                setOpen(false);
+              }}
+            >
+              <OsIcon os={option.value} size={18} />
+              <span>{option.label}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1168,33 +1282,19 @@ export function NewProfileForm({
             aria-labelledby="new-profile-tab-fingerprint"
           >
             <fieldset
-              className="field-grid"
-              disabled={legacyAndroid}
+              className="fp-stack"
               style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}
             >
-              <div className="field field--wide os-version-row">
+              <div className="field os-version-row">
                 <label className="field">
                   <span className="field__label">Operating system</span>
-                  <select
-                    className="input"
-                    value={form.os}
-                    disabled={legacyAndroid}
-                    onChange={(e) => setOs(e.target.value as ProfileOsTarget)}
-                  >
-                    {legacyAndroid ? <option value="android">Android (legacy)</option> : null}
-                    {OS_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
+                  <OsSelect value={form.os} options={OS_OPTIONS} onChange={setOs} />
                 </label>
                 <label className="field">
                   <span className="field__label">OS version</span>
                   <select
                     className="input"
                     value={form.osVersion}
-                    disabled={legacyAndroid}
                     onChange={(e) => setOsVersion(e.target.value)}
                   >
                     {versionOptions.map((version) => (
@@ -1245,17 +1345,18 @@ export function NewProfileForm({
                         showValidation &&
                         !findAndroidCatalogEntry(form.androidDeviceType, form.androidDeviceModel)
                       }
-                      placeholder="Search verified Play device models"
+                      placeholder="Search Google Play device models"
                     />
                     <span className="field-hint">
-                      {androidModels.length.toLocaleString()} verified models for {form.osVersion} ·{' '}
-                      {form.androidDeviceType}
+                      {androidModels.length.toLocaleString()} models from Google Play’s official device
+                      list · {form.osVersion} · {form.androidDeviceType}
                     </span>
                   </label>
                   <p className="field-hint field--wide">
-                    Hardware settings are derived from the selected verified device model. The
-                    profile opens in a phone-sized window with touch/mobile emulation — no
-                    physical device or Lobium APK required.
+                    The selected model sets the device name reported in the User-Agent. Screen, GPU and
+                    RAM use a coherent hardware profile matched to the device — exact for popular
+                    flagships, otherwise a real same-brand device. The profile opens in a phone-sized
+                    window with touch/mobile emulation — no physical device or Lobium APK required.
                   </p>
                 </>
               ) : (
@@ -1298,114 +1399,127 @@ export function NewProfileForm({
                 </>
               )}
 
-              <label className="field">
-                <span className="field__label">Language</span>
-                <select
-                  className="input"
-                  value={form.languageMode}
-                  onChange={(e) => set('languageMode', e.target.value as PersonaMode)}
-                >
-                  {PERSONA_MODE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {form.languageMode === 'manual' ? (
+              <div className="fp-row">
                 <label className="field">
-                  <span className="field__label">Languages</span>
-                  <input
+                  <span className="field__label">Language</span>
+                  <select
                     className="input"
-                    type="text"
-                    value={form.languages}
-                    placeholder="en-US, en"
-                    spellCheck={false}
-                    onChange={(e) => set('languages', e.target.value)}
-                  />
+                    value={form.languageMode}
+                    onChange={(e) => set('languageMode', e.target.value as PersonaMode)}
+                  >
+                    {PERSONA_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
                 </label>
-              ) : null}
+                {form.languageMode === 'manual' ? (
+                  <label className="field fp-row__grow">
+                    <span className="field__label">Locale</span>
+                    <SearchableSelect
+                      options={LOCALE_OPTIONS}
+                      value={primaryLocaleOf(form.languages)}
+                      onChange={(locale) => set('languages', expandLocaleToLanguages(locale))}
+                      ariaLabel="Language"
+                      placeholder="Select a language / locale"
+                    />
+                    <span className="field-hint">
+                      navigator.languages = {form.languages || '—'}
+                    </span>
+                  </label>
+                ) : null}
+              </div>
 
-              <label className="field">
-                <span className="field__label">Timezone</span>
-                <select
-                  className="input"
-                  value={form.timezoneMode}
-                  onChange={(e) => set('timezoneMode', e.target.value as PersonaMode)}
-                >
-                  {PERSONA_MODE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {form.timezoneMode === 'manual' ? (
+              <div className="fp-row">
                 <label className="field">
-                  <span className="field__label">Timezone value</span>
-                  <input
+                  <span className="field__label">Timezone</span>
+                  <select
                     className="input"
-                    type="text"
-                    value={form.timezone}
-                    placeholder="America/New_York"
-                    spellCheck={false}
-                    onChange={(e) => set('timezone', e.target.value)}
-                  />
+                    value={form.timezoneMode}
+                    onChange={(e) => set('timezoneMode', e.target.value as PersonaMode)}
+                  >
+                    {PERSONA_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
                 </label>
-              ) : null}
+                {form.timezoneMode === 'manual' ? (
+                  <label className="field fp-row__grow">
+                    <span className="field__label">Timezone value</span>
+                    <SearchableSelect
+                      options={TIMEZONE_OPTIONS}
+                      value={form.timezone}
+                      onChange={(tz) => set('timezone', tz)}
+                      ariaLabel="Timezone"
+                      placeholder="Search IANA timezones"
+                    />
+                  </label>
+                ) : null}
+              </div>
 
-              <label className="field">
-                <span className="field__label">Geolocation</span>
-                <select
-                  className="input"
-                  value={form.geolocationMode}
-                  onChange={(e) => set('geolocationMode', e.target.value as PersonaMode)}
-                >
-                  {PERSONA_MODE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {form.geolocationMode === 'manual' ? (
-                <>
-                  <label className="field">
-                    <span className="field__label">Latitude</span>
-                    <input
-                      className="input"
-                      type="number"
-                      min={-90}
-                      max={90}
-                      step="0.000001"
-                      value={form.geolocationLat}
-                      onChange={(e) => set('geolocationLat', e.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span className="field__label">Longitude</span>
-                    <input
-                      className="input"
-                      type="number"
-                      min={-180}
-                      max={180}
-                      step="0.000001"
-                      value={form.geolocationLng}
-                      onChange={(e) => set('geolocationLng', e.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span className="field__label">Accuracy</span>
-                    <input
-                      className="input"
-                      type="number"
-                      min={1}
-                      value={form.geolocationAccuracy}
-                      onChange={(e) => set('geolocationAccuracy', e.target.value)}
-                    />
-                  </label>
-                </>
-              ) : null}
+              <div className="fp-row">
+                <label className="field">
+                  <span className="field__label">Geolocation</span>
+                  <select
+                    className="input"
+                    value={form.geolocationMode}
+                    onChange={(e) => set('geolocationMode', e.target.value as PersonaMode)}
+                  >
+                    {PERSONA_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {form.geolocationMode === 'manual' ? (
+                  <>
+                    <label className="field fp-row__grow">
+                      <span className="field__label">Location</span>
+                      <SearchableSelect
+                        options={LOCATION_OPTIONS.map((l) => l.label)}
+                        value={
+                          LOCATION_OPTIONS.find(
+                            (l) =>
+                              String(l.latitude) === form.geolocationLat &&
+                              String(l.longitude) === form.geolocationLng,
+                          )?.label ?? ''
+                        }
+                        onChange={(label) => {
+                          const loc = LOCATION_OPTIONS.find((l) => l.label === label);
+                          if (!loc) return;
+                          setForm((prev) => ({
+                            ...prev,
+                            geolocationLat: String(loc.latitude),
+                            geolocationLng: String(loc.longitude),
+                            geolocationAccuracy: prev.geolocationAccuracy || '100',
+                          }));
+                        }}
+                        ariaLabel="Location"
+                        placeholder="Select a city / location"
+                      />
+                      <span className="field-hint">
+                        {form.geolocationLat && form.geolocationLng
+                          ? `lat ${form.geolocationLat}, lng ${form.geolocationLng}`
+                          : 'Pick a location to set coordinates'}
+                      </span>
+                    </label>
+                    <label className="field">
+                      <span className="field__label">Accuracy (m)</span>
+                      <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        value={form.geolocationAccuracy}
+                        onChange={(e) => set('geolocationAccuracy', e.target.value)}
+                      />
+                    </label>
+                  </>
+                ) : null}
+              </div>
 
               <label className="field">
                 <span className="field__label">WebRTC</span>
@@ -1424,38 +1538,40 @@ export function NewProfileForm({
 
               {!isAndroid ? (
                 <>
-                  <label className="field">
-                    <span className="field__label">CPU cores</span>
-                    <select
-                      className="input"
-                      value={form.cpuCores}
-                      onChange={(e) => set('cpuCores', e.target.value)}
-                    >
-                      {CPU_CORE_OPTIONS.map((cores) => (
-                        <option key={cores} value={String(cores)}>
-                          {cores}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <div className="fp-row">
+                    <label className="field">
+                      <span className="field__label">CPU cores</span>
+                      <select
+                        className="input"
+                        value={form.cpuCores}
+                        onChange={(e) => set('cpuCores', e.target.value)}
+                      >
+                        {CPU_CORE_OPTIONS.map((cores) => (
+                          <option key={cores} value={String(cores)}>
+                            {cores}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="field">
+                      <span className="field__label">Reported memory</span>
+                      <select
+                        className="input"
+                        value={form.ramSize}
+                        onChange={(e) => set('ramSize', e.target.value)}
+                      >
+                        {DEVICE_MEMORY_OPTIONS.map((ram) => (
+                          <option key={ram} value={String(ram)}>
+                            {ram} GB
+                          </option>
+                        ))}
+                      </select>
+                      <span className="field-hint">navigator.deviceMemory (Lobium values)</span>
+                    </label>
+                  </div>
 
                   <label className="field">
-                    <span className="field__label">Reported memory</span>
-                    <select
-                      className="input"
-                      value={form.ramSize}
-                      onChange={(e) => set('ramSize', e.target.value)}
-                    >
-                      {DEVICE_MEMORY_OPTIONS.map((ram) => (
-                        <option key={ram} value={String(ram)}>
-                          {ram} GB
-                        </option>
-                      ))}
-                    </select>
-                    <span className="field-hint">navigator.deviceMemory (Lobium values)</span>
-                  </label>
-
-                  <label className="field field--wide">
                     <span className="field__label">WebGL renderer</span>
                     <select
                       className="input"

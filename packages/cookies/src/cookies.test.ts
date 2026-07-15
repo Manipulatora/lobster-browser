@@ -6,6 +6,7 @@ import {
   parseNetscape,
   serializeJson,
   serializeNetscape,
+  validateCookie,
   type Cookie,
 } from './index.js';
 
@@ -138,6 +139,41 @@ test('parseNetscape skips malformed lines (wrong field count, bad expiry)', () =
   const cookies = parseNetscape(text);
   assert.equal(cookies.length, 1);
   assert.equal(cookies[0]?.name, 'keep');
+});
+
+test('Netscape includeSubdomains column is preserved even when the source omits a leading dot', () => {
+  const [cookie] = parseNetscape(
+    'example.com\tTRUE\t/\tTRUE\t1893456000\tsid\tabc',
+  );
+  assert.equal(cookie?.domain, '.example.com');
+  assert.match(serializeNetscape([cookie!]), /^\.example\.com\tTRUE/m);
+});
+
+test('cookie validation enforces modern SameSite and security-prefix invariants', () => {
+  assert.deepEqual(
+    validateCookie({
+      name: '__Host-session',
+      value: 'v',
+      domain: 'example.com',
+      path: '/',
+      httpOnly: true,
+      secure: true,
+      sameSite: 'None',
+    }),
+    [],
+  );
+  assert.match(
+    validateCookie({
+      name: '__Host-session',
+      value: 'v',
+      domain: '.example.com',
+      path: '/app',
+      httpOnly: true,
+      secure: false,
+      sameSite: 'None',
+    }).join('; '),
+    /SameSite=None requires Secure.*__Host- cookies require Secure.*path=\/.*host-only/,
+  );
 });
 
 test('parseJson skips malformed entries and defaults path to /', () => {

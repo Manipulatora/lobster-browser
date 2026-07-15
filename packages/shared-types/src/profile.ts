@@ -68,7 +68,8 @@ export interface ProfileTemplate {
   proxyLabel?: string;
   proxyDetail?: string;
   fingerprintOverrides?: FingerprintOverrides;
-  cookiesImport?: CookieImportDraft;
+  /** Templates may carry import behavior/diagnostics, never a pending cookie secret. */
+  cookiesImport?: CookieImportMetadata;
   extensions?: BrowserExtensionRef[];
   tags: string[];
   createdAt: string;
@@ -85,7 +86,8 @@ export interface CreateProfileTemplateInput {
   proxyLabel?: string;
   proxyDetail?: string;
   fingerprintOverrides?: FingerprintOverrides;
-  cookiesImport?: CookieImportDraft;
+  /** rawText is deliberately forbidden in templates. */
+  cookiesImport?: CookieImportMetadata;
   extensions?: BrowserExtensionRef[];
   tags?: string[];
 }
@@ -102,12 +104,23 @@ export interface CookieImportDraft {
   errors?: Array<{ line?: number; message: string }>;
 }
 
+/** Non-secret cookie import diagnostics safe to sync/export. The cookie payload itself stays local. */
+export type CookieImportMetadata = Omit<CookieImportDraft, 'rawText'>;
+
 export interface BrowserExtensionRef {
   source: 'chrome_web_store' | 'unpacked';
   enabled: boolean;
+  /** Chrome Web Store extension id (32 lowercase a-p characters). Derived from `url` when omitted. */
   id?: string;
   name?: string;
+  /** Canonical Chrome Web Store detail URL. Never used as an arbitrary download URL. */
   url?: string;
+  /** Absolute local directory for `unpacked` sources. The launcher snapshots it into the profile. */
+  path?: string;
+  /** Last known install state, persisted so profile editors can show actionable state. */
+  installState?: 'pending' | 'ready' | 'disabled' | 'error';
+  /** Human-readable failure from the last install attempt; safe to display, never silently ignored. */
+  installError?: string;
 }
 
 /**
@@ -125,7 +138,7 @@ export interface ProfileExport {
   fingerprintOverrides?: FingerprintOverrides;
   proxyId?: string;
   templateId?: string;
-  cookiesImport?: CookieImportDraft;
+  cookiesImport?: CookieImportMetadata;
   extensions?: BrowserExtensionRef[];
   tags: string[];
   folder?: string;

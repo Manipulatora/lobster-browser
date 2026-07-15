@@ -1,9 +1,9 @@
 {
-  "//": "Anti-detect thresholds for the validation harness (T-005). GATED (fails the run.mjs verdict + exit code): sannysoft.maxFailed and the webrtc leak checks. MEASURED-ONLY (reported in the JSON, never fails this harness): creepjs and coherence. The only threshold NUMBER run.mjs reads is sannysoft.maxFailed; the webrtc booleans document intent that the harness enforces in code; creepjs/coherence values are targets, not gates.",
+  "//": "Anti-detect thresholds for the historical Patchright compatibility harness (T-005). Only sannysoft.maxFailed is a detector threshold read by run.mjs. WebRTC has a synthetic flag/control check but no real proxy, while CreepJS and coherence are measured or enforced elsewhere. Release evidence is graded by detector-matrix.mjs and the native real-GPU gate, not this file alone.",
   "sannysoft": {
     "maxFailed": 2,
     "gated": true,
-    "note": "GATED. WebGL Vendor/Renderer are native (deep) surfaces handled by Lobium; they read the host GPU until the Lobium build ships, so up to 2 WebGL fails are expected/allowed here."
+    "note": "GATED only in the historical Patchright compatibility job. That control browser exposes host WebGL, so it allows two WebGL cells. Native Lobium release evidence permits no Sannysoft failed cells; this allowance must never be cited as the product bar."
   },
   "creepjs": {
     "minTrustScore": 60,
@@ -14,8 +14,8 @@
   "webrtc": {
     "forbidLocalIpLeak": true,
     "forbidPublicIpLeakUnderPolicy": true,
-    "gated": true,
-    "note": "GATED by the harness webrtcLeakProtected check (the booleans here document intent; the checks live in run.mjs): (1) the profile's own host candidates are all mDNS .local (no raw private IPv4 / no global IPv6), and (2) with disable_non_proxied_udp + a live STUN server the browser emits NO public-IP srflx. The suppression assertion (2) only counts once a CONTROL run (default_public_interface_only + STUN) proves the probe CAN leak; if the control does not leak (no network/STUN), webrtcLeakProtected is reported as not-measured (null) and skipped rather than a vacuous pass. requireIcePublicIpEqualsProxyIp — asserting a srflx equals the PROXY egress IP — needs a live test proxy and is a follow-up (T-019a)."
+    "gated": false,
+    "note": "NOT A PROXIED-PROFILE GATE. run.mjs checks local mDNS candidates on its unproxied compatibility profile and runs separate throwaway control/suppression browsers to prove the Chromium flag can suppress STUN. It reports webrtcLeakProtected=null because it never launches the exact product profile through a real proxy. Release evidence must compare expected proxy egress, observed TCP egress, ICE candidates, and a no-proxy negative control using detector-matrix.mjs."
   },
   "coherence": {
     "maxIssues": 0,

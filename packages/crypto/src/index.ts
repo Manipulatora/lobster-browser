@@ -1,7 +1,7 @@
 /**
  * @lobster/crypto — client-side profile-blob encryption (SEC-1).
  *
- * Normative wire format from `docs/specs/security.md` §1.3:
+ * Normative wire format from `docs/OPERATIONS.md` §1.3:
  *
  * ```
  * magic="LBv1" (4B) | key_id (16B) | alg (1B: 0x01=A256GCM) | nonce (12B) | ciphertext (…) | tag (16B)

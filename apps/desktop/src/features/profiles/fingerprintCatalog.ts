@@ -13,7 +13,7 @@ import {
   filterAndroidCatalogByOsVersion,
   normalizeMacFontFamily,
   type AndroidDeviceCatalogEntry,
-  type RendererCatalogEntry,
+  type ProductRendererCatalogEntry,
 } from '@lobster/fingerprint';
 import type {
   AndroidDeviceType,
@@ -35,8 +35,8 @@ export interface RendererPreset {
   id: string;
   os: 'windows' | 'macos' | 'linux';
   label: string;
-  vendorFamily: RendererCatalogEntry['vendorFamily'];
-  validationLevel: RendererCatalogEntry['validationLevel'];
+  vendorFamily: string;
+  validationLevel: ProductRendererCatalogEntry['validationLevel'];
   webgl: WebGlFingerprint;
   policy: RendererPolicy;
 }
@@ -48,17 +48,19 @@ export const PERSONA_MODE_OPTIONS: ReadonlyArray<SelectOption<PersonaMode>> = [
 ];
 
 /** WebRTC UI modes — not the same as Language/Timezone PersonaMode. */
-export type WebRtcUiMode = 'based_ip' | 'real' | 'disable_udp';
+export type WebRtcUiMode = 'based_ip' | 'real' | 'disable_udp' | 'disabled';
 
 export const WEBRTC_MODE_OPTIONS: ReadonlyArray<SelectOption<WebRtcUiMode>> = [
   { value: 'based_ip', label: 'Based on IP' },
   { value: 'real', label: 'Real' },
-  { value: 'disable_udp', label: 'Disable UDP' },
+  { value: 'disable_udp', label: 'Disable non-proxied UDP' },
+  { value: 'disabled', label: 'Disabled' },
 ];
 
 export function webRtcPolicyForUiMode(mode: WebRtcUiMode): WebRtcPolicy {
   if (mode === 'based_ip') return 'proxy_only';
   if (mode === 'disable_udp') return 'disable_non_proxied_udp';
+  if (mode === 'disabled') return 'disabled';
   return 'default_public_interface_only';
 }
 
@@ -71,10 +73,10 @@ export const ANDROID_DEVICE_TYPE_OPTIONS: ReadonlyArray<SelectOption<AndroidDevi
 export const CPU_CORE_OPTIONS = [8, 10, 11, 12, 14, 16, 20, 24] as const;
 
 /**
- * UI "physical RAM" sizes (GB). Written to fingerprint as Chromium `navigator.deviceMemory`
- * via `normalizeDeviceMemory` (ladder capped at 8).
+ * Values Chromium can actually expose through `navigator.deviceMemory`. Calling these physical RAM
+ * sizes was misleading: values above 8 GB all collapse to the same observable value.
  */
-export const PHYSICAL_RAM_OPTIONS = [8, 16, 24, 32, 36, 48, 64, 128] as const;
+export const DEVICE_MEMORY_OPTIONS = [0.25, 0.5, 1, 2, 4, 8] as const;
 
 export const WINDOWS_SCREEN_OPTIONS = [
   '1280x720',
@@ -129,9 +131,14 @@ export const LINUX_SCREEN_OPTIONS = [
 export const ANDROID_PHONE_MODELS = ANDROID_PHONE_MODEL_CATALOG.map((device) => device.label);
 export const ANDROID_TABLET_MODELS = ANDROID_TABLET_MODEL_CATALOG.map((device) => device.label);
 
-function rendererPreset(entry: RendererCatalogEntry): RendererPreset {
+function rendererPreset(entry: ProductRendererCatalogEntry): RendererPreset {
   return {
-    ...entry,
+    id: entry.id,
+    os: entry.os,
+    label: entry.label,
+    vendorFamily: entry.vendorFamily,
+    validationLevel: entry.validationLevel,
+    webgl: entry.webgl,
     policy: { mode: 'validated_preset', presetId: entry.id },
   };
 }
@@ -160,8 +167,10 @@ export function fontPresetsForTarget(os: ProfileOsTarget): readonly string[] {
 }
 
 export function defaultSelectedFontsForTarget(os: ProfileOsTarget): string[] {
-  if (os === 'macos' || os === 'macos_intel' || os === 'macos_arm') return defaultFontsForOs('macos');
+  if (os === 'macos' || os === 'macos_intel' || os === 'macos_arm')
+    return defaultFontsForOs('macos');
   if (os === 'linux') return defaultFontsForOs('linux');
+  if (os === 'android') return [];
   return defaultFontsForOs('windows');
 }
 

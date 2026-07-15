@@ -5,16 +5,30 @@ import { join } from 'node:path';
 import test from 'node:test';
 import type { StartProfileParams } from '@lobster/shared-types';
 import { CompositeRunner } from './runners/composite.js';
+import { probeLobiumBuildCapabilities } from './lobium-capabilities.js';
 import { buildLaunchers } from './runners/default-launchers.js';
-import { isLobiumAvailable } from './runners/lobium-launcher.js';
+import { isLobiumAvailable, resolveLobiumBinary } from './runners/lobium-launcher.js';
 import { startProfile } from './start-profile.js';
 
 // Runs only where native Lobium is installed; skipped (green) elsewhere.
-const lobiumReady = isLobiumAvailable();
+const binary = resolveLobiumBinary();
+const capabilityReady = binary && process.env.LOBSTER_HOST_CALIBRATION_FILE
+  ? await probeLobiumBuildCapabilities(binary).then(
+      () => true,
+      () => false,
+    )
+  : false;
+const lobiumReady =
+  isLobiumAvailable() &&
+  capabilityReady;
 
 test(
   'startProfile derives a fingerprint from the seed and launches native Lobium (no proxy)',
-  { skip: lobiumReady ? false : 'native Lobium not installed' },
+  {
+    skip: lobiumReady
+      ? false
+      : 'requires capability-contract Lobium and a complete LOBSTER_HOST_CALIBRATION_FILE',
+  },
   async () => {
     const runner = new CompositeRunner(
       await buildLaunchers({

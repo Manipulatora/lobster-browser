@@ -3,6 +3,8 @@ import test from 'node:test';
 import type { AndroidFingerprint } from '@lobster/shared-types';
 import {
   applyGeoToFingerprint,
+  ANDROID_PHONE_MODEL_CATALOG,
+  ANDROID_TABLET_MODEL_CATALOG,
   deriveAndroidFingerprint,
   validateAndroidFingerprintCoherence,
   validateFingerprintCoherence,
@@ -53,12 +55,68 @@ test('Android fingerprints carry the complete mobile identity chain', () => {
   assert.equal(fp.navigator.uaMobile, true);
   assert.ok(fp.navigator.maxTouchPoints > 0);
   assert.match(fp.navigator.userAgent, new RegExp(`Android ${fp.android.androidVersion}`));
-  assert.match(fp.navigator.userAgent, new RegExp(fp.android.model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(
+    fp.navigator.userAgent,
+    new RegExp(fp.android.model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
   assert.match(fp.navigator.userAgent, /Mobile Safari\/537\.36/);
   assert.equal(fp.navigator.uaFullVersion, '140.0.1234.56');
-  assert.ok(fp.screen.width < fp.screen.height, 'phone profile should default to portrait CSS size');
+  assert.ok(
+    fp.screen.width < fp.screen.height,
+    'phone profile should default to portrait CSS size',
+  );
   assert.ok(fp.fonts.includes('Roboto'));
   assert.ok(fp.webgl.renderer.includes('OpenGL ES') || fp.webgl.renderer.includes('Vulkan'));
+});
+
+test('selected Google Play phone/tablet models own the complete Android identity chain', () => {
+  const phone = ANDROID_PHONE_MODEL_CATALOG[0];
+  const tablet = ANDROID_TABLET_MODEL_CATALOG[0];
+  assert.ok(phone && tablet);
+
+  const selectedPhone = deriveAndroidFingerprint('selected-phone', {
+    engine: 'lobium',
+    deviceType: 'mobile',
+    deviceModel: phone.label,
+    osVersion: 'Android 15',
+  });
+  assert.equal(selectedPhone.android.model, phone.model);
+  assert.equal(selectedPhone.android.device, phone.device);
+  assert.equal(selectedPhone.android.androidVersion, '15');
+  assert.equal(selectedPhone.navigator.uaModel, phone.model);
+  assert.match(
+    selectedPhone.navigator.userAgent,
+    new RegExp(phone.model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+  );
+  assert.deepEqual(validateAndroidFingerprintCoherence(selectedPhone), []);
+
+  const selectedTablet = deriveAndroidFingerprint('selected-tablet', {
+    engine: 'lobium',
+    deviceType: 'tablet',
+    deviceModel: tablet.label,
+    osVersion: 'Android 14',
+  });
+  assert.equal(selectedTablet.android.formFactor, 'tablet');
+  assert.equal(selectedTablet.navigator.uaMobile, false);
+  assert.doesNotMatch(selectedTablet.navigator.userAgent, /\bMobile\b/);
+  assert.ok(selectedTablet.screen.width > selectedTablet.screen.height);
+  assert.deepEqual(validateAndroidFingerprintCoherence(selectedTablet), []);
+});
+
+test('phone fingerprints stay portrait while tablet fingerprints are landscape', () => {
+  const phone = deriveAndroidFingerprint('orientation-phone', {
+    engine: 'lobium',
+    deviceType: 'mobile',
+  });
+  const tablet = deriveAndroidFingerprint('orientation-tablet', {
+    engine: 'lobium',
+    deviceType: 'tablet',
+  });
+  assert.ok(phone.screen.height > phone.screen.width);
+  assert.equal(phone.android.formFactor, 'phone');
+  assert.ok(tablet.screen.width > tablet.screen.height);
+  assert.equal(tablet.android.formFactor, 'tablet');
+  assert.equal(tablet.navigator.uaMobile, false);
 });
 
 test('Android catalog is exhaustive-coherent, not just sampled-coherent', () => {

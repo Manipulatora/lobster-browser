@@ -11,6 +11,8 @@ import type {
 export interface HostCalibrationRawNavigator {
   userAgent: string;
   platform: string;
+  languages?: string[];
+  locale?: string;
   hardwareConcurrency: number;
   deviceMemory?: number;
   maxTouchPoints: number;
@@ -101,6 +103,14 @@ export function normalizeHostCalibrationSnapshot(
     arch: opts.arch,
     navigator: {
       platform: raw.navigator.platform,
+      ...(raw.navigator.languages && raw.navigator.languages.length > 0
+        ? {
+            languages: [
+              ...new Set(raw.navigator.languages.map((language) => language.trim()).filter(Boolean)),
+            ],
+          }
+        : {}),
+      ...(raw.navigator.locale ? { locale: raw.navigator.locale } : {}),
       hardwareConcurrency: raw.navigator.hardwareConcurrency,
       deviceMemory: raw.navigator.deviceMemory ?? 8,
       maxTouchPoints: raw.navigator.maxTouchPoints,
@@ -173,6 +183,8 @@ export function buildHostCalibrationProbeScript(): string {
     navigator: {
       userAgent: navigator.userAgent,
       platform: navigator.platform,
+      languages: Array.from(navigator.languages || []),
+      locale: Intl.DateTimeFormat().resolvedOptions().locale,
       hardwareConcurrency: navigator.hardwareConcurrency || 1,
       deviceMemory: navigator.deviceMemory,
       maxTouchPoints: navigator.maxTouchPoints || 0,

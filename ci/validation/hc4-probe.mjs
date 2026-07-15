@@ -10,7 +10,7 @@
  * feeds DISTINCTIVE sentinel HC-4 values through the config channel and asserts a page reads them back.
  *
  * This is a plumbing proof on ANY renderer (SwiftShader is fine — the sentinels are synthetic). It does
- * NOT prove real-GPU coherence; that is what the real-GPU gate (docs/specs/real-gpu-ci.md) is for. What
+ * NOT prove real-GPU coherence; that is what the real-GPU gate (docs/ENGINEERING.md (§4)) is for. What
  * it proves: the compiled binary routes cfg->webgl.{version,shadingLanguageVersion,extensions,
  * shaderPrecision} to JS. If HC-4 were absent, the reads would return host/SwiftShader values and the
  * assertions would fail.

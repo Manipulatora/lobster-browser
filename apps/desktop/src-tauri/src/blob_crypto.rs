@@ -1,6 +1,6 @@
 //! Client-side profile-blob encryption (SEC-1) — LBv1 envelope + SEC-2 HKDF PCK helpers.
 //!
-//! Normative wire format from `docs/specs/security.md` §1.3:
+//! Normative wire format from `docs/OPERATIONS.md` §1.3:
 //!
 //! ```text
 //! magic="LBv1" (4B) | key_id (16B) | alg (1B: 0x01=A256GCM) | nonce (12B) | ciphertext (…) | tag (16B)

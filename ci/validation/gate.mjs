@@ -3,7 +3,8 @@
  * Real-GPU stealth gate (QA-1 blocking).
  *
  * The raw detector scripts are permissive by design so they can be run for exploration on any host:
- *   - creepjs-battle.mjs exits 0 whenever no situation *errored*, EVEN ON A SOFTWARE GPU. A 120/120
+ *   - creepjs-battle.mjs can exit 0 when fail+error are zero, EVEN ON A SOFTWARE GPU (and historically
+ *     did not fail for unavailable rows). A 120/120
  *     "zero lies" run on SwiftShader is a FALSE PASS — the exact trap PROJECT-STATUS warns about.
  *   - lobium-detect.mjs already fails a `gpu` run whose renderer is software, but nothing chains the
  *     two into a single blocking verdict.
@@ -44,6 +45,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const REPORTS_DIR = join(here, 'reports');
 const MIN_SITUATIONS = Number(process.env.LOBSTER_GATE_MIN_SITUATIONS || '100');
 const REQUIRE_DETECT = process.env.LOBSTER_GATE_REQUIRE_DETECT === '1';
+const MAX_REPORT_AGE_MINUTES = Number(process.env.LOBSTER_GATE_MAX_REPORT_AGE_MINUTES || '120');
+const NOW = Date.now();
 
 const checks = [];
 function check(name, ok, detail) {
@@ -68,12 +71,51 @@ async function newestDetectReport() {
 function evaluateBattle(report) {
   const c = report.counts || {};
   const renderer = report.host?.renderer ?? null;
+  const capturedMs = Date.parse(report.capturedAt || '');
+  const results = Array.isArray(report.results) ? report.results : [];
+
+  check(
+    'battle: report kind is creepjs-battle',
+    report.schemaVersion === 1 && report.kind === 'creepjs-battle',
+    `schemaVersion=${report.schemaVersion}, kind=${report.kind}`,
+  );
+  check('battle: launch mode recorded as headless', report.headless === true, `headless=${report.headless}`);
+  check(
+    `battle: report age <= ${MAX_REPORT_AGE_MINUTES} minutes`,
+    Number.isFinite(capturedMs) &&
+      NOW >= capturedMs &&
+      NOW - capturedMs <= MAX_REPORT_AGE_MINUTES * 60_000,
+    Number.isFinite(capturedMs)
+      ? `ageMinutes=${((NOW - capturedMs) / 60_000).toFixed(1)}`
+      : 'capturedAt invalid',
+  );
+  check(
+    'battle: official CreepJS deployment',
+    (() => {
+      try {
+        return new URL(report.creepjsUrl).hostname === 'abrahamjuliot.github.io';
+      } catch {
+        return false;
+      }
+    })(),
+    `creepjsUrl=${report.creepjsUrl}`,
+  );
+  check(
+    'battle: native binary recorded',
+    typeof report.binary === 'string' && report.binary.length > 0,
+    `binary=${report.binary}`,
+  );
 
   check('battle: gpuMode === "gpu"', report.gpuMode === 'gpu', `gpuMode=${report.gpuMode}`);
   check(
     'battle: host renderer is real hardware (not software)',
     typeof renderer === 'string' && renderer.length > 0 && !isSoftwareRenderer(renderer),
     `renderer=${renderer ?? '(absent)'}`,
+  );
+  check(
+    'battle: host probe did not force software fallback',
+    report.host?.softwareFallbackForced === false,
+    `softwareFallbackForced=${report.host?.softwareFallbackForced}`,
   );
   check(
     `battle: situations >= ${MIN_SITUATIONS}`,
@@ -94,9 +136,43 @@ function evaluateBattle(report) {
     `zeroLies=${c.zeroLies}/${c.situations}`,
   );
   check('battle: meanLies === 0', c.meanLies === 0, `meanLies=${c.meanLies}`);
+  check(
+    'battle: result count matches aggregate',
+    typeof c.situations === 'number' && results.length === c.situations,
+    `results=${results.length}, situations=${c.situations}`,
+  );
+  check(
+    'battle: every raw result passed with available zero-lies data',
+    results.length > 0 &&
+      results.every(
+        (result) =>
+          result.verdict === 'pass' &&
+          result.creep?.available === true &&
+          result.creep?.lies === 0 &&
+          result.softwareFallbackForced === false &&
+          !result.error,
+      ),
+    `rawPass=${results.filter((result) => result.verdict === 'pass' && result.creep?.available === true && result.creep?.lies === 0 && result.softwareFallbackForced === false && !result.error).length}/${results.length}`,
+  );
 }
 
 function evaluateDetect(report) {
+  const capturedMs = Date.parse(report.capturedAt || '');
+  check(
+    'detect: report kind is lobium-detect',
+    report.schemaVersion === 1 && report.kind === 'lobium-detect',
+    `schemaVersion=${report.schemaVersion}, kind=${report.kind}`,
+  );
+  check('detect: launch mode recorded as headless', report.headless === true, `headless=${report.headless}`);
+  check(
+    `detect: report age <= ${MAX_REPORT_AGE_MINUTES} minutes`,
+    Number.isFinite(capturedMs) &&
+      NOW >= capturedMs &&
+      NOW - capturedMs <= MAX_REPORT_AGE_MINUTES * 60_000,
+    Number.isFinite(capturedMs)
+      ? `ageMinutes=${((NOW - capturedMs) / 60_000).toFixed(1)}`
+      : 'capturedAt invalid',
+  );
   check('detect: verdict === "pass"', report.verdict === 'pass', `verdict=${report.verdict}`);
   check('detect: gpuMode === "gpu"', report.gpuMode === 'gpu', `gpuMode=${report.gpuMode}`);
   check(
@@ -114,13 +190,23 @@ async function main() {
     );
     process.exit(1);
   }
-  evaluateBattle(await readJson(battlePath));
+  const battle = await readJson(battlePath);
+  evaluateBattle(battle);
 
   const detect = await newestDetectReport();
   if (detect) {
     evaluateDetect(detect.report);
+    check(
+      'reports: battle and detect used the same binary',
+      typeof battle.binary === 'string' && battle.binary === detect.report.binary,
+      `battle=${battle.binary}, detect=${detect.report.binary}`,
+    );
   } else if (REQUIRE_DETECT) {
-    check('detect: report present', false, 'no lobium-detect-*.json found (LOBSTER_GATE_REQUIRE_DETECT=1)');
+    check(
+      'detect: report present',
+      false,
+      'no lobium-detect-*.json found (LOBSTER_GATE_REQUIRE_DETECT=1)',
+    );
   } else {
     console.warn('note: no lobium-detect-*.json found — evaluating creepjs-battle only.');
   }
@@ -128,7 +214,9 @@ async function main() {
   const failed = checks.filter((c) => !c.ok);
   const width = Math.max(...checks.map((c) => c.name.length));
   for (const c of checks) {
-    process.stdout.write(`  ${c.ok ? 'PASS' : 'FAIL'}  ${c.name.padEnd(width)}  ${c.detail ?? ''}\n`);
+    process.stdout.write(
+      `  ${c.ok ? 'PASS' : 'FAIL'}  ${c.name.padEnd(width)}  ${c.detail ?? ''}\n`,
+    );
   }
   process.stdout.write('\n');
 
@@ -138,7 +226,9 @@ async function main() {
     );
     process.exit(1);
   }
-  console.log(`GATE PASS: ${checks.length}/${checks.length} checks passed — real-GPU zero-lies proof.`);
+  console.log(
+    `GATE PASS: ${checks.length}/${checks.length} checks passed — real-GPU headless zero-lies evidence.`,
+  );
 }
 
 main().catch((e) => {

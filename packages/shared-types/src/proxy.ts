@@ -60,3 +60,16 @@ export interface CreateStoredProxyInput {
   timezone?: string;
   rotateUrl?: string;
 }
+
+export type UpdateStoredProxyInput = Partial<
+  Pick<
+    CreateStoredProxyInput,
+    'source' | 'label' | 'config' | 'location' | 'timezone' | 'rotateUrl'
+  >
+>;
+
+export interface ProxyRotationResult {
+  proxyId: string;
+  rotatedAt: string;
+  status: number;
+}

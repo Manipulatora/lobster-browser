@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { Fingerprint, ProxyConfig } from '@lobster/shared-types';
 import {
   LOBIUM_CONFIG_FILENAME,
+  LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES,
   LOBIUM_CONFIG_VERSION,
   buildLobiumConfig,
   lobiumConfigArg,
@@ -125,6 +126,7 @@ test('farbling seeds are deterministic per (seed) and differ across seeds', () =
     assert.ok(Number.isInteger(v) && v >= 0, 'seeds are uint32');
   }
   assert.notEqual(a.canvas, a.webgl, 'per-surface seeds are independent');
+  assert.notEqual(a.mediaDevices, b.mediaDevices, 'stable media IDs remain distinct per profile');
 });
 
 test('WebRTC policy is proxy-aware, and proxy config carries NO credentials', () => {
@@ -150,6 +152,7 @@ test('buildLobiumConfig carries explicit profile launch policy', () => {
     seed: 'policy',
     osVersion: 'Windows 11 23H2',
     webrtcPolicy: 'proxy_only',
+    proxy: { type: 'http', host: 'proxy.example', port: 8080 },
     rendererPolicy: { mode: 'normalized_host' },
     hardwareNoise: { canvas: false, clientRects: true },
     mediaDevices: { cameras: 2, microphones: 1, speakers: 3, stableDeviceIds: false },
@@ -177,12 +180,53 @@ test('buildLobiumConfig carries explicit profile launch policy', () => {
   });
 });
 
+test('buildLobiumConfig rejects proxy_only without a proxy', () => {
+  assert.throws(
+    () => buildLobiumConfig(fp(), { webrtcPolicy: 'proxy_only' }),
+    /proxy_only policy requires a configured proxy/,
+  );
+});
+
+test('buildLobiumConfig rejects host-leaking default WebRTC policy with a proxy', () => {
+  assert.throws(
+    () =>
+      buildLobiumConfig(fp(), {
+        webrtcPolicy: 'default_public_interface_only',
+        proxy: { type: 'http', host: 'proxy.example', port: 8080 },
+      }),
+    /unsafe with a proxy/,
+  );
+});
+
 test('hardware noise checkboxes gate farbling seeds', () => {
   const allOff = buildLobiumConfig(fp(), {
     seed: 'noise-off',
     hardwareNoise: { webgl: false, canvas: false, audio: false },
   });
-  assert.deepEqual(allOff.seeds, { canvas: 0, webgl: 0, audio: 0, clientRects: 0 });
+  assert.deepEqual(
+    {
+      canvas: allOff.seeds.canvas,
+      webgl: allOff.seeds.webgl,
+      audio: allOff.seeds.audio,
+      clientRects: allOff.seeds.clientRects,
+    },
+    { canvas: 0, webgl: 0, audio: 0, clientRects: 0 },
+  );
+  assert.ok(
+    allOff.seeds.mediaDevices > 0,
+    'media identity stays per-profile even when all hardware-noise surfaces are off',
+  );
+});
+
+test('writeLobiumConfig rejects an oversized renderer payload instead of silently leaking host values', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobium-cfg-large-'));
+  try {
+    const config = buildLobiumConfig(fp(), { seed: 'large' });
+    config.webgl.extensions = [`EXT_${'x'.repeat(LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES)}`];
+    await assert.rejects(() => writeLobiumConfig(dir, config), /too large for the renderer channel/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('writeLobiumConfig writes owner-only JSON that round-trips, and the flag points at it', async () => {

@@ -19,6 +19,7 @@ import type { CreateProfileDto } from './dto/create-profile.dto';
 import type { ImportProfilesDto } from './dto/import-profiles.dto';
 import type { UpdateProfileDto } from './dto/update-profile.dto';
 import { PROFILES_REPOSITORY, type ProfilesRepository } from './profiles.repository';
+import { sanitizeCookieImportMetadata } from './sanitize-cookie-import';
 
 /** Direction of an encrypted-blob sync. */
 export type SyncDirection = 'push' | 'pull';
@@ -101,8 +102,13 @@ export class ProfilesService {
       name: dto.name,
       engine: dto.engine,
       os: dto.os,
+      osVersion: dto.osVersion,
       fingerprintSeed,
       fingerprintOverrides: dto.fingerprintOverrides,
+      proxyId: dto.proxyId,
+      templateId: dto.templateId,
+      cookiesImport: sanitizeCookieImportMetadata(dto.cookiesImport),
+      extensions: dto.extensions,
       tags: dto.tags ?? [],
       folder: dto.folder,
       notes: dto.notes,
@@ -187,8 +193,13 @@ export class ProfilesService {
           name: item.name,
           engine: item.engine,
           os: item.os,
+          osVersion: item.osVersion,
           fingerprintSeed: item.fingerprintSeed,
           fingerprintOverrides: item.fingerprintOverrides,
+          proxyId: item.proxyId,
+          templateId: item.templateId,
+          cookiesImport: sanitizeCookieImportMetadata(item.cookiesImport),
+          extensions: item.extensions,
           tags: item.tags ?? [],
           folder: item.folder,
           notes: item.notes,
@@ -211,11 +222,20 @@ export class ProfilesService {
       name: p.name,
       engine: p.engine,
       os: p.os,
+      ...(p.osVersion !== undefined ? { osVersion: p.osVersion } : {}),
       fingerprintSeed: p.fingerprintSeed,
-      ...(p.fingerprintOverrides ? { fingerprintOverrides: p.fingerprintOverrides } : {}),
+      ...(p.fingerprintOverrides !== undefined
+        ? { fingerprintOverrides: p.fingerprintOverrides }
+        : {}),
+      ...(p.proxyId !== undefined ? { proxyId: p.proxyId } : {}),
+      ...(p.templateId !== undefined ? { templateId: p.templateId } : {}),
+      ...(p.cookiesImport !== undefined
+        ? { cookiesImport: sanitizeCookieImportMetadata(p.cookiesImport) }
+        : {}),
+      ...(p.extensions !== undefined ? { extensions: p.extensions } : {}),
       tags: p.tags,
-      ...(p.folder ? { folder: p.folder } : {}),
-      ...(p.notes ? { notes: p.notes } : {}),
+      ...(p.folder !== undefined ? { folder: p.folder } : {}),
+      ...(p.notes !== undefined ? { notes: p.notes } : {}),
     };
   }
 
@@ -273,7 +293,14 @@ export class ProfilesService {
       targetType: 'profile',
       targetId: id,
     });
-    // TODO(Day 2): also delete the encrypted blob from S3.
+    // Delete the profile's encrypted blob versions so they are not orphaned in the object store.
+    // Best-effort: the DB record is already gone (the source of truth), so a transient store error
+    // must not fail the delete — it would only leave reclaimable bytes, never a dangling profile.
+    try {
+      await this.blobs.deleteAll(this.blobKey(ownerTeamId, id));
+    } catch {
+      /* orphaned bytes are reclaimable out-of-band; the profile is deleted regardless */
+    }
     return { id, deleted: true };
   }
 

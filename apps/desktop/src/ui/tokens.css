@@ -2,11 +2,13 @@
  * Lobster design tokens (UI-1).
  *
  * The single source of truth for color, spacing, typography, elevation, radii, and motion. The rest of
- * the app (including the legacy `styles.css`) consumes these variables, so re-theming — including the
- * dark theme below — happens here, not scattered across component CSS. Loaded BEFORE styles.css.
+ * the app (including the legacy `styles.css`) consumes these variables. The product is intentionally
+ * light-only; OS theme preferences and persisted theme state do not alter these values.
  */
 
 :root {
+  color-scheme: light;
+
   /* --- Brand + semantic palette (light) --------------------------------------------------------- */
   --brand-50: #f5f3ff;
   --brand-100: #ede9fe;
@@ -55,16 +57,17 @@
   --text: var(--n-900);
   --text-muted: var(--n-500);
   --text-soft: var(--n-400);
-  --red: var(--brand-500);
-  --red-hover: var(--brand-600);
-  --red-soft: var(--brand-50);
+  --accent: var(--brand-500);
+  --accent-hover: var(--brand-600);
+  --accent-soft: var(--brand-50);
   --on-brand: #ffffff;
 
   /* --- Typography ------------------------------------------------------------------------------- */
   --font:
     'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo,
-    Consolas, monospace;
+  --font-mono:
+    ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo, Consolas,
+    monospace;
   --fs-xs: 10px;
   --fs-sm: 11px;
   --fs-base: 12px; /* slightly reduced global UI size */
@@ -118,38 +121,6 @@
   --z-palette: 100;
 
   --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--brand-400);
-}
-
-/* --- Dark theme --------------------------------------------------------------------------------- */
-:root[data-theme='dark'] {
-  --bg: #0e121a;
-  --sidebar: #141924;
-  --surface: #171d29;
-  --surface-muted: #1b2231;
-  --surface-raised: #1e2634;
-  --active-muted: #253044;
-  --overlay: rgba(0, 0, 0, 0.6);
-  --border: #26303f;
-  --border-strong: #33404f;
-  --text: #eef2f7;
-  --text-muted: #98a3b3;
-  --text-soft: #6b7686;
-  --red: #a78bfa;
-  --red-hover: #c4b5fd;
-  --red-soft: #241a40;
-  --on-brand: #ffffff;
-
-  --green-soft: #10241a;
-  --amber-soft: #241a0d;
-  --danger-soft: #2a1414;
-  --info-soft: #101c30;
-
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
-  --shadow-md: 0 6px 16px rgba(0, 0, 0, 0.5);
-  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.6);
-  --shadow-focus: 0 0 0 3px rgba(255, 90, 90, 0.28);
-  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px var(--red);
 }
 
 @media (prefers-reduced-motion: reduce) {

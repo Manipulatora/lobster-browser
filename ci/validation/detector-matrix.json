@@ -1,0 +1,436 @@
+{
+  "schemaVersion": 1,
+  "matrixVersion": "2026-07-11.1",
+  "minimumIndependentProviders": 10,
+  "verdicts": ["pass", "fail", "inconclusive", "not_run"],
+  "evidencePolicy": {
+    "maxAgeHours": 24,
+    "requireHeadful": true,
+    "requireExplicitGpuMode": "gpu",
+    "forbidSoftwareRenderer": true,
+    "requireExpectedAndObservedProxyIp": true,
+    "requireExpectedAndObservedTimezone": true,
+    "notes": [
+      "A pass means only that the tool-specific criterion was met; it is not a universal anti-bot pass.",
+      "Public tester availability, a page load, or an identifier being computed is never scored as pass.",
+      "Commercial WAF acceptance requires an owned test tenant and server-side outcome telemetry; public diagnostics cannot substitute for it."
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "proxy-headful-uncontrolled",
+      "label": "Proxied headful profile without automation attachment",
+      "purpose": "Measure the exact product profile a customer launches, before DevTools, WebDriver, or CDP attaches.",
+      "required": true
+    },
+    {
+      "id": "proxy-headful-controlled",
+      "label": "Proxied headful profile through the supported automation endpoint",
+      "purpose": "Measure automation artifacts introduced by the product's documented CDP/Selenium connection path.",
+      "required": true
+    },
+    {
+      "id": "same-profile-relaunch",
+      "label": "Same profile after clean stop and relaunch",
+      "purpose": "Prove that stable surfaces and identifiers persist for one profile.",
+      "required": true
+    },
+    {
+      "id": "different-profile",
+      "label": "Second profile with a different seed",
+      "purpose": "Prove that profile-scoped farbling and identifiers are distinct without becoming internally inconsistent.",
+      "required": true
+    },
+    {
+      "id": "network-negative-control",
+      "label": "Same host without the proxy",
+      "purpose": "Prove that IP, DNS, and WebRTC tests can distinguish the host path from the protected proxy path.",
+      "required": true
+    },
+    {
+      "id": "stock-browser-control",
+      "label": "Stock stable Chromium on the same host and network",
+      "purpose": "Calibrate detector drift and prevent Lobium from being blamed for tester or runner-specific behavior.",
+      "required": true
+    }
+  ],
+  "tools": [
+    {
+      "id": "sannysoft",
+      "name": "Sannysoft Antibot",
+      "providerId": "sannysoft-intoli",
+      "provider": "Sannysoft / Intoli test set",
+      "tier": "required",
+      "kind": "public-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "sannysoft",
+      "routes": ["https://bot.sannysoft.com/"],
+      "sourceUrl": "https://bot.sannysoft.com/",
+      "signals": [
+        "webdriver",
+        "automation artifacts",
+        "plugins",
+        "permissions",
+        "languages",
+        "WebGL",
+        "canvas"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "stock-browser-control"
+      ],
+      "criterion": "All scored cells are green; any allowance belongs only to the historical compatibility gate, never to release evidence.",
+      "limitations": "A small public JavaScript test suite. It does not measure IP reputation, behavior, TLS, HTTP/2, or commercial WAF acceptance."
+    },
+    {
+      "id": "creepjs",
+      "name": "CreepJS",
+      "providerId": "abrahamjuliot-creepjs",
+      "provider": "abrahamjuliot",
+      "tier": "required",
+      "kind": "open-source-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "creepjs",
+      "routes": ["https://abrahamjuliot.github.io/creepjs/"],
+      "sourceUrl": "https://github.com/abrahamjuliot/creepjs",
+      "signals": [
+        "prototype lies",
+        "cross-context coherence",
+        "canvas",
+        "WebGL",
+        "audio",
+        "fonts",
+        "screen",
+        "timezone"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "same-profile-relaunch",
+        "different-profile",
+        "stock-browser-control"
+      ],
+      "criterion": "Fingerprint data is available, totalLies is zero, and worker/iframe values agree with the main context; compare stable and distinct surfaces across scenarios.",
+      "limitations": "Zero lies is a fingerprint-consistency result, not a bot-management allow verdict. Only the GitHub Pages deployment is official."
+    },
+    {
+      "id": "fpscanner",
+      "name": "FPScanner",
+      "providerId": "antoine-vastel",
+      "provider": "Antoine Vastel",
+      "tier": "required",
+      "kind": "open-source-bot-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": ["https://fpscanner.com/demo/"],
+      "sourceUrl": "https://github.com/antoinevastel/fpscanner",
+      "signals": [
+        "webdriver",
+        "CDP",
+        "Playwright",
+        "cross-context mismatches",
+        "GPU mismatch",
+        "SwiftShader",
+        "timezone"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "stock-browser-control"
+      ],
+      "criterion": "fastBotDetection is false and every individual detection flag is false; the structured fingerprint remains coherent across the requested contexts.",
+      "limitations": "Client-side building blocks, not an end-to-end fraud decision. The controlled scenario may legitimately expose product automation defects that the uncontrolled scenario does not."
+    },
+    {
+      "id": "deviceinfo-bot",
+      "name": "Device and Browser Info bot test",
+      "providerId": "antoine-vastel",
+      "provider": "Antoine Vastel / Device and Browser Info",
+      "tier": "required",
+      "kind": "public-bot-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "deviceinfo-bot",
+      "routes": ["https://deviceandbrowserinfo.com/are_you_a_bot"],
+      "sourceUrl": "https://deviceandbrowserinfo.com/are_you_a_bot",
+      "signals": [
+        "webdriver",
+        "iframe and worker consistency",
+        "CDP",
+        "client hints",
+        "GPU features",
+        "Playwright"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "stock-browser-control"
+      ],
+      "criterion": "The returned JSON contains isBot:false and every detail flag is false.",
+      "limitations": "The fingerprinting test explicitly excludes IP reputation and behavior; treat it as the same provider family as FPScanner, not as an independent vote."
+    },
+    {
+      "id": "fingerprintjs",
+      "name": "FingerprintJS open source",
+      "providerId": "fingerprint",
+      "provider": "Fingerprint",
+      "tier": "required",
+      "kind": "open-source-identifier",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": ["https://fingerprintjs.github.io/fingerprintjs/"],
+      "sourceUrl": "https://github.com/fingerprintjs/fingerprintjs",
+      "signals": ["visitor identifier", "component stability", "cross-profile distinctness"],
+      "requiredScenarios": ["same-profile-relaunch", "different-profile", "stock-browser-control"],
+      "criterion": "The component set is complete; the same profile is stable across relaunch; different profiles differ on intended profile-scoped surfaces. Merely obtaining a visitorId is inconclusive.",
+      "limitations": "FingerprintJS OSS identifies a browser and does not return a bot verdict. Its maintainers document lower accuracy than the commercial product."
+    },
+    {
+      "id": "botd",
+      "name": "BotD",
+      "providerId": "fingerprint",
+      "provider": "Fingerprint",
+      "tier": "required",
+      "kind": "open-source-bot-diagnostic",
+      "capturePolicy": "self-host-pinned",
+      "parser": "manual",
+      "routes": [],
+      "sourceUrl": "https://github.com/fingerprintjs/botd",
+      "signals": ["automation frameworks", "headless browsers", "browser spoofing"],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "stock-browser-control"
+      ],
+      "criterion": "A pinned self-hosted build returns a non-bot result in both Lobium scenarios and detects the deliberately automated negative control used by the lab.",
+      "limitations": "Same provider family as FingerprintJS. A self-hosted build must record the exact package version/commit and include a positive detection control."
+    },
+    {
+      "id": "thumbmarkjs",
+      "name": "ThumbmarkJS",
+      "providerId": "thumbmarkjs",
+      "provider": "ThumbmarkJS",
+      "tier": "required",
+      "kind": "open-source-identifier",
+      "capturePolicy": "self-host-pinned",
+      "parser": "manual",
+      "routes": [],
+      "sourceUrl": "https://github.com/thumbmarkjs/thumbmarkjs",
+      "signals": [
+        "canvas",
+        "WebGL",
+        "audio",
+        "fonts",
+        "permissions",
+        "screen",
+        "locale",
+        "identifier stability"
+      ],
+      "requiredScenarios": ["same-profile-relaunch", "different-profile", "stock-browser-control"],
+      "criterion": "A pinned OSS build returns complete components; the same profile is stable and different profiles are distinct on intended surfaces without cross-surface contradictions.",
+      "limitations": "The OSS thumbmark is an identifier, not a bot verdict. Server-side TLS, headers, IP classification, and visitorId require the separate API product."
+    },
+    {
+      "id": "browserleaks",
+      "name": "BrowserLeaks",
+      "providerId": "browserleaks",
+      "provider": "BrowserLeaks",
+      "tier": "required",
+      "kind": "public-leak-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": [
+        "https://browserleaks.com/ip",
+        "https://browserleaks.com/webrtc",
+        "https://browserleaks.com/canvas",
+        "https://browserleaks.com/webgl"
+      ],
+      "sourceUrl": "https://browserleaks.com/",
+      "signals": ["egress IP", "WebRTC local/public IP", "canvas", "WebGL", "headers", "timezone"],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "same-profile-relaunch",
+        "different-profile",
+        "network-negative-control"
+      ],
+      "criterion": "Proxy runs expose only the expected proxy egress; no host IP appears in WebRTC; geo/timezone/headers agree; stable and distinct rendering hashes follow the scenario contract.",
+      "limitations": "A suite of raw diagnostics, not a single trustworthy/untrustworthy verdict. DNS resolution still needs a system/tunnel-level control outside a browser-only proxy."
+    },
+    {
+      "id": "pixelscan",
+      "name": "Pixelscan",
+      "providerId": "pixelscan",
+      "provider": "Pixelscan",
+      "tier": "required",
+      "kind": "public-consistency-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": ["https://pixelscan.net/"],
+      "sourceUrl": "https://pixelscan.net/manifest",
+      "signals": [
+        "fingerprint consistency",
+        "IP and proxy",
+        "DNS",
+        "WebRTC",
+        "bot signals",
+        "blacklist"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "network-negative-control",
+        "stock-browser-control"
+      ],
+      "criterion": "No fingerprint inconsistency or automation warning; IP, DNS, location, and WebRTC sections agree with the expected proxy and negative control.",
+      "limitations": "Live-only and UI-driven. Preserve screenshots and raw values because labels and scoring can change without notice."
+    },
+    {
+      "id": "iphey",
+      "name": "Iphey",
+      "providerId": "iphey-mixvisit",
+      "provider": "Iphey / MixVisit",
+      "tier": "required",
+      "kind": "public-trust-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": ["https://iphey.com/"],
+      "sourceUrl": "https://iphey.com/",
+      "signals": ["browser", "OS", "location", "IP", "hardware", "software", "DNS", "automation"],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "network-negative-control",
+        "stock-browser-control"
+      ],
+      "criterion": "Every section reports the expected coherent identity with no low-trust reason; record the raw section values, not only the overall badge.",
+      "limitations": "Opaque live scoring. A green badge is advisory and cannot replace raw surface assertions or an owned WAF result."
+    },
+    {
+      "id": "amiunique",
+      "name": "AmIUnique",
+      "providerId": "university-lille",
+      "provider": "University of Lille",
+      "tier": "required",
+      "kind": "academic-population-diagnostic",
+      "capturePolicy": "manual-consent",
+      "parser": "manual",
+      "routes": ["https://www.amiunique.org/fingerprint"],
+      "sourceUrl": "https://www.amiunique.org/",
+      "signals": ["population rarity", "HTTP headers", "JavaScript attributes", "history"],
+      "requiredScenarios": ["same-profile-relaunch", "different-profile", "stock-browser-control"],
+      "criterion": "No impossible or contradictory attributes; record rarity as a trend relative to the stock control, not as a universal threshold.",
+      "limitations": "Uniqueness depends on the site's changing volunteer population. The test submits fingerprint data and requires reviewer consent."
+    },
+    {
+      "id": "cover-your-tracks",
+      "name": "EFF Cover Your Tracks",
+      "providerId": "eff",
+      "provider": "Electronic Frontier Foundation",
+      "tier": "required",
+      "kind": "privacy-population-diagnostic",
+      "capturePolicy": "manual-consent",
+      "parser": "manual",
+      "routes": ["https://coveryourtracks.eff.org/"],
+      "sourceUrl": "https://coveryourtracks.eff.org/about",
+      "signals": [
+        "fingerprintability",
+        "entropy",
+        "headers",
+        "canvas",
+        "WebGL",
+        "fonts",
+        "tracker protection"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "same-profile-relaunch",
+        "different-profile",
+        "stock-browser-control"
+      ],
+      "criterion": "Review detailed attributes for coherence and compare entropy to the stock control. Do not equate privacy protection or low uniqueness with commercial anti-bot acceptance.",
+      "limitations": "A privacy and tracker-protection research test, not an anti-bot detector. Running it contributes anonymous measurements under EFF's stated policy and requires reviewer consent."
+    },
+    {
+      "id": "webbrowsertools",
+      "name": "WebBrowserTools",
+      "providerId": "webbrowsertools",
+      "provider": "WebBrowserTools",
+      "tier": "required",
+      "kind": "public-cross-context-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": [
+        "https://webbrowsertools.com/timezone/",
+        "https://webbrowsertools.com/canvas-fingerprint/",
+        "https://webbrowsertools.com/webgl-fingerprint/",
+        "https://webbrowsertools.com/webgpu-fingerprint/",
+        "https://webbrowsertools.com/test-webrtc-leak/"
+      ],
+      "sourceUrl": "https://webbrowsertools.com/",
+      "signals": [
+        "timezone cross-context",
+        "canvas manipulation",
+        "WebGL manipulation",
+        "WebGPU",
+        "WebRTC"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "same-profile-relaunch",
+        "different-profile",
+        "network-negative-control"
+      ],
+      "criterion": "Normal, iframe, sandbox, eval/function, rendering, and WebRTC observations remain coherent with the profile and proxy; no host identity appears.",
+      "limitations": "The site's claims about aggressive extraction are not a formal guarantee. Record raw values and compare them with local probes and BrowserLeaks."
+    },
+    {
+      "id": "ipleak",
+      "name": "IPLeak.net",
+      "providerId": "airvpn",
+      "provider": "AirVPN",
+      "tier": "required",
+      "kind": "public-network-leak-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": ["https://ipleak.net/"],
+      "sourceUrl": "https://ipleak.net/",
+      "signals": ["IPv4 and IPv6", "WebRTC", "DNS resolvers", "geolocation", "headers"],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "network-negative-control"
+      ],
+      "criterion": "Proxy runs expose the expected egress only; WebRTC and DNS do not reveal the host ISP/location; the negative control reveals the expected different path.",
+      "limitations": "Browser proxies do not necessarily tunnel operating-system DNS. Interpret DNS results against the product's documented proxy model and a tunnel-level test when required."
+    },
+    {
+      "id": "browserscan",
+      "name": "BrowserScan",
+      "providerId": "browserscan",
+      "provider": "BrowserScan",
+      "tier": "required",
+      "kind": "public-bot-and-transport-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": ["https://www.browserscan.net/bot-detection", "https://www.browserscan.net/tls"],
+      "sourceUrl": "https://www.browserscan.net/tools",
+      "signals": [
+        "webdriver",
+        "CDP",
+        "navigator",
+        "client hints",
+        "TLS JA3/JA4",
+        "HTTP/2 fingerprint"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "stock-browser-control"
+      ],
+      "criterion": "No bot flag; navigator/client-hint values agree; TLS and HTTP/2 identify the real shipped Chromium/Lobium family and do not contradict the claimed UA major.",
+      "limitations": "Live and opaque. Transport fingerprints should be compared with the same Lobium build and stock control, not matched to a hand-picked hash."
+    }
+  ]
+}

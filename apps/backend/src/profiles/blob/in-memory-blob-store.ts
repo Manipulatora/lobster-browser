@@ -60,4 +60,8 @@ export class InMemoryBlobStore implements BlobStore {
     const stored = this.byKey.get(key);
     return stored ? { version: stored.version } : null;
   }
+
+  async deleteAll(key: string): Promise<void> {
+    this.byKey.delete(key);
+  }
 }

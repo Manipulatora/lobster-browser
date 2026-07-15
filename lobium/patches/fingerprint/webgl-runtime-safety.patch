@@ -1,0 +1,174 @@
+Lobium — WebGL runtime capability safety.
+
+Never advertise a configured WebGL capability which the active GL backend cannot execute. Numeric
+MAX_* values are clamped to the backend and configured extension lists are intersected with extensions
+the backend can actually enable. This prevents heavy 3D engines from selecting 16K resources or an
+unsupported extension on an 8K SwiftShader host, while retaining exact configured values on capable
+hardware. Requires core/config-channel.patch and fingerprint/host-gpu-profile.patch.
+
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4002,45 +4002,97 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+                                                     GLenum pname) {
+   if (isContextLost())
+     return ScriptValue::CreateNull(script_state->GetIsolate());
+-  // Lobium: override the numeric GPU limits (ENG-8) so MAX_* / viewport / aliased ranges agree with the
+-  // spoofed UNMASKED_RENDERER string instead of leaking the real (or software) backend's caps — a
+-  // SwiftShader-shaped cap next to a real-GPU renderer is a direct cross-check tell. Only config-provided
+-  // caps are intercepted; every other pname falls through to the normal driver query below.
++  // Lobium: expose persona limits only when the active backend can actually satisfy them. Advertising
++  // a 16K texture/renderbuffer limit over an 8K SwiftShader backend makes engines allocate resources
++  // which the GL implementation must reject, causing missing 3D components or a lost context. Taking
++  // the intersection preserves the configured (lower) persona value on a capable GPU while never
++  // over-promising what this executable can allocate. Every other pname falls through unchanged.
+   if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
+       cfg && cfg->webgl.caps.present) {
+     const auto& caps = cfg->webgl.caps;
++    const auto clamped_integer_cap = [&](GLenum cap_name,
++                                         GLint configured) -> GLint {
++      GLint backend = 0;
++      ContextGL()->GetIntegerv(cap_name, &backend);
++      if (configured <= 0 || backend <= 0) {
++        return backend;
++      }
++      return std::min(configured, backend);
++    };
+     switch (pname) {
+       case GL_MAX_TEXTURE_SIZE:
+-        return WebGLAny(script_state, static_cast<GLint>(caps.max_texture_size));
++        return WebGLAny(script_state,
++                        clamped_integer_cap(pname, caps.max_texture_size));
+       case GL_MAX_CUBE_MAP_TEXTURE_SIZE:
+-        return WebGLAny(script_state, static_cast<GLint>(caps.max_cube_map_texture_size));
++        return WebGLAny(
++            script_state,
++            clamped_integer_cap(pname, caps.max_cube_map_texture_size));
+       case GL_MAX_RENDERBUFFER_SIZE:
+-        return WebGLAny(script_state, static_cast<GLint>(caps.max_renderbuffer_size));
++        return WebGLAny(
++            script_state,
++            clamped_integer_cap(pname, caps.max_renderbuffer_size));
+       case GL_MAX_VERTEX_ATTRIBS:
+-        return WebGLAny(script_state, static_cast<GLint>(caps.max_vertex_attribs));
++        return WebGLAny(script_state,
++                        clamped_integer_cap(pname, caps.max_vertex_attribs));
+       case GL_MAX_VERTEX_UNIFORM_VECTORS:
+-        return WebGLAny(script_state, static_cast<GLint>(caps.max_vertex_uniform_vectors));
++        return WebGLAny(
++            script_state,
++            clamped_integer_cap(pname, caps.max_vertex_uniform_vectors));
+       case GL_MAX_FRAGMENT_UNIFORM_VECTORS:
+-        return WebGLAny(script_state, static_cast<GLint>(caps.max_fragment_uniform_vectors));
++        return WebGLAny(
++            script_state,
++            clamped_integer_cap(pname, caps.max_fragment_uniform_vectors));
+       case GL_MAX_VARYING_VECTORS:
+-        return WebGLAny(script_state, static_cast<GLint>(caps.max_varying_vectors));
++        return WebGLAny(script_state,
++                        clamped_integer_cap(pname, caps.max_varying_vectors));
+       case GL_MAX_TEXTURE_IMAGE_UNITS:
+-        return WebGLAny(script_state, static_cast<GLint>(caps.max_texture_image_units));
++        return WebGLAny(
++            script_state,
++            clamped_integer_cap(pname, caps.max_texture_image_units));
+       case GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS:
+-        return WebGLAny(script_state, static_cast<GLint>(caps.max_vertex_texture_image_units));
++        return WebGLAny(
++            script_state,
++            clamped_integer_cap(pname, caps.max_vertex_texture_image_units));
+       case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
+-        return WebGLAny(script_state, static_cast<GLint>(caps.max_combined_texture_image_units));
++        return WebGLAny(
++            script_state,
++            clamped_integer_cap(pname, caps.max_combined_texture_image_units));
+       case GL_MAX_VIEWPORT_DIMS: {
+-        const GLint dims[2] = {static_cast<GLint>(caps.max_viewport_dims[0]),
+-                               static_cast<GLint>(caps.max_viewport_dims[1])};
++        GLint backend[2] = {0, 0};
++        ContextGL()->GetIntegerv(pname, backend);
++        const GLint dims[2] = {
++            caps.max_viewport_dims[0] > 0
++                ? std::min(static_cast<GLint>(caps.max_viewport_dims[0]),
++                           backend[0])
++                : backend[0],
++            caps.max_viewport_dims[1] > 0
++                ? std::min(static_cast<GLint>(caps.max_viewport_dims[1]),
++                           backend[1])
++                : backend[1]};
+         return WebGLAny(script_state, DOMInt32Array::Create(base::span(dims)));
+       }
+       case GL_ALIASED_LINE_WIDTH_RANGE: {
+-        const GLfloat r[2] = {caps.aliased_line_width_range[0], caps.aliased_line_width_range[1]};
++        GLfloat backend[2] = {0, 0};
++        ContextGL()->GetFloatv(pname, backend);
++        GLfloat r[2] = {
++            std::max(caps.aliased_line_width_range[0], backend[0]),
++            std::min(caps.aliased_line_width_range[1], backend[1])};
++        if (r[0] > r[1]) {
++          r[0] = backend[0];
++          r[1] = backend[1];
++        }
+         return WebGLAny(script_state, DOMFloat32Array::Create(base::span(r)));
+       }
+       case GL_ALIASED_POINT_SIZE_RANGE: {
+-        const GLfloat r[2] = {caps.aliased_point_size_range[0], caps.aliased_point_size_range[1]};
++        GLfloat backend[2] = {0, 0};
++        ContextGL()->GetFloatv(pname, backend);
++        GLfloat r[2] = {
++            std::max(caps.aliased_point_size_range[0], backend[0]),
++            std::min(caps.aliased_point_size_range[1], backend[1])};
++        if (r[0] > r[1]) {
++          r[0] = backend[0];
++          r[1] = backend[1];
++        }
+         return WebGLAny(script_state, DOMFloat32Array::Create(base::span(r)));
+       }
+       default:
+@@ -4622,7 +4674,19 @@ WebGLShaderPrecisionFormat* WebGLRenderingContextBase::getShaderPrecisionFormat(
+     }
+     if (fmt) {
++      GLint backend_range[2] = {0, 0};
++      GLint backend_precision = 0;
++      ContextGL()->GetShaderPrecisionFormat(shader_type, precision_type,
++                                            backend_range,
++                                            &backend_precision);
++      const auto clamped_precision = [](GLint configured,
++                                        GLint backend) -> GLint {
++        return configured > 0 && backend > 0 ? std::min(configured, backend)
++                                             : backend;
++      };
+       return MakeGarbageCollected<WebGLShaderPrecisionFormat>(
+-          fmt->range_min, fmt->range_max, fmt->precision);
++          clamped_precision(fmt->range_min, backend_range[0]),
++          clamped_precision(fmt->range_max, backend_range[1]),
++          clamped_precision(fmt->precision, backend_precision));
+     }
+   }
+ 
+@@ -4644,13 +4708,23 @@ WebGLRenderingContextBase::getSupportedExtensions() {
+   if (isContextLost())
+     return std::nullopt;
+ 
+-  // Lobium HC-4: exact persona extension list (empty config = host enumeration).
++  // Lobium HC-4: intersect the persona list with extensions the active backend can actually enable.
++  // Returning unsupported configured names makes getSupportedExtensions() advertise an extension
++  // while getExtension() returns null, and 3D engines commonly treat that contradiction as support.
++  // Preserve configured ordering so a capable backend still exposes the exact persona sequence.
+   if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
+       cfg && !cfg->webgl.extensions.empty()) {
+     Vector<String> configured;
+     configured.reserve(static_cast<wtf_size_t>(cfg->webgl.extensions.size()));
+     for (const std::string& ext : cfg->webgl.extensions) {
+-      configured.push_back(String::FromUtf8(ext));
++      const String name = String::FromUtf8(ext);
++      for (ExtensionTracker* tracker : extensions_) {
++        if (tracker->MatchesName(name) &&
++            ExtensionSupportedAndAllowed(tracker)) {
++          configured.push_back(tracker->ExtensionName());
++          break;
++        }
++      }
+     }
+     return configured;
+   }

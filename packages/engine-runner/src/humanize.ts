@@ -1,5 +1,5 @@
 import { hashStringToUint32, mulberry32 } from '@lobster/fingerprint';
-import type { CdpSession } from './cdp-fingerprint.js';
+import type { CdpSession } from './cdp-client.js';
 
 /**
  * Human-like input generation for the automation layer (MASTER_PLAN §5 "Human-like input").

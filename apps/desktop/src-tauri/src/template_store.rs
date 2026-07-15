@@ -1,7 +1,7 @@
 //! Local profile-template catalog persisted in SQLite.
 
 use anyhow::Result;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
 
 pub const SCHEMA: &str = "
@@ -83,6 +83,14 @@ fn row_to_template(row: &Row) -> rusqlite::Result<ProfileTemplate> {
     let cookies_json: Option<String> = row.get("cookies_import")?;
     let extensions_json: Option<String> = row.get("extensions")?;
     let tags_json: String = row.get("tags")?;
+    let cookies_import = cookies_json
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .map(|mut value| {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("rawText");
+            }
+            value
+        });
     Ok(ProfileTemplate {
         id: row.get("id")?,
         name: row.get("name")?,
@@ -94,7 +102,7 @@ fn row_to_template(row: &Row) -> rusqlite::Result<ProfileTemplate> {
         proxy_label: row.get("proxy_label")?,
         proxy_detail: row.get("proxy_detail")?,
         fingerprint_overrides: overrides_json.and_then(|s| serde_json::from_str(&s).ok()),
-        cookies_import: cookies_json.and_then(|s| serde_json::from_str(&s).ok()),
+        cookies_import,
         extensions: extensions_json.and_then(|s| serde_json::from_str(&s).ok()),
         tags: serde_json::from_str(&tags_json).unwrap_or_default(),
         created_at: row.get("created_at")?,
@@ -108,6 +116,33 @@ fn to_text(value: &Option<serde_json::Value>) -> Option<String> {
 
 pub fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
+    // Legacy templates must not retain cookie payloads. Keep only non-secret import metadata.
+    let mut stmt = conn.prepare(
+        "SELECT id, cookies_import FROM profile_templates WHERE cookies_import IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut sanitized = Vec::new();
+    for row in rows {
+        let (id, raw) = row?;
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if value
+                .as_object_mut()
+                .and_then(|object| object.remove("rawText"))
+                .is_some()
+            {
+                sanitized.push((id, value.to_string()));
+            }
+        }
+    }
+    drop(stmt);
+    for (id, value) in sanitized {
+        conn.execute(
+            "UPDATE profile_templates SET cookies_import = ?2 WHERE id = ?1",
+            params![id, value],
+        )?;
+    }
     Ok(())
 }
 
@@ -122,6 +157,29 @@ pub fn list(conn: &Connection) -> Result<Vec<ProfileTemplate>> {
 }
 
 pub fn create(conn: &Connection, input: CreateProfileTemplateInput) -> Result<ProfileTemplate> {
+    const PROFILE_OS_TARGETS: &[&str] = &[
+        "windows",
+        "macos",
+        "macos_intel",
+        "macos_arm",
+        "linux",
+        "android",
+    ];
+    if !PROFILE_OS_TARGETS.contains(&input.os.as_str()) {
+        anyhow::bail!(
+            "desktop templates cannot use OS target `{}`; allowed: {}",
+            input.os,
+            PROFILE_OS_TARGETS.join(", ")
+        );
+    }
+    if input
+        .cookies_import
+        .as_ref()
+        .and_then(|value| value.get("rawText"))
+        .is_some()
+    {
+        anyhow::bail!("cookie rawText is forbidden in profile templates");
+    }
     let id = format!("tpl_{}", uuid::Uuid::new_v4().simple());
     let presets = input.preset_parameters.unwrap_or_default();
     let tags = input.tags.unwrap_or_default();
@@ -190,5 +248,51 @@ mod tests {
         assert_eq!(template.preset_parameters, vec!["User Agent", "Extensions"]);
         assert_eq!(template.proxy_id.as_deref(), Some("px_1"));
         assert_eq!(list(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn template_cookie_raw_text_is_forbidden_and_legacy_rows_are_scrubbed() {
+        let conn = mem();
+        let rejected = create(
+            &conn,
+            CreateProfileTemplateInput {
+                name: "Secret template".to_string(),
+                engine: "lobium".to_string(),
+                os: "linux".to_string(),
+                os_version: None,
+                preset_parameters: None,
+                proxy_id: None,
+                proxy_label: None,
+                proxy_detail: None,
+                fingerprint_overrides: None,
+                cookies_import: Some(serde_json::json!({
+                    "mode": "merge", "rawText": "session=secret"
+                })),
+                extensions: None,
+                tags: None,
+            },
+        );
+        assert!(rejected.is_err());
+
+        conn.execute(
+            "INSERT INTO profile_templates \
+             (id, name, engine, os, preset_parameters, cookies_import, tags, created_at, updated_at) \
+             VALUES ('legacy', 'Legacy', 'lobium', 'linux', '[]', ?1, '[]', 'now', 'now')",
+            [r#"{"mode":"merge","rawText":"secret-cookie","parsedCount":1}"#],
+        )
+        .unwrap();
+        init(&conn).unwrap();
+        let raw: String = conn
+            .query_row(
+                "SELECT cookies_import FROM profile_templates WHERE id = 'legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!raw.contains("secret-cookie"));
+        assert_eq!(
+            list(&conn).unwrap()[0].cookies_import.as_ref().unwrap()["parsedCount"],
+            1
+        );
     }
 }

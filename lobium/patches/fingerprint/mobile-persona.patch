@@ -1,0 +1,39 @@
+Lobium — Android mobile persona parity for desktop-hosted emulation.
+
+Desktop Chromium exposes its built-in PDF plugin list. Real Android Chromium does not expose that
+desktop plugin surface. When the native config declares uaMobile, suppress the fixed PDF plugins and
+pdfViewerEnabled so navigator.plugins/mimeTypes agree with the Android persona.
+
+diff --git a/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc b/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc
+--- a/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc
++++ b/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc
+@@ -19,6 +19,7 @@
+ 
+ #include "third_party/blink/renderer/modules/plugins/dom_plugin_array.h"
+ 
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+@@ -53,6 +54,10 @@
+ }  // namespace
+ 
+ DOMPluginArray::DOMPluginArray(LocalDOMWindow* window) : window_(window) {
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->navigator.ua_mobile) {
++    return;
++  }
+   if (IsPdfViewerAvailable()) {
+     // See crbug.com/1164635 and https://github.com/whatwg/html/pull/6738.
+     // To reduce fingerprinting and make plugins/mimetypes more
+@@ -135,6 +140,10 @@
+ }
+ 
+ bool DOMPluginArray::IsPdfViewerAvailable() {
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->navigator.ua_mobile) {
++    return false;
++  }
+   auto* data = GetPluginData();
+   if (!data)
+     return false;

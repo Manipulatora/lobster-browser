@@ -99,7 +99,10 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
       assert.equal(members.length, 1);
 
       const forUser = await teams.findTeamsForUser(userId);
-      assert.ok(forUser.some((tm) => tm.id === teamId), 'membership resolves the team');
+      assert.ok(
+        forUser.some((tm) => tm.id === teamId),
+        'membership resolves the team',
+      );
       assert.equal(await teams.getMembership(teamId, `no-such-user-${runId}`), null);
     });
 
@@ -109,12 +112,47 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
         name: 'IT Profile',
         engine: 'lobium',
         os: 'linux',
+        osVersion: 'Ubuntu 24.04',
         fingerprintSeed: `seed-${runId}`,
+        fingerprintOverrides: { navigator: { hardwareConcurrency: 8 } },
+        proxyId: `proxy-${runId}`,
+        templateId: `template-${runId}`,
+        cookiesImport: {
+          mode: 'merge',
+          source: 'file',
+          fileName: 'cookies.txt',
+          parsedCount: 2,
+        },
+        extensions: [
+          {
+            source: 'chrome_web_store',
+            enabled: true,
+            id: 'abcdefghijklmnop',
+            name: 'Example',
+          },
+        ],
         tags: ['it', 'prisma'],
         folder: 'integration',
         notes: 'created by the BE-2 integration test',
       });
       assert.equal(created.fingerprintSeed, `seed-${runId}`);
+      assert.equal(created.osVersion, 'Ubuntu 24.04');
+      assert.equal(created.proxyId, `proxy-${runId}`);
+      assert.equal(created.templateId, `template-${runId}`);
+      assert.deepEqual(created.cookiesImport, {
+        mode: 'merge',
+        source: 'file',
+        fileName: 'cookies.txt',
+        parsedCount: 2,
+      });
+      assert.deepEqual(created.extensions, [
+        {
+          source: 'chrome_web_store',
+          enabled: true,
+          id: 'abcdefghijklmnop',
+          name: 'Example',
+        },
+      ]);
       assert.deepEqual(created.tags, ['it', 'prisma']);
 
       const fetched = await profiles.findById(teamId, created.id);
@@ -125,12 +163,27 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
 
       const updated = await profiles.update(teamId, created.id, {
         name: 'IT Profile v2',
+        osVersion: 'Ubuntu 24.10',
+        proxyId: `proxy-updated-${runId}`,
+        templateId: `template-updated-${runId}`,
+        cookiesImport: { mode: 'empty', parsedCount: 0 },
+        extensions: [{ source: 'unpacked', enabled: false, name: 'Local extension' }],
         notes: 'updated',
       });
       assert.equal(updated?.name, 'IT Profile v2');
       assert.equal(updated?.notes, 'updated');
+      assert.equal(updated?.osVersion, 'Ubuntu 24.10');
+      assert.equal(updated?.proxyId, `proxy-updated-${runId}`);
+      assert.equal(updated?.templateId, `template-updated-${runId}`);
+      assert.deepEqual(updated?.cookiesImport, { mode: 'empty', parsedCount: 0 });
+      assert.deepEqual(updated?.extensions, [
+        { source: 'unpacked', enabled: false, name: 'Local extension' },
+      ]);
       // Untouched metadata fields survive a partial update.
       assert.deepEqual(updated?.tags, ['it', 'prisma']);
+      assert.deepEqual(updated?.fingerprintOverrides, {
+        navigator: { hardwareConcurrency: 8 },
+      });
       // The seed — the profile's identity — is immutable through update.
       assert.equal(updated?.fingerprintSeed, `seed-${runId}`);
 
@@ -142,13 +195,16 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
       assert.equal((await profiles.findAllByTeam(teamId)).length, 0);
     });
 
-    await t.test('profiles: getProfileLimit reads the team subscription (null without one)', async () => {
-      assert.equal(await profiles.getProfileLimit(teamId), null);
-      await prisma.subscription.create({
-        data: { teamId, tier: 'pro', profileLimit: 25, status: 'active' },
-      });
-      assert.equal(await profiles.getProfileLimit(teamId), 25);
-    });
+    await t.test(
+      'profiles: getProfileLimit reads the team subscription (null without one)',
+      async () => {
+        assert.equal(await profiles.getProfileLimit(teamId), null);
+        await prisma.subscription.create({
+          data: { teamId, tier: 'pro', profileLimit: 25, status: 'active' },
+        });
+        assert.equal(await profiles.getProfileLimit(teamId), 25);
+      },
+    );
 
     await t.test('api keys: create, findByHash, touchLastUsed, team-scoped remove', async () => {
       const created = await apiKeys.create({

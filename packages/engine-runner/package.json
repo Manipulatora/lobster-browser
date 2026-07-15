@@ -29,7 +29,11 @@
     "@lobster/fingerprint": "*",
     "@lobster/proxy": "*",
     "@lobster/shared-types": "*",
-    "patchright": "^1.61.1",
-    "proxy-chain": "^3.0.0"
+    "proxy-chain": "^3.0.0",
+    "yauzl": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/yauzl": "^3.4.0",
+    "patchright": "^1.61.1"
   }
 }

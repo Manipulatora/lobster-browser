@@ -8,6 +8,7 @@ import type {
   ProfilesRepository,
   UpdateProfileRecord,
 } from './profiles.repository';
+import { sanitizeCookieImportMetadata } from './sanitize-cookie-import';
 
 /**
  * In-memory `ProfilesRepository` backed by a Map. The active implementation until a Postgres
@@ -28,8 +29,13 @@ export class InMemoryProfilesRepository implements ProfilesRepository {
       name: input.name,
       engine: input.engine,
       os: input.os,
+      osVersion: input.osVersion,
       fingerprintSeed: input.fingerprintSeed,
       fingerprintOverrides: input.fingerprintOverrides,
+      proxyId: input.proxyId,
+      templateId: input.templateId,
+      cookiesImport: sanitizeCookieImportMetadata(input.cookiesImport),
+      extensions: input.extensions,
       tags: input.tags,
       folder: input.folder,
       notes: input.notes,
@@ -61,7 +67,15 @@ export class InMemoryProfilesRepository implements ProfilesRepository {
       name: patch.name ?? existing.name,
       engine: patch.engine ?? existing.engine,
       os: patch.os ?? existing.os,
+      osVersion: patch.osVersion ?? existing.osVersion,
       fingerprintOverrides: patch.fingerprintOverrides ?? existing.fingerprintOverrides,
+      proxyId: patch.proxyId ?? existing.proxyId,
+      templateId: patch.templateId ?? existing.templateId,
+      cookiesImport:
+        patch.cookiesImport !== undefined
+          ? sanitizeCookieImportMetadata(patch.cookiesImport)
+          : existing.cookiesImport,
+      extensions: patch.extensions ?? existing.extensions,
       tags: patch.tags ?? existing.tags,
       folder: patch.folder ?? existing.folder,
       notes: patch.notes ?? existing.notes,

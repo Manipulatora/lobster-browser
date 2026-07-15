@@ -6,7 +6,7 @@ name: Real-GPU stealth gate
 # CreepJS situation had zero lies. This converts "proven on SwiftShader" into a real, falsifiable claim.
 #
 # This is NOT the ubuntu-latest CI (github-hosted runners have no GPU/Lobium binary). Set up the
-# self-hosted GPU runner per docs/specs/real-gpu-ci.md, then:
+# self-hosted GPU runner per docs/ENGINEERING.md (§4), then:
 #   - label it `gpu`
 #   - set repo variables: LOBSTER_LOBIUM_BIN, DISPLAY, and (optional) LOBSTER_ANGLE_BACKEND / VK_ICD_FILENAMES
 # The job is manual + nightly by default so a missing/asleep GPU box never blocks normal PR CI. Flip

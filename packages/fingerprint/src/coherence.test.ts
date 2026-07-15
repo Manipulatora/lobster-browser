@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import type { Fingerprint, GeoInfo } from '@lobster/shared-types';
+import type { Fingerprint, FingerprintOverrides, GeoInfo } from '@lobster/shared-types';
 import {
   applyGeoToFingerprint,
   DEVICE_MEMORY_VALUES,
   normalizeColorDepth,
   normalizeDeviceMemory,
+  resolveFingerprintPersonaModes,
   validateFingerprintCoherence,
 } from './coherence.js';
+import { applyOverrides } from './overrides.js';
 import { deriveFingerprint } from './derive.js';
 
 /** A coherent, freshly derived Windows fingerprint to mutate in the rule tests below. */
@@ -42,6 +44,61 @@ test('applyGeoToFingerprint aligns timezone/locale/languages with the proxy geo'
   assert.ok(out.locale.acceptLanguage.startsWith('de-DE'));
   assert.deepEqual(out.locale.geolocation, { latitude: 52.52, longitude: 13.4, accuracy: 100 });
   assert.deepEqual(validateFingerprintCoherence(out), []);
+});
+
+test('persona modes resolve independent manual/real/based-IP values without stale overrides', () => {
+  const base = deriveFingerprint('persona-modes', { os: 'windows', engine: 'lobium' });
+  const overrides: FingerprintOverrides = {
+    languageMode: 'manual',
+    timezoneMode: 'real',
+    geolocationMode: 'based_ip',
+    fontsMode: 'real',
+    navigator: { languages: ['fr-FR', 'fr'] },
+    locale: {
+      // A stale manual timezone must be undone when mode changes back to Real.
+      timezone: 'Asia/Tokyo',
+      geolocation: { latitude: 1, longitude: 2, accuracy: 3 },
+    },
+    fonts: ['Stale Manual Font'],
+  };
+  const overridden = applyOverrides(base, overrides);
+  const out = resolveFingerprintPersonaModes(base, overridden, overrides, {
+    ip: '203.0.113.7',
+    countryCode: 'DE',
+    timezone: 'Europe/Berlin',
+    latitude: 52.52,
+    longitude: 13.405,
+  });
+
+  assert.deepEqual(out.navigator.languages, ['fr-FR', 'fr']);
+  assert.equal(out.locale.locale, 'fr-FR');
+  assert.equal(out.locale.acceptLanguage, 'fr-FR,fr;q=0.9');
+  assert.equal(out.locale.timezone, base.locale.timezone, 'real mode restores the base timezone');
+  assert.deepEqual(out.locale.geolocation, {
+    latitude: 52.52,
+    longitude: 13.405,
+    accuracy: 100,
+  });
+  assert.deepEqual(out.fonts, base.fonts, 'real mode restores base fonts');
+});
+
+test('based-IP mode without resolved geo falls back to base, not stale manual values', () => {
+  const base = deriveFingerprint('persona-no-geo', { os: 'linux', engine: 'lobium' });
+  const overrides: FingerprintOverrides = {
+    languageMode: 'based_ip',
+    timezoneMode: 'based_ip',
+    geolocationMode: 'based_ip',
+    navigator: { languages: ['ja-JP', 'ja'] },
+    locale: {
+      timezone: 'Asia/Tokyo',
+      locale: 'ja-JP',
+      acceptLanguage: 'ja-JP,ja;q=0.9',
+      geolocation: { latitude: 1, longitude: 2, accuracy: 3 },
+    },
+  };
+  const out = resolveFingerprintPersonaModes(base, applyOverrides(base, overrides), overrides);
+  assert.deepEqual(out.navigator.languages, base.navigator.languages);
+  assert.deepEqual(out.locale, base.locale);
 });
 
 test('unmapped country derives the language from a real foreign timezone (no en-US mismatch)', () => {
@@ -80,11 +137,10 @@ test('a mapped foreign country (SE) gets its primary locale coherent with the ti
   assert.deepEqual(validateFingerprintCoherence(out), []);
 });
 
-test('flags a foreign timezone left next to an en-US locale (language-vs-timezone mismatch)', () => {
-  // The exact bug: only the timezone was applied from the proxy geo, leaving the seed-default en-US.
+test('allows a browser language different from the timezone country (normal multilingual/expat case)', () => {
   const fp = coherentBase();
-  fp.locale.timezone = 'Europe/Stockholm'; // base fixture is en-US / America/New_York
-  assertFlags(fp, /timezone "Europe\/Stockholm" implies language "sv"/);
+  fp.locale.timezone = 'Europe/Stockholm';
+  assert.deepEqual(validateFingerprintCoherence(fp), []);
 });
 
 test('flags a Sec-CH-UA brand version mismatched with the UA Chrome major', () => {

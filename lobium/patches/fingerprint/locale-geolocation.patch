@@ -1,0 +1,126 @@
+Lobium — native language and configured-geolocation consumers.
+
+NavigatorLanguage is shared by Window Navigator and every WorkerNavigator, including service workers,
+so one hook makes language/languages identical in all contexts. Accept-Language remains sourced from the
+pre-start profile preference written by the launcher (Chromium's canonical network-context path);
+Intl locale uses --lang and timezone uses inherited TZ, both process-wide.
+
+Configured geolocation replaces the provider's coordinates only after Chromium's normal secure-context
+and permission flow succeeds. This preserves real permission semantics while preventing the host
+location from leaking once access is granted.
+
+The renderer applies locale.locale to ICU before Blink/V8 initialization, so default Intl locale is
+identical even when Chromium's UI resource pack only has a language-level locale (for example `de`).
+
+diff --git a/content/renderer/render_thread_impl.cc b/content/renderer/render_thread_impl.cc
+--- a/content/renderer/render_thread_impl.cc
++++ b/content/renderer/render_thread_impl.cc
+@@ -21,6 +21,7 @@
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
++#include "base/i18n/rtl.h"
+ #include "base/lazy_instance.h"
+@@ -64,6 +65,7 @@
+ #include "cc/trees/layer_tree_settings.h"
+ #include "components/discardable_memory/client/client_discardable_shared_memory_manager.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "components/metrics/public/mojom/single_sample_metrics.mojom.h"
+ #include "components/metrics/single_sample_metrics.h"
+ #include "components/viz/common/features.h"
+@@ -556,6 +558,13 @@ void RenderThreadImpl::Init() {
+   // modify the definition of |ExposeRendererInterfacesToBrowser()| to ensure
+   // security review coverage.
+   mojo::BinderMap binders;
++  // Lobium: install the exact profile locale before Blink creates V8 isolates. --lang selects a
++  // Chromium UI resource locale and can collapse `de-DE` to `de`; setting ICU from the native profile
++  // keeps default Intl locale exact in windows, iframes, and every worker.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && !cfg->locale.locale.empty()) {
++    base::i18n::SetICUDefaultLocale(cfg->locale.locale);
++  }
+   InitializeWebKit(&binders);
+ 
+   vc_manager_ = std::make_unique<blink::WebVideoCaptureImplManager>();
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.cc b/third_party/blink/renderer/core/frame/navigator_language.cc
+--- a/third_party/blink/renderer/core/frame/navigator_language.cc
++++ b/third_party/blink/renderer/core/frame/navigator_language.cc
+@@ -5,6 +5,7 @@
+ #include "third_party/blink/renderer/core/frame/navigator_language.h"
+ 
+ #include "base/command_line.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "services/network/public/cpp/features.h"
+ #include "third_party/blink/public/common/switches.h"
+ #include "third_party/blink/renderer/core/frame/web_feature.h"
+@@ -69,6 +70,18 @@
+ }
+ 
+ void NavigatorLanguage::EnsureUpdatedLanguage() {
++  // Lobium: NavigatorLanguage backs Navigator and WorkerNavigator. Reading the config here therefore
++  // covers main frames, iframes, dedicated/shared workers, and service workers without a per-frame CDP
++  // override. Preserve configured order exactly.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && !cfg->navigator.languages.empty()) {
++    languages_.clear();
++    for (const std::string& language : cfg->navigator.languages)
++      languages_.push_back(String::FromUtf8(language));
++    languages_dirty_ = false;
++    return;
++  }
++
+   String accept_languages_override;
+   probe::ApplyAcceptLanguageOverride(execution_context_,
+                                      &accept_languages_override);
+diff --git a/third_party/blink/renderer/core/geolocation/geolocation.cc b/third_party/blink/renderer/core/geolocation/geolocation.cc
+--- a/third_party/blink/renderer/core/geolocation/geolocation.cc
++++ b/third_party/blink/renderer/core/geolocation/geolocation.cc
+@@ -32,6 +32,8 @@
+ 
+ #include "base/task/single_thread_task_runner.h"
++#include "base/time/time.h"
+ #include "build/build_config.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "services/device/public/mojom/geoposition.mojom-blink.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+@@ -66,6 +67,18 @@
+ 
+ Geoposition* CreateGeoposition(
+     const device::mojom::blink::Geoposition& position) {
++  // Lobium: preserve Chromium's normal permission/provider lifecycle but replace page-visible
++  // coordinates with the configured profile location after permission is granted. This helper feeds
++  // both getCurrentPosition and watchPosition in every frame.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->locale.has_geolocation) {
++    auto* coordinates = MakeGarbageCollected<GeolocationCoordinates>(
++        cfg->locale.latitude, cfg->locale.longitude, std::nullopt,
++        cfg->locale.accuracy, std::nullopt, std::nullopt, std::nullopt);
++    return MakeGarbageCollected<Geoposition>(
++        coordinates, ConvertTimeToEpochTimeStamp(position.timestamp));
++  }
++
+   auto* coordinates = MakeGarbageCollected<GeolocationCoordinates>(
+       position.latitude, position.longitude,
+       // Lowest point on land is at approximately -400 meters.
+@@ -571,6 +585,20 @@
+     return;
+   }
+ 
++  // Lobium: after the normal browser permission service has granted access, a configured profile
++  // location is a complete native provider. Do not wait for (or leak) the host OS/network provider,
++  // which is unavailable on many desktops and would otherwise make a configured location time out.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->locale.has_geolocation) {
++    auto* coordinates = MakeGarbageCollected<GeolocationCoordinates>(
++        cfg->locale.latitude, cfg->locale.longitude, std::nullopt,
++        cfg->locale.accuracy, std::nullopt, std::nullopt, std::nullopt);
++    last_position_ = MakeGarbageCollected<Geoposition>(
++        coordinates, ConvertTimeToEpochTimeStamp(base::Time::Now()));
++    PositionChanged();
++    return;
++  }
++
+   UpdateAccuracyHint();
+ 
+   if (!updating_) {

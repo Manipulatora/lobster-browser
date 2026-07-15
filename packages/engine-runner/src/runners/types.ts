@@ -35,6 +35,8 @@ export interface LaunchContext {
    * phone viewport.
    */
   isMobileProfile?: boolean;
+  /** Selects the portrait phone or landscape tablet native device shell. */
+  mobileFormFactor?: 'phone' | 'tablet';
   options: PersistentLaunchOptions;
   /** Internal/test CDP shape; production Lobium launcher does not use this for fingerprinting. */
   emulation: CdpEmulation;

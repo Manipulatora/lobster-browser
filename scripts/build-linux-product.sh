@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build + install a fully working Linux Lobster Browser product on this machine.
-# See docs/specs/linux-packaging.md
+# See docs/OPERATIONS.md (§2)
 
 set -euo pipefail
 
@@ -28,6 +28,7 @@ DEFAULT_LOBIUM_SRC=""
 for candidate in \
   "${LOBSTER_LOBIUM_SRC:-}" \
   "${LOBSTER_LOBIUM_DIR:-}" \
+  "$HOME_DIR/lobium-build/src/out/LobiumOfficial" \
   "$HOME_DIR/lobium-build/src/out/Lobium" \
   /home/chrome/lobium-build/src/out/Lobium; do
   if [[ -n "$candidate" && -x "$candidate/chrome" ]]; then
@@ -60,6 +61,21 @@ if [[ -z "$LOBSTER_LOBIUM_SRC" ]]; then
   exit 1
 fi
 
+# Never silently ship the fast-link development component build. Chromium's
+# own BUILDCONFIG documents that only the official tier is suitable for end
+# users; it removes release DCHECK overhead and enables the platform's PGO /
+# ThinLTO defaults. Prepackaged runtimes may not carry args.gn, but a local
+# Chromium out directory does and must prove the production configuration.
+LOBIUM_ARGS="$LOBSTER_LOBIUM_SRC/args.gn"
+if [[ -f "$LOBIUM_ARGS" ]]; then
+  if ! grep -Eq '^[[:space:]]*is_official_build[[:space:]]*=[[:space:]]*true' "$LOBIUM_ARGS" ||
+     ! grep -Eq '^[[:space:]]*is_component_build[[:space:]]*=[[:space:]]*false' "$LOBIUM_ARGS"; then
+    echo "error: refusing to package a development Lobium build: $LOBIUM_ARGS" >&2
+    echo "       build out/LobiumOfficial from lobium/gn-args.gn.example" >&2
+    exit 1
+  fi
+fi
+
 cd "$ROOT"
 mkdir -p "$DIST" "$INSTALL_ROOT" "$(dirname "$BIN_LINK")"
 
@@ -77,10 +93,13 @@ LOBSTER_LOBIUM_DIR="$LOBSTER_LOBIUM_SRC" bash scripts/package-lobium-runtime.sh 
 
 echo "==> [3/6] Vendor Node into Tauri resources"
 NODE_DST="$ROOT/apps/desktop/src-tauri/resources/node"
+FONTS_DST="$ROOT/apps/desktop/src-tauri/resources/fonts"
 rm -rf "$NODE_DST"
 mkdir -p "$NODE_DST/bin"
 cp -a "$NODE_BIN" "$NODE_DST/bin/node"
 chmod +x "$NODE_DST/bin/node"
+rm -rf "$FONTS_DST"
+cp -a "$DIST/lobium-runtime/fonts" "$FONTS_DST"
 # Keep dynamic linker happy for a copied system node (usually fine on same distro).
 "$NODE_DST/bin/node" -e "console.log('vendored node ok', process.version)"
 
@@ -93,6 +112,7 @@ cfg = json.loads(p.read_text())
 cfg.setdefault("bundle", {})["resources"] = {
     "resources/sidecar": "sidecar",
     "resources/node": "node",
+    "resources/fonts": "fonts",
 }
 cfg["bundle"]["targets"] = ["deb"]
 p.write_text(json.dumps(cfg, indent=2) + "\n")
@@ -145,7 +165,14 @@ cp -a "$DIST/lobium-runtime/." "$INSTALL_ROOT/lobium/"
   echo "export LOBSTER_SIDECAR=\"$INSTALL_ROOT/lib/sidecar/index.js\""
   echo "export LOBSTER_LOBIUM_BIN=\"$INSTALL_ROOT/lobium/chrome\""
   echo "export LOBSTER_LOBIUM_DIR=\"$INSTALL_ROOT/lobium\""
+  echo "export LOBSTER_FONTS_DIR=\"$INSTALL_ROOT/lobium/fonts\""
+  echo "export LOBSTER_EXTENSION_CACHE_DIR=\"$INSTALL_ROOT/extension-cache\""
   echo "export LOBSTER_GPU=\"${LOBSTER_GPU}\""
+  if [[ "${LOBSTER_GPU}" == "software" ]]; then
+    # This host has no physical GPU. Allow product-path calibration only as explicitly provisional;
+    # detector grading still rejects software renderers as release evidence.
+    echo "export LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION=\"1\""
+  fi
   echo "export LOBSTER_NO_SANDBOX=\"${LOBSTER_NO_SANDBOX:-1}\""
   # Inert Google API keys: their presence suppresses the "Google API keys are missing"
   # infobar without enabling any Google service call.
@@ -207,7 +234,7 @@ echo "======== Linux product ready ========"
 echo "Start:  lobster-browser"
 echo "Deb:    $DIST/$(basename "$DEB")"
 echo "Install:$INSTALL_ROOT"
-echo "Docs:   docs/specs/linux-packaging.md"
+echo "Docs:   docs/OPERATIONS.md (§2)"
 if [[ "$E2E_OK" -eq 1 ]]; then
   echo "E2E:    PASS"
 else

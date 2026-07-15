@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { validateHostCalibrationProfile } from '@lobster/fingerprint';
 import type { HostCalibrationProfile } from '@lobster/shared-types';
+import { allowProvisionalSoftwareGpu } from './gpu.js';
 
 /**
  * Persisted host-calibration store (HC-3).
@@ -29,7 +30,9 @@ export async function persistHostCalibration(
   path: string,
   profile: HostCalibrationProfile,
 ): Promise<void> {
-  const issues = validateHostCalibrationProfile(profile);
+  const issues = validateHostCalibrationProfile(profile, {
+    allowSoftwareRenderer: allowProvisionalSoftwareGpu(),
+  });
   if (issues.length > 0) {
     throw new Error(
       `refusing to persist an invalid host calibration (${issues.length}): ${issues.join('; ')}`,

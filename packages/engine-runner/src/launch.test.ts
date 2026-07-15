@@ -99,9 +99,21 @@ test('buildLaunchOptions honors an explicit WebRTC launch policy', () => {
     userDataDir: '/d',
     fingerprint: sampleFingerprint(),
     webrtcPolicy: 'proxy_only',
+    proxy: { id: 'x', type: 'http', host: 'h', port: 8080 },
   });
   assert.ok(
     explicitProxyOnly.args.includes('--force-webrtc-ip-handling-policy=disable_non_proxied_udp'),
+  );
+  assert.throws(
+    () =>
+      buildLaunchOptions({
+        profileId: 'p',
+        engine: 'lobium',
+        userDataDir: '/d',
+        fingerprint: sampleFingerprint(),
+        webrtcPolicy: 'proxy_only',
+      }),
+    /proxy_only policy requires a configured proxy/,
   );
 
   const explicitDefault = buildLaunchOptions({
@@ -109,13 +121,24 @@ test('buildLaunchOptions honors an explicit WebRTC launch policy', () => {
     engine: 'lobium',
     userDataDir: '/d',
     fingerprint: sampleFingerprint(),
-    proxy: { id: 'x', type: 'http', host: 'h', port: 8080 },
     webrtcPolicy: 'default_public_interface_only',
   });
   assert.ok(
     explicitDefault.args.includes(
       '--force-webrtc-ip-handling-policy=default_public_interface_only',
     ),
+  );
+  assert.throws(
+    () =>
+      buildLaunchOptions({
+        profileId: 'p',
+        engine: 'lobium',
+        userDataDir: '/d',
+        fingerprint: sampleFingerprint(),
+        proxy: { id: 'x', type: 'http', host: 'h', port: 8080 },
+        webrtcPolicy: 'default_public_interface_only',
+      }),
+    /unsafe with a proxy/,
   );
 });
 

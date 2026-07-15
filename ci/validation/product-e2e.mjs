@@ -14,7 +14,7 @@
 // Exit 0 = a profile was created, launched, proven running, and stopped. Non-zero = a failure with the
 // specific assertion that broke.
 
-import { mkdtemp, mkdir, rm, writeFile, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, rm, writeFile, readFile, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -25,6 +25,7 @@ import { generateSeed } from '@lobster/fingerprint';
 import {
   CompositeRunner,
   buildLaunchers,
+  buildDevShmArgs,
   exportCookiesJson,
   isLobiumAvailable,
   startProfile,
@@ -49,9 +50,10 @@ function startSite() {
 }
 
 /** Build the StartProfileParams exactly as the Rust core's `start_profile_via_sidecar` does. */
-function buildStartParams(profile, userDataDir, siteHost) {
+function buildStartParams(profile, userDataDir, siteHost, includeCookieImport = true) {
   return {
     profileId: profile.id,
+    profileName: profile.name,
     engine: profile.engine,
     os: profile.os,
     osVersion: profile.osVersion,
@@ -59,22 +61,24 @@ function buildStartParams(profile, userDataDir, siteHost) {
     fingerprintOverrides: profile.fingerprintOverrides,
     proxy: profile.proxy,
     // Import a session cookie for the local site so we can prove cookie injection loads it into the jar.
-    cookiesImport: {
-      mode: 'merge',
-      source: 'plain_text',
-      rawText: JSON.stringify([
-        {
-          name: 'lobster_session',
-          value: 'e2e-proof-123',
-          domain: siteHost,
-          path: '/',
-          expires: 4102444800,
-          httpOnly: false,
-          secure: false,
-          sameSite: 'Lax',
-        },
-      ]),
-    },
+    cookiesImport: includeCookieImport
+      ? {
+          mode: 'merge',
+          source: 'plain_text',
+          rawText: JSON.stringify([
+            {
+              name: 'lobster_session',
+              value: 'e2e-proof-123',
+              domain: siteHost,
+              path: '/',
+              expires: Math.floor(Date.now() / 1000) + 86_400,
+              httpOnly: false,
+              secure: false,
+              sameSite: 'Lax',
+            },
+          ]),
+        }
+      : undefined,
     extensions: profile.extensions,
     userDataDir,
     headless: !HEADFUL,
@@ -90,33 +94,84 @@ async function main() {
   // The live launcher registry — the SAME one the sidecar builds at startup.
   const launchers = await buildLaunchers({
     headless: !HEADFUL,
-    extraArgs: ['--no-sandbox', '--disable-dev-shm-usage'],
+    extraArgs: [
+      '--no-sandbox',
+      ...buildDevShmArgs(),
+      '--password-store=basic',
+      '--host-resolver-rules=MAP lobster.test 127.0.0.1',
+    ],
   });
   const runner = new CompositeRunner(launchers);
 
   const site = await startSite();
   const sitePort = site.address().port;
-  // Use localhost (not 127.0.0.1): Chromium often refuses to persist cookies for raw IP hosts,
-  // which falsely fails the cookie-injection proof even when Network.setCookie succeeded.
-  const siteHost = 'localhost';
+  // A named .test host exercises a real persistent host-only cookie. The deterministic resolver rule
+  // above maps it to the local fixture without relying on external DNS.
+  const siteHost = 'lobster.test';
   const siteUrl = `http://${siteHost}:${sitePort}/`;
 
   const root = await mkdtemp(join(tmpdir(), 'lobster-product-e2e-'));
   const userDataDir = join(root, 'profile-user-data');
   await mkdir(userDataDir, { recursive: true });
+  const extensionDir = join(root, 'extension-fixture');
+  await mkdir(extensionDir, { recursive: true });
+  await writeFile(
+    join(extensionDir, 'manifest.json'),
+    JSON.stringify({
+      manifest_version: 3,
+      name: 'Lobster product E2E fixture',
+      version: '1.0.0',
+      content_scripts: [
+        {
+          matches: ['http://lobster.test/*'],
+          js: ['fixture.js'],
+          run_at: 'document_start',
+        },
+      ],
+    }),
+  );
+  await writeFile(
+    join(extensionDir, 'fixture.js'),
+    "document.documentElement.dataset.lobsterExtensionFixture = 'loaded';\n",
+  );
 
   // 1) "Create a profile" — the fields the desktop create-profile flow stores.
   const seed = generateSeed();
+  const profileOs = process.env.LOBSTER_PRODUCT_E2E_OS || 'linux';
+  const fontPackDir = process.env.LOBSTER_FONTS_DIR;
+  if (!fontPackDir) throw new Error('LOBSTER_FONTS_DIR is required for product E2E');
+  const fontManifest = JSON.parse(
+    await readFile(join(fontPackDir, 'font-pack.manifest.json'), 'utf8'),
+  );
+  const fontPersona = fontManifest.personas?.[profileOs];
+  if (!Array.isArray(fontPersona?.families) || fontPersona.families.length === 0) {
+    throw new Error(`open-font pack has no ${profileOs} persona`);
+  }
   const profile = {
     id: `e2e-${Date.now()}`,
     name: 'Product E2E Profile',
     engine: nativeLobium ? 'lobium' : 'chromium',
-    os: 'windows',
-    osVersion: 'Windows 11 23H2',
+    os: profileOs,
+    osVersion:
+      profileOs === 'windows'
+        ? 'Windows 11 23H2'
+        : profileOs === 'macos'
+          ? 'macOS 15 Sequoia'
+          : 'Ubuntu 24.04',
     fingerprintSeed: seed,
-    fingerprintOverrides: undefined,
+    fingerprintOverrides: {
+      fontsMode: 'manual',
+      fonts: fontPersona.families,
+    },
     proxy: undefined,
-    extensions: undefined,
+    extensions: [
+      {
+        source: 'unpacked',
+        enabled: true,
+        name: 'Lobster product E2E fixture',
+        path: extensionDir,
+      },
+    ],
   };
   process.stderr.write(`created profile ${profile.id} (engine=${profile.engine}, seed=${seed})\n`);
 
@@ -133,6 +188,9 @@ async function main() {
     // 2) "Launch it" — through the real product path.
     launched = await startProfile(runner, buildStartParams(profile, userDataDir, siteHost));
     report.steps.launched = { ws: launched.ws, debuggerAddress: launched.debuggerAddress };
+    if (launched.cookieImportApplied !== true) {
+      throw new Error('first launch did not report the pending cookie import as applied');
+    }
     process.stderr.write(`launched: ${launched.debuggerAddress}\n`);
 
     // 3) Prove the browser REALLY runs: the native config file exists (native engine), CDP answers,
@@ -144,8 +202,25 @@ async function main() {
         version: cfg.version,
         ua: cfg.navigator?.userAgent,
         renderer: cfg.webgl?.renderer,
+        fontsChannel: cfg.fonts,
       };
       if (cfg.version !== 1) throw new Error('native lobium-fp.json missing/!=1');
+      const fontConfig = await readFile(join(userDataDir, 'lobium-fonts.conf'), 'utf8');
+      const privateFontFiles = await readdir(join(userDataDir, 'font-files'));
+      report.steps.fontIsolation = {
+        packId: fontManifest.packId,
+        requestedFamilies: fontPersona.families,
+        privateFiles: privateFontFiles.length,
+        resetsInheritedDirs: fontConfig.includes('<reset-dirs />'),
+        referencesHostFonts: /\/etc\/fonts|\/usr\/share\/fonts/.test(fontConfig),
+      };
+      if (
+        privateFontFiles.length === 0 ||
+        !report.steps.fontIsolation.resetsInheritedDirs ||
+        report.steps.fontIsolation.referencesHostFonts
+      ) {
+        throw new Error('private open-font isolation contract was not applied');
+      }
     }
 
     const versionRes = await fetch(`http://${launched.debuggerAddress}/json/version`);
@@ -164,6 +239,51 @@ async function main() {
       // Lobium branding may still be navigating the initial tab to about:blank + setDocumentContent.
       // Wait briefly, then retry goto if that race interrupts the first navigation.
       await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {});
+      await page.waitForTimeout(2_000);
+      const ntp = await page.evaluate(() => {
+        const images = [];
+        const walk = (root) => {
+          for (const element of root.querySelectorAll('*')) {
+            if (element.tagName === 'IMG') {
+              images.push({
+                src: element.getAttribute('src') || '',
+                alt: element.getAttribute('alt') || '',
+                width: element.naturalWidth,
+                height: element.naturalHeight,
+              });
+            }
+            if (element.shadowRoot) walk(element.shadowRoot);
+          }
+        };
+        walk(document);
+        return { url: location.href, title: document.title, images };
+      });
+      report.steps.nativeNtp = ntp;
+      if (
+        ntp.title !== 'New Tab' ||
+        !ntp.url.startsWith('chrome://new-tab-page') ||
+        !ntp.images.some(
+          (image) =>
+            image.src.includes('lobium_master.png') &&
+            image.alt === 'Lobster Browser' &&
+            image.width > 0,
+        ) ||
+        !ntp.images.some(
+          (image) =>
+            image.src.includes('lobster_ad.png') &&
+            image.alt.includes('Lobster Browser') &&
+            image.width > 0,
+        )
+      ) {
+        throw new Error(`canonical native NTP branding was not observed: ${JSON.stringify(ntp)}`);
+      }
+      const ntpShotPath = join(
+        REPORTS_DIR,
+        `product-e2e-ntp-${report.capturedAt.replace(/[:.]/g, '-')}.png`,
+      );
+      await mkdir(REPORTS_DIR, { recursive: true });
+      await page.screenshot({ path: ntpShotPath });
+      report.steps.nativeNtpScreenshot = ntpShotPath;
       let navigated = false;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
@@ -196,11 +316,40 @@ async function main() {
             return null;
           }
         })(),
+        webglRuntime: (() => {
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = 16;
+            canvas.height = 16;
+            const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+            if (!gl) return { available: false };
+            const advertisedExtensions = gl.getSupportedExtensions() || [];
+            const unavailableAdvertisedExtensions = advertisedExtensions.filter(
+              (name) => gl.getExtension(name) === null,
+            );
+            gl.clearColor(0.125, 0.25, 0.5, 1);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            const pixel = new Uint8Array(4);
+            gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+            return {
+              available: true,
+              contextLost: gl.isContextLost(),
+              error: gl.getError(),
+              pixel: Array.from(pixel),
+              maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+              maxRenderbufferSize: gl.getParameter(gl.MAX_RENDERBUFFER_SIZE),
+              unavailableAdvertisedExtensions,
+            };
+          } catch (error) {
+            return { available: false, error: String(error) };
+          }
+        })(),
         bodyText: document.body ? document.body.innerText.trim() : '',
+        extensionFixture: document.documentElement.dataset.lobsterExtensionFixture ?? null,
       }));
       report.steps.page = observed;
       process.stderr.write(
-        `page title="${observed.title}" cookie="${observed.cookie}" ua-has-windows=${observed.ua.includes('Windows')}\n`,
+        `page title="${observed.title}" cookie="${observed.cookie}" profile-os=${profile.os}\n`,
       );
       process.stderr.write(`webgl renderer: ${observed.webglRenderer}\n`);
 
@@ -212,13 +361,35 @@ async function main() {
       if (!observed.cookie.includes('lobster_session=e2e-proof-123')) {
         throw new Error(`imported cookie not present in the jar: "${observed.cookie}"`);
       }
-      if (!observed.ua.includes('Windows'))
+      if (observed.extensionFixture !== 'loaded') {
+        throw new Error('local unpacked extension fixture did not execute');
+      }
+      const expectedUaToken =
+        profile.os === 'windows' ? 'Windows' : profile.os === 'macos' ? 'Macintosh' : 'X11; Linux';
+      if (!observed.ua.includes(expectedUaToken))
         throw new Error(`persona UA not applied: ${observed.ua}`);
+      if (
+        !observed.webglRuntime.available ||
+        observed.webglRuntime.contextLost ||
+        observed.webglRuntime.error !== 0 ||
+        observed.webglRuntime.pixel?.[3] === 0 ||
+        observed.webglRuntime.unavailableAdvertisedExtensions?.length !== 0
+      ) {
+        throw new Error(`WebGL runtime contract failed: ${JSON.stringify(observed.webglRuntime)}`);
+      }
 
       // Cookie EXPORT round-trip (warm-up save): read the jar back out as JSON.
       const cdp = await context.newCDPSession(page);
       const exported = await exportCookiesJson(cdp);
-      report.steps.cookieExport = { count: JSON.parse(exported).length };
+      const exportedCookies = JSON.parse(exported);
+      report.steps.cookieExport = {
+        count: exportedCookies.length,
+        importedCookieExpires: exportedCookies.find((cookie) => cookie.name === 'lobster_session')
+          ?.expires,
+      };
+      process.stderr.write(
+        `cookie export metadata: ${JSON.stringify(report.steps.cookieExport)}\n`,
+      );
       if (!exported.includes('lobster_session'))
         throw new Error('cookie export did not round-trip the session cookie');
 
@@ -241,6 +412,71 @@ async function main() {
     // 4) "Stop it" cleanly.
     await runner.stop({ profileId: profile.id });
     report.steps.stopped = true;
+
+    // 5) Relaunch the SAME profile without an import payload. The persistent cookie must remain and
+    // the launch result must prove the one-shot import was not applied again.
+    launched = await startProfile(runner, buildStartParams(profile, userDataDir, siteHost, false));
+    if (launched.cookieImportApplied !== false) {
+      throw new Error('relaunch unexpectedly reapplied the one-shot cookie import');
+    }
+    const relaunchedBrowser = await chromium.connectOverCDP(launched.ws);
+    try {
+      const context = relaunchedBrowser.contexts()[0];
+      const page = context.pages()[0] ?? (await context.newPage());
+      await page.goto(siteUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      const persisted = await page.evaluate(() => ({
+        cookie: document.cookie,
+        extensionFixture: document.documentElement.dataset.lobsterExtensionFixture ?? null,
+      }));
+      const cdp = await context.newCDPSession(page);
+      const exported = await exportCookiesJson(cdp);
+      report.steps.relaunch = {
+        cookieImportApplied: launched.cookieImportApplied,
+        cookiePersisted: persisted.cookie.includes('lobster_session=e2e-proof-123'),
+        extensionLoaded: persisted.extensionFixture === 'loaded',
+        exportCount: JSON.parse(exported).length,
+      };
+      if (
+        !report.steps.relaunch.cookiePersisted ||
+        !report.steps.relaunch.extensionLoaded ||
+        !exported.includes('lobster_session')
+      ) {
+        throw new Error(
+          `same-profile relaunch/cookie export/extension persistence failed: ${JSON.stringify(
+            report.steps.relaunch,
+          )}`,
+        );
+      }
+    } finally {
+      await relaunchedBrowser.close();
+    }
+    await runner.stop({ profileId: profile.id });
+
+    // 6) A dead configured proxy must fail before browser spawn. This proves the product launcher
+    // does not silently retry direct when its required upstream is unavailable.
+    const blockedProfile = {
+      ...profile,
+      id: `${profile.id}-blocked`,
+      proxy: { id: 'blocked', type: 'http', host: '127.0.0.1', port: 9 },
+    };
+    let proxyError = '';
+    try {
+      await startProfile(
+        runner,
+        buildStartParams(blockedProfile, join(root, 'blocked'), siteHost, false),
+      );
+    } catch (error) {
+      proxyError = String(error);
+    }
+    const blockedStatus = await runner.status({ profileId: blockedProfile.id });
+    report.steps.proxyFailClosed = {
+      rejectedBeforeLaunch: proxyError.length > 0,
+      runningAfterRejection: blockedStatus.running.length,
+      noDirectFallback: proxyError.length > 0 && blockedStatus.running.length === 0,
+    };
+    if (!report.steps.proxyFailClosed.noDirectFallback) {
+      throw new Error('dead proxy did not fail closed before launch');
+    }
     report.verdict = 'pass';
   } finally {
     site.close();
@@ -249,7 +485,11 @@ async function main() {
     } catch {
       /* already stopped */
     }
-    await rm(root, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+    if (process.env.LOBSTER_PRODUCT_E2E_KEEP_DATA === '1') {
+      process.stderr.write(`preserved product E2E data: ${root}\n`);
+    } else {
+      await rm(root, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+    }
   }
 
   await mkdir(REPORTS_DIR, { recursive: true });

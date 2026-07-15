@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 
 import { deriveFingerprint, generateSeed } from '@lobster/fingerprint';
 import {
+  buildDevShmArgs,
   buildGpuArgs,
   buildHostCalibrationProbeScript,
   buildLaunchOptions,
@@ -241,7 +242,7 @@ async function main() {
   const args = [
     '--headless=new',
     '--no-sandbox',
-    '--disable-dev-shm-usage',
+    ...buildDevShmArgs(),
     `--user-data-dir=${userDataDir}`,
     '--remote-debugging-port=0',
     '--no-first-run',
@@ -269,6 +270,7 @@ async function main() {
       const webrtc = await measureWebrtc(page);
       const rendererText = `${host.webgl.vendor} ${host.webgl.renderer}`;
       const softwareRenderer = isSoftwareRenderer(rendererText);
+      const releaseGateEligible = gpuMode === 'gpu' && !softwareRenderer;
       report = {
         kind: 'gpu-baseline',
         capturedAt: new Date().toISOString(),
@@ -302,7 +304,12 @@ async function main() {
           uaData: deep.uaData,
         },
         webrtc,
-        verdict: gpuMode === 'gpu' && softwareRenderer ? 'software-fallback' : 'ok',
+        provisional: !releaseGateEligible,
+        provisionalReason: !releaseGateEligible
+          ? 'Software rendering or a non-GPU launch mode can never satisfy the real-GPU release gate.'
+          : null,
+        releaseGateEligible,
+        verdict: releaseGateEligible ? 'ok' : 'provisional',
       };
     } finally {
       await browser.close();
@@ -319,11 +326,11 @@ async function main() {
   await writeFile(outPath, `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(`\nsaved: ${outPath}\n`);
-  if (report.verdict === 'software-fallback') {
+  if (!report.releaseGateEligible) {
     process.stderr.write(
-      '\nWARNING: real-GPU run fell back to software rendering — baseline is NOT valid real-GPU evidence.\n',
+      '\nWARNING: provisional software/non-GPU baseline — NOT valid real-GPU release evidence.\n',
     );
-    process.exitCode = 1;
+    if (gpuMode === 'gpu') process.exitCode = 1;
   }
 }
 

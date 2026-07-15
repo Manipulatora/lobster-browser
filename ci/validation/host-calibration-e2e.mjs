@@ -38,7 +38,6 @@ import {
   validateHostCalibrationProfile,
 } from '@lobster/fingerprint';
 import {
-  applyCdpFingerprint,
   buildGpuArgs,
   buildLaunchOptions,
   buildLobiumConfig,
@@ -106,8 +105,8 @@ function baseArgs(userDataDir, cfgPath, launchArgs) {
   return args;
 }
 
-/** Launch a browser (optionally with a config + CDP fingerprint), run `fn(page)`, and clean up. */
-async function withBrowser({ fingerprint, cfgPath, launchArgs }, fn) {
+/** Launch a browser with native config/process args only; Patchright is control/measurement. */
+async function withBrowser({ cfgPath, launchArgs }, fn) {
   const userDataDir = await mkdtemp(join(tmpdir(), 'hc-'));
   const args = baseArgs(userDataDir, cfgPath, launchArgs ?? []);
   const proc = spawn(LOBIUM, args, { stdio: 'ignore' });
@@ -118,10 +117,6 @@ async function withBrowser({ fingerprint, cfgPath, launchArgs }, fn) {
     try {
       const context = browser.contexts()[0];
       const page = context.pages()[0] ?? (await context.newPage());
-      if (fingerprint) {
-        const cdp = await context.newCDPSession(page);
-        await applyCdpFingerprint(cdp, fingerprint);
-      }
       await page.goto(PROBE_URL);
       return await fn(page);
     } finally {
@@ -277,11 +272,11 @@ async function main() {
       headless: true,
     });
     process.stderr.write(`  launch ${seed} ... `);
-    const obs = await withBrowser({ fingerprint: fp, cfgPath, launchArgs: launch.args }, (p) =>
+    const obs = await withBrowser({ cfgPath, launchArgs: launch.args }, (p) =>
       p.evaluate(PROBE_SURFACES),
     );
     // Relaunch once to prove farbling hashes are STABLE per profile across restarts.
-    const obs2 = await withBrowser({ fingerprint: fp, cfgPath, launchArgs: launch.args }, (p) =>
+    const obs2 = await withBrowser({ cfgPath, launchArgs: launch.args }, (p) =>
       p.evaluate(PROBE_SURFACES),
     );
     await rm(userDataDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});

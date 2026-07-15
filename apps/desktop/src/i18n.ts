@@ -7,11 +7,10 @@
 type Catalog = Record<string, string>;
 
 const en: Catalog = {
-  'app.name': 'Lobster',
+  'app.name': 'Lobster Browser',
   'nav.profiles': 'Profiles',
   'nav.proxies': 'Proxies',
   'nav.templates': 'Templates',
-  'nav.pricing': 'Pricing',
   'action.createProfile': 'Create Profile',
   'action.launch': 'Launch',
   'action.stop': 'Stop',

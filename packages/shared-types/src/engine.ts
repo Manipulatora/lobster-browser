@@ -29,6 +29,20 @@ export const PROFILE_OS_TARGETS = [
 ] as const;
 export type ProfileOsTarget = (typeof PROFILE_OS_TARGETS)[number];
 
+/**
+ * Desktop targets supported by the Lobster Browser control plane. Android remains in
+ * `PROFILE_OS_TARGETS` so existing/future mobile records can be decoded, but it must not be exposed
+ * by desktop create/edit or accepted by desktop-only cloud profile contracts.
+ */
+export const DESKTOP_PROFILE_OS_TARGETS = [
+  'windows',
+  'macos',
+  'macos_intel',
+  'macos_arm',
+  'linux',
+] as const satisfies readonly ProfileOsTarget[];
+export type DesktopProfileOsTarget = (typeof DESKTOP_PROFILE_OS_TARGETS)[number];
+
 /** CPU architecture a profile presents. */
 export type CpuArch = 'x86_64' | 'arm64';
 

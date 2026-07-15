@@ -1,5 +1,5 @@
 /**
- * SEC-2 key hierarchy helpers (docs/specs/security.md §1.2–1.3).
+ * SEC-2 key hierarchy helpers (docs/OPERATIONS.md).
  *
  * UMK (Argon2id) → wraps UKWK → unwraps TDK → HKDF → PCK → LBv1 blob encrypt.
  * Local Store Key (LSK) is handled on the desktop Rust side (OS keychain).

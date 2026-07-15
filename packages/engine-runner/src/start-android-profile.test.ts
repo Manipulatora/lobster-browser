@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { AdbClient, AdbCommandResult } from './android-bridge.js';
-import { startAndroidProfile } from './start-android-profile.js';
+import {
+  androidProfileStatus,
+  startAndroidProfile,
+  stopAndroidProfile,
+} from './start-android-profile.js';
 
 class RecordingAdb implements AdbClient {
   commands: string[][] = [];
@@ -59,7 +63,11 @@ test('startAndroidProfile pushes config, forwards CDP, and starts the APK activi
       fingerprintSeed: 'android-seed-2',
       userDataDir: dir,
     },
-    { adb, cdpLocalPort: 9333 },
+    {
+      adb,
+      cdpLocalPort: 9333,
+      launchMirror: async () => ({ close: async () => undefined }),
+    },
   );
 
   assert.equal(result.profileId, 'android-profile');
@@ -72,4 +80,18 @@ test('startAndroidProfile pushes config, forwards CDP, and starts the APK activi
     adb.commands.some((c) => c.some((arg) => arg.includes('com.lobster.lobium'))),
     'starts Lobium package',
   );
+  assert.equal(androidProfileStatus('android-profile').length, 1);
+  assert.equal(await stopAndroidProfile('android-profile'), true);
+  assert.equal(androidProfileStatus('android-profile').length, 0);
+  assert.ok(adb.commands.some((c) => c.includes('force-stop')));
+  assert.ok(cdpForwardRemoval(adb.commands, '9333'));
 });
+
+function cdpForwardRemoval(commands: string[][], port: string): boolean {
+  return commands.some(
+    (command) =>
+      command.includes('forward') &&
+      command.includes('--remove') &&
+      command.includes(`tcp:${port}`),
+  );
+}

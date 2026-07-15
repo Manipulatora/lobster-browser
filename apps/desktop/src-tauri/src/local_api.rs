@@ -179,7 +179,7 @@ pub async fn start_profile_via_sidecar(
     password: Option<&str>,
     headless: bool,
 ) -> Result<Value, StartError> {
-    let profile = {
+    let (profile, resolved_proxy) = {
         let conn = db
             .lock()
             .map_err(|_| StartError::Failed(anyhow::anyhow!("profile store lock poisoned")))?;
@@ -193,7 +193,22 @@ pub async fn start_profile_via_sidecar(
                 "profile password is required or incorrect"
             )));
         }
-        profile
+        let resolved_proxy = match profile.proxy_id.as_deref() {
+            Some(proxy_id) => Some(
+                proxy_store::get(&conn, cipher, proxy_id)
+                    .map_err(StartError::Failed)?
+                    .ok_or_else(|| {
+                        StartError::Failed(anyhow::anyhow!(
+                            "profile {} references missing proxy {}",
+                            profile.id,
+                            proxy_id
+                        ))
+                    })?
+                    .config,
+            ),
+            None => profile.proxy.clone(),
+        };
+        (profile, resolved_proxy)
     };
     if profile.engine != "lobium" {
         return Err(StartError::Failed(anyhow::anyhow!(
@@ -203,6 +218,12 @@ pub async fn start_profile_via_sidecar(
         )));
     }
     let launch_target = normalize_desktop_launch_os(&profile.os)?;
+    {
+        let conn = db
+            .lock()
+            .map_err(|_| StartError::Failed(anyhow::anyhow!("profile store lock poisoned")))?;
+        profile_store::set_status(&conn, profile_id, "launching").map_err(StartError::Failed)?;
+    }
     let user_data_dir = profiles_dir.join(&profile.id);
     let params = json!({
         "profileId": profile.id,
@@ -213,26 +234,93 @@ pub async fn start_profile_via_sidecar(
         "osVersion": profile.os_version,
         "fingerprintSeed": profile.fingerprint_seed,
         "fingerprintOverrides": profile.fingerprint_overrides,
-        "proxy": profile.proxy,
+        "proxy": resolved_proxy,
         "cookiesImport": profile.cookies_import,
         "extensions": profile.extensions,
         "userDataDir": user_data_dir.to_string_lossy(),
         "headless": headless,
     });
-    sidecar
-        .call("startProfile", params)
-        .await
-        .map_err(StartError::Failed)
+    let launched = sidecar.call("startProfile", params).await;
+    match launched {
+        Ok(result) => {
+            let conn = db
+                .lock()
+                .map_err(|_| StartError::Failed(anyhow::anyhow!("profile store lock poisoned")))?;
+            if result
+                .get("cookieImportApplied")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                profile_store::clear_cookie_import(&conn, profile_id)
+                    .map_err(StartError::Failed)?;
+            }
+            profile_store::set_status(&conn, profile_id, "running").map_err(StartError::Failed)?;
+            Ok(result)
+        }
+        Err(error) => {
+            if let Ok(conn) = db.lock() {
+                let _ = profile_store::set_status(&conn, profile_id, "error");
+            }
+            Err(StartError::Failed(error))
+        }
+    }
 }
 
 /// Stop a running profile through the sidecar. Shared by the HTTP API and the Tauri command.
 pub async fn stop_profile_via_sidecar(
+    db: &Arc<Mutex<Connection>>,
     sidecar: &SidecarClient,
     profile_id: &str,
 ) -> anyhow::Result<Value> {
-    sidecar
+    {
+        let conn = db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("profile store lock poisoned"))?;
+        profile_store::set_status(&conn, profile_id, "stopping")?;
+    }
+    let stopped = sidecar
         .call("stop", json!({ "profileId": profile_id }))
-        .await
+        .await;
+    let conn = db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("profile store lock poisoned"))?;
+    match stopped {
+        Ok(result) => {
+            profile_store::set_status(&conn, profile_id, "idle")?;
+            Ok(result)
+        }
+        Err(error) => {
+            profile_store::set_status(&conn, profile_id, "error")?;
+            Err(error)
+        }
+    }
+}
+
+pub async fn reconcile_profile_statuses(
+    db: &Arc<Mutex<Connection>>,
+    sidecar: &SidecarClient,
+) -> anyhow::Result<()> {
+    let status = sidecar.call("status", json!({})).await?;
+    let running_ids = status
+        .get("running")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("profileId").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let error_ids = status
+        .get("errors")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("profileId").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let conn = db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("profile store lock poisoned"))?;
+    profile_store::reconcile_statuses(&conn, &running_ids, &error_ids)
 }
 
 #[derive(Deserialize)]
@@ -331,7 +419,7 @@ async fn profile_stop(
     if !authorized(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, ApiResponse::err("unauthorized"));
     }
-    match stop_profile_via_sidecar(&state.sidecar, &body.profile_id).await {
+    match stop_profile_via_sidecar(&state.db, &state.sidecar, &body.profile_id).await {
         Ok(_) => (
             StatusCode::OK,
             ApiResponse::ok(json!({ "profileId": body.profile_id, "stopped": true })),
@@ -349,6 +437,12 @@ async fn profile_list(
 ) -> (StatusCode, Json<ApiResponse>) {
     if !authorized(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, ApiResponse::err("unauthorized"));
+    }
+    if let Err(error) = reconcile_profile_statuses(&state.db, &state.sidecar).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ApiResponse::err(error.to_string()),
+        );
     }
     let conn = match state.db.lock() {
         Ok(conn) => conn,
@@ -472,6 +566,7 @@ mod tests {
     fn mem_db() -> Arc<Mutex<Connection>> {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(profile_store::SCHEMA).unwrap();
+        proxy_store::init(&conn).unwrap();
         Arc::new(Mutex::new(conn))
     }
 
@@ -482,6 +577,38 @@ mod tests {
                 .to_string_lossy()
                 .into_owned()
         })
+    }
+
+    fn lifecycle_fake_sidecar() -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "lobster-lifecycle-sidecar-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("sidecar.mjs");
+        std::fs::write(
+            &script,
+            r#"import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  const request = JSON.parse(line);
+  if (request.method === 'startProfile') {
+    if (request.params.profileName === 'Fail import') {
+      process.stdout.write(JSON.stringify({ id: request.id, ok: false, error: { code: 'inject', message: 'cookie injection failed' } }) + '\n');
+      return;
+    }
+    const applied = Boolean(request.params.cookiesImport);
+    process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: {
+      profileId: request.params.profileId, pid: 7, ws: 'ws://test', debuggerAddress: '127.0.0.1:7',
+      cookieImportApplied: applied, proxyHost: request.params.proxy?.host ?? null
+    } }) + '\n');
+    return;
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { running: [] } }) + '\n');
+});"#,
+        )
+        .unwrap();
+        (root, script)
     }
 
     #[tokio::test]
@@ -504,6 +631,166 @@ mod tests {
         .await
         .expect_err("missing profile should fail");
         assert!(matches!(err, StartError::NotFound(id) if id == "missing"));
+    }
+
+    #[tokio::test]
+    async fn start_profile_rejects_a_stale_stored_proxy_reference_before_sidecar_launch() {
+        let db = mem_db();
+        let cipher = SecretCipher::new(&[42u8; 32]);
+        let mut input = test_input("Stale proxy");
+        input.proxy_id = Some("px_missing".to_string());
+        let profile = {
+            let conn = db.lock().unwrap();
+            profile_store::create(&conn, &cipher, input).unwrap()
+        };
+        let sidecar = SidecarClient::spawn("true", "")
+            .await
+            .expect("spawn fake sidecar");
+        let error = start_profile_via_sidecar(
+            &db,
+            &cipher,
+            &sidecar,
+            &std::env::temp_dir(),
+            &profile.id,
+            None,
+            true,
+        )
+        .await
+        .expect_err("stale proxy reference must fail closed");
+        assert!(error
+            .to_string()
+            .contains("references missing proxy px_missing"));
+    }
+
+    #[tokio::test]
+    async fn pending_cookie_import_is_consumed_after_success_and_preserved_on_failure() {
+        let db = mem_db();
+        let cipher = SecretCipher::new(&[42u8; 32]);
+        let mut success_input = test_input("Import once");
+        success_input.cookies_import = Some(serde_json::json!({ "mode": "empty" }));
+        let mut failure_input = test_input("Fail import");
+        failure_input.cookies_import = Some(serde_json::json!({
+            "mode": "merge", "rawText": "example.test\tFALSE\t/\tFALSE\t0\tsid\tsecret"
+        }));
+        let (success, failure) = {
+            let conn = db.lock().unwrap();
+            (
+                profile_store::create(&conn, &cipher, success_input).unwrap(),
+                profile_store::create(&conn, &cipher, failure_input).unwrap(),
+            )
+        };
+        let (root, script) = lifecycle_fake_sidecar();
+        let sidecar = SidecarClient::spawn("node", script.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+
+        let first =
+            start_profile_via_sidecar(&db, &cipher, &sidecar, &root, &success.id, None, true)
+                .await
+                .unwrap();
+        assert_eq!(
+            first.get("cookieImportApplied").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT cookies_import IS NULL FROM profiles WHERE id = ?1",
+                [&success.id],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap());
+
+        let second =
+            start_profile_via_sidecar(&db, &cipher, &sidecar, &root, &success.id, None, true)
+                .await
+                .unwrap();
+        assert_eq!(
+            second.get("cookieImportApplied").and_then(Value::as_bool),
+            Some(false),
+            "a later launch must not reapply the consumed import"
+        );
+
+        let failed =
+            start_profile_via_sidecar(&db, &cipher, &sidecar, &root, &failure.id, None, true).await;
+        assert!(failed.is_err());
+        let preserved = profile_store::get(&db.lock().unwrap(), &cipher, &failure.id)
+            .unwrap()
+            .unwrap();
+        assert!(preserved.cookies_import.is_some());
+        assert_eq!(preserved.status, "error");
+        drop(sidecar);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stored_proxy_is_resolved_fresh_for_every_launch() {
+        let db = mem_db();
+        let cipher = SecretCipher::new(&[42u8; 32]);
+        let profile = {
+            let conn = db.lock().unwrap();
+            proxy_store::create(
+                &conn,
+                &cipher,
+                proxy_store::CreateStoredProxyInput {
+                    source: "mine".to_string(),
+                    label: "Current".to_string(),
+                    config: serde_json::json!({
+                        "id": "px_fresh", "type": "http", "host": "first.example", "port": 8080
+                    }),
+                    location: None,
+                    timezone: None,
+                    rotate_url: None,
+                },
+            )
+            .unwrap();
+            let mut input = test_input("Fresh proxy");
+            input.proxy_id = Some("px_fresh".to_string());
+            profile_store::create(&conn, &cipher, input).unwrap()
+        };
+        let (root, script) = lifecycle_fake_sidecar();
+        let sidecar = SidecarClient::spawn("node", script.to_string_lossy().as_ref())
+            .await
+            .unwrap();
+        let first =
+            start_profile_via_sidecar(&db, &cipher, &sidecar, &root, &profile.id, None, true)
+                .await
+                .unwrap();
+        assert_eq!(
+            first.get("proxyHost").and_then(Value::as_str),
+            Some("first.example")
+        );
+
+        {
+            let conn = db.lock().unwrap();
+            proxy_store::update(
+                &conn,
+                &cipher,
+                "px_fresh",
+                proxy_store::UpdateStoredProxyInput {
+                    source: None,
+                    label: None,
+                    config: Some(serde_json::json!({
+                        "id": "px_fresh", "type": "socks5", "host": "second.example", "port": 1080
+                    })),
+                    location: None,
+                    timezone: None,
+                    rotate_url: None,
+                },
+            )
+            .unwrap();
+        }
+        let second =
+            start_profile_via_sidecar(&db, &cipher, &sidecar, &root, &profile.id, None, true)
+                .await
+                .unwrap();
+        assert_eq!(
+            second.get("proxyHost").and_then(Value::as_str),
+            Some("second.example")
+        );
+        drop(sidecar);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -586,7 +873,7 @@ mod tests {
             "CDP /json/version should expose a browser identity or websocket URL"
         );
 
-        stop_profile_via_sidecar(&sidecar, &profile.id)
+        stop_profile_via_sidecar(&db, &sidecar, &profile.id)
             .await
             .expect("stop profile");
         std::fs::remove_dir_all(root).unwrap();

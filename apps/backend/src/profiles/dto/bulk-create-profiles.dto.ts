@@ -1,5 +1,5 @@
 import { IsArray, IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
-import { ENGINE_KINDS, PROFILE_OS_TARGETS } from '@lobster/shared-types';
+import { PROFILE_OS_TARGETS, ENGINE_KINDS } from '@lobster/shared-types';
 import type { EngineKind, ProfileOsTarget } from '@lobster/shared-types';
 
 /** Upper bound on a single bulk-create call (also guards against accidental huge batches). */

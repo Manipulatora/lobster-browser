@@ -43,6 +43,14 @@ export function resolveGpuMode(env: NodeJS.ProcessEnv = process.env): GpuMode {
   return 'auto';
 }
 
+/** Explicit acknowledgement that a software-GPU host may run only provisional, non-release checks. */
+export function allowProvisionalSoftwareGpu(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw = (env.LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION ?? '').trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on'].includes(raw);
+}
+
 function resolveAngleBackend(
   explicit: AngleBackend | undefined,
   env: NodeJS.ProcessEnv,

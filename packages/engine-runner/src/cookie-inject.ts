@@ -1,6 +1,12 @@
-import { type Cookie, parseJson, parseNetscape, serializeJson } from '@lobster/cookies';
+import {
+  type Cookie,
+  parseJson,
+  parseNetscape,
+  serializeJson,
+  validateCookies,
+} from '@lobster/cookies';
 import type { CookieImportDraft } from '@lobster/shared-types';
-import type { CdpSession } from './cdp-fingerprint.js';
+import type { CdpSession } from './cdp-client.js';
 
 /**
  * Cookie inject/export for a launched profile (PROX-1/2).
@@ -19,7 +25,10 @@ import type { CdpSession } from './cdp-fingerprint.js';
 export interface CdpCookieParam {
   name: string;
   value: string;
-  domain: string;
+  /** Domain cookies use this (leading dot preserved). Host-only cookies use url instead. */
+  domain?: string;
+  /** URL-scoped insertion preserves host-only semantics when the import domain has no leading dot. */
+  url?: string;
   path: string;
   /** Unix seconds. Omitted for a session cookie. */
   expires?: number;
@@ -40,16 +49,31 @@ export function parseCookieText(rawText: string): Cookie[] {
 
 /** Map a canonical cookie to the CDP `Network.setCookies` param shape (drops nothing lossily). */
 export function toCdpCookie(cookie: Cookie): CdpCookieParam {
+  const issues = validateCookies([cookie]);
+  if (issues.length > 0) throw new Error(`invalid cookie import: ${issues.join('; ')}`);
   const out: CdpCookieParam = {
     name: cookie.name,
     value: cookie.value,
-    // A leading dot is a Netscape "include subdomains" marker; CDP wants the bare domain (it applies
-    // subdomain scope itself), so strip exactly one leading dot.
-    domain: cookie.domain.startsWith('.') ? cookie.domain.slice(1) : cookie.domain,
     path: cookie.path || '/',
     httpOnly: cookie.httpOnly,
     secure: cookie.secure,
   };
+  if (cookie.domain.startsWith('.')) {
+    // Preserve the leading-dot domain-cookie signal. Stripping it converted imports into host-only
+    // cookies and broke sessions on sibling subdomains.
+    out.domain = cookie.domain;
+  } else {
+    // Supplying `domain` to CDP creates a domain cookie. Supplying only a URL creates the host-only
+    // cookie represented by Playwright/Netscape domains without a leading dot.
+    const host =
+      cookie.domain.includes(':') && !cookie.domain.startsWith('[')
+        ? `[${cookie.domain}]`
+        : cookie.domain;
+    out.url = new URL(
+      cookie.path || '/',
+      `${cookie.secure ? 'https' : 'http'}://${host}`,
+    ).toString();
+  }
   if (cookie.expires !== undefined) out.expires = cookie.expires;
   if (cookie.sameSite !== undefined) out.sameSite = cookie.sameSite;
   return out;
@@ -66,12 +90,19 @@ export function cdpCookiesFromDraft(draft: CookieImportDraft | undefined): CdpCo
   if (!draft || draft.mode === 'empty' || !draft.rawText || draft.rawText.trim() === '') {
     return [];
   }
-  return parseCookieText(draft.rawText).map(toCdpCookie);
+  const parsed = parseCookieText(draft.rawText);
+  const issues = validateCookies(parsed);
+  if (issues.length > 0) {
+    throw new Error(
+      `invalid cookie import (${issues.length} issue${issues.length === 1 ? '' : 's'}): ${issues.join('; ')}`,
+    );
+  }
+  return parsed.map(toCdpCookie);
 }
 
 /**
  * Inject a profile's imported cookies into the live browser over CDP. `replace` clears the existing jar
- * first so the imported set is authoritative. No-op when the draft is absent/empty or parses to nothing.
+ * first so the imported set is authoritative. `empty` also clears once. No-op only when no draft exists.
  * Returns the number of cookies loaded.
  */
 export async function applyCookieImport(
@@ -79,7 +110,7 @@ export async function applyCookieImport(
   draft: CookieImportDraft | undefined,
 ): Promise<number> {
   const cookies = cdpCookiesFromDraft(draft);
-  if (draft?.mode === 'replace') {
+  if (draft?.mode === 'replace' || draft?.mode === 'empty') {
     await cdp.send('Network.clearBrowserCookies');
   }
   if (cookies.length === 0) {

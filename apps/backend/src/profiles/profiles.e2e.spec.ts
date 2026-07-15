@@ -149,7 +149,7 @@ test('create accepts the lobium engine (no longer a contract-drift 400)', async 
   assert.equal(res.body.data.engine, 'lobium');
 });
 
-test('update can edit engine, os, and fingerprintOverrides and they persist', async () => {
+test('update persists all editable non-secret desktop metadata', async () => {
   const token = await registerToken('profiles-update@example.com');
   const auth = { Authorization: `Bearer ${token}` };
 
@@ -162,14 +162,50 @@ test('update can edit engine, os, and fingerprintOverrides and they persist', as
   const originalSeed: string = create.body.data.fingerprintSeed;
 
   const overrides = { navigator: { hardwareConcurrency: 12 }, fonts: ['Arial', 'Helvetica'] };
+  const extensions = [
+    {
+      source: 'chrome_web_store',
+      enabled: true,
+      id: 'abcdefghijklmnop',
+      name: 'Example',
+      url: 'https://chromewebstore.google.com/detail/example/abcdefghijklmnop',
+    },
+  ];
+  const cookiesImport = {
+    mode: 'merge',
+    source: 'file',
+    fileName: 'cookies.txt',
+    parsedCount: 3,
+    errors: [{ line: 2, message: 'invalid cookie domain' }],
+  };
   const update = await request(app.getHttpServer())
     .patch(`/profiles/${id}`)
     .set(auth)
-    .send({ engine: 'lobium', os: 'macos', fingerprintOverrides: overrides });
+    .send({
+      engine: 'lobium',
+      os: 'macos',
+      osVersion: 'macOS 14.6',
+      fingerprintOverrides: overrides,
+      proxyId: 'proxy-2',
+      templateId: 'template-2',
+      cookiesImport,
+      extensions,
+      tags: ['updated'],
+      folder: 'Work',
+      notes: 'safe notes',
+    });
   assert.equal(update.status, 200);
   assert.equal(update.body.data.engine, 'lobium');
   assert.equal(update.body.data.os, 'macos');
+  assert.equal(update.body.data.osVersion, 'macOS 14.6');
   assert.deepEqual(update.body.data.fingerprintOverrides, overrides);
+  assert.equal(update.body.data.proxyId, 'proxy-2');
+  assert.equal(update.body.data.templateId, 'template-2');
+  assert.deepEqual(update.body.data.cookiesImport, cookiesImport);
+  assert.deepEqual(update.body.data.extensions, extensions);
+  assert.deepEqual(update.body.data.tags, ['updated']);
+  assert.equal(update.body.data.folder, 'Work');
+  assert.equal(update.body.data.notes, 'safe notes');
   // Identity is immutable via update: the seed is untouched.
   assert.equal(update.body.data.fingerprintSeed, originalSeed);
 
@@ -178,7 +214,12 @@ test('update can edit engine, os, and fingerprintOverrides and they persist', as
   assert.equal(getOne.status, 200);
   assert.equal(getOne.body.data.engine, 'lobium');
   assert.equal(getOne.body.data.os, 'macos');
+  assert.equal(getOne.body.data.osVersion, 'macOS 14.6');
   assert.deepEqual(getOne.body.data.fingerprintOverrides, overrides);
+  assert.equal(getOne.body.data.proxyId, 'proxy-2');
+  assert.equal(getOne.body.data.templateId, 'template-2');
+  assert.deepEqual(getOne.body.data.cookiesImport, cookiesImport);
+  assert.deepEqual(getOne.body.data.extensions, extensions);
 
   // fingerprintSeed is not a whitelisted update field, so attempting to change it is a 400.
   const seedChange = await request(app.getHttpServer())
@@ -186,6 +227,88 @@ test('update can edit engine, os, and fingerprintOverrides and they persist', as
     .set(auth)
     .send({ fingerprintSeed: 'deadbeefdeadbeefdeadbeefdeadbeef' });
   assert.equal(seedChange.status, 400);
+});
+
+test('profile DTOs reject inline proxies, raw cookie text, and malformed extensions', async () => {
+  const token = await registerToken('profiles-secret-validation@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+
+  const inlineProxy = await request(app.getHttpServer())
+    .post('/profiles')
+    .set(auth)
+    .send({
+      name: 'Unsafe proxy',
+      engine: 'lobium',
+      os: 'windows',
+      proxy: {
+        id: 'inline',
+        type: 'http',
+        host: 'proxy.example.com',
+        port: 8080,
+        username: 'user',
+        password: 'secret',
+      },
+    });
+  assert.equal(inlineProxy.status, 400);
+
+  const rawCookies = await request(app.getHttpServer())
+    .post('/profiles')
+    .set(auth)
+    .send({
+      name: 'Unsafe cookies',
+      engine: 'lobium',
+      os: 'windows',
+      cookiesImport: { mode: 'replace', source: 'plain_text', rawText: 'session=secret' },
+    });
+  assert.equal(rawCookies.status, 400);
+
+  const malformedExtension = await request(app.getHttpServer())
+    .post('/profiles')
+    .set(auth)
+    .send({
+      name: 'Bad extension',
+      engine: 'lobium',
+      os: 'windows',
+      extensions: [{ source: 'chrome_web_store', enabled: 'yes' }],
+    });
+  assert.equal(malformedExtension.status, 400);
+
+  const androidProfile = await request(app.getHttpServer())
+    .post('/profiles')
+    .set(auth)
+    .send({ name: 'Android mobile target', engine: 'lobium', os: 'android' });
+  assert.equal(androidProfile.status, 201);
+  assert.equal(androidProfile.body.data.os, 'android');
+
+  const safe = await request(app.getHttpServer())
+    .post('/profiles')
+    .set(auth)
+    .send({ name: 'Safe', engine: 'lobium', os: 'windows' });
+  assert.ok([200, 201].includes(safe.status));
+
+  const rawCookieUpdate = await request(app.getHttpServer())
+    .patch(`/profiles/${safe.body.data.id}`)
+    .set(auth)
+    .send({ cookiesImport: { mode: 'merge', rawText: 'auth=secret' } });
+  assert.equal(rawCookieUpdate.status, 400);
+
+  const rawCookieImport = await request(app.getHttpServer())
+    .post('/profiles/import')
+    .set(auth)
+    .send({
+      version: 1,
+      profiles: [
+        {
+          name: 'Unsafe import',
+          engine: 'lobium',
+          os: 'linux',
+          fingerprintSeed: '0123456789abcdef0123456789abcdef',
+          cookiesImport: { mode: 'replace', rawText: 'token=secret' },
+          tags: [],
+        },
+      ],
+    });
+  assert.equal(rawCookieImport.status, 400);
 });
 
 /** Create a profile and return its id. */
@@ -486,10 +609,40 @@ test('export is secret-free; import transfers profiles (preserving seed identity
   const tokenB = await registerToken('import-b@example.com');
   const authB = { Authorization: `Bearer ${tokenB}` };
 
+  const alphaMetadata = {
+    osVersion: 'macOS 14.6',
+    fingerprintOverrides: {
+      navigator: { hardwareConcurrency: 10 },
+      fonts: ['Arial', 'Helvetica'],
+    },
+    proxyId: 'proxy-alpha',
+    templateId: 'template-alpha',
+    cookiesImport: {
+      mode: 'merge',
+      source: 'file',
+      fileName: 'cookies.txt',
+      parsedCount: 2,
+      errors: [{ line: 4, message: 'expired cookie' }],
+    },
+    extensions: [
+      {
+        source: 'chrome_web_store',
+        enabled: true,
+        id: 'abcdefghijklmnop',
+        name: 'Example',
+        url: 'https://chromewebstore.google.com/detail/example/abcdefghijklmnop',
+      },
+      { source: 'unpacked', enabled: false, name: 'Local helper' },
+    ],
+    tags: ['t'],
+    folder: 'Transfers',
+    notes: 'n',
+  };
   const p1 = await request(app.getHttpServer())
     .post('/profiles')
     .set(authA)
-    .send({ name: 'Alpha', engine: 'lobium', os: 'macos', tags: ['t'], notes: 'n' });
+    .send({ name: 'Alpha', engine: 'lobium', os: 'macos', ...alphaMetadata });
+  assert.ok([200, 201].includes(p1.status), `Alpha create status ${p1.status}`);
   await request(app.getHttpServer())
     .post('/profiles')
     .set(authA)
@@ -508,6 +661,8 @@ test('export is secret-free; import transfers profiles (preserving seed identity
     assert.equal(p.id, undefined, 'export carries no server id');
     assert.equal(p.ownerTeamId, undefined, 'export carries no team id');
     assert.equal(p.status, undefined, 'export carries no runtime status');
+    assert.equal(p.proxy, undefined, 'export carries no inline proxy');
+    assert.equal(p.cookiesImport?.rawText, undefined, 'export carries no raw cookie text');
   }
   assert.ok(
     !JSON.stringify(exp.body.data).includes('U0VDUkVU'),
@@ -515,6 +670,9 @@ test('export is secret-free; import transfers profiles (preserving seed identity
   );
   const alpha = exp.body.data.profiles.find((p: { name: string }) => p.name === 'Alpha');
   assert.equal(alpha.engine, 'lobium');
+  for (const [key, value] of Object.entries(alphaMetadata)) {
+    assert.deepEqual(alpha[key], value, `export round-trips Alpha ${key}`);
+  }
 
   // B imports A's bundle; seeds (identity) transfer and B owns the copies.
   const imp = await request(app.getHttpServer())
@@ -526,6 +684,9 @@ test('export is secret-free; import transfers profiles (preserving seed identity
   const bAlpha = imp.body.data.find((p: { name: string }) => p.name === 'Alpha');
   assert.equal(bAlpha.fingerprintSeed, alpha.fingerprintSeed, 'seed identity transfers');
   assert.ok(bAlpha.ownerTeamId, "imported under B's team");
+  for (const [key, value] of Object.entries(alphaMetadata)) {
+    assert.deepEqual(bAlpha[key], value, `import round-trips Alpha ${key}`);
+  }
 
   const listB = await request(app.getHttpServer()).get('/profiles').set(authB);
   assert.equal(listB.body.data.length, 2, 'B sees exactly the imported profiles (isolation holds)');
