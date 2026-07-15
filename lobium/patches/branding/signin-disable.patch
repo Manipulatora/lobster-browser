@@ -1,0 +1,17 @@
+diff --git a/chrome/browser/signin/account_consistency_mode_manager.cc b/chrome/browser/signin/account_consistency_mode_manager.cc
+index f11db47c92..dde99e6f82 100644
+--- a/chrome/browser/signin/account_consistency_mode_manager.cc
++++ b/chrome/browser/signin/account_consistency_mode_manager.cc
+@@ -131,6 +131,12 @@ AccountConsistencyModeManager::AccountConsistencyModeManager(Profile* profile)
+     signin_allowed = false;
+   }
+ 
++  // Lobium: browser-level Google sign-in / sync is never offered. Forcing kSigninAllowed=false here (the
++  // single authoritative pref that both the app menu's sync section and chrome://settings' people page
++  // read via CanOfferSignin / AddBoolean("signinAllowed", ...)) removes "Sign in to Lobium" from the
++  // 3-dot menu, Settings, and the profile bubble at once — one profile per profile, no account funnel.
++  signin_allowed = false;
++
+   prefs->SetBoolean(prefs::kSigninAllowed, signin_allowed);
+ 
+   UMA_HISTOGRAM_BOOLEAN("Signin.SigninAllowed", signin_allowed);

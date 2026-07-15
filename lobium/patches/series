@@ -81,3 +81,4 @@ branding/omnibox-profile-chip.patch
 # pages + all omnibox product-icon spots. chrome://version page logos are done by the branding
 # script (binary PNGs), not a patch.
 branding/product-icon-lobster.patch
+branding/signin-disable.patch

@@ -1,16 +1,3 @@
-diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
-index 3e26337389..030e7876d4 100644
---- a/chrome/browser/ui/BUILD.gn
-+++ b/chrome/browser/ui/BUILD.gn
-@@ -5243,6 +5243,8 @@ static_library("ui") {
-         "views/frame/browser_frame_view_linux.h",
-         "views/frame/browser_frame_view_linux_native.cc",
-         "views/frame/browser_frame_view_linux_native.h",
-+        "views/frame/lobium_device_frame_view.cc",
-+        "views/frame/lobium_device_frame_view.h",
-       ]
-     }
- 
 diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
 index 2da4e711b9..2f01fee82c 100644
 --- a/chrome/browser/ui/views/frame/browser_view.cc
@@ -152,7 +139,7 @@ index 4d5b544dff..1f6718035f 100644
    raw_ptr<SidePanel> side_panel = nullptr;
    raw_ptr<views::View> side_panel_animation_content = nullptr;
 diff --git a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
-index 8a9a7c3ef3..e8900fd1ef 100644
+index 8a9a7c3ef3..e3e137920c 100644
 --- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
 +++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
 @@ -14,6 +14,9 @@
@@ -165,7 +152,7 @@ index 8a9a7c3ef3..e8900fd1ef 100644
  #include "chrome/browser/ui/animation/browser_animation_controller.h"
  #include "chrome/browser/ui/color/chrome_color_id.h"
  #include "chrome/browser/ui/immersive/immersive_mode_controller.h"
-@@ -1109,11 +1112,18 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+@@ -1109,11 +1112,22 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
      content_right =
          std::min(content_right, browser_params.visual_client_area.right());
    }
@@ -173,8 +160,12 @@ index 8a9a7c3ef3..e8900fd1ef 100644
 +                            content_right - content_left,
 +                            params.visual_client_area.height());
 +#if BUILDFLAG(IS_LINUX)
++  gfx::Rect lobium_stage;
 +  if (views().lobium_device_frame_view) {
 +    layout.AddChild(views().lobium_device_frame_view, contents_bounds);
++    // The content area (stage). When the zoomed device is scrolled the aperture below rises above
++    // this top; the WebContents must be clipped to it so the phone slides UNDER the toolbar.
++    lobium_stage = contents_bounds;
 +    contents_bounds = views().lobium_device_frame_view->GetDeviceScreenBounds(
 +        contents_bounds);
 +  }
@@ -188,6 +179,33 @@ index 8a9a7c3ef3..e8900fd1ef 100644
  
    // Maybe expand and clip the web contents to avoid issues during animation.
    if (features::UseSidePanelFlyoverAnimation()) {
+@@ -1156,6 +1170,26 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+     }
+   }
+ 
++#if BUILDFLAG(IS_LINUX)
++  // Lobium: clip the device aperture to the content-area (stage). When the zoomed phone/tablet is
++  // scrolled, the aperture's top rises above the stage; clip so the WebContents keeps its full size
++  // but the part above the stage top is hidden — the device slides UNDER the toolbar instead of
++  // painting over it. Reuses the same MultiContentsView expand+clip the side-panel animation uses.
++  if (views().lobium_device_frame_view) {
++    const gfx::Rect lobium_aperture = contents_layout.bounds;
++    gfx::Rect lobium_visible = lobium_aperture;
++    lobium_visible.Intersect(lobium_stage);
++    if (!lobium_visible.IsEmpty() && lobium_visible != lobium_aperture) {
++      contents_layout.bounds = lobium_visible;
++      views().multi_contents_view->SetTargetContentBounds(
++          MultiContentsView::TargetContentBounds(
++              lobium_aperture.size(), lobium_aperture.InsetsFrom(lobium_visible)));
++    } else {
++      views().multi_contents_view->SetTargetContentBounds(std::nullopt);
++    }
++  }
++#endif
++
+   if (features::IsGlassFrameEnabled()) {
+     gfx::RoundedCornersF content_corners;
+     if (layout_data_->tab_strip_type == TabStripType::kVertical &&
 diff --git a/chrome/browser/ui/views/frame/lobium_device_frame_view.cc b/chrome/browser/ui/views/frame/lobium_device_frame_view.cc
 new file mode 100644
 index 0000000000..83488ac64d
@@ -693,125 +711,3 @@ index 0000000000..7b86773b13
 +};
 +
 +#endif  // CHROME_BROWSER_UI_VIEWS_FRAME_LOBIUM_DEVICE_FRAME_VIEW_H_
-diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
-index 082bc083ee..ac35bb80a4 100644
---- a/content/browser/BUILD.gn
-+++ b/content/browser/BUILD.gn
-@@ -909,6 +909,7 @@ source_set("browser") {
-     "devtools/devtools_io_context.h",
-     "devtools/devtools_issue_storage.cc",
-     "devtools/devtools_issue_storage.h",
-+    "devtools/lobium_device_emulation.cc",
-     "devtools/devtools_manager.cc",
-     "devtools/devtools_manager.h",
-     "devtools/devtools_pipe_handler.cc",
-diff --git a/content/browser/devtools/lobium_device_emulation.cc b/content/browser/devtools/lobium_device_emulation.cc
-new file mode 100644
-index 0000000000..64c8aa3426
---- /dev/null
-+++ b/content/browser/devtools/lobium_device_emulation.cc
-@@ -0,0 +1,32 @@
-+// Copyright 2026 The Lobster Browser Authors.
-+
-+#include "content/public/browser/lobium_device_emulation.h"
-+
-+#include "content/browser/devtools/devtools_agent_host_impl.h"
-+#include "content/browser/devtools/protocol/emulation_handler.h"
-+#include "content/public/browser/devtools_agent_host.h"
-+
-+namespace content {
-+
-+bool SetLobiumDeviceEmulationScale(WebContents* web_contents, float scale) {
-+  if (!web_contents || scale <= 0.0f) {
-+    return false;
-+  }
-+
-+  scoped_refptr<DevToolsAgentHost> agent_host =
-+      DevToolsAgentHost::GetOrCreateFor(web_contents);
-+  if (!agent_host) {
-+    return false;
-+  }
-+
-+  bool updated = false;
-+  auto* agent_host_impl =
-+      static_cast<DevToolsAgentHostImpl*>(agent_host.get());
-+  for (protocol::EmulationHandler* handler :
-+       protocol::EmulationHandler::ForAgentHost(agent_host_impl)) {
-+    updated = handler->SetDeviceEmulationScale(scale) || updated;
-+  }
-+  return updated;
-+}
-+
-+}  // namespace content
-diff --git a/content/browser/devtools/protocol/emulation_handler.cc b/content/browser/devtools/protocol/emulation_handler.cc
-index 17934976bd..fc312f894e 100644
---- a/content/browser/devtools/protocol/emulation_handler.cc
-+++ b/content/browser/devtools/protocol/emulation_handler.cc
-@@ -1070,6 +1070,16 @@ void EmulationHandler::SetDeviceEmulationParams(
-   UpdateDeviceEmulationState();
- }
- 
-+bool EmulationHandler::SetDeviceEmulationScale(float scale) {
-+  if (!host_ || !device_emulation_enabled_ || scale <= 0.0f) {
-+    return false;
-+  }
-+  blink::DeviceEmulationParams params = device_emulation_params_;
-+  params.scale = scale;
-+  SetDeviceEmulationParams(params);
-+  return true;
-+}
-+
- WebContentsImpl* EmulationHandler::GetWebContents() {
-   DCHECK(host_);  // Only call if |host_| is set.
-   return static_cast<WebContentsImpl*>(WebContents::FromRenderFrameHost(host_));
-diff --git a/content/browser/devtools/protocol/emulation_handler.h b/content/browser/devtools/protocol/emulation_handler.h
-index 069f55babd..f764b2111d 100644
---- a/content/browser/devtools/protocol/emulation_handler.h
-+++ b/content/browser/devtools/protocol/emulation_handler.h
-@@ -129,6 +129,7 @@ class EmulationHandler : public DevToolsDomainHandler,
- 
-   blink::DeviceEmulationParams GetDeviceEmulationParams();
-   void SetDeviceEmulationParams(const blink::DeviceEmulationParams& params);
-+  bool SetDeviceEmulationScale(float scale);
- 
-   bool device_emulation_enabled() { return device_emulation_enabled_; }
- 
-diff --git a/content/public/browser/BUILD.gn b/content/public/browser/BUILD.gn
-index 95fe796458..55bd7cdd99 100644
---- a/content/public/browser/BUILD.gn
-+++ b/content/public/browser/BUILD.gn
-@@ -241,6 +241,7 @@ source_set("browser_sources") {
-     "keyboard_event_processing_result.h",
-     "legacy_tech_cookie_issue_details.cc",
-     "legacy_tech_cookie_issue_details.h",
-+    "lobium_device_emulation.h",
-     "login_delegate.h",
-     "manifest_icon_downloader.h",
-     "media_capture_devices.h",
-diff --git a/content/public/browser/lobium_device_emulation.h b/content/public/browser/lobium_device_emulation.h
-new file mode 100644
-index 0000000000..e7dcde5e21
---- /dev/null
-+++ b/content/public/browser/lobium_device_emulation.h
-@@ -0,0 +1,21 @@
-+// Copyright 2026 The Lobster Browser Authors.
-+
-+#ifndef CONTENT_PUBLIC_BROWSER_LOBIUM_DEVICE_EMULATION_H_
-+#define CONTENT_PUBLIC_BROWSER_LOBIUM_DEVICE_EMULATION_H_
-+
-+#include "content/common/content_export.h"
-+
-+namespace content {
-+
-+class WebContents;
-+
-+// Updates only the compositor scale of an already enabled device-metrics
-+// emulation session. The emulated screen/view dimensions and device scale
-+// factor are intentionally left unchanged. Returns true when at least one
-+// attached DevTools emulation session was updated.
-+CONTENT_EXPORT bool SetLobiumDeviceEmulationScale(WebContents* web_contents,
-+                                                  float scale);
-+
-+}  // namespace content
-+
-+#endif  // CONTENT_PUBLIC_BROWSER_LOBIUM_DEVICE_EMULATION_H_

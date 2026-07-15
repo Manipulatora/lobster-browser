@@ -1,5 +1,5 @@
 diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
-index 0353e3f0ae..ccec0f4b9b 100644
+index 0353e3f0ae..77b3248522 100644
 --- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
 +++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
 @@ -16,6 +16,7 @@
@@ -21,21 +21,50 @@ index 0353e3f0ae..ccec0f4b9b 100644
  #include "ui/views/interaction/element_tracker_views.h"
  #include "ui/views/property_effects.h"
  #include "ui/views/style/typography.h"
-@@ -340,6 +344,12 @@ void LocationBarView::Init() {
+@@ -340,6 +344,13 @@ void LocationBarView::Init() {
    location_icon_view->set_drag_controller(this);
    location_icon_view_ = AddChildView(std::move(location_icon_view));
  
-+  // Lobium: the per-profile identity now rides on the LEADING location-icon chip
-+  // (the small box at the left of the omnibox). On chrome:// pages that chip shows
-+  // the profile name (see GetSecurityChipText, which reads --lobium-profile-name)
-+  // plus the lobster product glyph. The former trailing (right-side) profile-name
-+  // chip was removed so the omnibox reads like stock Chrome.
++  // Lobium: the per-profile identity rides on the LEADING location-icon chip (the
++  // small box at the left of the omnibox) on EVERY page/URL — see GetSecurityChipText
++  // / ShouldShowSecurityChipText, which read --lobium-profile-name and surface it
++  // whenever no security warning is present (warnings still take precedence, and the
++  // chip hides while the user is editing the omnibox). The former trailing (right-side)
++  // profile-name chip was removed so the omnibox reads like stock Chrome.
 +
    // Initialize the Omnibox view. browser_ can be nullptr on ChromeOS in the
    // case of simple_web_view_dialog. Or it can be nulltpr on ChromeOS and on
    // other desktop platforms in the case of presentation_receiver_window_view.
+@@ -2170,6 +2181,15 @@ bool LocationBarView::IsEditingOrEmpty() const {
+   return omnibox_view_ && omnibox_view_->IsEditingOrEmpty();
+ }
+ 
++// Lobium: actively-editing only (text input in progress), NOT the empty-but-not-editing NTP state — so
++// the leading profile-name chip stays visible on the New Tab Page and hides only while typing a URL.
++// Uses GetOmniboxController() (the same accessor the rest of this file uses) since OmniboxView::
++// controller() is protected.
++bool LocationBarView::IsEditing() const {
++  return omnibox_view_ &&
++         GetOmniboxController()->edit_model()->user_input_in_progress();
++}
++
+ bool LocationBarView::IsMouseHovered() const {
+   return views::View::IsMouseHovered();
+ }
+diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.h b/chrome/browser/ui/views/location_bar/location_bar_view.h
+index 62b5f976ff..eee2b597ae 100644
+--- a/chrome/browser/ui/views/location_bar/location_bar_view.h
++++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
+@@ -308,6 +308,7 @@ class LocationBarView
+   // LocationIconView::Delegate:
+   const LocationBarModel* GetLocationBarModel() const override;
+   bool IsEditingOrEmpty() const override;
++  bool IsEditing() const override;
+   void OnLocationIconGestureEvent(ui::GestureEvent* event) override;
+   void OnLocationIconPressed(const ui::MouseEvent& event) override;
+   void OnLocationIconDragged(const ui::MouseEvent& event) override;
 diff --git a/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc b/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc
-index 16523a13c5..4c53ee3e63 100644
+index 16523a13c5..ae8d38cf43 100644
 --- a/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc
 +++ b/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc
 @@ -4,6 +4,8 @@
@@ -47,21 +76,129 @@ index 16523a13c5..4c53ee3e63 100644
  #include "build/branding_buildflags.h"
  #include "chrome/browser/extensions/extension_ui_util.h"
  #include "chrome/grit/branded_strings.h"
-@@ -39,6 +41,17 @@ std::u16string GetSecurityChipText(const LocationBarModel* model,
+@@ -29,6 +31,21 @@
+ 
+ namespace location_bar {
+ 
++namespace {
++
++// Lobium: the per-profile identity shown in the leading location-bar chip, passed by the launcher via
++// --lobium-profile-name. Empty when no profile name was supplied (e.g. a plain dev run), in which case
++// the chip falls back to ordinary Chromium behavior. This is the single source of the chip text so the
++// profile name renders identically on internal (chrome://) and normal (https://) pages.
++std::u16string LobiumProfileName() {
++  const std::string name =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++          "lobium-profile-name");
++  return name.empty() ? std::u16string() : base::UTF8ToUTF16(name);
++}
++
++}  // namespace
++
+ std::u16string GetSecurityChipText(const LocationBarModel* model,
+                                    content::WebContents* web_contents,
+                                    bool is_editing_or_empty) {
+@@ -39,6 +56,13 @@ std::u16string GetSecurityChipText(const LocationBarModel* model,
    if (model->GetURL().SchemeIs(content::kChromeUIScheme) ||
        (contextual_tasks::ShouldShowExpandedSecurityChip() &&
         model->IsContextualTasksPage())) {
 +    // Lobium: on internal (chrome://) pages the leading chip carries the profile
-+    // identity — the per-profile name passed via --lobium-profile-name — instead
-+    // of the bare product name, so chrome://version etc. read as "<profile>" with
-+    // the lobster glyph. Falls back to the product short name when the launcher
-+    // supplied no profile name.
-+    const std::string lobium_profile_name =
-+        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
-+            "lobium-profile-name");
-+    if (!lobium_profile_name.empty()) {
-+      return base::UTF8ToUTF16(lobium_profile_name);
++    // identity, falling back to the product short name when no profile name was
++    // supplied.
++    const std::u16string profile_name = LobiumProfileName();
++    if (!profile_name.empty()) {
++      return profile_name;
 +    }
      return l10n_util::GetStringUTF16(IDS_SHORT_PRODUCT_NAME);
    }
+ 
+@@ -64,7 +88,17 @@ std::u16string GetSecurityChipText(const LocationBarModel* model,
+     }
+   }
+ 
+-  return model->GetSecureDisplayText();
++  // A real security warning ("Not secure" / "Dangerous") must always take precedence over the profile
++  // identity, so surface it whenever present.
++  const std::u16string secure_text = model->GetSecureDisplayText();
++  if (!secure_text.empty()) {
++    return secure_text;
++  }
++  // Lobium: on every other page (a normal secure https:// site, which otherwise shows no chip text) the
++  // leading chip carries the profile identity, so the omnibox always reads as "<profile>" — the same as
++  // the chrome:// case above — instead of being blank. Returns empty (ordinary Chromium behavior) when
++  // no --lobium-profile-name was supplied.
++  return LobiumProfileName();
+ }
+ 
+ bool ShouldShowSecurityChipText(const LocationBarModel* model,
+@@ -94,7 +128,13 @@ bool ShouldShowSecurityChipText(const LocationBarModel* model,
+     return true;
+   }
+ 
+-  return !model->GetSecureDisplayText().empty();
++  if (!model->GetSecureDisplayText().empty()) {
++    return true;
++  }
++  // Lobium: always show the chip when a profile identity is present, so the profile name is visible on
++  // EVERY page/URL — not just internal (chrome://) pages. While the user is editing the omnibox the
++  // early is_editing_or_empty guard above still hides it, matching normal Chromium.
++  return !LobiumProfileName().empty();
+ }
+ 
+ std::optional<int> MaybeGetGradientGoogleSuperGIcon(
+diff --git a/chrome/browser/ui/views/location_bar/location_icon_view.cc b/chrome/browser/ui/views/location_bar/location_icon_view.cc
+index 01ba0aa4ae..11eeb92171 100644
+--- a/chrome/browser/ui/views/location_bar/location_icon_view.cc
++++ b/chrome/browser/ui/views/location_bar/location_icon_view.cc
+@@ -200,10 +200,19 @@ int LocationIconView::GetMinimumLabelTextWidth() const {
+   return GetMinimumSizeForPreferredSize(GetSizeForLabelWidth(width)).width();
+ }
+ 
++// Lobium: default IsEditing() == IsEditingOrEmpty() (out-of-line per chromium-style: virtual methods
++// with a body must not be inline in the header). LocationBarView overrides this with the narrower
++// "actively typing" signal so the profile chip persists on the New Tab Page.
++bool LocationIconView::Delegate::IsEditing() const {
++  return IsEditingOrEmpty();
++}
++
+ bool LocationIconView::GetShowText() const {
++  // Lobium: use IsEditing() (actively-typing) rather than IsEditingOrEmpty() so the profile-name chip
++  // shows on the empty New Tab Page too, and only hides while the user is typing a URL.
+   return location_bar::ShouldShowSecurityChipText(
+       delegate_->GetLocationBarModel(), delegate_->GetWebContents(),
+-      delegate_->IsEditingOrEmpty());
++      delegate_->IsEditing());
+ }
+ 
+ void LocationIconView::MaybeAnimateIcon(bool open) {
+@@ -253,9 +262,11 @@ const views::InkDrop* LocationIconView::get_ink_drop_for_testing() {
+ }
+ 
+ std::u16string LocationIconView::GetText() const {
++  // Lobium: IsEditing() (not IsEditingOrEmpty()) so the profile-name chip text is present on the empty
++  // New Tab Page and only blanks while the user is actively typing a URL.
+   return location_bar::GetSecurityChipText(delegate_->GetLocationBarModel(),
+                                            delegate_->GetWebContents(),
+-                                           delegate_->IsEditingOrEmpty());
++                                           delegate_->IsEditing());
+ }
+ 
+ bool LocationIconView::GetAnimateTextVisibilityChange() const {
+diff --git a/chrome/browser/ui/views/location_bar/location_icon_view.h b/chrome/browser/ui/views/location_bar/location_icon_view.h
+index 0a3cb10759..fb68f68d12 100644
+--- a/chrome/browser/ui/views/location_bar/location_icon_view.h
++++ b/chrome/browser/ui/views/location_bar/location_icon_view.h
+@@ -39,6 +39,13 @@ class LocationIconView : public IconLabelBubbleView {
+     // Determines whether the omnibox (if any) is editing or empty.
+     virtual bool IsEditingOrEmpty() const = 0;
+ 
++    // Lobium: true only while the user is ACTIVELY editing (text input in progress), as distinct from
++    // an empty-but-not-editing omnibox (e.g. the New Tab Page). The leading profile-name chip uses this
++    // narrower signal so it stays visible on the NTP while still hiding while the user types a URL.
++    // Non-pure (default = IsEditingOrEmpty, defined out-of-line) so WebUI/PiP/test delegates are
++    // unchanged.
++    virtual bool IsEditing() const;
++
+     // Called when the location icon is touched, with the event.
+     virtual void OnLocationIconGestureEvent(ui::GestureEvent* event) {}
  
