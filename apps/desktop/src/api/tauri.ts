@@ -1,10 +1,12 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 
 import type {
+  CreateMobileMachineInput,
   CreateProfileInput,
   CreateProfileTemplateInput,
   CreateStoredProxyInput,
   FingerprintSeed,
+  MobileMachine,
   Profile,
   ProfileTemplate,
   ProxyConfig,
@@ -74,6 +76,19 @@ export interface TemplatesClient {
 }
 
 /**
+ * Mobile machines — per-profile isolated Android emulators. The `provision`/`boot`/`stop` commands
+ * are infra-gated (they require a KVM+GPU host to run an AVD); the UI is fully exercisable via the
+ * in-browser mock, and the commands land with the `android-machine` package + Rust wiring.
+ */
+export interface MobileMachinesClient {
+  list_machines(): Promise<MobileMachine[]>;
+  create_machine(input: CreateMobileMachineInput): Promise<MobileMachine>;
+  boot_machine(id: string): Promise<MobileMachine>;
+  stop_machine(id: string): Promise<MobileMachine>;
+  delete_machine(id: string): Promise<void>;
+}
+
+/**
  * True when the app is hosted by a Tauri webview. We check the injected internals bag first
  * (present the instant the webview boots) and fall back to the SDK's own `isTauri()` guard.
  */
@@ -118,6 +133,14 @@ const tauriProxiesClient: ProxiesClient = {
 const tauriTemplatesClient: TemplatesClient = {
   list_templates: () => invoke<ProfileTemplate[]>('list_templates'),
   create_template: (input) => invoke<ProfileTemplate>('create_template', { input }),
+};
+
+const tauriMobileMachinesClient: MobileMachinesClient = {
+  list_machines: () => invoke<MobileMachine[]>('list_machines'),
+  create_machine: (input) => invoke<MobileMachine>('create_machine', { input }),
+  boot_machine: (id) => invoke<MobileMachine>('boot_machine', { id }),
+  stop_machine: (id) => invoke<MobileMachine>('stop_machine', { id }),
+  delete_machine: (id) => invoke<void>('delete_machine', { id }),
 };
 
 /* --------------------------------------------------------------------------------------------
@@ -470,6 +493,60 @@ const mockTemplatesClient: TemplatesClient = {
   },
 };
 
+/** In-memory mobile-machine store for the dev browser (no AVD host needed to exercise the UI). */
+const mobileMachineStore: MobileMachine[] = [];
+const mockMobileMachinesClient: MobileMachinesClient = {
+  list_machines: async () => mobileMachineStore.map((m) => ({ ...m })),
+  create_machine: async (input) => {
+    const machine: MobileMachine = {
+      id: `mm_${crypto.randomUUID().replaceAll('-', '')}`,
+      name: input.name,
+      config: {
+        machineType: input.machineType,
+        apiLevel: input.apiLevel,
+        fingerprintSeed:
+          input.fingerprintSeed ?? crypto.randomUUID().replaceAll('-', '').slice(0, 32),
+        ...(input.fingerprintOverrides ? { fingerprintOverrides: input.fingerprintOverrides } : {}),
+        ...(input.proxy ? { proxy: input.proxy } : {}),
+        ...(input.proxyId ? { proxyId: input.proxyId } : {}),
+        playServices: input.playServices ?? true,
+        island: {
+          builtIn: true,
+          isolateOnInstall: input.island?.isolateOnInstall ?? [],
+          freezeIdleApps: input.island?.freezeIdleApps ?? true,
+        },
+      },
+      status: 'stopped',
+      tags: input.tags ?? [],
+      ...(input.notes ? { notes: input.notes } : {}),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    };
+    mobileMachineStore.unshift(machine);
+    return { ...machine };
+  },
+  boot_machine: async (id) => {
+    const m = mobileMachineStore.find((x) => x.id === id);
+    if (!m) throw new Error('machine not found');
+    m.status = 'running';
+    m.adbSerial = 'emulator-5554';
+    m.updatedAt = nowIso();
+    return { ...m };
+  },
+  stop_machine: async (id) => {
+    const m = mobileMachineStore.find((x) => x.id === id);
+    if (!m) throw new Error('machine not found');
+    m.status = 'stopped';
+    delete m.adbSerial;
+    m.updatedAt = nowIso();
+    return { ...m };
+  },
+  delete_machine: async (id) => {
+    const i = mobileMachineStore.findIndex((x) => x.id === id);
+    if (i >= 0) mobileMachineStore.splice(i, 1);
+  },
+};
+
 /** The active client — real bridge in the desktop shell, in-memory mock in a dev browser. */
 export const profilesClient: ProfilesClient = isDesktopRuntime() ? tauriClient : mockClient;
 export const proxiesClient: ProxiesClient = isDesktopRuntime()
@@ -478,6 +555,9 @@ export const proxiesClient: ProxiesClient = isDesktopRuntime()
 export const templatesClient: TemplatesClient = isDesktopRuntime()
   ? tauriTemplatesClient
   : mockTemplatesClient;
+export const mobileMachinesClient: MobileMachinesClient = isDesktopRuntime()
+  ? tauriMobileMachinesClient
+  : mockMobileMachinesClient;
 
 if (!isDesktopRuntime()) {
   seedMockStore();

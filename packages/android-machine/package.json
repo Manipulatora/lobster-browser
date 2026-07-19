@@ -1,0 +1,20 @@
+{
+  "name": "@lobster/android-machine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Per-profile isolated Android machines (AVD/QEMU) with the built-in Lobium Island isolation service. Host-side lifecycle + the golden-image build pipeline + the Island system app.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@lobster/shared-types": "*",
+    "@lobster/fingerprint": "*"
+  }
+}

@@ -13,6 +13,7 @@
     "packages/fingerprint",
     "packages/proxy",
     "packages/cookies",
+    "packages/android-machine",
     "packages/engine-runner",
     "packages/local-api-sdk/js",
     "apps/desktop",
@@ -24,6 +25,7 @@
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "generate:fingerprint-catalog": "node scripts/generate-fingerprint-catalog.mjs",
+    "venice:chat": "node --env-file=.env scripts/venice-chat.mjs",
     "apply:lobium-branding": "node scripts/apply-lobium-branding.mjs",
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json}\"",
@@ -32,6 +34,7 @@
   "devDependencies": {
     "@playwright/test": "^1.61.1",
     "@types/node": "^22.9.0",
+    "openai": "^6.47.0",
     "prettier": "^3.3.3",
     "typescript": "^5.6.3"
   }

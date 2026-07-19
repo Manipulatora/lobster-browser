@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Device-admin policy surface for Lobium Island. As device owner the app can manage users
+     (create the island), suspend/hide packages (freeze + route), and wipe the container. -->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <disable-camera />
+        <force-lock />
+        <wipe-data />
+    </uses-policies>
+</device-admin>

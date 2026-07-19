@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Lobium Island — the built-in isolation service. Ships as a privileged SYSTEM app in the machine's
+  golden image (see image/build-golden-image.sh) and is provisioned as DEVICE OWNER at first boot
+  (image/first-boot-provision.sh). It is never installed by the user from Google Play.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.lobium.island">
+
+    <!-- Device-owner / managed-user privileges. Granted via the privapp-permissions allowlist
+         (image/privapp-permissions-com.lobium.island.xml) because this is a system priv-app. -->
+    <uses-permission android:name="android.permission.MANAGE_USERS" />
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL" />
+    <uses-permission android:name="android.permission.MANAGE_PROFILE_AND_DEVICE_OWNERS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
+        android:label="Island"
+        android:persistent="true"
+        android:allowBackup="false">
+
+        <!-- The device-admin component. Named as device owner by first-boot-provision.sh. -->
+        <receiver
+            android:name=".LobiumIslandAdminReceiver"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+                <action android:name="android.app.action.PROFILE_PROVISIONING_COMPLETE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- First-boot: ensure the isolated user exists + apply the per-machine policy. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Secure install routing: when a flagged app is installed, move it into the isolated user. -->
+        <receiver
+            android:name=".InstallRouter"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PACKAGE_ADDED" />
+                <data android:scheme="package" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
