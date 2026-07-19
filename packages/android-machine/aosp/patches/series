@@ -1,0 +1,9 @@
+# Lobium Android — framework patch series (apply in order onto a pristine AOSP 14 tree).
+# New source files are NOT patches; they are dropped in from ../overlay/ by build-lobium-android.sh:
+#   frameworks/base/services/core/java/com/android/server/lobium/
+#     LobiumSandboxManagerService.java   — the OS sandbox service (system_server)
+#     LobiumSandboxManagerInternal.java  — in-process LocalService contract
+#     SandboxPolicy.java                 — per-machine policy loader
+#
+0001-systemserver-start-lobium-sandbox-manager.patch
+0002-usertypefactory-lobium-sandbox-profile.patch

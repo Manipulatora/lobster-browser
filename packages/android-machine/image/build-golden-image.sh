@@ -1,52 +1,50 @@
 #!/usr/bin/env bash
 # Build the sealed GOLDEN Android system image every machine is cloned from.
 #
-# Composes: base Android system image + Google Play (GApps) + the built-in Lobium Island app (as a
-# privileged SYSTEM app) + Island's privapp-permissions allowlist. The result is a system image that,
-# on first boot, provisions Island as device owner (see first-boot-provision.sh) with NO user action.
+# The OS is Lobium Android — an AOSP fork whose framework sandboxes apps on install (see ../aosp/). The
+# sandbox is part of the operating system, so there is NO app to install and NO device owner to set:
+# this script just builds that OS, adds Google Play, and seals a cloneable golden snapshot.
 #
 # HOST REQUIREMENTS (cannot run on the GPU-less dev box):
+#   - The Lobium Android system image, built by ../aosp/build-lobium-android.sh on a heavy build host
+#     (~400 GB disk, 32 GB+ RAM). Point LOBIUM_SYSTEM_IMAGE at its out/target/product/<dev>/ dir.
 #   - Android SDK: emulator, avdmanager, sdkmanager, adb
 #   - KVM (bare-metal or nested-virt) + a GPU for the emulator
-#   - A writable system image to inject the priv-app (a userdebug/-eng system image, or a rooted
-#     GApps image); Google Play requires a Play-enabled base image (GApps licensing applies).
-#   - Gradle + Android build-tools to build the Island APK and platform-sign it.
+#   - A Play-enabled GApps package to overlay (Google Play licensing applies).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PKG_ROOT="$(cd "$HERE/.." && pwd)"
 API_LEVEL="${1:-34}"                          # Android 14 by default
 ABI="${LOBIUM_AVD_ABI:-x86_64}"
-IMG_TYPE="${LOBIUM_IMG_TYPE:-google_apis_playstore}"   # Play-enabled base
 OUT="${LOBIUM_GOLDEN_OUT:-$PKG_ROOT/.golden}"
-SYS_IMG="system/priv-app/LobiumIsland"
+# The Lobium Android system image (framework sandbox baked in). Built by ../aosp/build-lobium-android.sh.
+SYSTEM_IMAGE="${LOBIUM_SYSTEM_IMAGE:?set LOBIUM_SYSTEM_IMAGE to the out/target/product/<dev>/ dir from ../aosp/build-lobium-android.sh}"
 
-echo "==> 1/5 Build the Island APK (platform-signed)"
-( cd "$PKG_ROOT/island-app" && ./gradlew :assembleRelease )
-ISLAND_APK="$PKG_ROOT/island-app/build/outputs/apk/release/island-app-release.apk"
-# Platform-sign so it can live in /system/priv-app:
-#   apksigner sign --key platform.pk8 --cert platform.x509.pem "$ISLAND_APK"
+echo "==> 1/4 Register the Lobium Android system image as an emulator target (API ${API_LEVEL} ${ABI})"
+# The fork's build output is used directly as the AVD system image; no stock system-image download.
+echo no | avdmanager create avd -n lobium-golden \
+  -k "system-images;android-${API_LEVEL};lobium;${ABI}" --force 2>/dev/null || true
 
-echo "==> 2/5 Create + boot a writable AVD from the ${IMG_TYPE};${ABI} base (API ${API_LEVEL})"
-sdkmanager "system-images;android-${API_LEVEL};${IMG_TYPE};${ABI}" >/dev/null
-echo no | avdmanager create avd -n lobium-golden -k "system-images;android-${API_LEVEL};${IMG_TYPE};${ABI}" --force
-emulator -avd lobium-golden -writable-system -no-window -gpu swiftshader_indirect -no-snapshot &
+echo "==> 2/4 Boot the fork, overlay Google Play (GApps)"
+emulator -avd lobium-golden -writable-system -no-window -gpu swiftshader_indirect -no-snapshot \
+  -sysdir "$SYSTEM_IMAGE" &
 adb wait-for-device
 adb root && adb remount
+# Overlay GApps if provided (Play is a licensed add-on, not part of the AOSP fork).
+if [[ -n "${LOBIUM_GAPPS_DIR:-}" ]]; then
+  adb push "${LOBIUM_GAPPS_DIR}/." /system/
+fi
+# Sanity-check the OS sandbox is live before sealing.
+adb shell cmd lobium_sandbox status || { echo "FATAL: OS sandbox not present in system image"; exit 1; }
 
-echo "==> 3/5 Install Island as a privileged SYSTEM app + its permission allowlist"
-adb push "$ISLAND_APK" "/${SYS_IMG}/LobiumIsland.apk"
-adb push "$HERE/privapp-permissions-com.lobium.island.xml" \
-         /system/etc/permissions/privapp-permissions-com.lobium.island.xml
+echo "==> 3/4 Prepare the per-machine policy directory (staged per clone at boot, not baked here)"
 adb shell mkdir -p /data/system/lobium
 
-echo "==> 4/5 Stage first-boot provisioning (device-owner set on next clean boot)"
-adb push "$HERE/first-boot-provision.sh" /data/system/lobium/first-boot-provision.sh
-
-echo "==> 5/5 Seal the golden snapshot"
+echo "==> 4/4 Seal the golden snapshot"
 adb reboot
 adb wait-for-device
 adb emu avd snapshot save golden
 adb emu kill
 mkdir -p "$OUT"
-echo "golden image built for API ${API_LEVEL} ${IMG_TYPE};${ABI}. Clone per machine via src/machine-lifecycle.ts."
+echo "golden image built for API ${API_LEVEL} (Lobium Android, ${ABI}). Clone per machine via src/machine-lifecycle.ts."

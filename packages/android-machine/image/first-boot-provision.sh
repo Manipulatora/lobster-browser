@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# First-boot provisioning for a per-machine clone. Run once, right after a machine's cloned AVD boots
-# (invoked by src/machine-lifecycle.ts over adb). Sets Lobium Island as DEVICE OWNER and writes the
-# machine's per-Island policy — so isolation is active with zero user interaction.
+# Per-machine first-boot staging. Run once, right after a machine's cloned AVD boots (invoked by
+# src/machine-lifecycle.ts over adb).
 #
-# Args: $1 = path to this machine's island-policy.json (derived from IslandConfig in the create form).
+# The app sandbox is part of the OS (Lobium Android, ../aosp/) — there is no app to install and no
+# device owner to set. This only stages THIS machine's sandbox policy (from its IslandConfig) where the
+# OS reads it, then tells the running OS to re-read it. With no policy file the OS applies its
+# compiled-in default (sandbox every third-party app, one profile per app).
+#
+# Args: $1 = path to this machine's sandbox-policy.json (derived from IslandConfig in the create form).
 set -euo pipefail
 POLICY_JSON="${1:-}"
-ADMIN="com.lobium.island/.LobiumIslandAdminReceiver"
 
-# 1) Make Island the device owner. Only works on a fresh device with no accounts (true for a clone).
-adb shell dpm set-device-owner "$ADMIN"
-
-# 2) Write the per-machine policy where IslandPolicy.load() reads it.
+# 1) Stage the per-machine policy where SandboxPolicy.load() reads it.
 adb shell mkdir -p /data/system/lobium
 if [[ -n "$POLICY_JSON" && -f "$POLICY_JSON" ]]; then
-  adb push "$POLICY_JSON" /data/system/lobium/island-policy.json
+  adb push "$POLICY_JSON" /data/system/lobium/sandbox-policy.json
 fi
 
-# 3) Kick provisioning now (the admin's onEnabled + BootReceiver also do this idempotently).
-adb shell am broadcast -a android.app.action.DEVICE_ADMIN_ENABLED -n "$ADMIN"
+# 2) Tell the OS sandbox service to re-read the policy now (no reboot needed).
+adb shell cmd lobium_sandbox reload
 
-echo "island provisioned as device owner; isolated user + policy applied."
+echo "sandbox policy staged; OS app sandbox active for this machine."

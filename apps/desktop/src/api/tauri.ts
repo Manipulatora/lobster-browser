@@ -512,7 +512,9 @@ const mockMobileMachinesClient: MobileMachinesClient = {
         playServices: input.playServices ?? true,
         island: {
           builtIn: true,
-          isolateOnInstall: input.island?.isolateOnInstall ?? [],
+          mode: input.island?.mode ?? 'all',
+          sandboxedApps: input.island?.sandboxedApps ?? [],
+          isolation: input.island?.isolation ?? 'per-app',
           freezeIdleApps: input.island?.freezeIdleApps ?? true,
         },
       },

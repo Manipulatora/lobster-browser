@@ -5,6 +5,7 @@ import type {
   AndroidApiLevel,
   AndroidMachineType,
   CreateMobileMachineInput,
+  IslandSandboxMode,
   StoredProxy,
 } from '@lobster/shared-types';
 
@@ -18,8 +19,9 @@ interface NewMachineFormProps {
 
 /**
  * Create an Android machine: device class + Android version + fingerprint (auto-seeded) + proxy.
- * Island isolation is BUILT IN to every machine (baked into the OS image), so it is presented as an
- * always-on capability the user configures, never installs.
+ * Island sandboxing is EMBEDDED IN THE OS (the Lobium Android framework), so it is presented as an
+ * always-on capability the user shapes — never installs. In the default `all` mode every app the
+ * machine ever installs runs in its own sandbox; `selected` narrows that to specific packages.
  */
 export function NewMachineForm({ proxies, onCreate, onCancel }: NewMachineFormProps): JSX.Element {
   const [name, setName] = useState('');
@@ -27,15 +29,17 @@ export function NewMachineForm({ proxies, onCreate, onCancel }: NewMachineFormPr
   const [apiLevel, setApiLevel] = useState<AndroidApiLevel>(34);
   const [proxyId, setProxyId] = useState('');
   const [playServices, setPlayServices] = useState(true);
+  const [sandboxMode, setSandboxMode] = useState<IslandSandboxMode>('all');
+  const [perApp, setPerApp] = useState(true);
   const [freezeIdleApps, setFreezeIdleApps] = useState(true);
-  const [isolated, setIsolated] = useState<ReadonlySet<string>>(
+  const [sandboxed, setSandboxed] = useState<ReadonlySet<string>>(
     () => new Set(SUGGESTED_ISOLATED_APPS.map((a) => a.pkg)),
   );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function toggleIsolated(pkg: string): void {
-    setIsolated((prev) => {
+  function toggleSandboxed(pkg: string): void {
+    setSandboxed((prev) => {
       const next = new Set(prev);
       if (next.has(pkg)) next.delete(pkg);
       else next.add(pkg);
@@ -60,7 +64,9 @@ export function NewMachineForm({ proxies, onCreate, onCancel }: NewMachineFormPr
         playServices,
         ...(proxyId ? { proxyId } : {}),
         island: {
-          isolateOnInstall: [...isolated],
+          mode: sandboxMode,
+          sandboxedApps: sandboxMode === 'selected' ? [...sandboxed] : [],
+          isolation: perApp ? 'per-app' : 'shared',
           freezeIdleApps,
         },
       });
@@ -160,31 +166,57 @@ export function NewMachineForm({ proxies, onCreate, onCancel }: NewMachineFormPr
         </div>
 
         <fieldset className="fp-inline-group">
-          <legend>Island isolation · built in</legend>
+          <legend>Island sandbox · embedded in the OS</legend>
           <p className="field-hint field--wide">
-            Every machine ships with Island already in the OS — no Play install needed. Account-holding
-            apps are placed in an isolated, sandboxed space so their data can't leak across apps or to
-            the main profile. Choose which apps are isolated automatically on install:
+            Sandboxing is part of the machine's operating system — there is nothing to install. When an
+            app is installed, the OS drops it into an isolated Android profile of its own, so its
+            accounts, cookies and storage can't be correlated with other apps or the main space.
           </p>
-          <div className="support-grid">
-            {SUGGESTED_ISOLATED_APPS.map((app) => (
-              <label key={app.pkg} className="check-row">
-                <input
-                  type="checkbox"
-                  checked={isolated.has(app.pkg)}
-                  onChange={() => toggleIsolated(app.pkg)}
-                />
-                <span>{app.label}</span>
-              </label>
-            ))}
+          <div className="radio-group field--wide" role="radiogroup" aria-label="What gets sandboxed">
+            <label className="check-row">
+              <input
+                type="radio"
+                name="sandbox-mode"
+                checked={sandboxMode === 'all'}
+                onChange={() => setSandboxMode('all')}
+              />
+              <span>Sandbox every app on install (default)</span>
+            </label>
+            <label className="check-row">
+              <input
+                type="radio"
+                name="sandbox-mode"
+                checked={sandboxMode === 'selected'}
+                onChange={() => setSandboxMode('selected')}
+              />
+              <span>Only sandbox selected apps</span>
+            </label>
           </div>
+          {sandboxMode === 'selected' ? (
+            <div className="support-grid">
+              {SUGGESTED_ISOLATED_APPS.map((app) => (
+                <label key={app.pkg} className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={sandboxed.has(app.pkg)}
+                    onChange={() => toggleSandboxed(app.pkg)}
+                  />
+                  <span>{app.label}</span>
+                </label>
+              ))}
+            </div>
+          ) : null}
+          <label className="check-row check-row--field field--wide">
+            <input type="checkbox" checked={perApp} onChange={(e) => setPerApp(e.target.checked)} />
+            <span>One isolated profile per app (strongest — apps can't see each other)</span>
+          </label>
           <label className="check-row check-row--field field--wide">
             <input
               type="checkbox"
               checked={freezeIdleApps}
               onChange={(e) => setFreezeIdleApps(e.target.checked)}
             />
-            <span>Freeze isolated apps when idle (stop background activity/tracking)</span>
+            <span>Freeze sandboxed apps when idle (stop background activity/tracking)</span>
           </label>
         </fieldset>
 

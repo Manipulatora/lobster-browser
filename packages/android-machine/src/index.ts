@@ -1,9 +1,10 @@
 /**
- * @lobster/android-machine — per-profile isolated Android machines (AVD/QEMU) with the built-in
- * Lobium Island isolation service.
+ * @lobster/android-machine — per-profile isolated Android machines (AVD/QEMU) running Lobium Android,
+ * an AOSP fork whose framework sandboxes apps on install by default (the "Island" capability).
  *
- * - The Island app itself is developed under `island-app/` (Kotlin) and baked into the golden image.
- * - The golden-image build + first-boot provisioning live under `image/`.
+ * - The OS feature itself is the framework fork under `aosp/` (system service + patches + sepolicy);
+ *   there is no isolation app — sandboxing is compiled into the OS.
+ * - The golden-image build (from that fork) + per-machine policy staging live under `image/`.
  * - The host-side lifecycle (below) is the contract the desktop core drives on a KVM+GPU host.
  */
 export { AvdMachineRunner, buildPropsFor } from './machine-lifecycle.js';

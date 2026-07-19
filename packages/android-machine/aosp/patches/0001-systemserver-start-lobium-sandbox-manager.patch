@@ -1,0 +1,30 @@
+Subject: [PATCH] Start LobiumSandboxManagerService in system_server
+
+Brings up the OS-embedded app sandbox as a platform service, before third-party
+apps can start, so the first install on a fresh machine is already sandboxed.
+
+Anchored for AOSP 14 (android-14.0.0_r*). If the surrounding lines have drifted,
+apply with `git apply --3way` (or --reject) and place the traceBegin/startService
+block anywhere in startOtherServices() ahead of PHASE_THIRD_PARTY_APPS_CAN_START.
+---
+ services/java/com/android/server/SystemServer.java | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/frameworks/base/services/java/com/android/server/SystemServer.java b/frameworks/base/services/java/com/android/server/SystemServer.java
+--- a/frameworks/base/services/java/com/android/server/SystemServer.java
++++ b/frameworks/base/services/java/com/android/server/SystemServer.java
+@@ -2600,6 +2600,14 @@ public final class SystemServer implements Dumpable {
+                 t.traceEnd();
+             }
+
++            // Lobium: OS-embedded app sandbox. Moves third-party apps into isolated profiles as they
++            // are installed. Started here so it is live before PHASE_THIRD_PARTY_APPS_CAN_START and the
++            // very first install on a fresh machine is caught.
++            t.traceBegin("StartLobiumSandboxManager");
++            mSystemServiceManager.startService(
++                    "com.android.server.lobium.LobiumSandboxManagerService");
++            t.traceEnd();
++
+             // LneWiFi/Telephony and others depend on the above; keep late-init below this line.
+             t.traceBegin("MakeVibratorServiceReady");
+             try {

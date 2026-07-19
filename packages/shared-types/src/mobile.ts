@@ -29,26 +29,38 @@ export const ANDROID_API_LEVELS = [34, 33, 32, 31, 30] as const;
 export type AndroidApiLevel = (typeof ANDROID_API_LEVELS)[number];
 
 /**
- * Built-in Island isolation. This ships as a **system app** in the golden image and is auto-provisioned
- * as **device owner** at first boot — it is NEVER installed by the user from Google Play. It provides
- * the "secure app install + account protection" capability: account-holding apps are placed into an
- * isolated managed profile so their data is sandboxed away from the main space and from each other.
+ * Island — the OS-embedded app-sandboxing capability. This is NOT an app: it lives in the Lobium
+ * Android framework (an AOSP fork, `aosp/`) as a system service that sandboxes apps at install time by
+ * default. There is nothing to install or provision — the OS itself, on every third-party install,
+ * places the app into an isolated Android profile so its storage/accounts/cookies are walled off from
+ * other apps and from the main space ("secure app install + account protection").
+ *
+ * This object is the per-machine policy the OS reads: a baked default (`aosp/config/sandbox-policy.xml`)
+ * overlaid by a per-machine file staged at boot. It cannot turn the capability off — only shape it.
  */
+export type IslandSandboxMode = 'all' | 'selected';
+
 export interface IslandConfig {
-  /** Always present — the isolation service is baked into every Lobium machine image. */
+  /** Always true — the capability is compiled into the OS framework, never user-installed. */
   builtIn: true;
   /**
-   * App packages routed into the isolated container BY DEFAULT on install (e.g. mail/social/banking).
-   * The user never has to configure this per machine; it is applied by the image's install router.
+   * `all` (OS default): every third-party app is sandboxed on install. `selected`: only the packages in
+   * {@link sandboxedApps} are sandboxed; everything else installs normally.
    */
-  isolateOnInstall: string[];
-  /** Freeze (hibernate) isolated apps when idle so they cannot run or phone home in the background. */
+  mode: IslandSandboxMode;
+  /** Packages always sandboxed when `mode === 'selected'` (ignored when `mode === 'all'`). */
+  sandboxedApps: string[];
+  /** `per-app` = a dedicated isolated profile per app (strongest); `shared` = one sandbox profile. */
+  isolation: 'per-app' | 'shared';
+  /** Freeze (force-stop) sandboxed apps when idle so they cannot run or phone home in the background. */
   freezeIdleApps: boolean;
 }
 
 export const DEFAULT_ISLAND_CONFIG: IslandConfig = {
   builtIn: true,
-  isolateOnInstall: [],
+  mode: 'all',
+  sandboxedApps: [],
+  isolation: 'per-app',
   freezeIdleApps: true,
 };
 

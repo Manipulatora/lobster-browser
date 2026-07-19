@@ -7,9 +7,10 @@ import type { MobileMachine, MobileMachineConfig } from '@lobster/shared-types';
 
 /**
  * Host-side lifecycle for a per-profile Android machine. Orchestrates the Android SDK emulator + adb on
- * a KVM+GPU host. Each machine is a copy-on-write clone of the sealed golden image (image/), booted with
- * the machine's fingerprint (build.prop overlay) and proxy, then provisioned so the built-in Island app
- * becomes device owner (image/first-boot-provision.sh).
+ * a KVM+GPU host. Each machine is a copy-on-write clone of the sealed golden image (image/) — a Lobium
+ * Android (AOSP fork) system image whose framework already sandboxes apps on install (aosp/). Boot
+ * applies the machine's fingerprint (build.prop overlay) + proxy and stages the per-machine sandbox
+ * policy the OS reads; there is no isolation app to install or device owner to set.
  *
  * NOT runnable on a GPU-less box — this is the contract the desktop core drives on a provisioned host.
  */
@@ -56,13 +57,15 @@ export class AvdMachineRunner implements MobileMachineRunner {
     const avdName = `lobium-${machine.id}`;
     // Copy-on-write clone of the golden AVD (qcow2 overlay), not a full copy — fast + disk-cheap.
     await sh('avdmanager', ['create', 'avd', '-n', avdName, '-d', machine.config.machineType, '--force']);
-    // Write this machine's Island policy from its IslandConfig for first-boot-provision.sh.
+    // Write this machine's sandbox policy from its IslandConfig; boot stages it where the OS reads it.
     const policyDir = join(tmpdir(), avdName);
     await mkdir(policyDir, { recursive: true });
     await writeFile(
-      join(policyDir, 'island-policy.json'),
+      join(policyDir, 'sandbox-policy.json'),
       JSON.stringify({
-        isolateOnInstall: machine.config.island.isolateOnInstall,
+        mode: machine.config.island.mode,
+        sandboxedApps: machine.config.island.sandboxedApps,
+        isolation: machine.config.island.isolation,
         freezeIdleApps: machine.config.island.freezeIdleApps,
       }),
     );
@@ -88,8 +91,8 @@ export class AvdMachineRunner implements MobileMachineRunner {
     for (const [k, v] of Object.entries(props)) {
       await sh('adb', ['shell', 'setprop', k, v]);
     }
-    // Provision the built-in Island app as device owner + write the per-machine policy.
-    const policy = join(tmpdir(), avdName, 'island-policy.json');
+    // Stage the per-machine sandbox policy where the OS framework reads it (no app/device-owner setup).
+    const policy = join(tmpdir(), avdName, 'sandbox-policy.json');
     await sh('bash', [join(IMAGE_DIR, 'first-boot-provision.sh'), policy]);
 
     const adbSerial = `emulator-${machine.id}`;

@@ -32,8 +32,9 @@ export function apiLevelLabel(value: AndroidApiLevel): string {
 }
 
 /**
- * Common account-holding apps that Island isolates BY DEFAULT on install (secure app install +
- * account protection). Pre-checked in the create form; the user can adjust per machine.
+ * Common account-holding apps offered as quick picks when a machine sandboxes only *selected* apps
+ * (`island.mode === 'selected'`). In the default `all` mode every app is sandboxed and this list is
+ * just a convenience for narrowing down.
  */
 export const SUGGESTED_ISOLATED_APPS: ReadonlyArray<{ pkg: string; label: string }> = [
   { pkg: 'com.microsoft.office.outlook', label: 'Outlook' },

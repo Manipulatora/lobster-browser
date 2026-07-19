@@ -1,0 +1,67 @@
+Subject: [PATCH] Define the Lobium sandbox profile user type
+
+Registers USER_TYPE_LOBIUM_SANDBOX as a platform *profile* user type so
+UserManager#createProfile accepts it. Sandbox profiles start with their parent
+(run concurrently, like a work profile), are hidden from Settings, keep their own
+media + credentials, and never inherit the parent's contacts — full data isolation.
+
+maxAllowedPerParent is UNLIMITED because per-app isolation creates one profile per
+sandboxed app.
+
+Anchored for AOSP 14 (android-14.0.0_r*). If UserProperties builder setters have
+drifted, apply with `git apply --3way` and adjust the property block to match the
+tree; the load-bearing choices are FLAG_PROFILE + startWithParent + unshared
+media/credentials.
+---
+ .../com/android/server/pm/UserTypeFactory.java     | 27 ++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/frameworks/base/services/core/java/com/android/server/pm/UserTypeFactory.java b/frameworks/base/services/core/java/com/android/server/pm/UserTypeFactory.java
+--- a/frameworks/base/services/core/java/com/android/server/pm/UserTypeFactory.java
++++ b/frameworks/base/services/core/java/com/android/server/pm/UserTypeFactory.java
+@@ -60,6 +60,9 @@ public final class UserTypeFactory {
+     private static final String LOG_TAG = "UserTypeFactory";
+
++    /** Lobium OS app-sandbox profile. Must match LobiumSandboxManagerService.USER_TYPE_LOBIUM_SANDBOX. */
++    static final String USER_TYPE_LOBIUM_SANDBOX = "com.lobium.usertype.SANDBOX";
++
+     /** This is a utility class, so no instantiable constructor. */
+     private UserTypeFactory() {}
+
+@@ -78,6 +81,7 @@ public final class UserTypeFactory {
+         builders.put(USER_TYPE_PROFILE_MANAGED, getDefaultTypeProfileManaged());
+         builders.put(USER_TYPE_FULL_SECONDARY, getDefaultTypeFullSecondary());
+         builders.put(USER_TYPE_FULL_GUEST, getDefaultTypeFullGuest());
++        builders.put(USER_TYPE_LOBIUM_SANDBOX, getDefaultTypeLobiumSandbox());
+         builders.put(USER_TYPE_FULL_DEMO, getDefaultTypeFullDemo());
+         builders.put(USER_TYPE_FULL_RESTRICTED, getDefaultTypeFullRestricted());
+         builders.put(USER_TYPE_PROFILE_CLONE, getDefaultTypeProfileClone());
+@@ -300,6 +304,29 @@ public final class UserTypeFactory {
+                 .setDefaultRestrictions(restrictions);
+     }
+
++    /**
++     * Lobium sandbox profile: an isolated space the OS drops third-party apps into on install. Runs
++     * alongside the parent, invisible in Settings, with its own storage/accounts/credentials.
++     */
++    private static UserTypeDetails.Builder getDefaultTypeLobiumSandbox() {
++        return new UserTypeDetails.Builder()
++                .setName(USER_TYPE_LOBIUM_SANDBOX)
++                .setBaseType(FLAG_PROFILE)
++                .setMaxAllowedPerParent(UserTypeDetails.UNLIMITED_NUMBER_OF_USERS)
++                .setDefaultRestrictions(null)
++                .setIsMediaSharedWithParent(false)
++                .setIsCredentialSharableWithParent(false)
++                .setDefaultUserProperties(new UserProperties.Builder()
++                        .setStartWithParent(true)
++                        .setShowInLauncher(UserProperties.SHOW_IN_LAUNCHER_SEPARATE)
++                        .setShowInSettings(UserProperties.SHOW_IN_SETTINGS_NO)
++                        .setInheritDevicePolicy(UserProperties.INHERIT_DEVICE_POLICY_NO)
++                        .setUseParentsContacts(false)
++                        .setMediaSharedWithParent(false)
++                        .setCredentialShareableWithParent(false));
++    }
++
+     private static UserTypeDetails.Builder getDefaultTypeProfileClone() {
+         return new UserTypeDetails.Builder()
+                 .setName(USER_TYPE_PROFILE_CLONE)

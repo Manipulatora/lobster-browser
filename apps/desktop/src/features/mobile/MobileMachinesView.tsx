@@ -180,7 +180,9 @@ export function MobileMachinesView(): JSX.Element {
                     <td>{STATUS_LABEL[m.status]}</td>
                     <td>{m.config.proxyId ? 'Configured' : 'No proxy'}</td>
                     <td>
-                      Built-in · {m.config.island.isolateOnInstall.length} isolated
+                      {m.config.island.mode === 'all'
+                        ? 'Embedded · all apps'
+                        : `Embedded · ${m.config.island.sandboxedApps.length} apps`}
                     </td>
                     <td>
                       <div className="row-actions" style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
