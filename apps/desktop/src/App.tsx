@@ -1,5 +1,4 @@
 import {
-  DevicePhoneMobileIcon,
   DocumentDuplicateIcon,
   MagnifyingGlassIcon,
   ServerStackIcon,
@@ -8,7 +7,6 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { isDesktopRuntime, profilesClient } from './api/tauri';
-import { MobileMachinesView } from './features/mobile/MobileMachinesView';
 import { ProfilesView } from './features/profiles/ProfilesView';
 import { ProxiesView } from './features/proxies/ProxiesView';
 import { TemplatesView } from './features/templates/TemplatesView';
@@ -18,7 +16,6 @@ import type { Profile } from '@lobster/shared-types';
 
 const NAV_ITEMS = [
   { key: 'profiles', label: 'Profiles', icon: UserGroupIcon },
-  { key: 'mobile', label: 'Mobile machines', icon: DevicePhoneMobileIcon },
   { key: 'proxies', label: 'Proxies', icon: ServerStackIcon },
   { key: 'templates', label: 'Templates', icon: DocumentDuplicateIcon },
 ] as const;
@@ -35,8 +32,6 @@ function ActiveView({
   switch (active) {
     case 'profiles':
       return <ProfilesView createProfileSignal={createProfileSignal} />;
-    case 'mobile':
-      return <MobileMachinesView />;
     case 'proxies':
       return <ProxiesView />;
     case 'templates':

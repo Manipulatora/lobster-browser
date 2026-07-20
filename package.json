@@ -13,7 +13,6 @@
     "packages/fingerprint",
     "packages/proxy",
     "packages/cookies",
-    "packages/android-machine",
     "packages/engine-runner",
     "packages/local-api-sdk/js",
     "apps/desktop",

@@ -1,9 +1,0 @@
-{
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "rootDir": "src",
-    "outDir": "dist"
-  },
-  "references": [{ "path": "../shared-types" }, { "path": "../fingerprint" }],
-  "include": ["src/**/*.ts"]
-}
