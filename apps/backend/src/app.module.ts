@@ -6,6 +6,7 @@ import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { BillingModule } from './billing/billing.module';
 import { HealthModule } from './health/health.module';
+import { PhoneModule } from './phone/phone.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProfilesModule } from './profiles/profiles.module';
 import { TeamsModule } from './teams/teams.module';
@@ -28,6 +29,7 @@ import { TeamsModule } from './teams/teams.module';
     ApiKeysModule,
     AuditModule,
     BillingModule,
+    PhoneModule,
   ],
 })
 export class AppModule {}
