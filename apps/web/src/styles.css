@@ -1,0 +1,217 @@
+@import 'tailwindcss';
+
+/* ============================================================================
+   Lobster — design tokens
+   Light theme ONLY. Violet brand. Hairline rules. Ultra-thin icon strokes.
+   Tailwind v4 CSS-first config: every token below becomes a utility
+   (e.g. --color-brand-500 → bg-brand-500 / text-brand-500 / border-brand-500).
+   ========================================================================== */
+@theme {
+  --font-sans:
+    'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+
+  /* Brand ramp — violet */
+  --color-brand-50: #f7f5ff;
+  --color-brand-100: #efeaff;
+  --color-brand-200: #e0d8ff;
+  --color-brand-300: #c8b8ff;
+  --color-brand-400: #a889fc;
+  --color-brand-500: #8b5cf6;
+  --color-brand-600: #7c3aed;
+  --color-brand-700: #6d28d9;
+  --color-brand-800: #5a21b0;
+  --color-brand-900: #4a1d8c;
+  --color-brand-950: #2e1065;
+
+  /* Text — violet-tinted neutrals, never pure black */
+  --color-ink: #171320;
+  --color-ink-soft: #423c52;
+  --color-muted: #736c85;
+  --color-faint: #9a94a8;
+
+  /* Surfaces */
+  --color-canvas: #ffffff;
+  --color-surface: #ffffff;
+  --color-surface-soft: #faf9ff;
+  --color-surface-tint: #f5f2ff;
+
+  /* Hairlines — the whole UI is drawn with these */
+  --color-hairline: #ece9f5;
+  --color-hairline-strong: #ded8ef;
+
+  --radius-card: 1rem;
+  --radius-panel: 1.25rem;
+
+  --shadow-soft: 0 1px 2px rgb(23 19 32 / 0.04), 0 8px 24px -12px rgb(23 19 32 / 0.08);
+  --shadow-lift: 0 1px 2px rgb(23 19 32 / 0.04), 0 24px 48px -24px rgb(109 40 217 / 0.22);
+}
+
+@layer base {
+  /* Tailwind v4 defaults borders to currentColor — pin every rule to our hairline. */
+  *,
+  ::before,
+  ::after {
+    border-color: var(--color-hairline);
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  /* ULTRA-THIN ICON STROKES. Heroicons ship stroke-width 1.5; the CSS property
+     beats the SVG presentation attribute, so every icon renders hairline-thin. */
+  ng-icon svg,
+  ng-icon svg * {
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+
+  ::selection {
+    background-color: var(--color-brand-200);
+    color: var(--color-brand-950);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+/* ============================================================================
+   Component classes — the shared visual vocabulary.
+   Authoring against these (instead of ad-hoc utilities) is what keeps the site
+   consistent as it grows.
+   ========================================================================== */
+@layer components {
+  /* Page gutter — one source of truth for horizontal rhythm. */
+  .container-page {
+    @apply mx-auto w-full max-w-[76rem] px-6 sm:px-8;
+  }
+
+  /* Vertical section rhythm. */
+  .section {
+    @apply py-20 sm:py-28;
+  }
+
+  /* Hairline surfaces */
+  .card {
+    @apply rounded-card border-[0.5px] border-hairline bg-surface;
+  }
+
+  .card-soft {
+    @apply rounded-card border-[0.5px] border-hairline bg-surface-soft;
+  }
+
+  /* A 0.5px divider. */
+  .rule {
+    @apply border-t-[0.5px] border-hairline;
+  }
+
+  /* Small caps label above a section title. */
+  .eyebrow {
+    @apply inline-flex items-center gap-2 text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-brand-600;
+  }
+
+  .section-title {
+    @apply text-balance text-3xl font-semibold leading-[1.15] tracking-[-0.02em] text-ink sm:text-4xl;
+  }
+
+  .section-lede {
+    @apply text-pretty text-base leading-relaxed text-muted sm:text-lg;
+  }
+
+  /* Buttons — thin-bordered, violet-forward. */
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-2 rounded-full text-sm font-medium
+      transition duration-200 ease-out disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-md {
+    @apply h-11 px-5;
+  }
+
+  .btn-sm {
+    @apply h-9 px-4 text-[0.8125rem];
+  }
+
+  .btn-lg {
+    @apply h-12 px-6 text-[0.9375rem];
+  }
+
+  .btn-primary {
+    @apply bg-brand-600 text-white shadow-soft hover:bg-brand-700 active:bg-brand-800;
+  }
+
+  .btn-secondary {
+    @apply border-[0.5px] border-hairline-strong bg-surface text-ink hover:border-brand-300 hover:bg-brand-50;
+  }
+
+  .btn-ghost {
+    @apply text-ink-soft hover:bg-brand-50 hover:text-brand-700;
+  }
+
+  /* Pill / tag */
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border-[0.5px] border-hairline bg-surface
+      px-3 py-1 text-xs font-medium text-ink-soft;
+  }
+
+  /* Form controls — hairline, violet focus. */
+  .field-label {
+    @apply mb-1.5 block text-[0.8125rem] font-medium text-ink-soft;
+  }
+
+  .field-input {
+    @apply block h-11 w-full rounded-xl border-[0.5px] border-hairline-strong bg-surface px-3.5
+      text-[0.9375rem] text-ink placeholder:text-faint
+      transition duration-200 focus:border-brand-400 focus:outline-none
+      focus:ring-4 focus:ring-brand-500/10;
+  }
+
+  .field-error {
+    @apply mt-1.5 flex items-center gap-1 text-xs text-rose-600;
+  }
+}
+
+@layer utilities {
+  /* Soft violet radial wash used behind hero/CTA blocks. */
+  .bg-aurora {
+    background-image:
+      radial-gradient(60rem 30rem at 50% -18%, var(--color-brand-100) 0%, transparent 62%),
+      radial-gradient(38rem 22rem at 88% 8%, var(--color-brand-50) 0%, transparent 60%);
+  }
+
+  /* Violet-tinted grid, masked out at the edges — depth without heavy lines. */
+  .bg-grid {
+    background-image:
+      linear-gradient(to right, var(--color-hairline) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--color-hairline) 1px, transparent 1px);
+    background-size: 56px 56px;
+    -webkit-mask-image: radial-gradient(closest-side at 50% 40%, #000 0%, transparent 100%);
+    mask-image: radial-gradient(closest-side at 50% 40%, #000 0%, transparent 100%);
+  }
+
+  .text-gradient-brand {
+    background-image: linear-gradient(
+      100deg,
+      var(--color-brand-700),
+      var(--color-brand-500) 55%,
+      var(--color-brand-400)
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}

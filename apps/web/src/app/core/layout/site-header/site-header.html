@@ -1,0 +1,66 @@
+<header
+  class="sticky top-0 z-50 border-b-[0.5px] border-hairline bg-white/80 backdrop-blur-xl backdrop-saturate-150"
+>
+  <div class="container-page">
+    <div class="flex h-16 items-center justify-between gap-6">
+      <div class="flex items-center gap-8">
+        <app-logo />
+
+        <nav class="hidden items-center gap-1 lg:flex" aria-label="Primary">
+          @for (link of nav; track link.label) {
+            <a
+              [routerLink]="link.path"
+              [fragment]="link.fragment"
+              routerLinkActive="text-brand-700"
+              [routerLinkActiveOptions]="{ exact: true }"
+              class="rounded-full px-3 py-2 text-[0.875rem] font-medium text-ink-soft transition-colors duration-200 hover:bg-brand-50 hover:text-brand-700"
+            >
+              {{ link.label }}
+            </a>
+          }
+        </nav>
+      </div>
+
+      <div class="hidden items-center gap-2 lg:flex">
+        <a routerLink="/auth/sign-in" class="btn btn-sm btn-ghost">Sign in</a>
+        <a routerLink="/auth/sign-up" class="btn btn-sm btn-primary">Start free</a>
+      </div>
+
+      <button
+        type="button"
+        class="btn btn-sm btn-secondary !px-2.5 lg:hidden"
+        [attr.aria-expanded]="menuOpen()"
+        aria-controls="mobile-menu"
+        [attr.aria-label]="menuOpen() ? 'Close menu' : 'Open menu'"
+        (click)="toggleMenu()"
+      >
+        <ng-icon [name]="menuOpen() ? 'heroXMark' : 'heroBars3'" size="20" />
+      </button>
+    </div>
+  </div>
+
+  @if (menuOpen()) {
+    <div id="mobile-menu" class="border-t-[0.5px] border-hairline bg-white lg:hidden">
+      <nav class="container-page flex flex-col py-4" aria-label="Mobile">
+        @for (link of nav; track link.label) {
+          <a
+            [routerLink]="link.path"
+            [fragment]="link.fragment"
+            (click)="closeMenu()"
+            class="rounded-lg px-3 py-2.5 text-[0.9375rem] font-medium text-ink-soft transition-colors hover:bg-brand-50 hover:text-brand-700"
+          >
+            {{ link.label }}
+          </a>
+        }
+        <div class="rule mt-3 flex flex-col gap-2 pt-4">
+          <a routerLink="/auth/sign-in" (click)="closeMenu()" class="btn btn-md btn-secondary">
+            Sign in
+          </a>
+          <a routerLink="/auth/sign-up" (click)="closeMenu()" class="btn btn-md btn-primary">
+            Start free
+          </a>
+        </div>
+      </nav>
+    </div>
+  }
+</header>

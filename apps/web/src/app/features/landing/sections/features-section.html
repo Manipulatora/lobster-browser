@@ -1,0 +1,36 @@
+<section id="features" class="section bg-surface">
+  <div class="container-page">
+    <!-- Header -->
+    <div class="max-w-2xl">
+      <span class="eyebrow">Platform</span>
+      <h2 class="section-title mt-4">Built where detection actually happens</h2>
+      <p class="section-lede mt-4">
+        Lobster is an anti-detect browser and a control plane for the identities you run in it. The
+        engine handles the signals, the platform handles the profiles, proxies and people.
+      </p>
+    </div>
+
+    <!-- Feature grid -->
+    <ul role="list" class="mt-12 grid grid-cols-1 gap-4 sm:mt-14 sm:grid-cols-2 lg:grid-cols-3">
+      @for (feature of features; track feature.title) {
+        <li class="card p-6 transition hover:border-brand-200 hover:shadow-soft">
+          <div
+            class="flex h-9 w-9 items-center justify-center rounded-lg border-[0.5px] border-hairline bg-brand-50"
+          >
+            <ng-icon [name]="feature.icon" size="17" class="text-brand-600" />
+          </div>
+
+          <h3 class="mt-5 text-[0.9375rem] font-semibold tracking-tight text-ink">
+            {{ feature.title }}
+          </h3>
+          <p class="mt-2 text-pretty text-sm leading-relaxed text-muted">{{ feature.body }}</p>
+        </li>
+      }
+    </ul>
+
+    <p class="mt-10 max-w-2xl text-[0.8125rem] leading-relaxed text-faint">
+      Lobster is for accounts and data you are authorised to access — agency workloads, QA, research
+      and multi-market operations.
+    </p>
+  </div>
+</section>

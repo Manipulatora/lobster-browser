@@ -1,0 +1,117 @@
+<section class="relative isolate overflow-hidden bg-aurora">
+  <div class="pointer-events-none absolute inset-0 -z-10 bg-grid opacity-[0.55]"></div>
+
+  <div class="container-page pb-20 pt-16 sm:pb-28 sm:pt-24">
+    <div class="grid items-center gap-16 lg:grid-cols-[1.05fr_1fr]">
+      <!-- Copy -->
+      <div>
+        <span class="chip border-brand-200 bg-white/70">
+          <ng-icon name="heroFingerPrint" size="14" class="text-brand-600" />
+          Chromium 152 · native fingerprint engine
+        </span>
+
+        <h1
+          class="mt-6 text-balance text-4xl font-semibold leading-[1.08] tracking-[-0.03em] text-ink sm:text-5xl lg:text-[3.4rem]"
+        >
+          Every profile is a
+          <span class="block text-gradient-brand">different, believable machine.</span>
+        </h1>
+
+        <p class="section-lede mt-6 max-w-xl">
+          Lobster gives each browser profile a coherent device and network identity — screen, GPU,
+          fonts, timezone and locale that agree with one another. It is applied in C++ inside our
+          own Chromium kernel, never by a JavaScript overlay that anti-bot systems can read.
+        </p>
+
+        <div class="mt-9 flex flex-col gap-3 sm:flex-row">
+          <a routerLink="/auth/sign-up" class="btn btn-lg btn-primary">
+            Start free — 5 profiles
+            <ng-icon name="heroArrowRight" size="17" />
+          </a>
+          <a routerLink="/" fragment="how-it-works" class="btn btn-lg btn-secondary">
+            See how it works
+          </a>
+        </div>
+
+        <ul class="mt-8 flex flex-wrap items-center gap-x-6 gap-y-2">
+          @for (
+            proof of ['No credit card required', 'macOS, Windows & Linux', 'Cancel anytime'];
+            track proof
+          ) {
+            <li class="flex items-center gap-1.5 text-[0.8125rem] text-muted">
+              <ng-icon name="heroCheck" size="15" class="text-brand-500" />
+              {{ proof }}
+            </li>
+          }
+        </ul>
+      </div>
+
+      <!-- Product mock -->
+      <div class="relative">
+        <div class="card rounded-panel overflow-hidden shadow-lift">
+          <!-- window chrome -->
+          <div class="flex items-center gap-2 border-b-[0.5px] border-hairline px-4 py-3">
+            <span class="h-2.5 w-2.5 rounded-full border-[0.5px] border-hairline-strong"></span>
+            <span class="h-2.5 w-2.5 rounded-full border-[0.5px] border-hairline-strong"></span>
+            <span class="h-2.5 w-2.5 rounded-full border-[0.5px] border-hairline-strong"></span>
+            <div
+              class="ml-3 flex h-7 flex-1 items-center rounded-full border-[0.5px] border-hairline bg-surface-soft px-3 text-[0.6875rem] text-faint"
+            >
+              lobster://profiles
+            </div>
+          </div>
+
+          <!-- profile rows -->
+          <div class="divide-y-[0.5px] divide-hairline">
+            @for (profile of profiles; track profile.name) {
+              <div class="flex items-center gap-4 px-4 py-3.5">
+                <div
+                  class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border-[0.5px] border-hairline bg-brand-50"
+                >
+                  <ng-icon name="heroFingerPrint" size="17" class="text-brand-600" />
+                </div>
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-[0.8125rem] font-medium text-ink">{{ profile.name }}</p>
+                  <p class="mt-0.5 flex items-center gap-1.5 truncate text-[0.6875rem] text-muted">
+                    {{ profile.os }}
+                    <span class="text-hairline-strong">·</span>
+                    <ng-icon name="heroGlobeAlt" size="11" />
+                    {{ profile.geo }}
+                  </p>
+                </div>
+                <span
+                  class="chip shrink-0 px-2 py-0.5 text-[0.625rem]"
+                  [class.text-brand-700]="profile.status === 'running'"
+                  [class.border-brand-200]="profile.status === 'running'"
+                  [class.bg-brand-50]="profile.status === 'running'"
+                >
+                  {{ profile.status }}
+                </span>
+              </div>
+            }
+          </div>
+
+          <!-- coherence footer -->
+          <div
+            class="flex items-center gap-2 border-t-[0.5px] border-hairline bg-surface-soft px-4 py-3"
+          >
+            <ng-icon name="heroShieldCheck" size="15" class="text-brand-600" />
+            <p class="text-[0.6875rem] text-ink-soft">
+              Fingerprint coherence verified — 18 signals cross-checked
+            </p>
+          </div>
+        </div>
+
+        <!-- supporting stats, below the mock so nothing is obscured -->
+        <div class="mt-4 grid grid-cols-3 gap-3">
+          @for (stat of stats; track stat.label) {
+            <div class="card px-3.5 py-3">
+              <p class="text-base font-semibold tracking-tight text-ink">{{ stat.value }}</p>
+              <p class="mt-0.5 text-[0.6875rem] leading-tight text-muted">{{ stat.label }}</p>
+            </div>
+          }
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
