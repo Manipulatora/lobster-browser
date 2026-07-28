@@ -3,6 +3,7 @@ dist
 build
 target
 coverage
+.angular
 engines/bin
 engines/cache
 *.md

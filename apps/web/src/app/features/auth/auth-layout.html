@@ -6,40 +6,6 @@
     <div class="pointer-events-none absolute inset-0 -z-10 bg-grid opacity-[0.55]"></div>
 
     <app-logo />
-
-    <div class="max-w-md py-10">
-      <!-- Decorative marketing copy: kept as a paragraph so the form's <h1> stays the page heading. -->
-      <p class="text-balance text-3xl font-semibold leading-[1.15] tracking-[-0.02em] text-ink">
-        Every profile is a
-        <span class="text-gradient-brand">different, believable machine.</span>
-      </p>
-      <p class="mt-4 text-pretty text-[0.9375rem] leading-relaxed text-muted">
-        Coherent device and network identities, verified before a profile ever opens a page.
-      </p>
-
-      <ul class="mt-9 space-y-5">
-        @for (proof of proofs; track proof.title) {
-          <li class="flex gap-3">
-            <span
-              class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-[0.5px] border-brand-200 bg-white/70"
-            >
-              <ng-icon name="heroCheck" size="14" class="text-brand-600" />
-            </span>
-            <div>
-              <p class="text-sm font-medium text-ink">{{ proof.title }}</p>
-              <p class="mt-1 text-[0.8125rem] leading-relaxed text-muted">{{ proof.detail }}</p>
-            </div>
-          </li>
-        }
-      </ul>
-    </div>
-
-    <p class="flex items-start gap-2 text-xs leading-relaxed text-faint">
-      <ng-icon name="heroShieldCheck" size="14" class="mt-0.5 shrink-0 text-brand-500" />
-      <span>
-        Lobster is for accounts and data you are authorised to access. Please use it responsibly.
-      </span>
-    </p>
   </aside>
 
   <!-- Form column -->
