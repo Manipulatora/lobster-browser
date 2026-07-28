@@ -1,0 +1,218 @@
+@import 'tailwindcss';
+
+/* Custom palette tokens for utilities (brand violet reuses Tailwind's built-in violet scale). */
+@theme {
+  --color-ink: #1d1b2b;
+  --color-ink-soft: #6c6684;
+  --color-line: #ece9f6;
+  --color-line-strong: #ddd6ef;
+}
+
+/* Bundled Inter (hashed into assets by Vite) — no external font host, CSP-safe. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/inter-latin-400-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/inter-latin-500-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./fonts/inter-latin-600-normal.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/inter-latin-700-normal.woff2') format('woff2');
+}
+
+:root {
+  --violet: #7c3aed;
+  --violet-600: #6d28d9;
+  --violet-050: #f5f3ff;
+  --violet-100: #ede9fe;
+  --ink: #1d1b2b;
+  --ink-soft: #6c6684;
+  --line: #ece9f6;
+  --line-strong: #ddd6ef;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    sans-serif;
+  font-size: 13.5px;
+  color: var(--ink);
+  background: #fff;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Animated status stays readable at every frame. The previous transparent text-mask spent most of
+   each cycle with no gradient underneath the glyphs, making Thinking/Working appear to vanish. */
+.lobee-shine {
+  display: inline-block;
+  color: var(--ink-soft);
+  -webkit-text-fill-color: currentColor;
+  animation: lobee-breathe 1.35s ease-in-out infinite;
+  font-weight: 600;
+  white-space: nowrap;
+}
+@keyframes lobee-breathe {
+  0%,
+  100% {
+    color: var(--ink-soft);
+    opacity: 0.7;
+  }
+  50% {
+    color: var(--violet-600);
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lobee-shine {
+    animation: none;
+    color: var(--violet-600);
+    opacity: 1;
+  }
+}
+
+/* Progressive answer cursor. The text reveal is time-bounded in React; the cursor disappears as
+   soon as the exact final Markdown has been rendered. */
+.lobee-answer.is-typing .md > :last-child::after,
+.lobee-cursor {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.12em;
+  border-radius: 1px;
+  background: var(--violet-600);
+  animation: lobee-cursor 0.8s steps(1, end) infinite;
+}
+@keyframes lobee-cursor {
+  50% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lobee-answer.is-typing .md > :last-child::after,
+  .lobee-cursor {
+    animation: none;
+  }
+}
+
+/* Rendered-Markdown answer (built via the CSP-safe DOM renderer, injected as a child node). */
+.md {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ink);
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  margin: 14px 0 6px;
+  line-height: 1.3;
+  font-weight: 700;
+}
+.md h1 {
+  font-size: 17px;
+}
+.md h2 {
+  font-size: 15px;
+}
+.md h3 {
+  font-size: 14px;
+}
+.md h4 {
+  font-size: 13px;
+}
+.md p {
+  margin: 8px 0;
+}
+.md ul,
+.md ol {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+.md li {
+  margin: 3px 0;
+}
+.md a {
+  color: var(--violet-600);
+  text-decoration: underline;
+}
+.md code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--violet-050);
+  border: 1px solid var(--violet-100);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+.md pre {
+  margin: 10px 0;
+  padding: 10px 12px;
+  background: #faf9ff;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  overflow-x: auto;
+}
+.md pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+.md blockquote {
+  margin: 10px 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--violet-100);
+  color: var(--ink-soft);
+}
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 12px 0;
+}
+
+/* Quiet scrollbars */
+*::-webkit-scrollbar {
+  width: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 8px;
+  border: 2px solid #fff;
+}
+
+/* Textarea auto-size baseline (JS grows it) */
+textarea {
+  field-sizing: content;
+}

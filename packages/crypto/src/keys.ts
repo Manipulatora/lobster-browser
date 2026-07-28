@@ -115,10 +115,7 @@ export function wrapKey(
 }
 
 /** Unwrap a key produced by {@link wrapKey}. Fails closed on wrong wrapping key / tamper. */
-export function unwrapKey(
-  wrapped: Uint8Array | Buffer,
-  wrappingKey: Uint8Array | Buffer,
-): Buffer {
+export function unwrapKey(wrapped: Uint8Array | Buffer, wrappingKey: Uint8Array | Buffer): Buffer {
   const buf = Buffer.isBuffer(wrapped) ? wrapped : Buffer.from(wrapped);
   const wk = asKey(wrappingKey, 'wrappingKey');
   if (buf.length < KW_HEADER_LEN + KEY_LEN + 16) {

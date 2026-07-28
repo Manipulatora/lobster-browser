@@ -62,9 +62,8 @@ export function validateCookie(cookie: Cookie): string[] {
     issues.push(`domain "${cookie.domain}" is invalid`);
   } else {
     try {
-      const host = bareDomain.includes(':') && !bareDomain.startsWith('[')
-        ? `[${bareDomain}]`
-        : bareDomain;
+      const host =
+        bareDomain.includes(':') && !bareDomain.startsWith('[') ? `[${bareDomain}]` : bareDomain;
       if (!new URL(`http://${host}/`).hostname) issues.push(`domain "${cookie.domain}" is invalid`);
     } catch {
       issues.push(`domain "${cookie.domain}" is invalid`);
@@ -73,10 +72,7 @@ export function validateCookie(cookie: Cookie): string[] {
   if (typeof cookie.path !== 'string' || !cookie.path.startsWith('/')) {
     issues.push('path must start with /');
   }
-  if (
-    cookie.expires !== undefined &&
-    (!Number.isFinite(cookie.expires) || cookie.expires <= 0)
-  ) {
+  if (cookie.expires !== undefined && (!Number.isFinite(cookie.expires) || cookie.expires <= 0)) {
     issues.push('expires must be positive Unix seconds or absent for a session cookie');
   }
   if (cookie.sameSite === 'None' && !cookie.secure) {
@@ -133,24 +129,15 @@ export function parseNetscape(text: string): Cookie[] {
     const fields = line.split('\t');
     if (fields.length !== 7) continue; // Malformed: not the canonical 7-column shape.
 
-    const [rawDomain, includeSubdomainsField, path, secureField, expiryField, name, value] = fields as [
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-    ];
+    const [rawDomain, includeSubdomainsField, path, secureField, expiryField, name, value] =
+      fields as [string, string, string, string, string, string, string];
 
     const expiry = Number(expiryField);
     if (!Number.isFinite(expiry)) continue; // Malformed expiry column.
     if (includeSubdomainsField !== 'TRUE' && includeSubdomainsField !== 'FALSE') continue;
     if (secureField !== 'TRUE' && secureField !== 'FALSE') continue;
     const domain =
-      includeSubdomainsField === 'TRUE' && !rawDomain.startsWith('.')
-        ? `.${rawDomain}`
-        : rawDomain;
+      includeSubdomainsField === 'TRUE' && !rawDomain.startsWith('.') ? `.${rawDomain}` : rawDomain;
 
     const cookie: Cookie = {
       name,

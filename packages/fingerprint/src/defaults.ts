@@ -221,10 +221,18 @@ export function androidMajorFromOsVersionLabel(osVersion: string): number | unde
 
 function androidGenerationScore(label: string): number {
   const text = label.toLowerCase();
-  if (/galaxy s2[4-9]|galaxy z fold[6-9]|galaxy z flip[6-9]|pixel (8|9|10)\b|xiaomi 1[4-5]|oneplus 1[2-5]/i.test(text)) {
+  if (
+    /galaxy s2[4-9]|galaxy z fold[6-9]|galaxy z flip[6-9]|pixel (8|9|10)\b|xiaomi 1[4-5]|oneplus 1[2-5]/i.test(
+      text,
+    )
+  ) {
     return 16;
   }
-  if (/galaxy s2[2-3]|galaxy z fold[4-5]|galaxy z flip[4-5]|pixel [67]\b|xiaomi 1[2-3]|oneplus 1[01]|nothing phone/i.test(text)) {
+  if (
+    /galaxy s2[2-3]|galaxy z fold[4-5]|galaxy z flip[4-5]|pixel [67]\b|xiaomi 1[2-3]|oneplus 1[01]|nothing phone/i.test(
+      text,
+    )
+  ) {
     return 14;
   }
   if (/galaxy s21|galaxy note20|pixel 5|xiaomi 11|oneplus 9|rog phone [56]/i.test(text)) {
@@ -237,7 +245,9 @@ function androidGenerationScore(label: string): number {
     return 10;
   }
   // Tablets / midrange without a clear generation — treat as broadly Android 13-capable.
-  if (/galaxy tab s[89]|galaxy tab a9|pixel tablet|xiaomi pad [67]|oneplus pad|matepad/i.test(text)) {
+  if (
+    /galaxy tab s[89]|galaxy tab a9|pixel tablet|xiaomi pad [67]|oneplus pad|matepad/i.test(text)
+  ) {
     return 13;
   }
   return 0;

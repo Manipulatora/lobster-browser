@@ -237,21 +237,11 @@ export async function startProfile(
     (rendererPolicy.mode === 'host' || rendererPolicy.mode === 'normalized_host') &&
     !hostCalibration
   ) {
-    // A CROSS-OS persona (e.g. a Windows/macOS profile on a Linux host) can NEVER be host-calibrated —
-    // the host runs a different OS, so its real GPU is incoherent with the persona anyway. In that case
-    // fall through to the persona's own catalog GPU (deriveFingerprint below): config.webgl is
-    // authoritative for the reported renderer (verified — the engine reports config.webgl, not the real
-    // backend), so the launch stays coherent instead of being refused. Only a SAME-OS "host" profile
-    // that still lacks calibration is a genuine misconfiguration worth refusing.
-    if (params.os === runtimeHostOs()) {
-      throw new Error(
-        `refusing to launch profile ${params.profileId}: renderer policy "${rendererPolicy.mode}" ` +
-          'requires a complete compatible host calibration',
-      );
-    }
-    console.warn(
-      `[lobium] profile ${params.profileId}: renderer "${rendererPolicy.mode}" cannot be host-calibrated ` +
-        `on a ${runtimeHostOs()} host for a ${params.os} persona — using the persona's catalog GPU instead.`,
+    // Host policies assert measured evidence. Substituting a catalog renderer for a cross-OS persona
+    // would silently change policy semantics and can create a detectable GPU/OS mismatch, so fail closed.
+    throw new Error(
+      `refusing to launch profile ${params.profileId}: renderer policy "${rendererPolicy.mode}" ` +
+        'requires a complete compatible host calibration',
     );
   }
   // Renderer policy owns the complete WebGL surface. Legacy profiles may still contain the old

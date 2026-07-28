@@ -893,60 +893,62 @@ export function ProfilesView({
 
       {error ? <p className="notice notice--error">Could not load profiles: {error}</p> : null}
 
-      {loading ? (
-        <div className="skeleton-stack" aria-busy="true" aria-label="Loading profiles">
-          <Skeleton height={48} />
-          <Skeleton height={48} />
-          <Skeleton height={48} />
-          <Skeleton height={48} />
-        </div>
-      ) : isEmpty ? (
-        <EmptyState
-          icon={<UserGroupIcon aria-hidden />}
-          title={t('profiles.empty.title')}
-          description={t('profiles.empty.desc')}
-          action={
-            <button type="button" className="btn btn--primary" onClick={() => setShowForm(true)}>
-              <PlusIcon aria-hidden />
-              Create Profile
-            </button>
-          }
-        />
-      ) : (
-        <ProfileList
-          profiles={filteredProfiles}
-          availableProxies={availableProxies}
-          busyIds={busyIds}
-          launchInfo={launchInfo}
-          selectedIds={selectedIds}
-          sortKey={sortKey}
-          sortDir={sortDir}
-          onSort={handleSort}
-          onToggleSelect={(id) => {
-            setSelectedIds((prev) => {
-              const next = new Set(prev);
-              if (next.has(id)) next.delete(id);
-              else next.add(id);
-              return next;
-            });
-          }}
-          onToggleSelectAll={() => {
-            const ids = filteredProfiles.map((p) => p.id);
-            const allOn = ids.length > 0 && ids.every((id) => selectedIds.has(id));
-            setSelectedIds(allOn ? new Set() : new Set(ids));
-          }}
-          onLaunch={handleLaunch}
-          onStop={handleStop}
-          onClone={handleClone}
-          onMoveToTrash={handleMoveToTrash}
-          onEditProfile={setEditingProfile}
-          onSetPassword={handleSetPassword}
-          onShowConnection={handleShowConnection}
-          onExportCookies={(id) => {
-            void handleExportCookies(id);
-          }}
-        />
-      )}
+      <div className="profiles-view__list">
+        {loading ? (
+          <div className="skeleton-stack" aria-busy="true" aria-label="Loading profiles">
+            <Skeleton height={48} />
+            <Skeleton height={48} />
+            <Skeleton height={48} />
+            <Skeleton height={48} />
+          </div>
+        ) : isEmpty ? (
+          <EmptyState
+            icon={<UserGroupIcon aria-hidden />}
+            title={t('profiles.empty.title')}
+            description={t('profiles.empty.desc')}
+            action={
+              <button type="button" className="btn btn--primary" onClick={() => setShowForm(true)}>
+                <PlusIcon aria-hidden />
+                Create Profile
+              </button>
+            }
+          />
+        ) : (
+          <ProfileList
+            profiles={filteredProfiles}
+            availableProxies={availableProxies}
+            busyIds={busyIds}
+            launchInfo={launchInfo}
+            selectedIds={selectedIds}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            onSort={handleSort}
+            onToggleSelect={(id) => {
+              setSelectedIds((prev) => {
+                const next = new Set(prev);
+                if (next.has(id)) next.delete(id);
+                else next.add(id);
+                return next;
+              });
+            }}
+            onToggleSelectAll={() => {
+              const ids = filteredProfiles.map((p) => p.id);
+              const allOn = ids.length > 0 && ids.every((id) => selectedIds.has(id));
+              setSelectedIds(allOn ? new Set() : new Set(ids));
+            }}
+            onLaunch={handleLaunch}
+            onStop={handleStop}
+            onClone={handleClone}
+            onMoveToTrash={handleMoveToTrash}
+            onEditProfile={setEditingProfile}
+            onSetPassword={handleSetPassword}
+            onShowConnection={handleShowConnection}
+            onExportCookies={(id) => {
+              void handleExportCookies(id);
+            }}
+          />
+        )}
+      </div>
 
       {showForm ? (
         <AccessibleModalOverlay onClose={() => setShowForm(false)}>

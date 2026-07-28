@@ -22,6 +22,7 @@ use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::agent_secrets;
 use crate::profile_store;
 use crate::proxy_check;
 use crate::proxy_store;
@@ -179,7 +180,7 @@ pub async fn start_profile_via_sidecar(
     password: Option<&str>,
     headless: bool,
 ) -> Result<Value, StartError> {
-    let (profile, resolved_proxy) = {
+    let (profile, resolved_proxy, agent_memory_key) = {
         let conn = db
             .lock()
             .map_err(|_| StartError::Failed(anyhow::anyhow!("profile store lock poisoned")))?;
@@ -208,7 +209,10 @@ pub async fn start_profile_via_sidecar(
             ),
             None => profile.proxy.clone(),
         };
-        (profile, resolved_proxy)
+        // Per-profile encrypted-memory key, so the in-browser Lobee panel can run tasks over the
+        // loopback bridge. Best-effort: on failure the desktop agent path still works.
+        let agent_memory_key = agent_secrets::memory_key(&conn, cipher, profile_id).ok();
+        (profile, resolved_proxy, agent_memory_key)
     };
     if profile.engine != "lobium" {
         return Err(StartError::Failed(anyhow::anyhow!(
@@ -239,6 +243,7 @@ pub async fn start_profile_via_sidecar(
         "extensions": profile.extensions,
         "userDataDir": user_data_dir.to_string_lossy(),
         "headless": headless,
+        "agentMemoryKey": agent_memory_key,
     });
     let launched = sidecar.call("startProfile", params).await;
     match launched {

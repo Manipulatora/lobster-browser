@@ -16,6 +16,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { pipeline } from 'node:stream/promises';
 import type { BrowserExtensionRef } from '@lobster/shared-types';
 import yauzl, { type Entry, type ZipFile } from 'yauzl';
+import { getBridgeOrigin, issueBridgeToken, provisionProfile } from './agent/bridge-registry.js';
 
 export const MAX_CRX_BYTES = 64 * 1024 * 1024;
 export const MAX_EXTENSION_UNPACKED_BYTES = 256 * 1024 * 1024;
@@ -522,6 +523,47 @@ export async function prepareProfileExtensions(
     }
   }
   return loaded;
+}
+
+/**
+ * Stable extension ID of the first-party Lobee side-panel extension. It is DERIVED from the fixed
+ * `"key"` (base64 SPKI public key) in `packages/lobee/manifest.json` — Chromium computes the ID as the
+ * a–p mapping of the first 16 bytes of SHA-256(DER public key), independent of the load path — so it is
+ * known ahead of time and can be pinned. If the manifest key ever changes, recompute this.
+ */
+export const LOBEE_EXTENSION_ID = 'opbicdcjjlpehmibpmkmkconpnnkijel';
+
+/**
+ * Resolve the first-party Lobee side-panel extension (bundled with the desktop app), so it can be
+ * auto-loaded into EVERY profile. The directory comes from `LOBSTER_LOBEE_DIR` (set by the installer)
+ * or an explicit override. It is snapshotted into the profile like any unpacked extension. Returns
+ * `undefined` when Lobee isn't configured (dev/CI without the bundle) so launches still work.
+ */
+export async function prepareDefaultLobeeExtension(
+  userDataDir: string,
+  profileId?: string,
+  dir: string | undefined = process.env.LOBSTER_LOBEE_DIR,
+): Promise<string | undefined> {
+  const source = dir?.trim();
+  if (!source) return undefined;
+  if (!isAbsolute(source)) throw new Error('LOBSTER_LOBEE_DIR must be an absolute path');
+  const manifest = await stat(join(source, 'manifest.json')).catch(() => undefined);
+  if (!manifest?.isFile()) return undefined; // not a valid extension dir — skip rather than fail launch
+  const root = join(userDataDir, 'lobium-extensions');
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const destination = join(root, 'lobee');
+  await snapshotUnpackedDirectory(source, destination);
+
+  // Wire this profile's Lobee panel to the loopback agent bridge: an unguessable per-profile token +
+  // the bridge origin, written into THIS snapshot only. `bridge.json` is a normal packaged resource the
+  // extension reads via chrome.runtime.getURL — no web page can fetch it (no web_accessible_resources).
+  if (profileId) {
+    const token = issueBridgeToken(profileId);
+    provisionProfile(profileId, { memoryDir: join(userDataDir, 'agent') });
+    const config = { origin: getBridgeOrigin(), token, profileId };
+    await writeFile(join(destination, 'bridge.json'), JSON.stringify(config), { mode: 0o600 });
+  }
+  return destination;
 }
 
 export function extensionLaunchArgs(paths: readonly string[]): string[] {

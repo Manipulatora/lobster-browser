@@ -516,7 +516,9 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
     availTop + fp.screen.availHeight > fp.screen.height ||
     availLeft + fp.screen.availWidth > fp.screen.width
   ) {
-    issues.push('screen available rect must be an integer rect contained within the physical screen');
+    issues.push(
+      'screen available rect must be an integer rect contained within the physical screen',
+    );
   }
   if (fp.os === 'macos' && availTop < 24) {
     issues.push(

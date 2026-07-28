@@ -1,6 +1,15 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 import type {
+  AgentConfig,
+  AgentEvent,
+  AgentLlmConfig,
+  AgentLlmProvider,
+  AgentSendInputResult,
+  AgentStartResult,
+  AgentStatusResult,
+  AgentStopResult,
   CreateProfileInput,
   CreateProfileTemplateInput,
   CreateStoredProxyInput,
@@ -71,6 +80,34 @@ export interface ProxiesClient {
 export interface TemplatesClient {
   list_templates(): Promise<ProfileTemplate[]>;
   create_template(input: CreateProfileTemplateInput): Promise<ProfileTemplate>;
+}
+
+/**
+ * The per-profile web-agent command surface. `start` kicks off a run on an ALREADY-LAUNCHED profile
+ * and returns immediately; live progress arrives via {@link AgentClient.onEvent} (streamed by the
+ * sidecar → Rust → the `agent-event` Tauri event). One agent per profile — starting again while one
+ * runs is rejected by the sidecar.
+ */
+export interface AgentClient {
+  start(
+    id: string,
+    task: string,
+    llm: AgentLlmConfig,
+    config?: Partial<AgentConfig>,
+  ): Promise<AgentStartResult>;
+  stop(id: string): Promise<AgentStopResult>;
+  sendInput(id: string, text: string): Promise<AgentSendInputResult>;
+  status(id?: string): Promise<AgentStatusResult>;
+  apiKeyStatus(provider: AgentLlmConfig['provider']): Promise<{ stored: boolean }>;
+  /** Save in the Rust encrypted store; null forgets the provider key. */
+  setApiKey(
+    provider: AgentLlmConfig['provider'],
+    apiKey: string | null,
+  ): Promise<{ stored: boolean }>;
+  /** Validate a BYOK key and list its usable chat models (uses `apiKey` if given, else the stored key). */
+  listModels(provider: AgentLlmConfig['provider'], apiKey?: string): Promise<{ models: string[] }>;
+  /** Subscribe to ALL agent events (every profile); the caller filters by `profileId`. Returns unsubscribe. */
+  onEvent(cb: (event: AgentEvent) => void): () => void;
 }
 
 /**
@@ -470,6 +507,138 @@ const mockTemplatesClient: TemplatesClient = {
   },
 };
 
+/* --------------------------------------------------------------------------------------------
+ * Agent client
+ * ------------------------------------------------------------------------------------------ */
+
+const tauriAgentClient: AgentClient = {
+  start: (id, task, llm, config) =>
+    invoke<AgentStartResult>('agent_start', { id, task, llm, config: config ?? null }),
+  stop: (id) => invoke<AgentStopResult>('agent_stop', { id }),
+  sendInput: (id, text) => invoke<AgentSendInputResult>('agent_send_input', { id, text }),
+  status: (id) => invoke<AgentStatusResult>('agent_status', { id: id ?? null }),
+  apiKeyStatus: (provider) => invoke<{ stored: boolean }>('agent_api_key_status', { provider }),
+  setApiKey: (provider, apiKey) =>
+    invoke<{ stored: boolean }>('agent_set_api_key', { provider, apiKey }),
+  listModels: (provider, apiKey) =>
+    invoke<{ models: string[] }>('agent_list_models', { provider, apiKey: apiKey ?? null }),
+  onEvent: (cb) => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void listen<AgentEvent>('agent-event', (e) => cb(e.payload)).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  },
+};
+
+/**
+ * In-browser mock: drives a believable scripted run so the Agent panel is fully exercisable under
+ * `vite dev` without the desktop core. Events fan out to every registered listener, mirroring the real
+ * broadcast.
+ */
+const mockAgentListeners = new Set<(e: AgentEvent) => void>();
+const mockAgentTimers = new Map<string, ReturnType<typeof setTimeout>[]>();
+const mockAgentKeys = new Set<AgentLlmProvider>();
+
+function emitMock(e: AgentEvent): void {
+  for (const cb of mockAgentListeners) cb(e);
+}
+
+const mockAgentClient: AgentClient = {
+  start: async (id, task) => {
+    const sessionId = crypto.randomUUID();
+    const ts = (): string => new Date().toISOString();
+    const base = { sessionId, profileId: id };
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const at = (ms: number, fn: () => void): void => {
+      timers.push(setTimeout(fn, ms));
+    };
+    emitMock({ type: 'run.started', ...base, task, ts: ts() });
+    at(400, () => emitMock({ type: 'step.thinking', ...base, step: 1, ts: ts() }));
+    at(900, () =>
+      emitMock({
+        type: 'step.observation',
+        ...base,
+        step: 1,
+        url: 'https://example.com/',
+        title: 'Example',
+        summary: 'url: https://example.com/  |  "Example"',
+        elementCount: 6,
+        ts: ts(),
+      }),
+    );
+    at(1200, () =>
+      emitMock({
+        type: 'step.action',
+        ...base,
+        step: 1,
+        action: { kind: 'type', id: 2, text: task.slice(0, 24), submit: true },
+        ts: ts(),
+      }),
+    );
+    at(1400, () =>
+      emitMock({ type: 'usage', ...base, usage: { tokensIn: 820, tokensOut: 40 }, ts: ts() }),
+    );
+    at(2000, () =>
+      emitMock({
+        type: 'run.finished',
+        ...base,
+        status: 'done',
+        result: `(mock) Completed: ${task}`,
+        usage: { tokensIn: 1640, tokensOut: 95 },
+        ts: ts(),
+      }),
+    );
+    mockAgentTimers.set(id, timers);
+    return { sessionId, profileId: id };
+  },
+  stop: async (id) => {
+    const timers = mockAgentTimers.get(id);
+    if (timers) {
+      for (const t of timers) clearTimeout(t);
+      mockAgentTimers.delete(id);
+      emitMock({
+        type: 'run.finished',
+        sessionId: 'mock',
+        profileId: id,
+        status: 'stopped',
+        result: 'Stopped by user.',
+        usage: { tokensIn: 0, tokensOut: 0 },
+        ts: new Date().toISOString(),
+      });
+      return { stopped: true };
+    }
+    return { stopped: false };
+  },
+  sendInput: async () => ({ delivered: true }),
+  status: async () => ({ runs: [] }),
+  apiKeyStatus: async (provider) => ({ stored: mockAgentKeys.has(provider) }),
+  listModels: async (provider) => {
+    const byProvider: Record<string, string[]> = {
+      anthropic: ['claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
+      openai: ['gpt-4o', 'gpt-4o-mini', 'o4-mini'],
+      openrouter: ['anthropic/claude-opus-4.8', 'openai/gpt-4o-mini', 'google/gemini-2.5-pro'],
+      google: ['gemini-2.5-pro', 'gemini-2.0-flash'],
+      xai: ['grok-4', 'grok-3-mini'],
+    };
+    return { models: byProvider[provider] ?? [] };
+  },
+  setApiKey: async (provider, apiKey) => {
+    if (apiKey) mockAgentKeys.add(provider);
+    else mockAgentKeys.delete(provider);
+    return { stored: mockAgentKeys.has(provider) };
+  },
+  onEvent: (cb) => {
+    mockAgentListeners.add(cb);
+    return () => mockAgentListeners.delete(cb);
+  },
+};
+
 /** The active client — real bridge in the desktop shell, in-memory mock in a dev browser. */
 export const profilesClient: ProfilesClient = isDesktopRuntime() ? tauriClient : mockClient;
 export const proxiesClient: ProxiesClient = isDesktopRuntime()
@@ -478,6 +647,7 @@ export const proxiesClient: ProxiesClient = isDesktopRuntime()
 export const templatesClient: TemplatesClient = isDesktopRuntime()
   ? tauriTemplatesClient
   : mockTemplatesClient;
+export const agentClient: AgentClient = isDesktopRuntime() ? tauriAgentClient : mockAgentClient;
 
 if (!isDesktopRuntime()) {
   seedMockStore();

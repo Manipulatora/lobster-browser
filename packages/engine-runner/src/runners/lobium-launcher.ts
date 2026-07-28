@@ -15,6 +15,8 @@ import type { ProxyConfig } from '@lobster/shared-types';
 import { readDevToolsEndpoint, clearDevToolsActivePort } from '../devtools-endpoint.js';
 import {
   extensionLaunchArgs,
+  LOBEE_EXTENSION_ID,
+  prepareDefaultLobeeExtension,
   prepareProfileExtensions,
   type PrepareExtensionsOptions,
 } from '../extensions.js';
@@ -285,6 +287,11 @@ export async function buildNativeLobiumProcessArgs(
     ctx.options.userDataDir,
     opts.extensions,
   );
+  // Lobee (the first-party in-browser agent side panel) is auto-loaded into every profile, ahead of
+  // any user extensions. It injects no content scripts, so a page can't see it; its actions run in
+  // this sidecar over leak-free CDP. Absent (dev/CI without the bundle) → simply not added.
+  const lobeePath = await prepareDefaultLobeeExtension(ctx.options.userDataDir, ctx.profileId);
+  const allExtensionPaths = lobeePath ? [lobeePath, ...extensionPaths] : extensionPaths;
   const resolvedProxy =
     proxyServer ??
     // Unauthenticated upstream can be passed straight through; authenticated must go via the shim
@@ -341,7 +348,11 @@ export async function buildNativeLobiumProcessArgs(
         (!arg.startsWith('--window-size=') && !arg.startsWith('--window-position=')),
     ),
     ...(opts.extraArgs ?? []),
-    ...extensionLaunchArgs(extensionPaths),
+    ...extensionLaunchArgs(allExtensionPaths),
+    // Ask the Lobium engine to auto-open Lobee's side panel at startup (a browser-side Show with no
+    // user-gesture requirement; consumed by the LobiumSidePanelAutoOpener fork hook). Harmlessly
+    // ignored by an engine build that predates the hook. Only when Lobee is actually loaded.
+    ...(lobeePath ? [`--lobium-open-side-panel=${LOBEE_EXTENSION_ID}`] : []),
     ...nativeProxyArgs(resolvedProxy),
     ...((opts.headless ?? ctx.options.headless) ? ['--headless=new'] : []),
     ...dynamicArgs,
@@ -441,6 +452,41 @@ export function ensureChromiumProfileName(userDataDir: string, profileName: stri
     writeFileSync(prefsPath, JSON.stringify(prefs), { mode: 0o600 });
   } catch {
     /* ignore — branding still works via NTP chip */
+  }
+}
+
+/**
+ * Pin the first-party Lobee extension to the toolbar so its icon is always visible (not buried in the
+ * puzzle menu). This is the plain, unprotected profile pref `extensions.pinned_extensions` (a list of
+ * extension IDs); it needs no MAC/super_mac. No-op when Lobee isn't bundled (`LOBSTER_LOBEE_DIR` unset)
+ * or when it is already pinned. Merges into the existing `extensions` object so sibling keys survive.
+ */
+export function ensureLobeePreferences(userDataDir: string): void {
+  if (!process.env.LOBSTER_LOBEE_DIR) return;
+  const defaultDir = join(userDataDir, 'Default');
+  try {
+    mkdirSync(defaultDir, { recursive: true });
+  } catch {
+    return;
+  }
+  const prefsPath = join(defaultDir, 'Preferences');
+  const prefs = readPrefsForUpdate(prefsPath);
+  if (prefs === null) return; // never clobber a corrupt/half-written Preferences file
+  const extensions =
+    prefs.extensions && typeof prefs.extensions === 'object' && !Array.isArray(prefs.extensions)
+      ? { ...(prefs.extensions as Record<string, unknown>) }
+      : {};
+  const existing = Array.isArray(extensions.pinned_extensions)
+    ? (extensions.pinned_extensions as unknown[]).filter((x): x is string => typeof x === 'string')
+    : [];
+  if (existing.includes(LOBEE_EXTENSION_ID)) return;
+  // Pin Lobee leftmost (nearest the omnibox), keeping any user-pinned extensions after it.
+  extensions.pinned_extensions = [LOBEE_EXTENSION_ID, ...existing];
+  prefs.extensions = extensions;
+  try {
+    writeFileSync(prefsPath, JSON.stringify(prefs), { mode: 0o600 });
+  } catch {
+    /* best-effort: the extension still loads, just unpinned */
   }
 }
 
@@ -678,6 +724,7 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
       // Always scrub — even when profileName is missing — so restored data: tabs cannot win.
       scrubLegacyBrandingSessions(ctx.options.userDataDir);
       ensureChromiumPersonaPreferences(ctx);
+      ensureLobeePreferences(ctx.options.userDataDir);
       // Drop a stale DevToolsActivePort so we never brand/automate against a dead previous port.
       await clearDevToolsActivePort(ctx.options.userDataDir);
       const args = await buildNativeLobiumProcessArgs(

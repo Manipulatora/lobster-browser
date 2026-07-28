@@ -265,9 +265,7 @@ test('ensureChromiumPersonaPreferences persists language sources for main frames
     ctx.fingerprint.navigator.languages = ['ja-JP', 'ja'];
     ctx.fingerprint.locale.locale = 'ja-JP';
     ensureChromiumPersonaPreferences(ctx);
-    const prefs = JSON.parse(
-      await readFile(join(userDataDir, 'Default', 'Preferences'), 'utf8'),
-    );
+    const prefs = JSON.parse(await readFile(join(userDataDir, 'Default', 'Preferences'), 'utf8'));
     assert.equal(prefs.intl.accept_languages, 'ja-JP,ja');
     assert.equal(prefs.intl.selected_languages, 'ja-JP,ja');
     const localState = JSON.parse(await readFile(join(userDataDir, 'Local State'), 'utf8'));

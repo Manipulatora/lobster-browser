@@ -41,11 +41,12 @@ export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOption
     );
   }
   const proxyHardening = buildProxyHardeningArgs(params.proxy);
-  const proxyDisabledFeatures = proxyHardening
-    .find((arg) => arg.startsWith('--disable-features='))
-    ?.slice('--disable-features='.length)
-    .split(',')
-    .filter(Boolean) ?? [];
+  const proxyDisabledFeatures =
+    proxyHardening
+      .find((arg) => arg.startsWith('--disable-features='))
+      ?.slice('--disable-features='.length)
+      .split(',')
+      .filter(Boolean) ?? [];
   // Chrome 152's ReduceAcceptLanguage feature collapses navigator.languages to its first item. The
   // profile model intentionally supports an ordered user-selected list, so disable that reduction and
   // merge it into the SAME switch as proxy hardening (Chromium only honors one value per switch).

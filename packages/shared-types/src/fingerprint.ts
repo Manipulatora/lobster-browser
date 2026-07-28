@@ -261,4 +261,4 @@ export type FingerprintOverrides = Partial<{
   androidDeviceType: AndroidDeviceType;
   androidDeviceModel: string;
   androidDeviceCode: string;
-}>
+}>;

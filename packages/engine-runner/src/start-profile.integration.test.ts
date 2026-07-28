@@ -12,15 +12,14 @@ import { startProfile } from './start-profile.js';
 
 // Runs only where native Lobium is installed; skipped (green) elsewhere.
 const binary = resolveLobiumBinary();
-const capabilityReady = binary && process.env.LOBSTER_HOST_CALIBRATION_FILE
-  ? await probeLobiumBuildCapabilities(binary).then(
-      () => true,
-      () => false,
-    )
-  : false;
-const lobiumReady =
-  isLobiumAvailable() &&
-  capabilityReady;
+const capabilityReady =
+  binary && process.env.LOBSTER_HOST_CALIBRATION_FILE
+    ? await probeLobiumBuildCapabilities(binary).then(
+        () => true,
+        () => false,
+      )
+    : false;
+const lobiumReady = isLobiumAvailable() && capabilityReady;
 
 test(
   'startProfile derives a fingerprint from the seed and launches native Lobium (no proxy)',

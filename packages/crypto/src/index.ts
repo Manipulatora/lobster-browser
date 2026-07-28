@@ -99,10 +99,7 @@ export function isLBv1Envelope(bytes: Uint8Array | Buffer): boolean {
  * Encrypt `plaintext` into an LBv1 envelope. Ciphertext never contains the cleartext bytes;
  * a fresh random nonce is used per call unless `nonce` is supplied (tests only).
  */
-export function encryptBlob(
-  plaintext: Uint8Array | Buffer,
-  options: EncryptBlobOptions,
-): Buffer {
+export function encryptBlob(plaintext: Uint8Array | Buffer, options: EncryptBlobOptions): Buffer {
   const key = asBuffer(options.key, 'key', LB_V1_KEY_LEN);
   const keyId = options.keyId
     ? asBuffer(options.keyId, 'keyId', LB_V1_KEY_ID_LEN)

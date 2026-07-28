@@ -238,9 +238,7 @@ test('flags an implausible hardwareConcurrency, OS-aware (96 cores ok on Windows
   zero.navigator.hardwareConcurrency = 0;
   assertFlags(zero, /hardwareConcurrency/);
 
-  const mac = structuredClone(
-    deriveFingerprint('mac-hw-base', { os: 'macos', engine: 'lobium' }),
-  );
+  const mac = structuredClone(deriveFingerprint('mac-hw-base', { os: 'macos', engine: 'lobium' }));
   assert.deepEqual(validateFingerprintCoherence(mac), [], 'mac base must be coherent');
   mac.navigator.hardwareConcurrency = 96; // > 56, impossible on macOS
   assertFlags(mac, /hardwareConcurrency .* range for "macos"/);

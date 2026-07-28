@@ -39,7 +39,9 @@ export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
   error?: ReactNode;
 }
 export function Input({ label, hint, error, className, ...rest }: InputProps): JSX.Element {
-  const cls = ['lb-input', error ? 'lb-input--invalid' : '', className ?? ''].filter(Boolean).join(' ');
+  const cls = ['lb-input', error ? 'lb-input--invalid' : '', className ?? '']
+    .filter(Boolean)
+    .join(' ');
   if (!label && !hint && !error) return <input className={cls} {...rest} />;
   return (
     <Field label={label} hint={hint} error={error}>
@@ -53,7 +55,14 @@ export interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
   hint?: ReactNode;
   error?: ReactNode;
 }
-export function Select({ label, hint, error, className, children, ...rest }: SelectProps): JSX.Element {
+export function Select({
+  label,
+  hint,
+  error,
+  className,
+  children,
+  ...rest
+}: SelectProps): JSX.Element {
   const cls = ['lb-select', error ? 'lb-select--invalid' : '', className ?? '']
     .filter(Boolean)
     .join(' ');

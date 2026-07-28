@@ -103,6 +103,28 @@ cp -a "$DIST/lobium-runtime/fonts" "$FONTS_DST"
 # Keep dynamic linker happy for a copied system node (usually fine on same distro).
 "$NODE_DST/bin/node" -e "console.log('vendored node ok', process.version)"
 
+# Lobee: the first-party in-browser agent side-panel extension (React/TS/Tailwind, MV3), auto-loaded
+# into every profile. Rebuild it from source (packages/lobee-app → packages/lobee) so the shipped
+# bundle is always current, then stage the self-contained output.
+node "$ROOT/scripts/build-lobee.mjs"
+LOBEE_DST="$ROOT/apps/desktop/src-tauri/resources/lobee"
+rm -rf "$LOBEE_DST"
+cp -a "$ROOT/packages/lobee" "$LOBEE_DST"
+rm -rf "$LOBEE_DST/node_modules"
+[[ -f "$LOBEE_DST/manifest.json" ]] || { echo "error: Lobee manifest missing after stage" >&2; exit 1; }
+# ANTI-DETECT INVARIANT (P0): Lobee's ID is a fixed public constant, so a single web_accessible_resource
+# or externally_connectable match would turn chrome-extension://<id>/… into a universal fingerprinting
+# probe. Fail the build if either ever appears in the manifest.
+python3 - "$LOBEE_DST/manifest.json" <<'PY'
+import json, sys
+m = json.load(open(sys.argv[1]))
+bad = [k for k in ("web_accessible_resources", "externally_connectable") if k in m]
+if bad:
+    print(f"error: Lobee manifest must NOT declare {bad} (anti-detect: ID is public)", file=sys.stderr)
+    sys.exit(1)
+print("[lobee] anti-detect manifest guard: OK (no WAR / externally_connectable)")
+PY
+
 echo "==> [4/6] Configure + build .deb"
 python3 - <<'PY'
 import json
@@ -113,6 +135,7 @@ cfg.setdefault("bundle", {})["resources"] = {
     "resources/sidecar": "sidecar",
     "resources/node": "node",
     "resources/fonts": "fonts",
+    "resources/lobee": "lobee",
 }
 cfg["bundle"]["targets"] = ["deb"]
 p.write_text(json.dumps(cfg, indent=2) + "\n")
@@ -163,6 +186,7 @@ cp -a "$DIST/lobium-runtime/." "$INSTALL_ROOT/lobium/"
 {
   echo "export LOBSTER_NODE_BIN=\"$INSTALL_ROOT/lib/node/bin/node\""
   echo "export LOBSTER_SIDECAR=\"$INSTALL_ROOT/lib/sidecar/index.js\""
+  echo "export LOBSTER_LOBEE_DIR=\"$INSTALL_ROOT/lib/lobee\""
   echo "export LOBSTER_LOBIUM_BIN=\"$INSTALL_ROOT/lobium/chrome\""
   echo "export LOBSTER_LOBIUM_DIR=\"$INSTALL_ROOT/lobium\""
   echo "export LOBSTER_FONTS_DIR=\"$INSTALL_ROOT/lobium/fonts\""
@@ -205,15 +229,33 @@ EOF
 chmod +x "$DIST/run-lobster.sh"
 ln -sfn "$DIST/run-lobster.sh" "$BIN_LINK"
 
+# Stage a product icon and register a launcher entry that references it, so the app shows an icon in
+# the desktop menu. An absolute Icon= path is the most portable across desktop environments; we also
+# drop the PNG into the hicolor theme for DEs that resolve icons by name.
+ICON_SRC="$ROOT/apps/desktop/src-tauri/icons/128x128@2x.png"
+[[ -f "$ICON_SRC" ]] || ICON_SRC="$ROOT/apps/desktop/src-tauri/icons/128x128.png"
+ICON_DST="$INSTALL_ROOT/lobster.png"
+cp -f "$ICON_SRC" "$ICON_DST" 2>/dev/null || true
+for sz in 128x128 256x256; do
+  HICOLOR="$HOME_DIR/.local/share/icons/hicolor/$sz/apps"
+  mkdir -p "$HICOLOR"
+  cp -f "$ICON_SRC" "$HICOLOR/lobster-browser.png" 2>/dev/null || true
+done
+
 mkdir -p "$HOME_DIR/.local/share/applications"
 cat > "$HOME_DIR/.local/share/applications/lobster-browser.desktop" <<EOF
 [Desktop Entry]
 Name=Lobster Browser
+Comment=Anti-detect browser with a per-profile web agent
 Exec=$DIST/run-lobster.sh
+Icon=$ICON_DST
 Terminal=false
 Type=Application
 Categories=Network;WebBrowser;
+StartupWMClass=lobster-desktop
 EOF
+update-desktop-database "$HOME_DIR/.local/share/applications" 2>/dev/null || true
+gtk-update-icon-cache -f -t "$HOME_DIR/.local/share/icons/hicolor" 2>/dev/null || true
 
 echo "==> [6/6] Product E2E (installed Lobium env)"
 set -a

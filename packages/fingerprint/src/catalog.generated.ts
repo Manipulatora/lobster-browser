@@ -24615,4 +24615,3 @@ export const LINUX_RENDERER_PRESETS: RendererCatalogEntry[] = [
   linuxRenderer("linux-intel-intel--battlemage-g31-arc-pro-b70-e223", "Intel", "Intel(R) Battlemage G31 [Arc Pro B70", "0xE223", "pci.ids Intel 8086 (Mesa/OpenGL ANGLE string for Linux)"),
   linuxRenderer("linux-intel-intel--wildcat-lake-intel-graphics-fd80", "Intel", "Intel(R) Wildcat Lake [Intel Graphics", "0xFD80", "pci.ids Intel 8086 (Mesa/OpenGL ANGLE string for Linux)"),
 ];
-

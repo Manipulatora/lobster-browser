@@ -52,10 +52,7 @@ test('software calibration requires an explicit provisional acknowledgement', ()
     allowProvisionalSoftwareGpu({ LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION: 'true' }),
     true,
   );
-  assert.equal(
-    allowProvisionalSoftwareGpu({ LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION: '0' }),
-    false,
-  );
+  assert.equal(allowProvisionalSoftwareGpu({ LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION: '0' }), false);
 });
 
 test('isSoftwareRenderer flags SwiftShader/llvmpipe and clears real GPU strings', () => {

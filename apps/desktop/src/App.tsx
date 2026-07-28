@@ -1,14 +1,12 @@
 import {
   DocumentDuplicateIcon,
   MagnifyingGlassIcon,
-  PhoneIcon,
   ServerStackIcon,
   UserGroupIcon,
 } from '@heroicons/react/24/outline';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { isDesktopRuntime, profilesClient } from './api/tauri';
-import { PhoneView } from './features/phone/PhoneView';
 import { ProfilesView } from './features/profiles/ProfilesView';
 import { ProxiesView } from './features/proxies/ProxiesView';
 import { TemplatesView } from './features/templates/TemplatesView';
@@ -18,7 +16,6 @@ import type { Profile } from '@lobster/shared-types';
 
 const NAV_ITEMS = [
   { key: 'profiles', label: 'Profiles', icon: UserGroupIcon },
-  { key: 'phone', label: 'Phone', icon: PhoneIcon },
   { key: 'proxies', label: 'Proxies', icon: ServerStackIcon },
   { key: 'templates', label: 'Templates', icon: DocumentDuplicateIcon },
 ] as const;
@@ -35,8 +32,6 @@ function ActiveView({
   switch (active) {
     case 'profiles':
       return <ProfilesView createProfileSignal={createProfileSignal} />;
-    case 'phone':
-      return <PhoneView />;
     case 'proxies':
       return <ProxiesView />;
     case 'templates':

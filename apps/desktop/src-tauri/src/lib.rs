@@ -10,6 +10,7 @@
 //! `local_api::start_profile_via_sidecar` — the SAME path the local automation API uses — so the UI
 //! Launch button and external automation clients behave identically. See README.md.
 
+mod agent_secrets;
 mod blob_crypto;
 mod engine_provision;
 mod keychain;
@@ -24,7 +25,7 @@ mod template_store;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use profile_store::{CreateProfileInput, Profile, UpdateProfilePatch};
 use proxy_check::{run_proxy_check, ProxyCheckResult};
@@ -539,15 +540,15 @@ fn encrypt_profile_blob(
     use blob_crypto::{derive_key_id, BlobCipher, LB_V1_KEY_ID_LEN};
 
     let key = resolve_pck(pck_hex, team_data_key_hex.as_deref(), profile_id.as_deref())?;
-    let key_id = if let (Some(tdk_hex), Some(pid)) = (team_data_key_hex.as_deref(), profile_id.as_deref())
-    {
-        let tdk = parse_key32_hex(tdk_hex)?;
-        derive_key_id(&tdk, pid).map_err(|e| e.to_string())?
-    } else if let Some(hex) = key_id_hex {
-        parse_key_id_hex(&hex)?
-    } else {
-        [0u8; LB_V1_KEY_ID_LEN]
-    };
+    let key_id =
+        if let (Some(tdk_hex), Some(pid)) = (team_data_key_hex.as_deref(), profile_id.as_deref()) {
+            let tdk = parse_key32_hex(tdk_hex)?;
+            derive_key_id(&tdk, pid).map_err(|e| e.to_string())?
+        } else if let Some(hex) = key_id_hex {
+            parse_key_id_hex(&hex)?
+        } else {
+            [0u8; LB_V1_KEY_ID_LEN]
+        };
     let cipher = BlobCipher::new(&key);
     let envelope = cipher
         .encrypt(plaintext_utf8.as_bytes(), &key_id)
@@ -598,8 +599,7 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
     (0..hex.len())
         .step_by(2)
         .map(|i| {
-            u8::from_str_radix(&hex[i..i + 2], 16)
-                .map_err(|_| format!("invalid hex at offset {i}"))
+            u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| format!("invalid hex at offset {i}"))
         })
         .collect()
 }
@@ -658,8 +658,7 @@ fn first_font_pack_dir(candidates: impl IntoIterator<Item = PathBuf>) -> Option<
 #[cfg(target_os = "linux")]
 fn packaged_runtime_needs_no_sandbox(chrome: &std::path::Path) -> bool {
     chrome.parent().is_some_and(|runtime| {
-        runtime.join("LOBSTER_ENGINE.json").is_file()
-            && !runtime.join("chrome_sandbox").is_file()
+        runtime.join("LOBSTER_ENGINE.json").is_file() && !runtime.join("chrome_sandbox").is_file()
     })
 }
 
@@ -679,12 +678,9 @@ fn packaged_runtime_needs_software_gpu(
 #[cfg(target_os = "linux")]
 fn host_has_drm_render_node() -> bool {
     std::fs::read_dir("/dev/dri").is_ok_and(|entries| {
-        entries.filter_map(Result::ok).any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("renderD")
-        })
+        entries
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("renderD"))
     })
 }
 
@@ -802,6 +798,246 @@ async fn export_profile_cookies(state: State<'_, AppState>, id: String) -> Resul
         .ok_or_else(|| "sidecar returned an invalid cookie export".to_string())
 }
 
+/// Start the per-profile web agent. The profile does not need to be launched: the run begins with
+/// the browser closed, and the browser opens only if the agent takes a browser action (the
+/// `run.needsBrowser` → launch → `agent.attachBrowser` round-trip below). Returns `{ sessionId, profileId }`;
+/// progress arrives on the UI as streamed `agent-event` Tauri events. `llm` carries the provider +
+/// model; a BYOK key supplied inline is persisted ENCRYPTED at rest (SecretCipher, global
+/// `scope='provider'`) and then forwarded to the sidecar over local stdio for the run — it is never
+/// written in plaintext or logged. Memory lives under the profile's own dir with a per-profile key, so
+/// it can never touch another profile's memory.
+#[tauri::command]
+async fn agent_start(
+    state: State<'_, AppState>,
+    id: String,
+    task: String,
+    mut llm: serde_json::Value,
+    config: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    validate_agent_id(&id)?;
+    if task.trim().is_empty() || task.len() > 20_000 {
+        return Err("agent task must be 1..20000 characters".to_string());
+    }
+    let llm_obj = llm
+        .as_object_mut()
+        .ok_or_else(|| "llm must be an object".to_string())?;
+    let provider = llm_obj
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "llm.provider is required".to_string())?
+        .to_string();
+    agent_secrets::validate_provider(&provider).map_err(|e| e.to_string())?;
+    let managed = llm_obj.get("managed").and_then(serde_json::Value::as_bool) == Some(true);
+    // A client-supplied base URL is never trusted — managed mode's URL comes from operator env only,
+    // and BYOK always uses the built-in provider endpoint. This keeps the model/UI from redirecting a
+    // credential or the proxy token to an arbitrary host (SSRF guard).
+    if llm_obj.get("baseUrl").is_some() {
+        return Err("custom LLM base URLs are not accepted by desktop IPC".to_string());
+    }
+    // The provider key only matters for BYOK; in managed mode the server holds the OpenRouter key.
+    let supplied_key = llm_obj
+        .remove("apiKey")
+        .and_then(|value| value.as_str().map(ToString::to_string));
+    let (byok_key, memory_key) = {
+        let conn = state
+            .db
+            .lock()
+            .map_err(|_| "profile store lock poisoned".to_string())?;
+        profile_store::get(&conn, &state.cipher, &id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "profile not found".to_string())?;
+        let memory_key =
+            agent_secrets::memory_key(&conn, &state.cipher, &id).map_err(|e| e.to_string())?;
+        let byok_key = if managed {
+            None
+        } else {
+            if let Some(key) = supplied_key.as_deref() {
+                agent_secrets::set_provider_key(&conn, &state.cipher, &provider, Some(key))
+                    .map_err(|e| e.to_string())?;
+            }
+            Some(
+                agent_secrets::provider_key(&conn, &state.cipher, &provider)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("no API key is stored for {provider}"))?,
+            )
+        };
+        (byok_key, memory_key)
+    };
+    if managed {
+        // Managed runs go through the backend proxy: inject its URL + access token from operator env,
+        // never an OpenRouter key. The sidecar's managed client uses `apiKey` as the proxy bearer token.
+        let proxy_url = std::env::var("LOBSTER_AGENT_PROXY_URL").map_err(|_| {
+            "managed mode requires LOBSTER_AGENT_PROXY_URL (the backend /agent/llm base)".to_string()
+        })?;
+        let proxy_token = std::env::var("LOBSTER_AGENT_PROXY_TOKEN")
+            .map_err(|_| "managed mode requires LOBSTER_AGENT_PROXY_TOKEN".to_string())?;
+        llm_obj.insert("baseUrl".to_string(), serde_json::Value::String(proxy_url));
+        llm_obj.insert("apiKey".to_string(), serde_json::Value::String(proxy_token));
+    } else if let Some(key) = byok_key {
+        llm_obj.insert("apiKey".to_string(), serde_json::Value::String(key));
+    }
+    let sidecar = state
+        .sidecar
+        .as_ref()
+        .ok_or("engine-runner sidecar is not available (failed to start)")?;
+    // The browser is NOT launched here. The run starts against a closed browser; only if the agent
+    // decides the task needs the web does it emit `run.needsBrowser`, which the event forwarder
+    // answers by launching the profile and calling `agent.attachBrowser` (see setup). A pure Q&A
+    // task therefore never opens a window.
+    let memory_dir = state.profiles_dir.join(&id).join("agent");
+    let params = serde_json::json!({
+        "profileId": id,
+        "task": task,
+        "memoryDir": memory_dir.to_string_lossy(),
+        "memoryKey": memory_key,
+        "llm": llm,
+        "config": config,
+    });
+    sidecar
+        .call("agent.start", params)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentApiKeyStatus {
+    stored: bool,
+}
+
+#[tauri::command]
+fn agent_set_api_key(
+    state: State<'_, AppState>,
+    provider: String,
+    api_key: Option<String>,
+) -> Result<AgentApiKeyStatus, String> {
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| "profile store lock poisoned".to_string())?;
+    let stored =
+        agent_secrets::set_provider_key(&conn, &state.cipher, &provider, api_key.as_deref())
+            .map_err(|e| e.to_string())?;
+    Ok(AgentApiKeyStatus { stored })
+}
+
+#[tauri::command]
+fn agent_api_key_status(
+    state: State<'_, AppState>,
+    provider: String,
+) -> Result<AgentApiKeyStatus, String> {
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| "profile store lock poisoned".to_string())?;
+    let stored = agent_secrets::has_provider_key(&conn, &provider).map_err(|e| e.to_string())?;
+    Ok(AgentApiKeyStatus { stored })
+}
+
+/// Validate a BYOK key and list the chat models it can use. Uses the supplied `api_key` when present
+/// (the just-typed key, for immediate validation), otherwise the stored encrypted key. The key is sent
+/// to the sidecar over local stdio only for the provider round-trip; it is never logged.
+#[tauri::command]
+async fn agent_list_models(
+    state: State<'_, AppState>,
+    provider: String,
+    api_key: Option<String>,
+) -> Result<serde_json::Value, String> {
+    agent_secrets::validate_provider(&provider).map_err(|e| e.to_string())?;
+    let key = match api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+        Some(k) => k.to_string(),
+        None => {
+            let conn = state
+                .db
+                .lock()
+                .map_err(|_| "profile store lock poisoned".to_string())?;
+            agent_secrets::provider_key(&conn, &state.cipher, &provider)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("no API key is stored for {provider}"))?
+        }
+    };
+    let sidecar = state
+        .sidecar
+        .as_ref()
+        .ok_or("engine-runner sidecar is not available (failed to start)")?;
+    sidecar
+        .call(
+            "agent.listModels",
+            serde_json::json!({ "provider": provider, "apiKey": key }),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn validate_agent_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err("invalid profile id".to_string());
+    }
+    Ok(())
+}
+
+/// Stop a running agent on a profile (idempotent).
+#[tauri::command]
+async fn agent_stop(state: State<'_, AppState>, id: String) -> Result<serde_json::Value, String> {
+    validate_agent_id(&id)?;
+    let sidecar = state
+        .sidecar
+        .as_ref()
+        .ok_or("engine-runner sidecar is not available (failed to start)")?;
+    sidecar
+        .call("agent.stop", serde_json::json!({ "profileId": id }))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Answer an agent that is awaiting human input (an `ask`, or a `confirm` verdict `approve`/`reject`).
+#[tauri::command]
+async fn agent_send_input(
+    state: State<'_, AppState>,
+    id: String,
+    text: String,
+) -> Result<serde_json::Value, String> {
+    validate_agent_id(&id)?;
+    if text.is_empty() || text.len() > 20_000 {
+        return Err("agent input must be 1..20000 characters".to_string());
+    }
+    let sidecar = state
+        .sidecar
+        .as_ref()
+        .ok_or("engine-runner sidecar is not available (failed to start)")?;
+    sidecar
+        .call(
+            "agent.sendInput",
+            serde_json::json!({ "profileId": id, "text": text }),
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Snapshot running agents (all profiles, or one) — backs the running-agents tray + per-row status.
+#[tauri::command]
+async fn agent_status(
+    state: State<'_, AppState>,
+    id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if let Some(value) = id.as_deref() {
+        validate_agent_id(value)?;
+    }
+    let sidecar = state
+        .sidecar
+        .as_ref()
+        .ok_or("engine-runner sidecar is not available (failed to start)")?;
+    sidecar
+        .call("agent.status", serde_json::json!({ "profileId": id }))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Application entrypoint invoked by `main.rs` (and the mobile entry macro later).
 pub fn run() {
     tracing_subscriber::fmt()
@@ -824,7 +1060,6 @@ pub fn run() {
     }
 
     builder
-        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             // Open the local profile store under the OS app-data dir.
             let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -833,6 +1068,7 @@ pub fn run() {
                 profile_store::init(dir.join("profiles.sqlite")).map_err(|e| e.to_string())?;
             proxy_store::init(&conn).map_err(|e| e.to_string())?;
             template_store::init(&conn).map_err(|e| e.to_string())?;
+            agent_secrets::init(&conn).map_err(|e| e.to_string())?;
             let db = Arc::new(Mutex::new(conn));
 
             // SEC-12 + SEC-2: load (or generate) the Local Store Key — OS keychain preferred,
@@ -913,6 +1149,93 @@ pub fn run() {
                 let _ = profile_store::reconcile_statuses(&conn, &[], &[]);
             }
 
+            // Forward per-profile agent events (streamed by the sidecar as `notify` lines) to the UI as
+            // `agent-event` Tauri events, and answer `run.needsBrowser` by launching the profile and
+            // attaching it to the waiting run (the lazy-launch round-trip). Subscribe BEFORE the sidecar
+            // Option is moved into the local API state below. A lagged/closed channel ends the forwarder
+            // without touching the sidecar.
+            if let Some(sc) = sidecar.as_ref() {
+                let mut rx = sc.subscribe();
+                let handle = app.handle().clone();
+                let attach_sidecar = sc.clone();
+                let attach_db = db.clone();
+                let attach_cipher = cipher.clone();
+                let attach_profiles_dir = profiles_dir.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        match rx.recv().await {
+                            Ok(v) => {
+                                let payload = v.get("event").cloned().unwrap_or(v);
+                                if payload.get("type").and_then(serde_json::Value::as_str)
+                                    == Some("run.needsBrowser")
+                                {
+                                    if let Some(profile_id) = payload
+                                        .get("profileId")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(ToString::to_string)
+                                    {
+                                        let sidecar = attach_sidecar.clone();
+                                        let db = attach_db.clone();
+                                        let cipher = attach_cipher.clone();
+                                        let profiles_dir = attach_profiles_dir.clone();
+                                        tauri::async_runtime::spawn(async move {
+                                            // Skip the launch when the profile is already running —
+                                            // attachBrowser re-resolves the live endpoint either way.
+                                            let already_running = db
+                                                .lock()
+                                                .ok()
+                                                .and_then(|conn| {
+                                                    profile_store::get(&conn, &cipher, &profile_id)
+                                                        .ok()
+                                                        .flatten()
+                                                })
+                                                .map(|p| p.status == "running")
+                                                .unwrap_or(false);
+                                            let launch_error = if already_running {
+                                                None
+                                            } else {
+                                                local_api::start_profile_via_sidecar(
+                                                    &db,
+                                                    &cipher,
+                                                    &sidecar,
+                                                    &profiles_dir,
+                                                    &profile_id,
+                                                    None,
+                                                    false,
+                                                )
+                                                .await
+                                                .err()
+                                                .map(|e| e.to_string())
+                                            };
+                                            let params = match launch_error {
+                                                None => serde_json::json!({
+                                                    "profileId": profile_id,
+                                                }),
+                                                Some(error) => serde_json::json!({
+                                                    "profileId": profile_id,
+                                                    "error": error,
+                                                }),
+                                            };
+                                            if let Err(error) =
+                                                sidecar.call("agent.attachBrowser", params).await
+                                            {
+                                                tracing::error!(
+                                                    %error,
+                                                    "agent.attachBrowser failed"
+                                                );
+                                            }
+                                        });
+                                    }
+                                }
+                                let _ = handle.emit("agent-event", payload);
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                });
+            }
+
             app.manage(AppState {
                 db: db.clone(),
                 sidecar: sidecar.clone(),
@@ -964,7 +1287,14 @@ pub fn run() {
             stop_profile,
             export_profile_cookies,
             encrypt_profile_blob,
-            decrypt_profile_blob
+            decrypt_profile_blob,
+            agent_start,
+            agent_set_api_key,
+            agent_api_key_status,
+            agent_list_models,
+            agent_stop,
+            agent_send_input,
+            agent_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Lobster desktop application");

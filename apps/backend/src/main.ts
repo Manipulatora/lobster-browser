@@ -58,9 +58,12 @@ async function bootstrap(): Promise<void> {
   });
 
   const port = process.env.PORT ?? 8080;
-  await app.listen(port);
+  // Bind host is configurable; default keeps prior behaviour. For a local-only agent-LLM proxy on the
+  // same host as the desktop app, set HOST=127.0.0.1 so the OpenRouter broker is never internet-facing.
+  const host = process.env.HOST ?? '0.0.0.0';
+  await app.listen(port, host);
   // eslint-disable-next-line no-console
-  console.log(`🦞 Lobster backend listening on :${port}`);
+  console.log(`🦞 Lobster backend listening on ${host}:${port}`);
 }
 
 void bootstrap();

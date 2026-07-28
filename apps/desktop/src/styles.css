@@ -544,13 +544,49 @@ textarea:focus {
   text-align: center;
 }
 
-/* Profiles table: fixed layout so the draggable <colgroup> widths are honored and overflowing cell
-   text clips (which is what enables the ellipsis). Column widths come from JS state, not fixed %. */
+/* Profiles table: fixed layout + fluid percentage <colgroup> widths so the table always fits its
+   container. It reflows (rather than growing a horizontal scrollbar) when the agent dock opens, and
+   overflowing cell text clips — which is what enables the per-cell ellipsis. A modest min-width keeps
+   the columns legible; below it the panel scrolls rather than crushing content. */
 .profiles-table--fixed {
   table-layout: fixed;
+  min-width: 520px;
+}
+/* Compact mode (agent dock open): fewer columns, so a smaller floor — no horizontal scrollbar. */
+.profiles-table--compact {
+  min-width: 380px;
 }
 .data-panel {
   overflow-x: auto;
+}
+
+/* The profiles page is app-like: pinned to the viewport, never scrolling as a whole. The table pane
+   and the agent chat each scroll internally, so a long agent run can never drag the table down. */
+.page.profiles-view {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Profiles + Agent dock: a horizontal split. The list flexes to fill the space and the Agent dock
+   (sized in agent.css) sits alongside it. Both stretch full height; the list scrolls internally. */
+.profiles-view__split {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+}
+.profiles-view__list {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.profiles-view__list .data-panel {
+  flex: 1;
+  min-height: 0;
 }
 
 /* Denser, uniform rows: identical + reduced height and font size (column widths are unaffected). */
@@ -723,7 +759,10 @@ textarea:focus {
   width: auto;
 }
 
+/* The name/subtitle block grows into the free space and clips with an ellipsis, so it stays visible
+   even when the title column is narrow (agent dock open). The row actions keep their intrinsic size. */
 .profile-title-text {
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -735,11 +774,25 @@ textarea:focus {
 
 .profile-title-cell .table-actions {
   margin-left: auto;
+  flex: 0 0 auto;
 }
 
 .table-actions {
   display: inline-flex;
   gap: 8px;
+}
+
+/* Dedicated trailing actions column (launch + row menu), split out of the title cell so the profile
+   name always has the full title column and the table stays responsive when the agent dock is open. */
+.row-actions-head-cell {
+  width: 92px;
+}
+.row-actions-cell {
+  text-align: center;
+  vertical-align: middle;
+}
+.row-actions-cell .table-actions {
+  justify-content: center;
 }
 
 .row-menu {

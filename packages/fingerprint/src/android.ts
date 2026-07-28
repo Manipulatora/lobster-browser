@@ -86,9 +86,7 @@ export function deriveAndroidFingerprint(
     ? ANDROID_TEMPLATE.devices.find((d) => d.model === selected.model)
     : undefined;
   const brandTemplate = selected
-    ? ANDROID_TEMPLATE.devices.find(
-        (d) => d.brand.toLowerCase() === selected.brand.toLowerCase(),
-      )
+    ? ANDROID_TEMPLATE.devices.find((d) => d.brand.toLowerCase() === selected.brand.toLowerCase())
     : undefined;
   const device = exactTemplate ?? brandTemplate ?? rng.pick(ANDROID_TEMPLATE.devices);
   const androidVersion =

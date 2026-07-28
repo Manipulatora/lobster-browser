@@ -68,8 +68,7 @@ impl BlobCipher {
             .encrypt(&nonce, plaintext)
             .map_err(|e| anyhow!("AES-GCM encrypt failed: {e}"))?;
         // aes-gcm crate appends the 16-byte tag to the ciphertext.
-        let mut envelope =
-            Vec::with_capacity(LB_V1_HEADER_LEN + sealed.len());
+        let mut envelope = Vec::with_capacity(LB_V1_HEADER_LEN + sealed.len());
         envelope.extend_from_slice(LB_V1_MAGIC);
         envelope.extend_from_slice(key_id);
         envelope.push(LB_V1_ALG_A256GCM);
@@ -98,10 +97,9 @@ impl BlobCipher {
         let nonce = Nonce::from_slice(&envelope[offset..offset + LB_V1_NONCE_LEN]);
         offset += LB_V1_NONCE_LEN;
         let sealed = &envelope[offset..];
-        let plaintext = self
-            .cipher
-            .decrypt(nonce, sealed)
-            .map_err(|_| anyhow!("AES-GCM authentication failed (wrong key or tampered envelope)"))?;
+        let plaintext = self.cipher.decrypt(nonce, sealed).map_err(|_| {
+            anyhow!("AES-GCM authentication failed (wrong key or tampered envelope)")
+        })?;
         Ok((plaintext, key_id))
     }
 }
@@ -145,7 +143,10 @@ pub fn derive_key_id(
 }
 
 /// AES-256-GCM wrap of a 32-byte key (LKw1 envelope — mirrors `@lobster/crypto` wrapKey).
-pub fn wrap_key(plaintext_key: &[u8; LB_V1_KEY_LEN], wrapping_key: &[u8; LB_V1_KEY_LEN]) -> Result<Vec<u8>> {
+pub fn wrap_key(
+    plaintext_key: &[u8; LB_V1_KEY_LEN],
+    wrapping_key: &[u8; LB_V1_KEY_LEN],
+) -> Result<Vec<u8>> {
     const MAGIC: &[u8; 4] = b"LKw1";
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(wrapping_key));
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -160,7 +161,10 @@ pub fn wrap_key(plaintext_key: &[u8; LB_V1_KEY_LEN], wrapping_key: &[u8; LB_V1_K
 }
 
 /// Unwrap an LKw1-wrapped key.
-pub fn unwrap_key(wrapped: &[u8], wrapping_key: &[u8; LB_V1_KEY_LEN]) -> Result<[u8; LB_V1_KEY_LEN]> {
+pub fn unwrap_key(
+    wrapped: &[u8],
+    wrapping_key: &[u8; LB_V1_KEY_LEN],
+) -> Result<[u8; LB_V1_KEY_LEN]> {
     const MAGIC: &[u8; 4] = b"LKw1";
     if wrapped.len() < 4 + LB_V1_NONCE_LEN + LB_V1_KEY_LEN + LB_V1_TAG_LEN {
         bail!("wrapped key too short");
@@ -193,9 +197,7 @@ mod tests {
         let key = BlobCipher::generate_key();
         let key_id = BlobCipher::generate_key_id();
         let cipher = BlobCipher::new(&key);
-        let plaintext = format!(
-            r#"{{"cookie":"{COOKIE_VALUE}","domain":"{COOKIE_DOMAIN}"}}"#
-        );
+        let plaintext = format!(r#"{{"cookie":"{COOKIE_VALUE}","domain":"{COOKIE_DOMAIN}"}}"#);
 
         let envelope = cipher.encrypt(plaintext.as_bytes(), &key_id).unwrap();
         assert!(BlobCipher::is_lbv1(&envelope));

@@ -142,9 +142,7 @@ test('parseNetscape skips malformed lines (wrong field count, bad expiry)', () =
 });
 
 test('Netscape includeSubdomains column is preserved even when the source omits a leading dot', () => {
-  const [cookie] = parseNetscape(
-    'example.com\tTRUE\t/\tTRUE\t1893456000\tsid\tabc',
-  );
+  const [cookie] = parseNetscape('example.com\tTRUE\t/\tTRUE\t1893456000\tsid\tabc');
   assert.equal(cookie?.domain, '.example.com');
   assert.match(serializeNetscape([cookie!]), /^\.example\.com\tTRUE/m);
 });

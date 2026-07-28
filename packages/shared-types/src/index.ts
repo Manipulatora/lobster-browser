@@ -11,4 +11,4 @@ export * from './profile.js';
 export * from './account.js';
 export * from './api.js';
 export * from './ipc.js';
-export * from './phone.js';
+export * from './agent.js';

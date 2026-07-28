@@ -19,9 +19,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-# Lets the Rust core spawn/attach engine sidecars and helper processes.
-tauri-plugin-shell = "2"
-
 # Serialization for IPC + the local automation API envelope.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

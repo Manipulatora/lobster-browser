@@ -101,6 +101,7 @@ export {
   typingCadence,
   humanMouseMove,
   humanClick,
+  humanDrag,
   humanType,
 } from './humanize.js';
 export type {

@@ -99,9 +99,7 @@ export class S3BlobStore implements BlobStore {
       forcePathStyle: config.get<string>('S3_FORCE_PATH_STYLE')
         ? config.get<string>('S3_FORCE_PATH_STYLE') !== 'false'
         : Boolean(endpoint),
-      ...(accessKeyId && secretAccessKey
-        ? { credentials: { accessKeyId, secretAccessKey } }
-        : {}),
+      ...(accessKeyId && secretAccessKey ? { credentials: { accessKeyId, secretAccessKey } } : {}),
     });
   }
 

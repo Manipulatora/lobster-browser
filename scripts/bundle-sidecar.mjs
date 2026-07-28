@@ -64,6 +64,7 @@ for (const ws of [
   '@lobster/fingerprint',
   '@lobster/cookies',
   '@lobster/crypto',
+  '@lobster/agent',
   '@lobster/engine-runner',
 ]) {
   mustBuild(ws);
@@ -104,7 +105,7 @@ writeFileSync(
 
 // 5. Workspace packages (file: layout under node_modules/@lobster).
 mkdirSync(join(outDir, 'node_modules/@lobster'), { recursive: true });
-for (const name of ['shared-types', 'proxy', 'fingerprint', 'cookies', 'crypto', 'engine-runner']) {
+for (const name of ['shared-types', 'proxy', 'fingerprint', 'cookies', 'crypto', 'agent', 'engine-runner']) {
   const src = join(repo, 'packages', name);
   const dest = join(outDir, 'node_modules/@lobster', name);
   // Prefer dist + package.json only (smaller).

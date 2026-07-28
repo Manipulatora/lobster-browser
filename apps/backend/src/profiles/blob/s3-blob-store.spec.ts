@@ -27,10 +27,13 @@ class FakeS3Client {
     if (command instanceof PutObjectCommand) {
       const { Key, Body, IfNoneMatch } = command.input;
       if (IfNoneMatch === '*' && this.objects.has(Key!)) {
-        throw Object.assign(new Error('At least one of the pre-conditions you specified did not hold'), {
-          name: 'PreconditionFailed',
-          $metadata: { httpStatusCode: 412 },
-        });
+        throw Object.assign(
+          new Error('At least one of the pre-conditions you specified did not hold'),
+          {
+            name: 'PreconditionFailed',
+            $metadata: { httpStatusCode: 412 },
+          },
+        );
       }
       this.objects.set(Key!, { body: Buffer.from(Body as Buffer), lastModified: new Date() });
       return {};

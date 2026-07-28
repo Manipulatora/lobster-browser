@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Lobee",
+  "version": "0.1.0",
+  "description": "Lobee \u2014 your in-browser agent for Lobster. Automate the web and configure the browser from a chat.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtfSBZ2gheiUZa2EvmH/0rTqQTIK9DQ6pwrelx6z4H113Uk0U2mtsGY6ZnSp252pkvC+RXPkli2eyRz0NdG/mTaZKDAbNVhGuJqhTYpwBYvsPzFd/ZdDiwu/Mg3P9Bb7kDtzjCYYDmQeDsUMtTqBq6sajjN1urpFkcWjvrFbKUfLt1CF12iZ9bEh7pzs1KCOt+WbyG+wdT52Zwg8Qh3Ss9bNeL23Z/GcyUwlcV1ho+MZiG7YlHsB6xhHI53dYawiK2wza3B+9DEqfA6w+rQMIEvCH5ItuRk0v8wqtHH3BuPxPHRcNomdflb6TrgDQGUR4ZPa4ikvnryVSDcXD1nkt1QIDAQAB",
+  "minimum_chrome_version": "114",
+  "icons": {
+    "16": "icons/lobee-16.png",
+    "32": "icons/lobee-32.png",
+    "48": "icons/lobee-48.png",
+    "128": "icons/lobee-128.png"
+  },
+  "action": {
+    "default_title": "Open Lobee",
+    "default_icon": {
+      "16": "icons/lobee-16.png",
+      "32": "icons/lobee-32.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "permissions": ["sidePanel", "storage"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "commands": {
+    "open_lobee": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y"
+      },
+      "description": "Open the Lobee panel"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http://127.0.0.1:*"
+  }
+}

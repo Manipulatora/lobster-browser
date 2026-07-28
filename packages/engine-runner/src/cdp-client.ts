@@ -124,9 +124,7 @@ export async function cdpEvaluate<T>(session: CdpSession, expression: string): P
   };
   if (res.exceptionDetails) {
     const detail =
-      res.exceptionDetails.exception?.description ||
-      res.exceptionDetails.text ||
-      'unknown error';
+      res.exceptionDetails.exception?.description || res.exceptionDetails.text || 'unknown error';
     throw new Error(`CDP Runtime.evaluate failed: ${detail}`);
   }
   return res.result?.value as T;

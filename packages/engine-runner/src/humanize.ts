@@ -227,6 +227,11 @@ export interface HumanMoveOptions extends MousePathOptions, MoveTimingOptions {
   sleep?: Sleep;
 }
 
+export interface HumanClickOptions extends HumanMoveOptions {
+  button?: 'left' | 'right';
+  count?: 1 | 2;
+}
+
 /**
  * Move the cursor from `from` to `to` along a human-like path. `path[0]` is the cursor's current
  * position, so we don't re-emit it — each hop sleeps its travel time, then dispatches an
@@ -264,14 +269,67 @@ export async function humanClick(
   cdp: CdpSession,
   from: Point,
   to: Point,
-  opts: HumanMoveOptions = {},
+  opts: HumanClickOptions = {},
 ): Promise<void> {
   const end = await humanMouseMove(cdp, from, to, opts);
   const sleep = opts.sleep ?? realSleep;
-  const at = { x: end.x, y: end.y, button: 'left' as const, clickCount: 1 };
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at, buttons: 1 });
-  await sleep(round2(40 + rngFromSeed(autoSeed(`click:${end.x},${end.y}`, opts.seed))() * 60));
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, buttons: 0 });
+  const button = opts.button ?? 'left';
+  const buttons = button === 'right' ? 2 : 1;
+  const count = opts.count ?? 1;
+  const rand = rngFromSeed(autoSeed(`click:${end.x},${end.y}`, opts.seed));
+  for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+    const at = { x: end.x, y: end.y, button, clickCount };
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at, buttons });
+    await sleep(round2(40 + rand() * 60));
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, buttons: 0 });
+    if (clickCount < count) await sleep(round2(70 + rand() * 90));
+  }
+}
+
+/** Trusted pointer drag with a human path and the left button held throughout the travel. */
+export async function humanDrag(
+  cdp: CdpSession,
+  cursor: Point,
+  from: Point,
+  to: Point,
+  opts: HumanMoveOptions = {},
+): Promise<void> {
+  await humanMouseMove(cdp, cursor, from, opts);
+  const sleep = opts.sleep ?? realSleep;
+  // Jitter the press-hold and pre-release like humanClick — a byte-identical hold/settle on every drag
+  // is itself a replay tell (see the module preamble). Seeded so tests stay reproducible.
+  const rand = rngFromSeed(autoSeed(`drag:${from.x},${from.y}->${to.x},${to.y}`, opts.seed));
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mousePressed',
+    x: from.x,
+    y: from.y,
+    button: 'left',
+    buttons: 1,
+    clickCount: 1,
+  });
+  await sleep(round2(50 + rand() * 40));
+  const path = mousePath(from, to, opts);
+  const timings = moveTimings(path.length - 1, opts);
+  for (let i = 1; i < path.length; i += 1) {
+    await sleep(timings[i - 1] as number);
+    const point = path[i] as Point;
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: point.x,
+      y: point.y,
+      button: 'left',
+      buttons: 1,
+    });
+  }
+  await sleep(round2(60 + rand() * 50));
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased',
+    x: to.x,
+    y: to.y,
+    button: 'left',
+    buttons: 0,
+    clickCount: 1,
+  });
 }
 
 /** CDP `Input.*` modifier bitmask for a held Shift key. */
@@ -297,6 +355,14 @@ export async function humanType(
   for (let i = 0; i < chars.length; i += 1) {
     const ch = chars[i] as string;
     const info = keyInfo(ch);
+    if (!info.code && info.keyCode === 0) {
+      // Non-US-layout/IME text has no honest physical US key identity. Chromium's insertText path
+      // matches IME commit semantics and avoids emitting impossible code:""/keyCode:0 key events.
+      await cdp.send('Input.insertText', { text: ch });
+      const gap = delays[i];
+      if (gap !== undefined) await sleep(gap);
+      continue;
+    }
     const modifiers = info.shift ? SHIFT_MODIFIER : 0;
     if (info.shift) {
       await cdp.send('Input.dispatchKeyEvent', {

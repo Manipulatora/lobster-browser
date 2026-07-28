@@ -223,7 +223,10 @@ test('writeLobiumConfig rejects an oversized renderer payload instead of silentl
   try {
     const config = buildLobiumConfig(fp(), { seed: 'large' });
     config.webgl.extensions = [`EXT_${'x'.repeat(LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES)}`];
-    await assert.rejects(() => writeLobiumConfig(dir, config), /too large for the renderer channel/);
+    await assert.rejects(
+      () => writeLobiumConfig(dir, config),
+      /too large for the renderer channel/,
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

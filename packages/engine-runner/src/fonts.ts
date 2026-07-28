@@ -189,7 +189,10 @@ export function buildFontConfig(
     ['fantasy', preferByClass.sans],
   ];
   const lines: string[] = [
-    ...genericToFace.flatMap(([generic, face]) => [alias(generic, face), strongPreference(generic, face)]),
+    ...genericToFace.flatMap(([generic, face]) => [
+      alias(generic, face),
+      strongPreference(generic, face),
+    ]),
     alias('emoji', emoji),
     alias('math', math),
     // Fontconfig's <alias><prefer> values are weak bindings. For these two character-class

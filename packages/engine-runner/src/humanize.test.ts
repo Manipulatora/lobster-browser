@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   humanClick,
+  humanDrag,
   humanMouseMove,
   humanType,
   mousePath,
@@ -135,6 +136,49 @@ test('humanClick presses (buttons:1) then releases (buttons:0) the left button a
   assert.ok(types.indexOf('mousePressed') < types.indexOf('mouseReleased'));
 });
 
+test('humanClick supports a protocol-correct right double-click', async () => {
+  const cdp = new RecordingCdp();
+  await humanClick(
+    cdp,
+    { x: 0, y: 0 },
+    { x: 30, y: 40 },
+    {
+      button: 'right',
+      count: 2,
+      seed: 'right-double',
+      sleep: noSleep,
+    },
+  );
+  const presses = cdp.ofType('mousePressed');
+  assert.equal(presses.length, 2);
+  assert.deepEqual(
+    presses.map((item) => item.clickCount),
+    [1, 2],
+  );
+  assert.ok(presses.every((item) => item.button === 'right' && item.buttons === 2));
+});
+
+test('humanDrag holds the left button across the movement', async () => {
+  const cdp = new RecordingCdp();
+  await humanDrag(
+    cdp,
+    { x: 0, y: 0 },
+    { x: 20, y: 20 },
+    { x: 220, y: 100 },
+    {
+      seed: 'drag',
+      sleep: noSleep,
+    },
+  );
+  const pressed = cdp.ofType('mousePressed');
+  const dragged = cdp.ofType('mouseMoved').filter((item) => item.buttons === 1);
+  const released = cdp.ofType('mouseReleased');
+  assert.equal(pressed.length, 1);
+  assert.ok(dragged.length >= 12);
+  assert.ok(dragged.every((item) => item.button === 'left' && item.buttons === 1));
+  assert.equal(released.at(-1)?.buttons, 0);
+});
+
 test('humanType inserts each char once (keyDown+keyUp, NO char event) with key/code populated', async () => {
   const cdp = new RecordingCdp();
   await humanType(cdp, 'aB2', { seed: 'ht', sleep: noSleep });
@@ -208,4 +252,16 @@ test('humanType leaves an unshifted symbol unshifted but with a real code/keyCod
   assert.equal(dot?.code, 'Period'); // was '' before the fix
   assert.equal(dot?.windowsVirtualKeyCode, 190); // was 0 before the fix
   assert.equal(dot?.modifiers, 0);
+});
+
+test('humanType commits non-US text through the IME path instead of impossible key metadata', async () => {
+  const cdp = new RecordingCdp();
+  await humanType(cdp, 'é🙂', { seed: 'ime', sleep: noSleep });
+  assert.deepEqual(
+    cdp.calls.map((call) => [call.method, call.params?.text]),
+    [
+      ['Input.insertText', 'é'],
+      ['Input.insertText', '🙂'],
+    ],
+  );
 });

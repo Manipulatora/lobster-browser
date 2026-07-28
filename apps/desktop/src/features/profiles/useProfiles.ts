@@ -60,9 +60,7 @@ export function useProfiles(): UseProfiles {
       profilesClient
         .list_profiles()
         .then((list) =>
-          setProfiles((prev) =>
-            JSON.stringify(prev) === JSON.stringify(list) ? prev : list,
-          ),
+          setProfiles((prev) => (JSON.stringify(prev) === JSON.stringify(list) ? prev : list)),
         )
         .catch(() => undefined);
     }, 2000);

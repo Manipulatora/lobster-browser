@@ -25,6 +25,7 @@ import {
   fontPresetsForTarget,
   parseScreenOption,
   rendererPresetById,
+  rendererPresetsForTarget,
   screenOptionsForTarget,
   webRtcPolicyForUiMode,
   type WebRtcUiMode,
@@ -243,7 +244,12 @@ export function createProfileDraft(os: ProfileOsTarget = 'linux'): ProfileDraft 
     geolocationAccuracy: '100',
     cpuCores: '8',
     ramSize: '8',
-    rendererPresetId: 'host',
+    // Default to a coherent VALIDATED preset for the persona OS rather than the real host GPU. `host`
+    // mode is only coherent when the persona OS matches the host OS; the engine now fail-closes a
+    // cross-OS `host` launch (start-profile.ts), and anti-detect personas are usually cross-OS (e.g. a
+    // Linux host running a Windows persona), so `host` as the default would brick the common case.
+    // Real-host-GPU stays available as an explicit choice in the renderer picker.
+    rendererPresetId: rendererPresetsForTarget(os)[0]?.id ?? 'host',
     webrtcMode: 'based_ip',
     noiseWebgl: true,
     noiseCanvas: true,

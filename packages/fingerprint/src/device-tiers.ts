@@ -34,7 +34,9 @@ export type GpuTier =
 export function gpuTier(entry: RendererCatalogEntry): GpuTier {
   const r = entry.webgl.unmaskedRenderer || entry.webgl.renderer || '';
   if (entry.vendorFamily === 'Apple' || /Apple\s?M\d/.test(r)) return 'apple-silicon';
-  if (/RTX\s?A\d{3,}|Quadro|Radeon\s?Pro\s?W|FirePro|RTX\s?(6000|5000)\s?(Ada|Generation)/.test(r)) {
+  if (
+    /RTX\s?A\d{3,}|Quadro|Radeon\s?Pro\s?W|FirePro|RTX\s?(6000|5000)\s?(Ada|Generation)/.test(r)
+  ) {
     return 'workstation';
   }
   if (
@@ -93,7 +95,11 @@ const TIERS: Record<GpuTier, Tier> = {
   'mid-discrete': { cores: [8, 12, 16], mem: [8], screens: [S_1080, S_1440] },
   'high-discrete': { cores: [12, 16, 24], mem: [8], screens: [S_1440, S_4K, S_UW1440, S_1080] },
   workstation: { cores: [16, 24, 32], mem: [8], screens: [S_1440, S_4K, S_UW1440] },
-  'apple-silicon': { cores: [8, 10, 12, 14, 16], mem: [8], screens: [S_MBA13, S_MBP14, S_MBP16, S_IMAC24] },
+  'apple-silicon': {
+    cores: [8, 10, 12, 14, 16],
+    mem: [8],
+    screens: [S_MBA13, S_MBP14, S_MBP16, S_IMAC24],
+  },
 };
 
 function presetsFor(os: OsFamily, arch: CpuArch): readonly RendererCatalogEntry[] {

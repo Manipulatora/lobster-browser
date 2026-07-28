@@ -25,7 +25,25 @@ export type SidecarMethod =
   | 'status'
   | 'exportCookies'
   | 'ping'
-  | 'ensureHostCalibration';
+  | 'ensureHostCalibration'
+  // Per-profile web agent. `agent.start` is fire-and-forget (the sequential stdio loop must not block
+  // on a whole run); progress streams back as out-of-band `AgentEvent` notification lines.
+  | 'agent.start'
+  | 'agent.stop'
+  | 'agent.attachBrowser'
+  | 'agent.sendInput'
+  | 'agent.status'
+  | 'agent.listModels';
+
+/**
+ * An out-of-band, un-correlated message the sidecar pushes to the Rust core (NOT a response to any
+ * request — it has no `id`). Today this carries live {@link import('./agent.js').AgentEvent}s during an
+ * agent run. The Rust reader routes any line with a `notify` field here instead of the id→response map.
+ */
+export interface SidecarNotification<E = unknown> {
+  notify: 'agent';
+  event: E;
+}
 
 export interface SidecarRequest<M extends SidecarMethod = SidecarMethod, P = unknown> {
   /** Correlation id echoed back in the response. */
@@ -117,6 +135,13 @@ export interface StartProfileParams {
   /** Absolute path to the per-profile persistent user-data-dir. */
   userDataDir: string;
   headless?: boolean;
+  /**
+   * Per-profile encrypted-memory key (base64, 32 bytes), so the in-browser Lobee agent can run tasks
+   * the user starts from its side panel WITHOUT a round-trip to the desktop core for the secret. Held
+   * only in the sidecar's memory, keyed by profile, and used exactly as the desktop `agent.start` path
+   * uses it. Omit to leave the profile's Lobee bridge unprovisioned (side-panel runs then error clearly).
+   */
+  agentMemoryKey?: string;
 }
 
 export interface LaunchResult {

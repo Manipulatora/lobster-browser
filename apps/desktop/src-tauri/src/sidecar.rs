@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot, Mutex};
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
 
@@ -23,6 +23,10 @@ pub struct SidecarClient {
     stdin: Mutex<ChildStdin>,
     pending: Pending,
     next_id: AtomicU64,
+    // Out-of-band sidecar notifications (lines with a `notify` field, no `id`) — today the per-profile
+    // agent's live AgentEvents. Subscribers (the Tauri event forwarder) receive each notification's
+    // JSON; a lagged/absent subscriber never blocks the sidecar reader.
+    notifications: broadcast::Sender<Value>,
     // Kept alive for the process lifetime; dropping it kills the sidecar.
     _child: Child,
 }
@@ -46,8 +50,10 @@ impl SidecarClient {
             .take()
             .ok_or_else(|| anyhow!("sidecar: no stdout"))?;
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let (notifications, _) = broadcast::channel::<Value>(256);
 
         let reader_pending = pending.clone();
+        let reader_notif = notifications.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             loop {
@@ -68,6 +74,9 @@ impl SidecarClient {
                     if let Some(tx) = reader_pending.lock().await.remove(id) {
                         let _ = tx.send(value);
                     }
+                } else if value.get("notify").is_some() {
+                    // Out-of-band notification (agent event). Best-effort fan-out; drop if no subscriber.
+                    let _ = reader_notif.send(value);
                 }
             }
             // Reader loop ended: the sidecar closed stdout or crashed. Drop every pending
@@ -80,8 +89,15 @@ impl SidecarClient {
             stdin: Mutex::new(stdin),
             pending,
             next_id: AtomicU64::new(1),
+            notifications,
             _child: child,
         }))
+    }
+
+    /// Subscribe to out-of-band sidecar notifications (agent events). Each item is the full
+    /// `{ "notify": "agent", "event": {...} }` line as JSON.
+    pub fn subscribe(&self) -> broadcast::Receiver<Value> {
+        self.notifications.subscribe()
     }
 
     /// Send a request and await its response `result` (or the sidecar's error).

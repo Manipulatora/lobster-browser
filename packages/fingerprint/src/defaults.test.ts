@@ -55,5 +55,9 @@ test('Android OS-version filter keeps modern devices for Android 15+', () => {
 
 test('macOS Support font names normalize without inventing families', () => {
   assert.equal(normalizeMacFontFamily('Helvetica Neue 13.0d2e27'), 'Helvetica Neue');
-  assert.ok(MACOS_FONT_NAMES.some((font) => normalizeMacFontFamily(font) === 'Helvetica Neue' || font.includes('Helvetica')));
+  assert.ok(
+    MACOS_FONT_NAMES.some(
+      (font) => normalizeMacFontFamily(font) === 'Helvetica Neue' || font.includes('Helvetica'),
+    ),
+  );
 });

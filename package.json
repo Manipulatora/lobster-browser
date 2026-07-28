@@ -5,7 +5,7 @@
   "description": "Lobster Browser — anti-detect browser + SaaS (monorepo root)",
   "license": "UNLICENSED",
   "engines": {
-    "node": ">=22 <25"
+    "node": ">=22.12 <25"
   },
   "workspaces": [
     "packages/shared-types",
@@ -13,7 +13,9 @@
     "packages/fingerprint",
     "packages/proxy",
     "packages/cookies",
+    "packages/agent",
     "packages/engine-runner",
+    "packages/lobee-app",
     "packages/local-api-sdk/js",
     "apps/desktop",
     "apps/backend"

@@ -59,7 +59,11 @@ function host(): HostCalibrationProfile {
       unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.6.0)',
       version: 'WebGL 1.0 (OpenGL ES 2.0 Chromium)',
       shadingLanguageVersion: 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)',
-      extensions: ['ANGLE_instanced_arrays', 'EXT_texture_filter_anisotropic', 'WEBGL_debug_renderer_info'],
+      extensions: [
+        'ANGLE_instanced_arrays',
+        'EXT_texture_filter_anisotropic',
+        'WEBGL_debug_renderer_info',
+      ],
       caps: {
         maxTextureSize: 16384,
         maxCubeMapTextureSize: 16384,

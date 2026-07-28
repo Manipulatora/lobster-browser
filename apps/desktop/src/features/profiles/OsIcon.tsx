@@ -96,18 +96,29 @@ export function OsIcon({
     focusable: false as const,
     fill: 'currentColor',
   };
-  if (kind === 'windows') return <svg {...common}><path d={WINDOWS_PATH} /></svg>;
-  if (kind === 'android') return <svg {...common}><path d={ANDROID_PATH} /></svg>;
+  if (kind === 'windows')
+    return (
+      <svg {...common}>
+        <path d={WINDOWS_PATH} />
+      </svg>
+    );
+  if (kind === 'android')
+    return (
+      <svg {...common}>
+        <path d={ANDROID_PATH} />
+      </svg>
+    );
   // linux
-  return <svg {...common}><path d={LINUX_PATH} /></svg>;
+  return (
+    <svg {...common}>
+      <path d={LINUX_PATH} />
+    </svg>
+  );
 }
 
 /** Regional-indicator flag emoji from a 2-letter ISO country code (empty string if not a valid code). */
 export function countryFlag(code: string | undefined | null): string {
   if (!code || !/^[A-Za-z]{2}$/.test(code)) return '';
   const cc = code.toUpperCase();
-  return String.fromCodePoint(
-    0x1f1e6 + (cc.charCodeAt(0) - 65),
-    0x1f1e6 + (cc.charCodeAt(1) - 65),
-  );
+  return String.fromCodePoint(0x1f1e6 + (cc.charCodeAt(0) - 65), 0x1f1e6 + (cc.charCodeAt(1) - 65));
 }

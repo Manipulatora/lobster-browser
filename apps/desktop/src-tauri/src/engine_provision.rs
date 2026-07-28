@@ -29,12 +29,20 @@ pub struct EngineSource {
 /// / self-hosting); otherwise read the manifest shipped alongside the app.
 pub fn resolve_source(manifest_path: Option<&Path>) -> Result<EngineSource> {
     if let (Some(url), Some(sha256)) = (
-        std::env::var("LOBSTER_ENGINE_URL").ok().filter(|s| !s.is_empty()),
-        std::env::var("LOBSTER_ENGINE_SHA256").ok().filter(|s| !s.is_empty()),
+        std::env::var("LOBSTER_ENGINE_URL")
+            .ok()
+            .filter(|s| !s.is_empty()),
+        std::env::var("LOBSTER_ENGINE_SHA256")
+            .ok()
+            .filter(|s| !s.is_empty()),
     ) {
         let version =
             std::env::var("LOBSTER_ENGINE_VERSION").unwrap_or_else(|_| "override".to_string());
-        return Ok(EngineSource { url, sha256, version });
+        return Ok(EngineSource {
+            url,
+            sha256,
+            version,
+        });
     }
     let path = manifest_path.ok_or_else(|| {
         anyhow!("no engine manifest available and LOBSTER_ENGINE_URL/SHA256 are not set")
@@ -58,7 +66,11 @@ pub fn resolve_source(manifest_path: Option<&Path>) -> Result<EngineSource> {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
-    Ok(EngineSource { url, sha256, version })
+    Ok(EngineSource {
+        url,
+        sha256,
+        version,
+    })
 }
 
 /// True when a usable engine binary already exists in `runtime_dir`.
@@ -93,19 +105,24 @@ where
         .await
         .with_context(|| format!("requesting engine archive {}", source.url))?;
     if !resp.status().is_success() {
-        bail!("engine download failed: HTTP {} for {}", resp.status(), source.url);
+        bail!(
+            "engine download failed: HTTP {} for {}",
+            resp.status(),
+            source.url
+        );
     }
     let total = resp.content_length();
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
     {
-        let mut file = std::fs::File::create(&tmp_archive)
-            .with_context(|| "creating temp engine archive")?;
+        let mut file =
+            std::fs::File::create(&tmp_archive).with_context(|| "creating temp engine archive")?;
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("reading engine archive chunk")?;
             hasher.update(&chunk);
-            file.write_all(&chunk).context("writing engine archive chunk")?;
+            file.write_all(&chunk)
+                .context("writing engine archive chunk")?;
             received += chunk.len() as u64;
             on_progress(received, total);
         }
@@ -119,7 +136,8 @@ where
         let _ = std::fs::remove_file(&tmp_archive);
         bail!(
             "engine archive integrity check FAILED (expected {}, got {}); refusing to install",
-            source.sha256, digest
+            source.sha256,
+            digest
         );
     }
 
@@ -136,8 +154,16 @@ where
 
     let _ = std::fs::remove_file(&tmp_archive);
     if !engine_present(runtime_dir) {
-        bail!("engine extraction completed but {}/chrome is missing", runtime_dir.display());
+        bail!(
+            "engine extraction completed but {}/chrome is missing",
+            runtime_dir.display()
+        );
     }
+    std::fs::write(
+        runtime_dir.join(".lobium-engine-version"),
+        format!("{}\n", source.version),
+    )
+    .with_context(|| "writing installed engine version marker")?;
     Ok(())
 }
 
@@ -150,15 +176,15 @@ fn extract_and_swap(archive: &Path, staging: &Path, runtime_dir: &Path) -> Resul
     let gz = flate2::read::GzDecoder::new(file);
     let mut tar = tar::Archive::new(gz);
     tar.set_preserve_permissions(true);
-    tar.unpack(staging).with_context(|| "extracting engine archive")?;
+    tar.unpack(staging)
+        .with_context(|| "extracting engine archive")?;
 
     // The archive is created with `tar -C <lobium> .`, so entries land directly under staging.
     // Atomic-ish swap: move any existing runtime aside, rename staging in, then delete the old one.
     let backup = PathBuf::from(format!("{}.old", runtime_dir.display()));
     if runtime_dir.exists() {
         let _ = std::fs::remove_dir_all(&backup);
-        std::fs::rename(runtime_dir, &backup)
-            .with_context(|| "moving previous engine aside")?;
+        std::fs::rename(runtime_dir, &backup).with_context(|| "moving previous engine aside")?;
     }
     match std::fs::rename(staging, runtime_dir) {
         Ok(()) => {
@@ -225,8 +251,7 @@ mod tests {
                 let Ok(mut stream) = conn else { break };
                 let mut buf = [0u8; 2048];
                 let _ = stream.read(&mut buf);
-                let header =
-                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
                 let _ = stream.write_all(header.as_bytes());
                 let _ = stream.write_all(&body);
             }
@@ -242,7 +267,11 @@ mod tests {
         // is fine in production (single-instance lock) but would collide across parallel tests.
         let base = std::env::temp_dir().join(format!("lobium-prov-{}", uuid::Uuid::new_v4()));
         let dir = base.join("lobium");
-        let src = EngineSource { url, sha256: sha, version: "test".into() };
+        let src = EngineSource {
+            url,
+            sha256: sha,
+            version: "test".into(),
+        };
         let mut last: (u64, Option<u64>) = (0, None);
         provision(&src, &dir, |r, t| last = (r, t)).await.unwrap();
         assert!(engine_present(&dir), "chrome must be installed");
@@ -256,10 +285,17 @@ mod tests {
         let url = serve_once(archive);
         let base = std::env::temp_dir().join(format!("lobium-prov-bad-{}", uuid::Uuid::new_v4()));
         let dir = base.join("lobium");
-        let src = EngineSource { url, sha256: "0".repeat(64), version: "test".into() };
+        let src = EngineSource {
+            url,
+            sha256: "0".repeat(64),
+            version: "test".into(),
+        };
         let res = provision(&src, &dir, |_, _| {}).await;
         assert!(res.is_err(), "a checksum mismatch must fail the provision");
-        assert!(!engine_present(&dir), "must NOT install an unverified engine");
+        assert!(
+            !engine_present(&dir),
+            "must NOT install an unverified engine"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

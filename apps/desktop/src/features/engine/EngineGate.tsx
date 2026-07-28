@@ -94,7 +94,11 @@ export function EngineGate({ children }: { children: ReactNode }): JSX.Element {
                   aria-valuemax={100}
                 >
                   <div
-                    className={pct === null ? 'engine-gate__fill engine-gate__fill--indet' : 'engine-gate__fill'}
+                    className={
+                      pct === null
+                        ? 'engine-gate__fill engine-gate__fill--indet'
+                        : 'engine-gate__fill'
+                    }
                     style={pct === null ? undefined : { width: `${pct}%` }}
                   />
                 </div>
@@ -105,7 +109,11 @@ export function EngineGate({ children }: { children: ReactNode }): JSX.Element {
                 </p>
               </>
             ) : (
-              <button type="button" className="btn btn--primary" onClick={() => void startDownload()}>
+              <button
+                type="button"
+                className="btn btn--primary"
+                onClick={() => void startDownload()}
+              >
                 Download engine
               </button>
             )}

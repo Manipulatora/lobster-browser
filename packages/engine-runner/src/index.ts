@@ -1,6 +1,8 @@
 import { createInterface } from 'node:readline';
-import type { SidecarRequest } from '@lobster/shared-types';
+import type { AgentEvent, SidecarNotification, SidecarRequest } from '@lobster/shared-types';
 import { dispatch } from './rpc.js';
+import { AgentManager } from './agent/manager.js';
+import { AgentBridge } from './agent/bridge.js';
 import { CompositeRunner } from './runners/composite.js';
 import { buildLaunchers } from './runners/default-launchers.js';
 import { buildDevShmArgs } from './dev-shm.js';
@@ -22,6 +24,36 @@ async function main(): Promise<void> {
       ],
     }),
   );
+  // Per-profile web agent. `agent.start` returns immediately and the run streams AgentEvents as
+  // out-of-band notification lines (no `id`) — the Rust reader routes any line carrying `notify` to a
+  // broadcast channel instead of the request/response map. The manager resolves a profile's live CDP
+  // endpoint from the runner's status, so an agent only attaches to an already-launched window.
+  let bridge: AgentBridge | undefined;
+  const emitAgentEvent = (event: AgentEvent): void => {
+    const line: SidecarNotification<AgentEvent> = { notify: 'agent', event };
+    process.stdout.write(JSON.stringify(line) + '\n');
+    // Also stream to the in-browser Lobee panel (if any) over the loopback bridge.
+    bridge?.dispatch(event);
+  };
+  const agents = new AgentManager({
+    resolveWs: async (profileId) => {
+      const status = await runner.status({ profileId });
+      return status.running.find((r) => r.profileId === profileId)?.ws;
+    },
+    emit: emitAgentEvent,
+  });
+
+  // Loopback bridge so the Lobee side panel can start/stream runs for its own profile. Best-effort:
+  // if it can't bind, side-panel runs are simply unavailable; stdio-driven (desktop) runs still work.
+  bridge = new AgentBridge(agents);
+  try {
+    const origin = await bridge.start();
+    console.error(`[lobee-bridge] listening on ${origin}`);
+  } catch (err) {
+    console.error(`[lobee-bridge] failed to start: ${err instanceof Error ? err.message : err}`);
+    bridge = undefined;
+  }
+
   const rl = createInterface({ input: process.stdin });
 
   for await (const line of rl) {
@@ -42,7 +74,7 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const res = await dispatch(runner, req);
+    const res = await dispatch(runner, req, { agents });
     process.stdout.write(JSON.stringify(res) + '\n');
   }
 }

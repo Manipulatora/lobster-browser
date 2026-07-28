@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Baseline capability for the main window: core Tauri APIs plus permission to execute helper/engine processes via the shell plugin.",
+  "description": "Baseline capability for the main window. Process spawning stays in trusted Rust code.",
   "windows": ["main"],
-  "permissions": ["core:default", "shell:allow-execute"]
+  "permissions": ["core:default"]
 }

@@ -42,7 +42,10 @@ impl SecretCipher {
     /// `path`. See [`crate::keychain::load_or_create_lsk`].
     pub fn load_or_create<P: AsRef<Path>>(path: P) -> Result<Self> {
         let (key, source) = crate::keychain::load_or_create_lsk(path.as_ref())?;
-        tracing::info!(?source, "loaded Local Store Key for SEC-12 at-rest encryption");
+        tracing::info!(
+            ?source,
+            "loaded Local Store Key for SEC-12 at-rest encryption"
+        );
         Ok(Self::new(&key))
     }
 
@@ -78,6 +81,14 @@ impl SecretCipher {
                 stored.to_string()
             }
         }
+    }
+
+    /// Strict decrypt for credential stores: plaintext and unauthentic ciphertext are rejected.
+    pub fn decrypt_strict(&self, stored: &str) -> Result<String> {
+        let encoded = stored
+            .strip_prefix(ENC_PREFIX)
+            .ok_or_else(|| anyhow!("credential is not encrypted"))?;
+        self.try_decrypt(encoded)
     }
 
     fn try_decrypt(&self, encoded: &str) -> Result<String> {
@@ -156,6 +167,8 @@ mod tests {
             c.decrypt_str("lbsec1:!!!not-base64"),
             "lbsec1:!!!not-base64"
         );
+        assert!(c.decrypt_strict("plain-old-password").is_err());
+        assert!(other.decrypt_strict(&stored).is_err());
     }
 
     #[test]

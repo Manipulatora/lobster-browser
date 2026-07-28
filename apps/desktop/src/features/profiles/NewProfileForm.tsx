@@ -1348,15 +1348,16 @@ export function NewProfileForm({
                       placeholder="Search Google Play device models"
                     />
                     <span className="field-hint">
-                      {androidModels.length.toLocaleString()} models from Google Play’s official device
-                      list · {form.osVersion} · {form.androidDeviceType}
+                      {androidModels.length.toLocaleString()} models from Google Play’s official
+                      device list · {form.osVersion} · {form.androidDeviceType}
                     </span>
                   </label>
                   <p className="field-hint field--wide">
-                    The selected model sets the device name reported in the User-Agent. Screen, GPU and
-                    RAM use a coherent hardware profile matched to the device — exact for popular
-                    flagships, otherwise a real same-brand device. The profile opens in a phone-sized
-                    window with touch/mobile emulation — no physical device or Lobium APK required.
+                    The selected model sets the device name reported in the User-Agent. Screen, GPU
+                    and RAM use a coherent hardware profile matched to the device — exact for
+                    popular flagships, otherwise a real same-brand device. The profile opens in a
+                    phone-sized window with touch/mobile emulation — no physical device or Lobium
+                    APK required.
                   </p>
                 </>
               ) : (

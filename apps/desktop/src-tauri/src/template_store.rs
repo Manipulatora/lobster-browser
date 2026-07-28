@@ -1,7 +1,7 @@
 //! Local profile-template catalog persisted in SQLite.
 
 use anyhow::Result;
-use rusqlite::{Connection, Row, params};
+use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 
 pub const SCHEMA: &str = "

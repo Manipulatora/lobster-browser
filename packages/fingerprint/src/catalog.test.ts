@@ -59,7 +59,10 @@ test('renderer catalog depth and backend formats match the claimed OS', () => {
     assert.equal(preset.validationLevel, 'verified_source');
     assert.ok(preset.deviceId, `missing deviceId for ${preset.id}`);
     assert.ok(preset.source, `missing source for ${preset.id}`);
-    assert.match(preset.webgl.renderer, /ANGLE \((NVIDIA|Intel|AMD), .+ \(0x[0-9A-F]+\) Direct3D11/);
+    assert.match(
+      preset.webgl.renderer,
+      /ANGLE \((NVIDIA|Intel|AMD), .+ \(0x[0-9A-F]+\) Direct3D11/,
+    );
     assert.doesNotMatch(preset.webgl.renderer, /Metal Renderer|OpenGL Engine/);
     assert.ok(preset.webgl.caps, `missing caps for ${preset.id}`);
   }

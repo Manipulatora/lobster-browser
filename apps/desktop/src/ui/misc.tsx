@@ -21,7 +21,12 @@ export function Skeleton({
   return (
     <span
       className="lb-skeleton"
-      style={{ display: 'block', width, height, ...(radius !== undefined ? { borderRadius: radius } : {}) }}
+      style={{
+        display: 'block',
+        width,
+        height,
+        ...(radius !== undefined ? { borderRadius: radius } : {}),
+      }}
       aria-hidden
     />
   );

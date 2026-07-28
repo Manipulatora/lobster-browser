@@ -1,0 +1,27 @@
+{
+  "name": "@lobster/agent",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Per-profile web agent core: perception (text-first DOM), action space, provider-agnostic LLM loop, and local memory. Engine-agnostic — the CDP/humanize driver is injected by the sidecar.",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "test": "tsc -b && node --test \"dist/**/*.test.js\"",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@lobster/shared-types": "*"
+  }
+}

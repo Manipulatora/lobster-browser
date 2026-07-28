@@ -21,7 +21,7 @@ from every other profile, consistent enough to pass modern anti-bot systems. Fin
 User ── Tauri desktop app (Rust core + React/TS UI)
           │  spawns + JSON-RPC over stdio
           ▼
-        engine-runner sidecar (Node/TS)  ── generates --lobium-fp-config, manages proxy, injects cookies
+        engine-runner sidecar (Node/TS)  ── profile lifecycle + guarded web-agent loop + raw CDP driver
           │  spawns the native binary; drives it via a first-party raw-DevTools CDP client (cdp-client.ts)
           ▼
         Lobium  (Chromium 152 fork, C++)  ── applies the fingerprint natively at the Blink surface
@@ -44,6 +44,7 @@ packages/
   engine-runner/   the sidecar: launch, cdp-client, cookie inject, mobile emulation, host calibration
   proxy/           proxy testing + exit-IP geo derivation
   cookies/         Netscape/JSON cookie parse + validate
+  agent/           text-first perception, policy, tool loop, LLM adapters, encrypted local memory
   crypto/          at-rest encryption helpers
   local-api-sdk/   client SDK (js/ + python/) for the local automation API
 lobium/            Chromium fork build scripts, GN args, quilt patch series, native config-channel spec
@@ -56,7 +57,7 @@ ci/validation/     the anti-detect validation harnesses + real-GPU gate
 
 | Tool | Version | Used by |
 |------|---------|---------|
-| Node | `>=22 <25` (`.nvmrc`) | all TS packages, backend, sidecar |
+| Node | `>=22.12 <25` (`.nvmrc`) | all TS packages, backend, sidecar |
 | npm  | `>=10` | workspace manager |
 | Rust | pinned in `rust-toolchain.toml` | desktop agent (Tauri) — install via `rustup` |
 
@@ -80,4 +81,6 @@ gates are all covered in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
 ## License & sourcing
 
-Ships open source; freely imports OSS. Other anti-detect browsers are reference only.
+This repository is currently `UNLICENSED`: its source is visible to collaborators, but no public reuse
+license is granted. External agent projects are architectural references only; product code is implemented
+in this repository and third-party packages retain their own licenses.

@@ -26,6 +26,7 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
+    "@lobster/agent": "*",
     "@lobster/fingerprint": "*",
     "@lobster/proxy": "*",
     "@lobster/shared-types": "*",

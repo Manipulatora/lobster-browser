@@ -1,7 +1,7 @@
 # Lobium Engineering — Anti-Detect Engine, Fingerprint Model & Roadmap
 
 The single source of truth for how the browser hides, how fingerprints are modeled, and the plan to reach
-top-1%. Updated 2026-07-15.
+top-1%. Updated 2026-07-21.
 
 ## 1. Principles
 
@@ -131,3 +131,53 @@ real-GPU capture, W3 native rotation, W5 real-GPU gate (after real-GPU host acce
 The current build/dev host has **no real GPU** (SwiftShader only) and no default proxy. W1 data capture and
 the W5 live detection gate cannot execute here — only their code/schema can. Everything else (the catalog,
 coherence, trackers, verification harnesses, CI definitions) is built and tested in software CI.
+
+## 7. Web agent (`packages/agent`)
+
+The agent is a bounded control loop, not a second automation framework:
+
+```text
+task + trusted local memory
+        ↓
+compact DOM/shadow/frame observation ── optional, explicit screenshot fallback
+        ↓
+forced structured `act` tool call (Anthropic/OpenAI/OpenRouter/xAI/Google)
+        ↓
+policy + risk gate ── human confirmation / secret handoff when required
+        ↓
+trusted Input.* / DOM command through CdpBrowserDriver ── observe again
+```
+
+- **Browser-use ideas:** rich browser tools, numbered text-first perception, human handoff, and optional
+  vision are implemented behind the project-owned `BrowserDriver`; no browser-use code or runtime is
+  embedded.
+- **OpenClaw ideas:** progressive skill disclosure and strict separation between untrusted page content,
+  trusted harness history, and local memory. Skills are short read-only procedures, never webpage-supplied
+  executable code.
+- **Codex/Claude Code ideas:** least privilege, explicit consequential-action confirmation, bounded tools,
+  cancellation, recovery after invalid/repeated actions, and secrets that are not echoed into transcripts.
+
+### Trust boundaries and guarantees
+
+- Page text is delimited as untrusted data. URLs are limited to HTTP(S), private/local destinations are
+  blocked by default, an optional domain fence is enforced on explicit navigation and post-action drift,
+  and cross-domain moves default to human confirmation.
+- Password/OTP/payment/token fields expose only `filled` state. `ask {sensitive:true,targetId}` sends the
+  reply directly from the UI to the measured field; it is never added to model history, UI action events,
+  or run memory. CAPTCHA is a human handoff—there is intentionally no bypass service.
+- Provider keys are stored in the Rust-owned encrypted SQLite secret table. The React webview receives
+  only a `stored` boolean. Run memory uses a separately generated per-profile AES-256-GCM key, authenticated
+  files, 0600 permissions, atomic replacement, and one-time migration of legacy plaintext records.
+- File uploads are disabled unless absolute roots are explicitly configured; paths are canonicalized and
+  checked after symlink resolution. Upload path strings are redacted from events and memory.
+- The action loop has hard step/token bounds, abortable provider calls with retry/backoff, repeated-action
+  detection, validation of every tool payload, high-impact action gates, and fail-closed provider/base-URL
+  selection. Managed LLM mode remains disabled until an authenticated metering proxy exists.
+
+### Browser coverage
+
+The driver supports clicks (left/right/double), hover, humanized text/key input, native selects and custom
+combobox fallback, scrolling, drag/drop, restricted file inputs, back navigation, multi-tab create/list/
+switch/close, popup adoption, extraction, and screenshots. Perception walks visible controls in the top
+document, open shadow roots, and accessible same-origin frames; cross-origin frames and inaccessible custom
+canvas widgets use the explicit vision/human fallback.

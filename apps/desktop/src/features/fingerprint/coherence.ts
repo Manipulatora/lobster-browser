@@ -39,7 +39,8 @@ export function previewPersona(
         fingerprint: null,
         issues: [],
         ok: false,
-        error: 'Android profiles require the Android Lobium APK runner; desktop preview is not applicable.',
+        error:
+          'Android profiles require the Android Lobium APK runner; desktop preview is not applicable.',
       };
     }
     const arch = archForTarget(os);

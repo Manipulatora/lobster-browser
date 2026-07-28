@@ -91,7 +91,8 @@ function cloneHostWebgl(host: WebGlFingerprint): WebGlFingerprint {
  * extensions, limits, shader precision and pixel path remain host-derived.
  */
 export function normalizeHostWebglIdentity(host: WebGlFingerprint): WebGlFingerprint {
-  const normalize = (value: string): string => value.replaceAll('\0', '').replace(/\s+/g, ' ').trim();
+  const normalize = (value: string): string =>
+    value.replaceAll('\0', '').replace(/\s+/g, ' ').trim();
   return {
     ...cloneHostWebgl(host),
     vendor: normalize(host.vendor),
@@ -124,8 +125,11 @@ export function deriveFingerprintFromHost(
     opts.browserVersion ?? host.browserVersion,
   );
   const locale = opts.locale ? { ...base.locale, ...opts.locale } : base.locale;
-  const hostLanguages = host.navigator.languages?.map((language) => language.trim()).filter(Boolean);
-  const languages = hostLanguages && hostLanguages.length > 0 ? hostLanguages : base.navigator.languages;
+  const hostLanguages = host.navigator.languages
+    ?.map((language) => language.trim())
+    .filter(Boolean);
+  const languages =
+    hostLanguages && hostLanguages.length > 0 ? hostLanguages : base.navigator.languages;
   const hostLocale = host.navigator.locale?.trim() || languages[0] || base.locale.locale;
   const calibratedLocale: LocaleFingerprint = {
     ...locale,

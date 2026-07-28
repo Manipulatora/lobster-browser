@@ -126,8 +126,6 @@ export function assertLobiumBuildCapabilities(
   const available = new Set(manifest.capabilities);
   const missing = required.filter((capability) => !available.has(capability));
   if (missing.length > 0) {
-    throw new Error(
-      `Lobium build lacks required native fingerprint hooks: ${missing.join(', ')}`,
-    );
+    throw new Error(`Lobium build lacks required native fingerprint hooks: ${missing.join(', ')}`);
   }
 }

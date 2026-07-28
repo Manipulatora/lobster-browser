@@ -66,8 +66,7 @@ export interface EnsureHostCalibrationResult {
 export async function ensureHostCalibration(
   opts: EnsureHostCalibrationOptions = {},
 ): Promise<EnsureHostCalibrationResult> {
-  const path =
-    opts.path ?? resolveHostCalibrationPath() ?? defaultHostCalibrationPath();
+  const path = opts.path ?? resolveHostCalibrationPath() ?? defaultHostCalibrationPath();
   const existing = await loadHostCalibration(path);
   if (existing) {
     const issues = validateHostCalibrationProfile(existing, {

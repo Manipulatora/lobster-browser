@@ -7,7 +7,7 @@ import {
   PlayIcon,
   StopIcon,
 } from '@heroicons/react/24/outline';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import type { LaunchInfo } from '../../api/tauri';
@@ -19,17 +19,15 @@ import { OsIcon, countryFlag } from './OsIcon';
 export type ProfileSortKey = 'name' | 'updatedAt' | 'status' | 'proxy' | 'description' | 'tags';
 export type SortDir = 'asc' | 'desc';
 
-// Resizable data columns (the leading checkbox is fixed). Widths persist across sessions.
-const RESIZABLE_COLUMNS = ['title', 'description', 'proxy', 'tags'] as const;
-type ResizableColumn = (typeof RESIZABLE_COLUMNS)[number];
-const DEFAULT_COLUMN_WIDTHS: Record<ResizableColumn, number> = {
-  title: 320,
-  description: 240,
-  proxy: 260,
-  tags: 180,
-};
-const COLUMN_WIDTHS_STORAGE_KEY = 'lobster.profiles.columnWidths.v1';
-const MIN_COLUMN_WIDTH = 96;
+// Data columns are fluid: `table-layout:fixed` + percentage widths keep the table inside its
+// container (it reflows when the agent dock opens) and enable per-cell text ellipsis. The two
+// utility columns (select, agent) stay a fixed pixel width.
+const COLUMN_WIDTHS = {
+  title: '30%',
+  description: '22%',
+  proxy: '30%',
+  tags: '18%',
+} as const;
 
 interface ProfileListProps {
   profiles: Profile[];
@@ -208,7 +206,9 @@ function StatusActionButton({
       onClick={() => onLaunch(profile.id)}
       disabled={busy}
       aria-label={`Launch ${profile.name}`}
-      title={androidTarget ? 'Launch (phone-emulated Chrome — no device or APK required)' : 'Launch'}
+      title={
+        androidTarget ? 'Launch (phone-emulated Chrome — no device or APK required)' : 'Launch'
+      }
     >
       <PlayIcon aria-hidden />
     </button>
@@ -242,46 +242,6 @@ export function ProfileList({
   const triggerRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const allSelected = profiles.length > 0 && profiles.every((p) => selectedIds.has(p.id));
   const someSelected = profiles.some((p) => selectedIds.has(p.id));
-
-  // Per-column widths (draggable, persisted). table-layout:fixed honors these + enables text ellipsis.
-  const [columnWidths, setColumnWidths] = useState<Record<ResizableColumn, number>>(() => {
-    try {
-      const saved = localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
-      if (saved) return { ...DEFAULT_COLUMN_WIDTHS, ...(JSON.parse(saved) as Partial<Record<ResizableColumn, number>>) };
-    } catch {
-      // ignore malformed storage
-    }
-    return DEFAULT_COLUMN_WIDTHS;
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(columnWidths));
-    } catch {
-      // storage unavailable — widths simply won't persist
-    }
-  }, [columnWidths]);
-
-  const startResize = useCallback(
-    (column: ResizableColumn, event: React.MouseEvent) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const startX = event.clientX;
-      const startWidth = columnWidths[column];
-      const onMove = (moveEvent: MouseEvent) => {
-        const next = Math.max(MIN_COLUMN_WIDTH, startWidth + (moveEvent.clientX - startX));
-        setColumnWidths((current) => ({ ...current, [column]: next }));
-      };
-      const onUp = () => {
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-        document.body.style.cursor = '';
-      };
-      document.body.style.cursor = 'col-resize';
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-    },
-    [columnWidths],
-  );
 
   useLayoutEffect(() => {
     if (!openMenuId) {
@@ -348,10 +308,11 @@ export function ProfileList({
       <table className="data-table profiles-table profiles-table--fixed">
         <colgroup>
           <col style={{ width: 40 }} />
-          <col style={{ width: columnWidths.title }} />
-          <col style={{ width: columnWidths.description }} />
-          <col style={{ width: columnWidths.proxy }} />
-          <col style={{ width: columnWidths.tags }} />
+          <col style={{ width: COLUMN_WIDTHS.title }} />
+          <col style={{ width: COLUMN_WIDTHS.description }} />
+          <col style={{ width: COLUMN_WIDTHS.proxy }} />
+          <col style={{ width: COLUMN_WIDTHS.tags }} />
+          <col style={{ width: 92 }} />
         </colgroup>
         <thead>
           <tr>
@@ -366,46 +327,39 @@ export function ProfileList({
                 onChange={onToggleSelectAll}
               />
             </th>
-            <th className="th--resizable">
+            <th>
               <SortHeader
                 label="Title"
                 active={sortKey === 'name'}
                 dir={sortDir}
                 onClick={() => onSort('name')}
               />
-              <span className="col-resize" onMouseDown={(e) => startResize('title', e)} aria-hidden />
             </th>
-            <th className="th--resizable">
+            <th>
               <SortHeader
                 label="Description"
                 active={sortKey === 'description'}
                 dir={sortDir}
                 onClick={() => onSort('description')}
               />
-              <span
-                className="col-resize"
-                onMouseDown={(e) => startResize('description', e)}
-                aria-hidden
-              />
             </th>
-            <th className="th--resizable">
+            <th>
               <SortHeader
                 label="Proxy"
                 active={sortKey === 'proxy'}
                 dir={sortDir}
                 onClick={() => onSort('proxy')}
               />
-              <span className="col-resize" onMouseDown={(e) => startResize('proxy', e)} aria-hidden />
             </th>
-            <th className="th--resizable">
+            <th>
               <SortHeader
                 label="Tags"
                 active={sortKey === 'tags'}
                 dir={sortDir}
                 onClick={() => onSort('tags')}
               />
-              <span className="col-resize" onMouseDown={(e) => startResize('tags', e)} aria-hidden />
             </th>
+            <th className="row-actions-head-cell" aria-label="Actions" />
           </tr>
         </thead>
         <tbody>
@@ -437,36 +391,11 @@ export function ProfileList({
                       </div>
                       <div className="table-subtitle">
                         <OsIcon os={profile.os} className="table-os-icon" />
-                        <span title={osLabel(profile.os)}>{STATUS_META[profile.status].label}</span> ·{' '}
-                        {formatDate(profile.updatedAt)}
+                        <span title={osLabel(profile.os)}>
+                          {STATUS_META[profile.status].label}
+                        </span>{' '}
+                        · {formatDate(profile.updatedAt)}
                         {profile.passwordProtected ? ' · 🔒' : ''}
-                      </div>
-                    </div>
-                    <div className="table-actions">
-                      <StatusActionButton
-                        profile={profile}
-                        busy={busy}
-                        androidTarget={androidTarget}
-                        onLaunch={onLaunch}
-                        onStop={onStop}
-                      />
-                      <div className="row-menu">
-                        <button
-                          type="button"
-                          className="icon-button icon-button--table"
-                          aria-label={`More actions for ${profile.name}`}
-                          aria-expanded={openMenuId === profile.id}
-                          title="More"
-                          ref={(el) => {
-                            if (el) triggerRefs.current.set(profile.id, el);
-                            else triggerRefs.current.delete(profile.id);
-                          }}
-                          onClick={() =>
-                            setOpenMenuId((current) => (current === profile.id ? null : profile.id))
-                          }
-                        >
-                          <EllipsisVerticalIcon aria-hidden />
-                        </button>
                       </div>
                     </div>
                   </div>
@@ -508,6 +437,35 @@ export function ProfileList({
                   ) : (
                     <span className="muted">None</span>
                   )}
+                </td>
+                <td className="row-actions-cell">
+                  <div className="table-actions">
+                    <StatusActionButton
+                      profile={profile}
+                      busy={busy}
+                      androidTarget={androidTarget}
+                      onLaunch={onLaunch}
+                      onStop={onStop}
+                    />
+                    <div className="row-menu">
+                      <button
+                        type="button"
+                        className="icon-button icon-button--table"
+                        aria-label={`More actions for ${profile.name}`}
+                        aria-expanded={openMenuId === profile.id}
+                        title="More"
+                        ref={(el) => {
+                          if (el) triggerRefs.current.set(profile.id, el);
+                          else triggerRefs.current.delete(profile.id);
+                        }}
+                        onClick={() =>
+                          setOpenMenuId((current) => (current === profile.id ? null : profile.id))
+                        }
+                      >
+                        <EllipsisVerticalIcon aria-hidden />
+                      </button>
+                    </div>
+                  </div>
                 </td>
               </tr>
             );

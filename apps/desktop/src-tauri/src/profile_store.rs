@@ -14,10 +14,10 @@ use std::path::Path;
 use anyhow::Result;
 use argon2::Argon2;
 use password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use rusqlite::{Connection, Row, params};
+use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 
-use crate::secrets::{PROXY_SECRET_FIELDS, SecretCipher};
+use crate::secrets::{SecretCipher, PROXY_SECRET_FIELDS};
 
 /// SQLite schema for the local profile catalog. `IF NOT EXISTS` keeps `init` idempotent.
 pub const SCHEMA: &str = "
@@ -919,13 +919,11 @@ mod tests {
         assert_eq!(updated.proxy_id.as_deref(), Some("px_current"));
         assert!(clear_cookie_import(&conn, &created.id).unwrap());
         assert!(!clear_cookie_import(&conn, &created.id).unwrap());
-        assert!(
-            get(&conn, &cipher, &created.id)
-                .unwrap()
-                .unwrap()
-                .cookies_import
-                .is_none()
-        );
+        assert!(get(&conn, &cipher, &created.id)
+            .unwrap()
+            .unwrap()
+            .cookies_import
+            .is_none());
     }
 
     #[test]

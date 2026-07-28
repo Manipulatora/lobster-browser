@@ -1,0 +1,803 @@
+import { isAbsolute } from 'node:path';
+import type {
+  AgentAction,
+  AgentConfig,
+  AgentEvent,
+  AgentLlmConfig,
+  AgentUsage,
+} from '@lobster/shared-types';
+import { ACT_TOOL, parseAction } from './actions.js';
+import {
+  assessUiSettingsIntent,
+  isBrowserConfigSurfaceUrl,
+  isVettedBrowserConfigUrl,
+} from './browser-config-guard.js';
+import type { BrowserDriver } from './driver.js';
+import { executeAction } from './executor.js';
+import type { Sleep } from './executor.js';
+import type { LlmClient } from './llm/index.js';
+import type { MemoryStore } from './memory/index.js';
+import {
+  actionRisk,
+  assessNavigation,
+  normalizeAllowedDomains,
+  targetUrlForAction,
+} from './policy.js';
+import { perceive } from './perception/perceive.js';
+import { renderObservation, sameElements } from './perception/serialize.js';
+import {
+  buildAskPrompt,
+  buildAskUserPrompt,
+  buildStepPrompt,
+  buildSystemPrompt,
+} from './prompt.js';
+import { describeSafeAction, isSensitiveElement, redactAction, redactUrl } from './security.js';
+import type { RawPerception } from './types.js';
+
+export interface AgentRunDeps {
+  driver: BrowserDriver;
+  llm: LlmClient;
+  memory: MemoryStore;
+  emit: (event: AgentEvent) => void;
+  waitForInput: (prompt: string, kind: 'ask' | 'confirm', action?: AgentAction) => Promise<string>;
+  signal: AbortSignal;
+  now: () => string;
+  sleep?: Sleep;
+}
+
+export interface AgentRunParams {
+  sessionId: string;
+  profileId: string;
+  task: string;
+  runId: string;
+  llmConfig: AgentLlmConfig;
+  config: AgentConfig;
+}
+
+export function resolveConfig(partial: Partial<AgentConfig> | undefined): AgentConfig {
+  const maxSteps = boundedInteger(partial?.maxSteps, 40, 1, 200, 'maxSteps');
+  const tokenBudget =
+    partial?.tokenBudget === undefined
+      ? undefined
+      : boundedInteger(partial.tokenBudget, 0, 1_000, 10_000_000, 'tokenBudget');
+  const mode = partial?.mode ?? 'agent';
+  if (mode !== 'ask' && mode !== 'agent') throw new Error('mode must be ask or agent');
+  const autonomy = partial?.autonomy ?? 'auto';
+  if (autonomy !== 'auto' && autonomy !== 'confirm')
+    throw new Error('autonomy must be auto or confirm');
+  // Autonomy is THE approval switch: `auto` runs end-to-end with zero approval pauses (hard denials
+  // still apply), so cross-domain navigation defaults to allow there; `confirm` gates it.
+  const crossDomainNavigation =
+    partial?.crossDomainNavigation ?? (autonomy === 'auto' ? 'allow' : 'confirm');
+  if (!['allow', 'confirm', 'deny'].includes(crossDomainNavigation)) {
+    throw new Error('crossDomainNavigation must be allow, confirm, or deny');
+  }
+  const allowedDomains = normalizeAllowedDomains(partial?.allowedDomains);
+  const allowedUploadRoots = (partial?.allowedUploadRoots ?? []).map((root) => {
+    if (typeof root !== 'string' || !isAbsolute(root))
+      throw new Error('allowedUploadRoots must be absolute paths');
+    return root;
+  });
+  if (allowedUploadRoots.length > 20) throw new Error('at most 20 upload roots are allowed');
+  if (partial?.startUrl && partial.startUrl.length > 8192) throw new Error('startUrl is too long');
+  return {
+    mode,
+    maxSteps,
+    autonomy,
+    ...(allowedDomains.length ? { allowedDomains } : {}),
+    ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+    ...(partial?.startUrl ? { startUrl: partial.startUrl } : {}),
+    visionFallback: partial?.visionFallback === true,
+    allowPrivateNetwork: partial?.allowPrivateNetwork === true,
+    crossDomainNavigation,
+    ...(allowedUploadRoots.length ? { allowedUploadRoots } : {}),
+  };
+}
+
+const MUTATING: ReadonlySet<AgentAction['kind']> = new Set([
+  'click',
+  'click_at',
+  'type',
+  'type_at',
+  'select',
+  'key',
+  'drag',
+  'upload',
+  'navigate',
+  'back',
+  'tab',
+  'browser_config',
+]);
+
+export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Promise<void> {
+  const { sessionId, profileId, task, runId, llmConfig, config } = params;
+  const { driver, llm, memory, emit, signal, now } = deps;
+  const usage: AgentUsage = { tokensIn: 0, tokensOut: 0 };
+  const history: string[] = [];
+  const base = { sessionId, profileId };
+  let memoryStarted = false;
+
+  const log = (level: 'debug' | 'info' | 'warn' | 'error', message: string): void =>
+    emit({ type: 'log', ...base, level, message, ts: now() });
+  const addUsage = (value: AgentUsage): void => {
+    usage.tokensIn += value.tokensIn;
+    usage.tokensOut += value.tokensOut;
+    if (value.cachedTokensIn)
+      usage.cachedTokensIn = (usage.cachedTokensIn ?? 0) + value.cachedTokensIn;
+    if (value.costUsd) usage.costUsd = (usage.costUsd ?? 0) + value.costUsd;
+  };
+  const finish = async (
+    status: 'done' | 'error' | 'stopped',
+    result: string,
+    error?: string,
+  ): Promise<void> => {
+    if (memoryStarted) {
+      try {
+        await memory.finishRun(runId, {
+          status,
+          summary: result || error || '',
+          usage,
+          endedAt: now(),
+        });
+      } catch (memoryError) {
+        log('warn', `Could not finalize encrypted run memory: ${safeError(memoryError)}`);
+      }
+    }
+    emit({
+      type: 'run.finished',
+      ...base,
+      status,
+      ...(result ? { result } : {}),
+      ...(error ? { error } : {}),
+      usage,
+      ts: now(),
+    });
+  };
+
+  emit({ type: 'run.started', ...base, task, ts: now() });
+  // Memory is BEST-EFFORT context, never a hard dependency: a broken, rotated, or corrupt store must
+  // never stop the agent from doing the user's task. Persistence and recall each degrade to "off" on
+  // failure instead of erroring the run (which is exactly what made a single bad file kill everything).
+  try {
+    await memory.startRun(runId, task, now(), {
+      ...(config.mode ? { mode: config.mode } : {}),
+      model: llmConfig.model,
+    });
+    memoryStarted = true;
+  } catch {
+    // Could not record this run — it just won't be persisted or recalled later. Continue.
+  }
+
+  let conversationContext = '';
+  try {
+    conversationContext = await memory.loadConversationContext();
+  } catch {
+    conversationContext = ''; // recall unavailable this turn — proceed with none
+  }
+
+  // ASK mode: a single chat completion, no browser and no tools — the model answers from its own
+  // knowledge in Markdown. The browser never opens (the lazy driver is never touched).
+  if (config.mode === 'ask') {
+    try {
+      const result = await llm.complete({
+        model: llmConfig.model,
+        system: buildAskPrompt(),
+        user: buildAskUserPrompt(task, conversationContext),
+        tools: [],
+        forceTool: '',
+        maxTokens: llmConfig.effort ? 8000 : 2048,
+        cachePrefix: true,
+        ...(llmConfig.effort ? { effort: llmConfig.effort } : {}),
+        signal,
+      });
+      addUsage(result.usage);
+      emit({ type: 'usage', ...base, usage: { ...result.usage }, ts: now() });
+      const answer = (result.text ?? '').trim();
+      return await finish(
+        answer ? 'done' : 'error',
+        answer,
+        answer ? undefined : 'The model returned no answer.',
+      );
+    } catch (error) {
+      if (signal.aborted) return await finish('stopped', 'Stopped by user.');
+      return await finish('error', '', `Chat failed: ${safeError(error)}`);
+    }
+  }
+
+  try {
+    if (config.startUrl) {
+      const current = await safe(() => driver.currentUrl(), '');
+      const decision = assessNavigation(config.startUrl, current, config);
+      if (decision.verdict === 'deny')
+        return await finish('error', '', `Start URL blocked: ${decision.reason}`);
+      if (decision.verdict === 'confirm') {
+        const approved = await confirm(
+          `Approve opening ${config.startUrl}? (${decision.reason})`,
+          { kind: 'navigate', url: config.startUrl },
+          base,
+          deps,
+        );
+        if (!approved) return await finish('stopped', 'The start navigation was rejected.');
+      }
+      await driver.navigate(config.startUrl);
+      await driver.waitForSettle();
+    }
+
+    // Skills are task-scoped and stable, so they stay in the cacheable system prefix. Site facts are
+    // loaded separately after each navigation and remain user-level untrusted data.
+    const memoryContext = await memory.loadContext(undefined, task);
+    const system = buildSystemPrompt({ task, config, memoryContext });
+    let previous: RawPerception | null = null;
+    let readEvidence: string[] = [];
+    let siteMemoryHost = '';
+    let siteMemoryContext = '';
+    let pendingImage: string | undefined;
+    let lastFingerprint = '';
+    let repeatCount = 0;
+    let recovery = false;
+    let invalidActions = 0;
+    let lastExtractedView = '';
+
+    for (let step = 1; step <= config.maxSteps; step += 1) {
+      if (signal.aborted) return await finish('stopped', 'Stopped by user.');
+
+      const raw = await perceive(driver);
+      const currentHost = hostOf(raw.url);
+      if (currentHost !== siteMemoryHost) {
+        siteMemoryHost = currentHost;
+        siteMemoryContext = currentHost ? await memory.loadContext(currentHost, '') : '';
+      }
+      const rendered =
+        previous && sameElements(previous, raw)
+          ? `url: ${raw.url} | ${JSON.stringify(raw.title)}\n(interactive elements unchanged from the previous step)`
+          : renderObservation(raw);
+      previous = raw;
+      emit({
+        type: 'step.observation',
+        ...base,
+        step,
+        url: raw.url,
+        title: raw.title,
+        summary: firstLine(rendered),
+        elementCount: raw.elements.length,
+        ts: now(),
+      });
+
+      if (
+        config.visionFallback &&
+        !pendingImage &&
+        driver.screenshot &&
+        raw.elements.length <= 2 &&
+        raw.signals?.includes('canvas')
+      ) {
+        const captured = await driver.screenshot().catch(() => undefined);
+        if (captured && captured.length <= 16_000_000) pendingImage = captured;
+      }
+
+      const nudges: string[] = [];
+      if (recovery)
+        nudges.push(
+          'RECOVERY: the last behavior repeated. Re-read the page and choose a materially different action.',
+        );
+      if (step >= Math.ceil(config.maxSteps * 0.75))
+        nudges.push(
+          `BUDGET: step ${step} of ${config.maxSteps}. Wrap up — consolidate what you already have and call \`done\`; do not start new exploration.`,
+        );
+      const user = buildStepPrompt({
+        history: nudges.length ? [...history, ...nudges] : history,
+        observation: rendered,
+        step,
+        ...(readEvidence.length ? { readState: readEvidence.join('\n\n') } : {}),
+        ...(conversationContext ? { conversationContext } : {}),
+        ...(siteMemoryContext ? { siteMemoryContext } : {}),
+      });
+      // Reasoning effort consumes from `max_tokens` (OpenRouter converts effort→thinking budget for
+      // Anthropic, up to ~0.8×max_tokens at High), so raise the cap when effort is on to leave room for
+      // the forced action call; otherwise the tiny tool-call output only needs ~1024.
+      const maxTokens = llmConfig.effort ? 8000 : 1024;
+      const estimated = estimateTokens(system) + estimateTokens(user) + maxTokens;
+      if (config.tokenBudget && usage.tokensIn + usage.tokensOut + estimated > config.tokenBudget) {
+        return await finish(
+          'stopped',
+          `Token budget (${config.tokenBudget}) would be exceeded by the next step.`,
+        );
+      }
+
+      emit({ type: 'step.thinking', ...base, step, ts: now() });
+      const imageForStep = pendingImage;
+      pendingImage = undefined;
+      const result = await llm.complete({
+        model: step === 1 || recovery ? llmConfig.model : (llmConfig.stepModel ?? llmConfig.model),
+        system,
+        user,
+        tools: [
+          {
+            name: ACT_TOOL.name,
+            description: ACT_TOOL.description,
+            inputSchema: ACT_TOOL.inputSchema,
+          },
+        ],
+        forceTool: ACT_TOOL.name,
+        maxTokens,
+        cachePrefix: true,
+        sessionId: runId,
+        ...(llmConfig.effort ? { effort: llmConfig.effort } : {}),
+        ...(imageForStep ? { images: [{ mediaType: 'image/png', data: imageForStep }] } : {}),
+        signal,
+      });
+      recovery = false;
+      addUsage(result.usage);
+      emit({ type: 'usage', ...base, usage: { ...result.usage }, ts: now() });
+
+      if (result.stopReason === 'refusal')
+        return await finish('error', '', 'The model refused this task.');
+      if (!result.toolCall) {
+        invalidActions += 1;
+        history.push(`${step}. no structured action returned`);
+        if (invalidActions >= 3)
+          return await finish('error', '', 'The model repeatedly returned no valid action.');
+        continue;
+      }
+      const parsed = parseAction(result.toolCall.input);
+      if (!parsed.ok) {
+        invalidActions += 1;
+        history.push(`${step}. invalid action: ${parsed.error}`);
+        if (invalidActions >= 3)
+          return await finish('error', '', 'The model repeatedly returned invalid actions.');
+        continue;
+      }
+      invalidActions = 0;
+      const action = parsed.action;
+      const safeAction = redactAction(action, raw);
+      emit({ type: 'step.action', ...base, step, action: safeAction, ts: now() });
+
+      if (
+        (action.kind === 'click_at' ||
+          action.kind === 'type_at' ||
+          (action.kind === 'ask' && action.targetX !== undefined)) &&
+        !imageForStep
+      ) {
+        history.push(
+          `${step}. blocked: coordinate actions require a screenshot in the same model step`,
+        );
+        continue;
+      }
+
+      if (action.kind === 'ask') {
+        const handled = await handleAsk(action, raw, step, runId, history, base, deps, memory, now);
+        if (!handled.ok) history.push(`${step}. ${handled.outcome}`);
+        continue;
+      }
+      if (action.kind === 'remember') {
+        // Agent-authored durable memory: persist a per-domain fact this profile will recall next time.
+        const domain = hostOf(raw.url);
+        if (!domain) {
+          history.push(`${step}. remember skipped: no page domain`);
+        } else {
+          try {
+            await memory.rememberFact({ domain, key: action.factKey, value: action.factValue });
+            const outcome = `remembered "${action.factKey}" for ${domain}`;
+            history.push(`${step}. ${outcome}`);
+            await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log);
+          } catch (error) {
+            history.push(`${step}. could not remember: ${safeError(error)}`);
+          }
+        }
+        continue;
+      }
+      if (action.kind === 'screenshot' && !config.visionFallback) {
+        history.push(`${step}. blocked: visual fallback is disabled for this run`);
+        continue;
+      }
+
+      // Browser WebUI is only reachable through the vetted browser_config entry points. Continue to
+      // screen each semantic control/value so a safe page cannot be used as a trampoline into the
+      // fingerprint/proxy layer. Coordinate clicks are deliberately disallowed here because they have
+      // no trustworthy semantic target for the guard to assess.
+      if (isBrowserConfigSurfaceUrl(raw.url) && isSettingsUiAction(action)) {
+        const settingsAssessment = assessUiSettingsIntent(...settingsActionIntent(action, raw));
+        const coordinate = action.kind === 'click_at' || action.kind === 'type_at';
+        const unvettedPage = !isVettedBrowserConfigUrl(raw.url);
+        if (unvettedPage || coordinate || settingsAssessment.verdict === 'block') {
+          const outcome = unvettedPage
+            ? 'blocked: this browser settings subsection is outside the vetted configuration surface'
+            : coordinate
+              ? 'blocked: coordinate actions are not allowed on browser settings pages; use a labelled control'
+              : (settingsAssessment.reason ?? 'blocked: browser setting is not permitted');
+          history.push(`${step}. ${outcome}`);
+          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log);
+          continue;
+        }
+      }
+
+      if (action.kind === 'extract' && lastExtractedView === observationFingerprint(raw)) {
+        const outcome =
+          'blocked: this unchanged page view was already extracted; use the existing result or change the page';
+        history.push(`${step}. ${outcome}`);
+        recovery = true;
+        continue;
+      }
+
+      const target = targetUrlForAction(action, raw);
+      let navigationApproved = false;
+      if (target) {
+        const trustedInternalMove =
+          isVettedBrowserConfigUrl(raw.url) && isVettedBrowserConfigUrl(target);
+        const decision = trustedInternalMove
+          ? { verdict: 'allow' as const, reason: 'vetted browser settings navigation' }
+          : assessNavigation(target, raw.url, config);
+        if (decision.verdict === 'deny') {
+          const outcome = `blocked: ${decision.reason}`;
+          history.push(`${step}. ${outcome}`);
+          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log);
+          continue;
+        }
+        if (decision.verdict === 'confirm') {
+          navigationApproved = await confirm(
+            `Approve ${describeSafeAction(action, raw)}? (${decision.reason})`,
+            safeAction,
+            base,
+            deps,
+          );
+          if (!navigationApproved) {
+            history.push(`${step}. user rejected ${describeSafeAction(action, raw)}`);
+            continue;
+          }
+        }
+      }
+
+      // In `auto` the run NEVER pauses for approval — the user chose full autonomy, and risk
+      // heuristics only annotate the confirm prompt when `confirm` mode gates mutating actions.
+      const risk = actionRisk(action, raw);
+      const needsConfirm =
+        config.autonomy === 'confirm' && (MUTATING.has(action.kind) || risk.high);
+      if (needsConfirm && !navigationApproved) {
+        const approved = await confirm(
+          `Approve ${describeSafeAction(action, raw)}${risk.reason ? `? (${risk.reason})` : '?'}`,
+          safeAction,
+          base,
+          deps,
+        );
+        if (!approved) {
+          history.push(`${step}. user rejected ${describeSafeAction(action, raw)}`);
+          continue;
+        }
+      }
+
+      const fingerprint = `${raw.url}|${JSON.stringify(safeAction)}`;
+      repeatCount = fingerprint === lastFingerprint ? repeatCount + 1 : 1;
+      lastFingerprint = fingerprint;
+      if (repeatCount >= 5) {
+        return await finish(
+          'error',
+          '',
+          'The agent entered a repeated-action loop and stopped safely.',
+        );
+      }
+      if (repeatCount >= 3) recovery = true;
+
+      const outcome = await executeAction(action, raw, driver, {
+        ...(deps.sleep ? { sleep: deps.sleep } : {}),
+        config,
+        signal,
+        navigationApproved,
+      });
+      await appendSafe(memory, runId, step, raw.url, safeAction, outcome.outcome, now, log);
+
+      if (outcome.terminal) {
+        return outcome.terminal.success
+          ? await finish('done', outcome.terminal.summary || outcome.outcome)
+          : await finish('error', '', outcome.terminal.summary || outcome.outcome);
+      }
+      history.push(`${step}. ${outcome.outcome}`);
+      // Keep a bounded evidence ledger across pagination. Unlike one-shot read state, page-one values
+      // remain available after clicking Next, while a hard total cap prevents runaway prompt growth.
+      if (outcome.extracted) {
+        const description = action.kind === 'extract' ? action.description : 'page text';
+        readEvidence = appendExtractedEvidence(
+          readEvidence,
+          step,
+          raw.url,
+          description,
+          outcome.extracted,
+        );
+      }
+      if (action.kind === 'extract') lastExtractedView = observationFingerprint(raw);
+      if (outcome.image) pendingImage = outcome.image;
+
+      // Catch redirects/popups/JS navigations that could not be predicted from an href. `browser_config`
+      // is exempt: its only navigation is the UI-fallback jump to a vetted `chrome://settings` page
+      // (already guarded and, being a non-http scheme, would otherwise trip the web-navigation policy).
+      if (MUTATING.has(action.kind) && action.kind !== 'browser_config') {
+        const afterUrl = await safe(() => driver.currentUrl(), raw.url);
+        if (afterUrl !== raw.url) {
+          const trustedInternalMove =
+            isVettedBrowserConfigUrl(raw.url) && isVettedBrowserConfigUrl(afterUrl);
+          const drift = trustedInternalMove
+            ? { verdict: 'allow' as const, reason: 'vetted browser settings navigation' }
+            : assessNavigation(afterUrl, raw.url, config);
+          if (drift.verdict === 'deny') {
+            await rollbackNavigation(driver, raw.url);
+            return await finish(
+              'error',
+              '',
+              `Navigation policy blocked page drift: ${drift.reason}`,
+            );
+          }
+          if (drift.verdict === 'confirm' && !navigationApproved) {
+            const approved = await confirm(
+              `The page opened ${redactUrl(afterUrl)}. Approve staying there? (${drift.reason})`,
+              { kind: 'navigate', url: redactUrl(afterUrl) },
+              base,
+              deps,
+            );
+            if (!approved) {
+              await rollbackNavigation(driver, raw.url);
+              history.push(`${step}. user rejected unexpected navigation; went back`);
+            }
+          }
+        }
+      }
+    }
+    return await finish('stopped', `Reached the ${config.maxSteps}-step budget without finishing.`);
+  } catch (error) {
+    if (signal.aborted) return await finish('stopped', 'Stopped by user.');
+    return await finish('error', '', safeError(error));
+  }
+}
+
+async function handleAsk(
+  action: Extract<AgentAction, { kind: 'ask' }>,
+  raw: RawPerception,
+  step: number,
+  runId: string,
+  history: string[],
+  base: { sessionId: string; profileId: string },
+  deps: AgentRunDeps,
+  memory: MemoryStore,
+  now: () => string,
+): Promise<{ ok: boolean; outcome: string }> {
+  deps.emit({
+    type: 'run.needsInput',
+    ...base,
+    kind: 'ask',
+    prompt: action.question,
+    ...(action.sensitive !== undefined ? { sensitive: action.sensitive } : {}),
+    ts: now(),
+  });
+  const answer = await deps.waitForInput(action.question, 'ask', action);
+  if (action.sensitive && action.targetId !== undefined) {
+    const element = raw.elements.find((item) => item.index === action.targetId);
+    if (!element)
+      return { ok: false, outcome: `sensitive target [${action.targetId}] is no longer available` };
+    if (!isSensitiveElement(element)) {
+      return {
+        ok: false,
+        outcome: `refused sensitive handoff to non-sensitive field [${action.targetId}]`,
+      };
+    }
+    const direct = await executeAction(
+      { kind: 'type', id: action.targetId, text: answer, clear: true },
+      raw,
+      deps.driver,
+      { ...(deps.sleep ? { sleep: deps.sleep } : {}), signal: deps.signal },
+    );
+    const safeAction: AgentAction = {
+      kind: 'type',
+      id: action.targetId,
+      text: '[REDACTED]',
+      clear: true,
+    };
+    await appendSafe(memory, runId, step, raw.url, safeAction, direct.outcome, now, () => {});
+    history.push(`${step}. human securely supplied sensitive input to [${action.targetId}]`);
+    return { ok: true, outcome: direct.outcome };
+  }
+  if (action.sensitive && action.targetX !== undefined && action.targetY !== undefined) {
+    const directAction: AgentAction = {
+      kind: 'type_at',
+      x: action.targetX,
+      y: action.targetY,
+      text: answer,
+      clear: true,
+    };
+    const direct = await executeAction(directAction, raw, deps.driver, {
+      ...(deps.sleep ? { sleep: deps.sleep } : {}),
+      signal: deps.signal,
+    });
+    const safeAction = redactAction(directAction, raw);
+    await appendSafe(memory, runId, step, raw.url, safeAction, direct.outcome, now, () => {});
+    history.push(
+      `${step}. human securely supplied sensitive input at the requested visual coordinate`,
+    );
+    return { ok: true, outcome: direct.outcome };
+  }
+  history.push(
+    action.sensitive
+      ? `${step}. human completed the sensitive handoff (reply withheld)`
+      : `${step}. human replied to ${JSON.stringify(clip(action.question, 100))}: ${JSON.stringify(clip(answer, 120))}`,
+  );
+  return { ok: true, outcome: 'human input received' };
+}
+
+async function confirm(
+  prompt: string,
+  action: AgentAction,
+  base: { sessionId: string; profileId: string },
+  deps: AgentRunDeps,
+): Promise<boolean> {
+  deps.emit({
+    type: 'run.needsInput',
+    ...base,
+    kind: 'confirm',
+    prompt,
+    action,
+    ts: deps.now(),
+  });
+  const verdict = await deps.waitForInput(prompt, 'confirm', action);
+  return /^(approve|approved|yes|ok)$/i.test(verdict.trim());
+}
+
+async function appendSafe(
+  memory: MemoryStore,
+  runId: string,
+  step: number,
+  url: string,
+  action: AgentAction,
+  outcome: string,
+  now: () => string,
+  log: (level: 'warn', message: string) => void,
+): Promise<void> {
+  try {
+    await memory.appendStep(runId, {
+      index: step,
+      url,
+      action: JSON.stringify(action),
+      outcome,
+      ts: now(),
+    });
+  } catch (error) {
+    log('warn', `Could not persist encrypted agent step: ${safeError(error)}`);
+  }
+}
+
+function boundedInteger(
+  value: number | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+  name: string,
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function firstLine(value: string): string {
+  return value.split('\n', 1)[0] ?? '';
+}
+
+function clip(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+const MAX_EXTRACT_ENTRY_CHARS = 3_000;
+const MAX_EXTRACT_LEDGER_CHARS = 8_000;
+
+function appendExtractedEvidence(
+  existing: string[],
+  step: number,
+  url: string,
+  description: string,
+  text: string,
+): string[] {
+  const entry = `Extract ${step} — ${clip(description, 160)} — ${redactUrl(url)}\n${clip(text, MAX_EXTRACT_ENTRY_CHARS)}`;
+  const next = [...existing, entry];
+  while (next.length > 1 && next.join('\n\n').length > MAX_EXTRACT_LEDGER_CHARS) next.shift();
+  if (next[0] && next[0].length > MAX_EXTRACT_LEDGER_CHARS) {
+    next[0] = clip(next[0], MAX_EXTRACT_LEDGER_CHARS);
+  }
+  return next;
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function isSettingsUiAction(action: AgentAction): boolean {
+  return (
+    action.kind === 'click' ||
+    action.kind === 'click_at' ||
+    action.kind === 'hover' ||
+    action.kind === 'type' ||
+    action.kind === 'type_at' ||
+    action.kind === 'select' ||
+    action.kind === 'key' ||
+    action.kind === 'drag'
+  );
+}
+
+function settingsActionIntent(action: AgentAction, raw: RawPerception): Array<string | undefined> {
+  const values: Array<string | undefined> = ['note' in action ? action.note : undefined];
+  const elementName = (index: number | undefined): string | undefined =>
+    index === undefined ? undefined : raw.elements.find((element) => element.index === index)?.name;
+  switch (action.kind) {
+    case 'click':
+    case 'hover':
+    case 'select':
+      values.push(elementName(action.id));
+      break;
+    case 'type':
+      values.push(elementName(action.id), action.text);
+      break;
+    case 'type_at':
+      values.push(action.text);
+      break;
+    case 'key':
+      values.push(action.key);
+      break;
+    case 'drag':
+      values.push(elementName(action.fromId), elementName(action.toId));
+      break;
+    default:
+      break;
+  }
+  return values;
+}
+
+function observationFingerprint(raw: RawPerception): string {
+  return JSON.stringify([
+    raw.url,
+    raw.scrollY,
+    raw.text ?? '',
+    raw.elements.map((element) => [
+      element.role,
+      element.name,
+      element.value ?? '',
+      element.state ?? '',
+    ]),
+  ]);
+}
+
+function estimateTokens(value: string): number {
+  return Math.ceil(value.length / 3.5);
+}
+
+function safeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await fn();
+  } catch {
+    return fallback;
+  }
+}
+
+async function rollbackNavigation(driver: BrowserDriver, priorUrl: string): Promise<void> {
+  try {
+    await driver.goBack();
+    await driver.waitForSettle(3000);
+    if ((await driver.currentUrl()) === priorUrl) return;
+  } catch {
+    // A popup/new tab has no back entry; close the active extra tab instead.
+  }
+  try {
+    const tabs = await driver.listTabs();
+    const active = tabs.find((tab) => tab.active);
+    if (active && tabs.length > 1) {
+      await driver.closeTab(active.index);
+      return;
+    }
+  } catch {
+    // Last resort below.
+  }
+  await driver.navigate(priorUrl).catch(() => {});
+  await driver.waitForSettle(3000).catch(() => {});
+}

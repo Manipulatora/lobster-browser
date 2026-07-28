@@ -106,7 +106,9 @@ export function normalizeHostCalibrationSnapshot(
       ...(raw.navigator.languages && raw.navigator.languages.length > 0
         ? {
             languages: [
-              ...new Set(raw.navigator.languages.map((language) => language.trim()).filter(Boolean)),
+              ...new Set(
+                raw.navigator.languages.map((language) => language.trim()).filter(Boolean),
+              ),
             ],
           }
         : {}),

@@ -1,6 +1,6 @@
 # Lobium Operations — Build, Install, Validate, Contracts
 
-Everything needed to build the engine, ship the product, run the gates, and integrate. Updated 2026-07-15.
+Everything needed to build the engine, ship the product, run the gates, and integrate. Updated 2026-07-21.
 
 ## 1. Build the Lobium engine
 
@@ -88,7 +88,24 @@ method: `startProfile(StartProfileParams) → { profileId, pid, ws, debuggerAddr
 any engine but `lobium`. It spawns the native binary, resolves the CDP endpoint from the
 `DevToolsActivePort` file, injects imported cookies over the first-party CDP client, and (for mobile
 profiles) installs native device emulation. It returns the raw CDP `ws` + Selenium `debuggerAddress` for
-the user's own automation — the product never drives them.
+the user's own automation. The built-in agent uses the same first-party CDP boundary only after the user
+explicitly starts a run for that profile.
+
+Web-agent methods share the same authenticated desktop boundary: `agent.start`, `agent.stop`,
+`agent.sendInput`, and `agent.status`. The Rust command validates the profile, injects the encrypted-store
+provider credential and per-profile memory key, then the sidecar streams session-scoped `agent-event`
+notifications. Never log or persist the raw `agent.start` params because they contain the in-memory provider
+credential during that call.
+
+Agent state lives at:
+
+- `profiles.sqlite / agent_secrets` — provider credentials and memory keys, each AES-GCM encrypted;
+- `profiles/<id>/agent/memory.json` — authenticated per-profile facts/settings;
+- `profiles/<id>/agent/runs/*.json` — authenticated run records with secret actions redacted.
+
+CAPTCHA and sensitive-field prompts pause the session. The user completes a CAPTCHA in the visible window,
+or enters a password/OTP in the masked desktop prompt; the latter is typed directly into its target and is
+not returned to the model.
 
 ### Local automation API (developer-facing)
 

@@ -202,7 +202,6 @@ export async function installMobileEmulationForAllTargets(
       }
       if (sessionId) await configureSession(sessionId, 'page');
     }
-
   } catch (error) {
     closed = true;
     socket.close();
