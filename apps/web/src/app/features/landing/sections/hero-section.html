@@ -10,9 +10,14 @@
   <!-- Layer 2: the animated shader canvas, fading in once it has a frame to show. -->
   <app-hero-backdrop class="absolute inset-0 -z-10" />
 
-  <!-- Layer 3: a soft wash so the type keeps its contrast wherever the shader is bright. -->
+  <!-- Layer 3: legibility scrim. Weighted to the left, where the copy sits, so the right half of
+       the scene stays visible instead of being washed out uniformly. -->
   <div
-    class="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-b from-white/70 via-white/40 to-white/85"
+    class="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-r from-white/90 via-white/45 to-transparent"
+  ></div>
+  <!-- Layer 4: a short fade at the bottom edge so the section resolves into the page. -->
+  <div
+    class="pointer-events-none absolute inset-x-0 bottom-0 -z-10 h-32 bg-gradient-to-b from-transparent to-white"
   ></div>
 
   <div class="container-page relative w-full pb-24 pt-40 sm:pt-44">

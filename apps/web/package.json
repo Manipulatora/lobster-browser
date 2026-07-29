@@ -25,6 +25,7 @@
     "@ng-icons/heroicons": "^34.0.0",
     "express": "^5.1.0",
     "rxjs": "~7.8.0",
+    "three": "^0.185.1",
     "tslib": "^2.3.0"
   },
   "devDependencies": {
@@ -34,6 +35,7 @@
     "@tailwindcss/postcss": "^4.3.3",
     "@types/express": "^5.0.1",
     "@types/node": "^20.17.19",
+    "@types/three": "^0.185.1",
     "jsdom": "^28.0.0",
     "postcss": "^8.5.24",
     "prettier": "^3.8.1",
