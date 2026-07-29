@@ -1,21 +1,24 @@
 /**
  * Scenic backdrop — a full-screen TSL (Three.js Shading Language) fragment shader.
  *
- * Adapted from Frank Reitberger's "scenic-backdrop"
- * (https://github.com/prinzipiell/tsl/tree/main/scenic-backdrop). The original renders a night
- * scene: dark sky, stars, drifting cloud layers, a moon, and a reflective water plane.
+ * A faithful port of Frank Reitberger's "scenic-backdrop"
+ * (github.com/prinzipiell/tsl/tree/main/scenic-backdrop, live at
+ * https://dasprinzip.com/tinker/day25/): night sky and stars, drifting cloud layers, a sun low over
+ * the horizon, and a lit sea below it.
  *
- * The palette is the ORIGINAL, untouched — no recolouring, no tinting. The only changes are the
- * ones required to make it build and run here.
+ * The maths and the palette are the original's, unchanged. The only edits are the ones required to
+ * compile under esbuild + TypeScript:
  *
- * Ported fixes over the original source:
- * - `mulAssign`/`addAssign`/`subAssign` are NOT exported by `three/tsl` — they only exist as methods
- *   on nodes. The original imports them anyway; webpack silently bound `undefined`, but esbuild
- *   (what Angular uses) fails the build outright. They are simply not imported here.
- * - Every `Fn` parameter list is type-annotated, otherwise TypeScript picks the `NodeBuilder`
+ * - `mulAssign`/`addAssign`/`subAssign` are NOT exported by `three/tsl`; they exist only as methods
+ *   on nodes. The original imports them anyway — webpack silently bound `undefined`, but esbuild
+ *   fails the build outright — so they are simply not imported.
+ * - Every `Fn` parameter list is type-annotated, otherwise TypeScript resolves the `NodeBuilder`
  *   overload and the shader will not typecheck.
- * - The tweakpane/dat.gui debug wiring and the `WebGLAssets` global are gone; textures and tunables
- *   are passed in, and the uniforms are returned so the page can retheme without rebuilding.
+ * - Two statements in the original are no-ops (`q.y.sub(...)` and `q.add(0.4).div(...)` discard
+ *   their results) and are omitted rather than reproduced.
+ * - The tweakpane debug wiring and the `WebGLAssets` global are replaced by arguments; the uniforms
+ *   are returned so they stay tunable. Defaults match the live demo's panel exactly:
+ *   gamma 0.87, horizon 0.36, moonlight 5.0.
  */
 import {
   Fn,
@@ -48,30 +51,23 @@ import type { MeshBasicNodeMaterial, Node, Texture } from 'three/webgpu';
 type ColorNode = NonNullable<MeshBasicNodeMaterial['colorNode']>;
 
 export interface BackdropOptions {
-  /** Tiling noise, drives the cloud FBM and the water. */
+  /** Tiling noise; drives the cloud FBM and the sea. */
   readonly noise: Texture;
-  /** Sparse high-frequency texture, drives the stars. */
+  /** Sparse high-frequency texture; drives the stars. */
   readonly stars: Texture;
 }
 
 export interface BackdropUniforms {
-  /** Overall gamma of the underlying scene. */
   readonly gamma: ReturnType<typeof uniform>;
-  /** Strength of the horizon band. */
   readonly horizon: ReturnType<typeof uniform>;
-  /** Brightness of the celestial highlight. */
   readonly moonlight: ReturnType<typeof uniform>;
 }
 
-/**
- * Build the colour node for a full-screen quad.
- *
- * Returns the node plus its live uniforms so the caller can animate or retheme them.
- */
 export function createBackdrop(options: BackdropOptions): {
   colorNode: ColorNode;
   uniforms: BackdropUniforms;
 } {
+  // Defaults taken from the demo's own control panel.
   const gamma = uniform(0.87);
   const horizon = uniform(0.36);
   const moonlight = uniform(5.0);
@@ -79,7 +75,6 @@ export function createBackdrop(options: BackdropOptions): {
   const noiseTex = options.noise;
   const starTex = options.stars;
 
-  // Fractal brownian motion over the noise texture — the cloud shapes.
   const fbm = Fn(([p]: [Node<'vec2'>]) =>
     float(1.5)
       .mul(texture(noiseTex, p.mul(1.0)).x)
@@ -88,7 +83,6 @@ export function createBackdrop(options: BackdropOptions): {
       .add(float(1.0675).mul(texture(noiseTex, p.mul(8.02)).x)),
   );
 
-  // Lower-amplitude variant, used for the surface detail of the celestial body.
   const fbm2 = Fn(([p]: [Node<'vec2'>]) =>
     float(0.5)
       .mul(texture(noiseTex, p.mul(1.0)).x)
@@ -97,61 +91,50 @@ export function createBackdrop(options: BackdropOptions): {
       .add(float(0.0675).mul(texture(noiseTex, p.mul(8.02)).x)),
   );
 
-  // Framing. This is a CROP of the original scene — every colour below is untouched.
-  //
-  // Measured down the original frame, the scene is brightest at the horizon and falls away in both
-  // directions: deep night sky above, near-black water below. Shown at the original scale the hero
-  // spans all three, which is where the large dark mass at the top came from. Zooming in on the
-  // horizon keeps the bright band, the moon and the reflections, and simply leaves the dark
-  // extremes outside the frame.
-  const FOCUS_Y = 0.12; // the horizon, in scene units
-  const ZOOM = 0.35; // < 1 magnifies
-
   const scene = Fn(() => {
     const tick = mod(time.mul(0.4), 458.0).toVar();
 
-    // Screen space to a centred, aspect-corrected, y-up coordinate.
     const p = screenUV
       .sub(0.5)
-      .mul(vec2(screenSize.x.div(screenSize.y), float(-1.0)))
+      .mul(vec2(screenSize.x.div(screenSize.y), float(1.0).negate()))
       .mul(2.0)
       .toVar();
-    p.assign(p.sub(vec2(0.0, FOCUS_Y)).mul(ZOOM).add(vec2(0.0, FOCUS_Y)));
 
-    // Slow parallax drift, so nothing ever sits still.
+    // camera drift
     p.addAssign(
       vec2(1.0, 3.0)
-        .mul(0.002)
-        .mul(2.0)
+        .mul(float(0.002))
+        .mul(float(2.0))
         .mul(cos(tick).mul(float(2.0).add(vec2(0.0, 1.5)))),
     );
     p.addAssign(
       vec2(1.0, 3.0)
-        .mul(0.001)
+        .mul(float(0.001))
+        .mul(float(1.0))
         .mul(cos(tick).mul(float(5.0).add(vec2(1.0, 4.5)))),
     );
     p.mulAssign(float(0.95).add(float(0.05).mul(length(p))));
 
-    // Gentle rotation of the whole frame.
     const an = float(0.03)
       .mul(sin(float(0.1).mul(tick)))
       .toVar();
-    const co = cos(an).toVar();
-    const si = sin(an).toVar();
+    const co = float(cos(an)).toVar();
+    const si = float(sin(an)).toVar();
     p.assign(mat2(co, si.negate(), si, co).mul(p));
 
-    // --- water: a reflected plane below the horizon ------------------------------------------
-    const q = vec2(p.x, float(-1.0)).div(p.y.sub(0.1)).toVar();
+    // ---- water -------------------------------------------------------------------------------
+    const q = vec2(p.x, float(1.0).negate()).div(p.y.sub(0.1)).toVar();
+
     const off = texture(
       noiseTex,
-      float(0.1)
-        .mul(
-          mod(tick.mul(0.001), 2.0)
-            .mul(q)
-            .mul(vec2(1.0, float(2.0).oneMinus())),
-        )
-        .sub(vec2(0.0, float(0.007).mul(tick))).xy,
+      float(0.1).mul(
+        mod(tick.mul(0.001), 2.0)
+          .mul(q)
+          .mul(vec2(1.0, float(2.0).oneMinus()))
+          .sub(vec2(float(0.0), float(0.007).mul(tick))).xy,
+      ),
     ).toVar();
+
     const col = vec3(
       texture(
         noiseTex,
@@ -164,9 +147,9 @@ export function createBackdrop(options: BackdropOptions): {
     ).toVar();
     col.mulAssign(0.4);
 
-    const re = float(1.0)
-      .sub(smoothstep(0.0, 0.7, abs(p.x.sub(0.6)).sub(abs(p.y).mul(0.3).add(0.2))))
-      .toVar();
+    const re = float(
+      float(1.0).sub(smoothstep(0.0, 0.7, abs(p.x.sub(0.6)).sub(abs(p.y).mul(0.3).add(0.2)))),
+    ).toVar();
     col.addAssign(
       float(0.1)
         .mul(vec3(1.0, 0.9, 0.73))
@@ -174,7 +157,7 @@ export function createBackdrop(options: BackdropOptions): {
         .mul(0.2)
         .mul(off.y)
         .mul(5.0)
-        .mul(col.x.oneMinus()),
+        .mul(float(1.0).sub(col.x)),
     );
     col.addAssign(
       float(0.5)
@@ -183,10 +166,10 @@ export function createBackdrop(options: BackdropOptions): {
         .mul(0.2)
         .mul(off.y)
         .mul(moonlight)
-        .mul(col.x.oneMinus()),
+        .mul(float(1.0).sub(col.x)),
     );
 
-    // --- sky, stars, clouds -------------------------------------------------------------------
+    // ---- sky, stars, clouds ------------------------------------------------------------------
     const sky = vec3(0.01, 0.03, 0.1).toVar();
     sky.addAssign(
       float(2.8).mul(
@@ -208,7 +191,11 @@ export function createBackdrop(options: BackdropOptions): {
     const cloud = vec3(
       vec3(0.3, 0.4, 0.5)
         .mul(0.7)
-        .mul(float(1.0).sub(float(0.85).mul(sqrt(smoothstep(0.4, 1.0, f))))),
+        .mul(
+          float(1.0)
+            .sub(0.85)
+            .mul(sqrt(smoothstep(0.4, 1.0, f))),
+        ),
     ).toVar();
     sky.assign(mix(sky, cloud, float(0.95).mul(smoothstep(0.4, 0.6, f))));
     sky.assign(
@@ -220,7 +207,7 @@ export function createBackdrop(options: BackdropOptions): {
     );
     col.assign(mix(col, sky, smoothstep(0.0, 0.1, p.y)));
 
-    // --- celestial highlight ------------------------------------------------------------------
+    // ---- sun ---------------------------------------------------------------------------------
     const ddd = length(p.sub(vec2(0.58, 0.45))).toVar();
     const moontex = float(0.8)
       .add(0.2)
@@ -237,22 +224,26 @@ export function createBackdrop(options: BackdropOptions): {
       )
       .toVar();
     const moon = vec3(1.0, 0.97, 0.9).toVar();
-    col.addAssign(moon.mul(exp(float(5.0).oneMinus().mul(ddd).add(moontex.mul(0.15).add(col)))));
-
-    // --- horizon band -------------------------------------------------------------------------
     col.addAssign(
-      horizon
+      moon.mul(exp(float(5.0).oneMinus().mul(ddd).add(float(moontex).mul(0.15).add(col)))),
+    );
+
+    // ---- horizon -----------------------------------------------------------------------------
+    col.addAssign(
+      float(horizon)
         .mul(cos(tick.div(120.0)))
         .mul(pow(clamp(float(1.0).sub(abs(p.y.add(0.96).oneMinus())), 0.0, 1.0), 9.0)),
     );
 
-    // --- tone ---------------------------------------------------------------------------------
+    // ---- tone --------------------------------------------------------------------------------
     col.mulAssign(1.4);
     col.assign(pow(col, vec3(1.5, 1.2, 1.0)));
     col.assign(pow(col, vec3(float(1.0).div(gamma))));
 
-    // Fade up from black on first paint, exactly as the original does.
-    return vec4(col, 1.0).mul(smoothstep(0.0, 3.0, tick));
+    // blend-in
+    col.mulAssign(smoothstep(0.0, 4.0, tick));
+
+    return vec4(col, 1.0);
   });
 
   return {

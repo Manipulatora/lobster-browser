@@ -95,8 +95,14 @@ export class HeroBackdrop {
     for (const t of [noise, stars]) {
       t.wrapS = THREE.RepeatWrapping;
       t.wrapT = THREE.RepeatWrapping;
-      t.colorSpace = THREE.SRGBColorSpace;
-      t.anisotropy = 8;
+      t.anisotropy = 32;
+      // colorSpace is deliberately left at the default.
+      //
+      // The reference sets `texture.outputColorSpace`, which does nothing — outputColorSpace is a
+      // renderer property, not a texture one — so its textures are sampled raw. Setting the real
+      // property (`colorSpace = SRGBColorSpace`) is the "correct" call but applies an sRGB→linear
+      // conversion the original never had, which darkened every sample: the sea came out roughly
+      // four times darker than the demo. These textures are noise data, not colour, so raw is right.
     }
 
     // A full-screen quad under an orthographic camera: the shader does all the work, the geometry is
@@ -108,14 +114,18 @@ export class HeroBackdrop {
     material.colorNode = colorNode;
     scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material));
 
-    const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, alpha: false });
-    // Render BELOW device resolution and let the browser scale the canvas up.
-    //
-    // This is a soft, blurry, slowly drifting scene — it has no high-frequency detail to lose, but
-    // it is an expensive per-fragment shader (two FBMs, eight texture fetches). At native dpr this
-    // dropped to single-digit frame rates on software rasterisers. 0.6 cuts the fragment count by
-    // by 75% and is imperceptible on imagery this soft.
-    renderer.setPixelRatio(0.5);
+    const renderer = new THREE.WebGPURenderer({
+      canvas,
+      antialias: true,
+      alpha: false,
+      stencil: false,
+      powerPreference: 'high-performance',
+    });
+    // Match the reference exactly: device pixel ratio, clamped to 1.3 on HiDPI displays.
+    // Rendering below 1 made the starfield coarse — each shader pixel covered several device
+    // pixels, so the stars read at roughly twice their proper size.
+    const dpr = view.devicePixelRatio;
+    renderer.setPixelRatio(dpr >= 2 ? 1.3 : dpr);
 
     const resize = (): void => {
       const { clientWidth: w, clientHeight: h } = this.host.nativeElement;

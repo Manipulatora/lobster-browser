@@ -5,8 +5,9 @@
   <div class="container-page">
     <div class="flex h-16 items-center justify-between gap-6">
       <div class="flex items-center gap-8">
-        <!-- The brand lockup is dark ink; on the hero scene it needs a lift to stay readable. -->
-        <app-logo [class.drop-shadow-[0_1px_10px_rgba(255,255,255,0.55)]]="onDarkBackdrop()" />
+        <!-- The lockup is dark ink, which disappears against the night sky. brightness-0 flattens
+             it to black and invert flips it to solid white — the whole mark, wordmark included. -->
+        <app-logo [class]="onDarkBackdrop() ? 'brightness-0 invert' : ''" />
 
         <nav class="hidden items-center gap-1 lg:flex" aria-label="Primary">
           @for (link of nav; track link.label) {

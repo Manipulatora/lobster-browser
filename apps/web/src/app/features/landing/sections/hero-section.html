@@ -10,26 +10,21 @@
   <!-- Layer 2: the animated shader canvas, fading in once it has a frame to show. -->
   <app-hero-backdrop class="absolute inset-0 -z-10" />
 
-  <!-- Layer 3: a soft dark scrim behind the copy only. The scene is left untouched everywhere
-       else — this is the minimum needed to keep the text readable over moving imagery. -->
-  <div
-    class="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-r from-black/45 via-black/15 to-transparent"
-  ></div>
-  <!-- Layer 4: a short fade at the bottom edge so the section resolves into the page below. -->
-  <div
-    class="pointer-events-none absolute inset-x-0 bottom-0 -z-10 h-40 bg-gradient-to-b from-transparent to-white"
-  ></div>
+  <!-- No scrims. The bottom fade was washing out the sea, which is the best part of the scene,
+       and the sky behind the copy is already dark enough for white type to hold up. -->
 
   <div class="container-page relative w-full pb-24 pt-40 sm:pt-44">
     <div class="max-w-2xl">
       <h1
-        class="text-balance text-4xl leading-[1.06] tracking-[-0.03em] text-white sm:text-5xl lg:text-[3.6rem]"
+        class="on-scene text-balance text-4xl leading-[1.06] tracking-[-0.03em] text-white sm:text-5xl lg:text-[3.6rem]"
       >
         Every profile is a
         <span class="block text-brand-200">different, believable machine.</span>
       </h1>
 
-      <p class="mt-7 max-w-xl text-pretty text-base leading-relaxed text-white/80 sm:text-lg">
+      <p
+        class="on-scene mt-7 max-w-xl text-pretty text-base leading-relaxed text-white/85 sm:text-lg"
+      >
         Lobster gives each browser profile a coherent device and network identity — screen, GPU,
         fonts, timezone and locale that agree with one another. It is applied in C++ inside our own
         Chromium kernel, never by a JavaScript overlay that anti-bot systems can read.
@@ -39,7 +34,7 @@
         <app-shiny-cta link="/auth/sign-up">Get started</app-shiny-cta>
         <a
           routerLink="/pricing"
-          class="text-[0.9375rem] text-white/85 underline-offset-4 transition-colors hover:text-white hover:underline"
+          class="on-scene text-[0.9375rem] text-white/85 underline-offset-4 transition-colors hover:text-white hover:underline"
         >
           View pricing
         </a>
