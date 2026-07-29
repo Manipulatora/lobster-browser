@@ -86,8 +86,22 @@ export class DevicesSection {
       return; // leave the static fallback in place
     }
     scene.resize();
-    scene.start();
     this.loaded.set(true);
+
+    // Render ONLY while the section is on screen.
+    //
+    // The observer above is a one-shot load trigger; without this second one the scene kept drawing
+    // at full rate forever, competing with the hero's shader for the GPU even when scrolled far
+    // away. Two full-screen WebGL canvases running at once is the single biggest source of stutter
+    // on this page.
+    const vis = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting) && !this.document.hidden) scene.start();
+        else scene.stop();
+      },
+      { threshold: 0.01 },
+    );
+    vis.observe(this.host.nativeElement);
 
     const onMove = (e: PointerEvent): void => scene.onPointerMove(e.clientX, e.clientY);
     const onLeave = (): void => scene.onPointerLeave();
@@ -96,14 +110,20 @@ export class DevicesSection {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape' && scene.currentFocus) scene.setFocus('');
     };
+    const onVisibility = (): void => {
+      if (this.document.hidden) scene.stop();
+    };
 
     stage.addEventListener('pointermove', onMove);
     stage.addEventListener('pointerleave', onLeave);
     stage.addEventListener('click', onClick);
     view.addEventListener('resize', onResize, { passive: true });
     this.document.addEventListener('keydown', onKey);
+    this.document.addEventListener('visibilitychange', onVisibility);
 
     this.cleanup = () => {
+      vis.disconnect();
+      this.document.removeEventListener('visibilitychange', onVisibility);
       stage.removeEventListener('pointermove', onMove);
       stage.removeEventListener('pointerleave', onLeave);
       stage.removeEventListener('click', onClick);

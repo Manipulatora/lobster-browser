@@ -64,10 +64,14 @@ export class HeroBackdrop {
 
     const canvas = this.canvasRef().nativeElement;
 
-    // Probe before importing. three's WebGPURenderer falls back to WebGL2 on its own, but with
-    // NEITHER backend available `init()` rejects with an unhelpful TypeError — and this way we skip
-    // a 283 kB download we could not have used.
-    if (!canvas.getContext('webgl2')) return;
+    // Capability probe on a THROWAWAY canvas — never the real one.
+    //
+    // `getContext()` permanently binds a canvas to that context type. Probing the live canvas for
+    // 'webgl2' meant WebGPURenderer's later `getContext('webgpu')` returned null, so on any machine
+    // where WebGPU is actually available (Windows Chrome by default) the backdrop failed to appear
+    // at all, while WebGL-only machines silently limped along on the fallback.
+    const probe = this.document.createElement('canvas');
+    if (!probe.getContext('webgl2')) return;
 
     const [THREE, { createBackdrop }] = await Promise.all([
       import('three/webgpu'),
@@ -105,7 +109,13 @@ export class HeroBackdrop {
     scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material));
 
     const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, alpha: false });
-    renderer.setPixelRatio(Math.min(view.devicePixelRatio, 1.75));
+    // Render BELOW device resolution and let the browser scale the canvas up.
+    //
+    // This is a soft, blurry, slowly drifting scene — it has no high-frequency detail to lose, but
+    // it is an expensive per-fragment shader (two FBMs, eight texture fetches). At native dpr this
+    // dropped to single-digit frame rates on software rasterisers. 0.6 cuts the fragment count by
+    // by 75% and is imperceptible on imagery this soft.
+    renderer.setPixelRatio(0.5);
 
     const resize = (): void => {
       const { clientWidth: w, clientHeight: h } = this.host.nativeElement;
@@ -124,9 +134,16 @@ export class HeroBackdrop {
       return; // no usable backend — the CSS gradient stands in
     }
 
+    // Cap the update rate. The scene drifts slowly enough that 30fps is indistinguishable from 60,
+    // and halving the draw calls is the difference between smooth and stuttering on weak GPUs.
+    const MIN_FRAME_MS = 1000 / 30;
     let running = false;
-    const frame = (): void => {
-      if (running) renderer.render(scene, camera);
+    let lastFrame = 0;
+    const frame = (now: number): void => {
+      if (!running) return;
+      if (now - lastFrame < MIN_FRAME_MS) return;
+      lastFrame = now;
+      renderer.render(scene, camera);
     };
     const play = (): void => {
       if (running) return;

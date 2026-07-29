@@ -5,14 +5,8 @@
  * (https://github.com/prinzipiell/tsl/tree/main/scenic-backdrop). The original renders a night
  * scene: dark sky, stars, drifting cloud layers, a moon, and a reflective water plane.
  *
- * WHAT CHANGED HERE, AND WHY
- *
- * The motion is the valuable part, the palette is not: a night scene cannot sit on a light violet
- * page. Rather than re-tune a dozen hard-coded colours (which fights the original's carefully
- * balanced luminance), the scene is computed as before and then its **luminance is remapped through
- * our brand ramp** at the very end. Dark regions (the sky) become the near-white page colour and
- * bright regions (moon, stars, water highlights) become violet — so every bit of the original's
- * drift and shimmer survives, inverted into a light composition.
+ * The palette is the ORIGINAL, untouched — no recolouring, no tinting. The only changes are the
+ * ones required to make it build and run here.
  *
  * Ported fixes over the original source:
  * - `mulAssign`/`addAssign`/`subAssign` are NOT exported by `three/tsl` — they only exist as methods
@@ -28,7 +22,6 @@ import {
   abs,
   clamp,
   cos,
-  dot,
   exp,
   float,
   length,
@@ -68,18 +61,7 @@ export interface BackdropUniforms {
   readonly horizon: ReturnType<typeof uniform>;
   /** Brightness of the celestial highlight. */
   readonly moonlight: ReturnType<typeof uniform>;
-  /** 0 = untouched original palette, 1 = fully remapped to the brand ramp. */
-  readonly tint: ReturnType<typeof uniform>;
 }
-
-/** Page background — where the scene is darkest it resolves to this. */
-const PAGE = vec3(1.0, 1.0, 1.0);
-/** Lightest violet, for the low midtones. */
-const VIOLET_SOFT = vec3(0.906, 0.875, 1.0); // ~brand-100/200
-/** Mid violet, for the bright structure (cloud edges, water shimmer). */
-const VIOLET_MID = vec3(0.706, 0.608, 1.0); // ~brand-300/400
-/** Deepest accent, reserved for the very brightest points. */
-const VIOLET_DEEP = vec3(0.486, 0.227, 0.929); // brand-600
 
 /**
  * Build the colour node for a full-screen quad.
@@ -93,7 +75,6 @@ export function createBackdrop(options: BackdropOptions): {
   const gamma = uniform(0.87);
   const horizon = uniform(0.36);
   const moonlight = uniform(5.0);
-  const tint = uniform(1.0);
 
   const noiseTex = options.noise;
   const starTex = options.stars;
@@ -116,6 +97,16 @@ export function createBackdrop(options: BackdropOptions): {
       .add(float(0.0675).mul(texture(noiseTex, p.mul(8.02)).x)),
   );
 
+  // Framing. This is a CROP of the original scene — every colour below is untouched.
+  //
+  // Measured down the original frame, the scene is brightest at the horizon and falls away in both
+  // directions: deep night sky above, near-black water below. Shown at the original scale the hero
+  // spans all three, which is where the large dark mass at the top came from. Zooming in on the
+  // horizon keeps the bright band, the moon and the reflections, and simply leaves the dark
+  // extremes outside the frame.
+  const FOCUS_Y = 0.12; // the horizon, in scene units
+  const ZOOM = 0.35; // < 1 magnifies
+
   const scene = Fn(() => {
     const tick = mod(time.mul(0.4), 458.0).toVar();
 
@@ -125,6 +116,7 @@ export function createBackdrop(options: BackdropOptions): {
       .mul(vec2(screenSize.x.div(screenSize.y), float(-1.0)))
       .mul(2.0)
       .toVar();
+    p.assign(p.sub(vec2(0.0, FOCUS_Y)).mul(ZOOM).add(vec2(0.0, FOCUS_Y)));
 
     // Slow parallax drift, so nothing ever sits still.
     p.addAssign(
@@ -259,26 +251,12 @@ export function createBackdrop(options: BackdropOptions): {
     col.assign(pow(col, vec3(1.5, 1.2, 1.0)));
     col.assign(pow(col, vec3(float(1.0).div(gamma))));
 
-    // --- violet remap -------------------------------------------------------------------------
-    // Collapse the scene to luminance and re-expand it through the brand ramp. This is what turns
-    // a night scene into a light one without touching any of the motion above: darkness becomes the
-    // page colour, and the bright structure becomes violet.
-    const lum = clamp(dot(col, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0).toVar();
-    const ramp = mix(
-      mix(PAGE, VIOLET_SOFT, smoothstep(0.0, 0.2, lum)),
-      mix(VIOLET_MID, VIOLET_DEEP, smoothstep(0.55, 1.0, lum)),
-      smoothstep(0.16, 0.54, lum),
-    ).toVar();
-
-    // Keep it airy: even the deepest accent stays well short of full saturation.
-    const tinted = mix(col, ramp, tint).toVar();
-
-    // Fade up from the page colour on first paint, so there is no hard pop-in.
-    return vec4(mix(PAGE, tinted, smoothstep(0.0, 3.0, tick)), 1.0);
+    // Fade up from black on first paint, exactly as the original does.
+    return vec4(col, 1.0).mul(smoothstep(0.0, 3.0, tick));
   });
 
   return {
     colorNode: scene() as unknown as ColorNode,
-    uniforms: { gamma, horizon, moonlight, tint },
+    uniforms: { gamma, horizon, moonlight },
   };
 }
