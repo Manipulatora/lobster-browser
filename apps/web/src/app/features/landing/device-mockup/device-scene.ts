@@ -16,6 +16,8 @@ import {
   Color,
   DoubleSide,
   EquirectangularReflectionMapping,
+  LinearFilter,
+  LinearMipmapLinearFilter,
   Group,
   Mesh,
   MeshPhysicalMaterial,
@@ -47,16 +49,17 @@ const DRACO_PATH = '/draco/';
 const ease = (t: number): number => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
 /**
- * The editor's camera views were framed for a full browser window. This section is a 16:9 panel, so
- * every view is pulled back along its own view axis to keep the devices inside the frame.
+ * The editor's camera views frame each device tightly for a click-to-focus interaction. Here the
+ * sequence plays across a full-viewport stage and both devices need to stay in shot throughout, so
+ * every view is pulled back along its own axis.
  */
-const FRAMING = 1.34;
+const FRAMING = 1.72;
 
 /**
  * Pulling the camera back alone leaves the devices sitting low, because the editor's targets aim
  * above them. Dropping the aim point re-centres the pair in the panel.
  */
-const AIM_DROP = 0.72;
+const AIM_DROP = -0.15;
 
 /** Push a camera position away from its target, preserving direction. */
 function framed(position: Vec3, target: Vec3): [number, number, number] {
@@ -180,6 +183,11 @@ export class DeviceScene {
       // of the opposite edge into a visible seam.
       t.wrapS = t.wrapT = 1001; // ClampToEdgeWrapping
       t.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+      // These are 2560x1600 images shown a few hundred pixels wide, so they are heavily minified.
+      // Without mipmaps the row rules and small caps alias into a moire hatch across the screen.
+      t.generateMipmaps = true;
+      t.minFilter = LinearMipmapLinearFilter;
+      t.magFilter = LinearFilter;
       t.flipY = true; // correct here: the baked textures are stored pre-flipped
       t.needsUpdate = true;
       this.textures.push(t);
@@ -256,6 +264,57 @@ export class DeviceScene {
       duration,
       elapsed: 0,
     });
+  }
+
+  // ---- scroll-driven playback --------------------------------------------------------------
+
+  /**
+   * Drive the whole sequence from a single 0..1 scroll position.
+   *
+   * The beats are staged rather than simultaneous, so the laptop finishes opening before the phone
+   * starts to rise: 0.00-0.45 opens the lid, 0.45-0.55 holds, 0.55-1.00 raises the phone. The camera
+   * travels front -> macbook -> iphone across the same span. Because everything is a pure function
+   * of the scroll position, scrolling back up plays it in reverse for free.
+   */
+  setProgress(t: number): void {
+    const p = Math.min(Math.max(t, 0), 1);
+
+    const lidT = ease(clamp01(p / 0.45));
+    lerpPose(this.lid, LID_POSES.closed, LID_POSES.open, lidT);
+
+    const phoneT = ease(clamp01((p - 0.55) / 0.45));
+    lerpPose(this.phone, PHONE_POSES.facedown, PHONE_POSES.floating, phoneT);
+
+    // Two camera legs. The first moves in on the laptop as it opens; the second pulls back out so
+    // both devices are in shot while the phone rises. Ending on the tight phone framing cropped the
+    // laptop against the left edge, which read as a mistake rather than a choice.
+    if (p < 0.5) {
+      const k = ease(clamp01(p / 0.5));
+      this.lerpView(this.viewName('start'), this.viewName('macbook'), k);
+    } else {
+      const k = ease(clamp01((p - 0.5) / 0.5));
+      this.lerpView(this.viewName('macbook'), this.viewName('front'), k);
+    }
+  }
+
+  private lerpView(a: keyof typeof CAMERA_VIEWS, b: keyof typeof CAMERA_VIEWS, k: number): void {
+    const va = CAMERA_VIEWS[a];
+    const vb = CAMERA_VIEWS[b];
+    const pa = framed(va.position, va.target);
+    const pb = framed(vb.position, vb.target);
+    const ta = aimed(va.target);
+    const tb = aimed(vb.target);
+    this.camera.position.set(
+      pa[0] + (pb[0] - pa[0]) * k,
+      pa[1] + (pb[1] - pa[1]) * k,
+      pa[2] + (pb[2] - pa[2]) * k,
+    );
+    this.lookAt.set(
+      ta[0] + (tb[0] - ta[0]) * k,
+      ta[1] + (tb[1] - ta[1]) * k,
+      ta[2] + (tb[2] - ta[2]) * k,
+    );
+    this.camera.lookAt(this.lookAt);
   }
 
   // ---- interaction -----------------------------------------------------------------------------
@@ -389,6 +448,25 @@ export class DeviceScene {
     this.renderer.forceContextLoss();
   }
 }
+
+const clamp01 = (v: number): number => Math.min(Math.max(v, 0), 1);
+
+/** Interpolate an object between two authored poses. */
+function lerpPose(object: Object3D | undefined, from: Pose, to: Pose, k: number): void {
+  if (!object) return;
+  object.position.set(
+    from.position[0] + (to.position[0] - from.position[0]) * k,
+    from.position[1] + (to.position[1] - from.position[1]) * k,
+    from.position[2] + (to.position[2] - from.position[2]) * k,
+  );
+  _qa.set(from.quaternion[0], from.quaternion[1], from.quaternion[2], from.quaternion[3]);
+  _qb.set(to.quaternion[0], to.quaternion[1], to.quaternion[2], to.quaternion[3]);
+  object.quaternion.slerpQuaternions(_qa, _qb, k);
+  object.scale.set(...(from.scale as unknown as [number, number, number]));
+}
+
+const _qa = new Quaternion();
+const _qb = new Quaternion();
 
 function applyPose(object: Object3D, pose: Pose): void {
   object.position.set(...(pose.position as unknown as [number, number, number]));

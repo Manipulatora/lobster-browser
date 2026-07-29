@@ -28,7 +28,6 @@ import {
   exp,
   float,
   length,
-  mat2,
   max,
   mix,
   mod,
@@ -100,27 +99,12 @@ export function createBackdrop(options: BackdropOptions): {
       .mul(2.0)
       .toVar();
 
-    // camera drift
-    p.addAssign(
-      vec2(1.0, 3.0)
-        .mul(float(0.002))
-        .mul(float(2.0))
-        .mul(cos(tick).mul(float(2.0).add(vec2(0.0, 1.5)))),
-    );
-    p.addAssign(
-      vec2(1.0, 3.0)
-        .mul(float(0.001))
-        .mul(float(1.0))
-        .mul(cos(tick).mul(float(5.0).add(vec2(1.0, 4.5)))),
-    );
+    // The reference drifts the frame on two cosine terms and rotates it slightly. Both are removed
+    // here: they slide the horizon up and down and tilt it, and the drift pushes p beyond the
+    // scene's own bounds (see the pow guard below). Everything else still animates — the sea, the
+    // starfield, the sky gradient and the horizon glow are all driven by time — so the scene stays
+    // alive while the horizon itself stays level and pinned.
     p.mulAssign(float(0.95).add(float(0.05).mul(length(p))));
-
-    const an = float(0.03)
-      .mul(sin(float(0.1).mul(tick)))
-      .toVar();
-    const co = float(cos(an)).toVar();
-    const si = float(sin(an)).toVar();
-    p.assign(mat2(co, si.negate(), si, co).mul(p));
 
     // ---- water -------------------------------------------------------------------------------
     const q = vec2(p.x, float(1.0).negate()).div(p.y.sub(0.1)).toVar();
@@ -202,7 +186,11 @@ export function createBackdrop(options: BackdropOptions): {
       mix(
         sky,
         vec3(0.33, 0.34, 0.35),
-        pow(float(1.0).sub(max(0.0, p.y)), float(5.0).add(sin(time).mul(2.0))),
+        // max(0, ...) on the BASE as well as the argument. This section is wider than the demo's
+        // window, so the barrel term can carry p.y past 1 in the top corners; pow() of a negative
+        // base with a fractional exponent is undefined and returns NaN, which is what painted the
+        // black patch across the top of the hero.
+        pow(max(0.0, float(1.0).sub(max(0.0, p.y))), float(5.0).add(sin(time).mul(2.0))),
       ),
     );
     col.assign(mix(col, sky, smoothstep(0.0, 0.1, p.y)));

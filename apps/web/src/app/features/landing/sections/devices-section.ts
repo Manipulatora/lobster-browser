@@ -9,17 +9,23 @@ import {
   viewChild,
 } from '@angular/core';
 
-import type { DeviceScene, Focus } from '../device-mockup/device-scene';
+import type { DeviceScene } from '../device-mockup/device-scene';
 
 /**
- * Section two: an interactive 3D MacBook and iPhone showing the product.
+ * Section two: a MacBook and an iPhone, animated entirely by scroll position.
  *
- * Nothing 3D is downloaded until the section is actually approaching the viewport — three plus the
- * model and screen textures are ~2 MB, which has no business loading for someone who only reads the
- * hero. The section renders complete, styled and legible without any of it.
+ * The section is a tall scroll track wrapping a sticky, viewport-height stage. Progress through the
+ * track drives the sequence — the laptop opens first, then the phone rises — and because the scene
+ * is a pure function of that progress, scrolling back up plays it in reverse with no extra state.
+ *
+ * Nothing 3D loads until the section is near the viewport: three plus the model and screen textures
+ * are ~2 MB, which has no business loading for someone who only reads the hero.
  */
 @Component({
   selector: 'app-devices-section',
+  // Angular hosts default to display:inline, whose box does not reliably reflect the section's
+  // geometry — which breaks both getBoundingClientRect() and IntersectionObserver against it.
+  host: { class: 'block' },
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './devices-section.html',
 })
@@ -30,7 +36,6 @@ export class DevicesSection {
   private readonly document = inject(DOCUMENT);
 
   protected readonly loaded = signal(false);
-  protected readonly focus = signal<Focus>('');
 
   private scene?: DeviceScene;
   private cleanup?: () => void;
@@ -39,7 +44,6 @@ export class DevicesSection {
     afterNextRender(() => this.observe());
   }
 
-  /** Begin loading only once the section is near the viewport. */
   private observe(): void {
     const view = this.document.defaultView;
     if (!view) return;
@@ -53,7 +57,6 @@ export class DevicesSection {
         io.disconnect();
         void this.boot();
       },
-      // A generous margin so the model is usually ready by the time it is scrolled to.
       { rootMargin: '400px 0px' },
     );
     io.observe(this.host.nativeElement);
@@ -73,7 +76,6 @@ export class DevicesSection {
       desktopScreen: '/screens/desktop.png',
       phoneScreen: '/screens/mobile.png',
       isNarrow: () => view.matchMedia('(max-width: 768px)').matches,
-      onFocusChange: (f) => this.focus.set(f),
     });
     this.scene = scene;
 
@@ -83,58 +85,61 @@ export class DevicesSection {
     } catch {
       scene.dispose();
       this.scene = undefined;
-      return; // leave the static fallback in place
+      return;
     }
     scene.resize();
+
+    /** Map how far the sticky stage has travelled through its track onto 0..1. */
+    const progress = (): number => {
+      const rect = this.host.nativeElement.getBoundingClientRect();
+      const travel = rect.height - view.innerHeight;
+      if (travel <= 0) return 0;
+      return Math.min(Math.max(-rect.top / travel, 0), 1);
+    };
+
+    // Scroll events fire far more often than frames, so the read is coalesced into the next one.
+    let queued = false;
+    const onScroll = (): void => {
+      if (queued) return;
+      queued = true;
+      view.requestAnimationFrame(() => {
+        queued = false;
+        scene.setProgress(progress());
+      });
+    };
+
+    scene.setProgress(progress());
     this.loaded.set(true);
 
-    // Render ONLY while the section is on screen.
-    //
-    // The observer above is a one-shot load trigger; without this second one the scene kept drawing
-    // at full rate forever, competing with the hero's shader for the GPU even when scrolled far
-    // away. Two full-screen WebGL canvases running at once is the single biggest source of stutter
-    // on this page.
+    // Render only while on screen — otherwise this competed with the hero's shader for the GPU
+    // even when scrolled far away.
     const vis = new IntersectionObserver(
       (entries) => {
         if (entries.some((e) => e.isIntersecting) && !this.document.hidden) scene.start();
         else scene.stop();
       },
-      { threshold: 0.01 },
+      { threshold: 0 },
     );
     vis.observe(this.host.nativeElement);
 
-    const onMove = (e: PointerEvent): void => scene.onPointerMove(e.clientX, e.clientY);
-    const onLeave = (): void => scene.onPointerLeave();
-    const onClick = (e: PointerEvent): void => scene.onClick(e.clientX, e.clientY);
-    const onResize = (): void => scene.resize();
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape' && scene.currentFocus) scene.setFocus('');
+    const onResize = (): void => {
+      scene.resize();
+      scene.setProgress(progress());
     };
     const onVisibility = (): void => {
       if (this.document.hidden) scene.stop();
     };
 
-    stage.addEventListener('pointermove', onMove);
-    stage.addEventListener('pointerleave', onLeave);
-    stage.addEventListener('click', onClick);
+    view.addEventListener('scroll', onScroll, { passive: true });
     view.addEventListener('resize', onResize, { passive: true });
-    this.document.addEventListener('keydown', onKey);
     this.document.addEventListener('visibilitychange', onVisibility);
 
     this.cleanup = () => {
       vis.disconnect();
-      this.document.removeEventListener('visibilitychange', onVisibility);
-      stage.removeEventListener('pointermove', onMove);
-      stage.removeEventListener('pointerleave', onLeave);
-      stage.removeEventListener('click', onClick);
+      view.removeEventListener('scroll', onScroll);
       view.removeEventListener('resize', onResize);
-      this.document.removeEventListener('keydown', onKey);
+      this.document.removeEventListener('visibilitychange', onVisibility);
     };
-  }
-
-  /** Buttons give the same control as clicking the models — and make it reachable by keyboard. */
-  protected select(target: Focus): void {
-    this.scene?.setFocus(this.focus() === target ? '' : target);
   }
 
   ngOnDestroy(): void {
