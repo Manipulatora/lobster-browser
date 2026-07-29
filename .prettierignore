@@ -4,6 +4,8 @@ build
 target
 coverage
 .angular
+# Vendored Draco decoder (upstream three.js build artefact)
+apps/web/public/draco
 engines/bin
 engines/cache
 *.md

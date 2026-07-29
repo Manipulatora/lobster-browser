@@ -1,0 +1,92 @@
+<section id="devices" class="section border-t-[0.5px] border-hairline bg-surface-soft">
+  <div class="container-page">
+    <div class="max-w-2xl">
+      <span class="eyebrow">Everywhere you work</span>
+      <h2 class="section-title mt-4">One identity per profile, on every machine you run.</h2>
+      <p class="section-lede mt-5">
+        The desktop app manages profiles, proxies and templates. Every profile launches into Lobium
+        with its fingerprint already applied — nothing is injected after the page starts loading.
+      </p>
+    </div>
+
+    <!-- Stage. Sized by aspect ratio so it reserves its space before the canvas exists and the
+         page never reflows when the model finishes loading. -->
+    <div
+      #stage
+      class="relative mt-14 aspect-[16/10] w-full overflow-hidden rounded-panel border-[0.5px] border-hairline bg-surface sm:aspect-[16/9]"
+    >
+      <canvas
+        #canvas
+        class="absolute inset-0 h-full w-full transition-opacity duration-700"
+        [class.opacity-0]="!loaded()"
+        [class.opacity-100]="loaded()"
+        [class.cursor-pointer]="loaded()"
+      ></canvas>
+
+      <!-- Shown until the scene is ready, and permanently where WebGL is unavailable. -->
+      @if (!loaded()) {
+        <div class="absolute inset-0 flex items-center justify-center">
+          <div class="flex flex-col items-center gap-4">
+            <img
+              src="/screens/desktop.png"
+              alt="The Lobster desktop app, showing a list of browser profiles with their operating
+                   system, proxy location and fingerprint status."
+              class="w-[68%] rounded-lg border-[0.5px] border-hairline shadow-soft"
+              loading="lazy"
+              decoding="async"
+            />
+            <p class="text-xs text-faint">Loading interactive view…</p>
+          </div>
+        </div>
+      }
+    </div>
+
+    <!-- Equivalent controls: the models respond to clicks, but that is unreachable by keyboard,
+         so the same state changes are available as real buttons. -->
+    @if (loaded()) {
+      <div class="mt-6 flex flex-wrap items-center gap-3">
+        <button type="button" class="btn btn-sm btn-secondary" (click)="select('macbook')">
+          {{ focus() === 'macbook' ? 'Close the desktop' : 'Open the desktop app' }}
+        </button>
+        <button type="button" class="btn btn-sm btn-secondary" (click)="select('phone')">
+          {{ focus() === 'phone' ? 'Put the phone down' : 'Raise the phone' }}
+        </button>
+        <p class="text-xs text-faint">Or click a device. Press Escape to reset.</p>
+      </div>
+    }
+
+    <!-- CC BY 4.0 requires visible attribution for the two Sketchfab models. -->
+    <p class="mt-8 text-[0.6875rem] leading-relaxed text-faint">
+      Device models by
+      <a
+        href="https://sketchfab.com/3d-models/macbook-pro-13-inch-2020-efab224280fd4c3993c808107f7c0b38"
+        rel="noopener noreferrer nofollow"
+        target="_blank"
+        class="underline underline-offset-2 hover:text-brand-600"
+        >timblewee</a
+      >
+      and
+      <a
+        href="https://sketchfab.com/3d-models/apple-iphone-15-pro-max-black-df17520841214c1792fb8a44c6783ee7"
+        rel="noopener noreferrer nofollow"
+        target="_blank"
+        class="underline underline-offset-2 hover:text-brand-600"
+        >polyman Studio</a
+      >, licensed
+      <a
+        href="https://creativecommons.org/licenses/by/4.0/"
+        rel="noopener noreferrer nofollow"
+        target="_blank"
+        class="underline underline-offset-2 hover:text-brand-600"
+        >CC BY 4.0</a
+      >. Scene adapted from
+      <a
+        href="https://github.com/repalash/threepipe-device-mockup-codrops"
+        rel="noopener noreferrer nofollow"
+        target="_blank"
+        class="underline underline-offset-2 hover:text-brand-600"
+        >repalash's device mockup</a
+      >.
+    </p>
+  </div>
+</section>
