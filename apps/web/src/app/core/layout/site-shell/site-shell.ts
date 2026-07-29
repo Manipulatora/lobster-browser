@@ -21,7 +21,10 @@ import { SiteFooter } from '../site-footer/site-footer';
         Skip to content
       </a>
       <app-site-header />
-      <main id="main" class="flex-1">
+      <!-- The header is fixed and transparent, so ordinary pages need to clear its height.
+           A full-bleed section (the hero) opts out with a -mt-16 and supplies its own top
+           padding, letting its backdrop run up behind the nav. -->
+      <main id="main" class="flex-1 pt-16">
         <router-outlet />
       </main>
       <app-site-footer />

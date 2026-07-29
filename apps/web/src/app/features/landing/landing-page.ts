@@ -1,14 +1,14 @@
 import { ChangeDetectionStrategy, Component } from '@angular/core';
 
+import { HeroSection } from './sections/hero-section';
+
 /**
- * Landing page — intentionally empty.
- *
- * Compose it from section components under `./sections/`, adding each to `imports` and to the
- * template below.
+ * Landing page. Sections live in ./sections/ and are composed here in page order.
  */
 @Component({
   selector: 'app-landing-page',
+  imports: [HeroSection],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  template: ``,
+  template: `<app-hero-section />`,
 })
 export class LandingPage {}
