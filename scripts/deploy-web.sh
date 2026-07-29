@@ -34,7 +34,7 @@ sudo systemctl reload nginx
 
 echo "==> Verifying"
 for path in / /pricing /auth/sign-in; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1$path")
+  code=$(curl -s -o /dev/null -w "%{http_code}" -L --resolve "lobrowser.com:443:127.0.0.1" --resolve "lobrowser.com:80:127.0.0.1" "http://lobrowser.com$path")
   printf '    %-20s %s\n' "$path" "$code"
   [[ "$code" == "200" ]] || { echo "!! $path returned $code" >&2; exit 1; }
 done
