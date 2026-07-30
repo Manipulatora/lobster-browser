@@ -5,6 +5,7 @@ import {
   Injectable,
   afterNextRender,
   inject,
+  input,
   signal,
 } from '@angular/core';
 
@@ -37,8 +38,13 @@ export class HeaderTheme {
 }
 
 /**
- * Applied to any section with a dark backdrop: while that section sits under the header, the header
- * renders its links light. Used as a host directive, so a section opts in with one line.
+ * Applied to a section with a dark backdrop: while that section sits under the header, the header
+ * renders its links light.
+ *
+ * Takes a boolean so a section whose backdrop can be switched off toggles the header tint with the
+ * same flag, instead of the two drifting apart:
+ *
+ *     <section [appHeaderBackdropTint]="backdrop">
  */
 @Directive({ selector: '[appHeaderBackdropTint]' })
 export class HeaderBackdropTint {
@@ -46,11 +52,16 @@ export class HeaderBackdropTint {
   private readonly theme = inject(HeaderTheme);
   private readonly document = inject(DOCUMENT);
 
+  /** Defaults to on, so a bare attribute still means "this section is dark". */
+  readonly enabled = input(true, { alias: 'appHeaderBackdropTint' });
+
   private claimed = false;
   private teardown?: () => void;
 
   constructor() {
-    afterNextRender(() => this.watch());
+    afterNextRender(() => {
+      if (this.enabled()) this.watch();
+    });
   }
 
   /**

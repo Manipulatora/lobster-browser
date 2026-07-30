@@ -1,29 +1,36 @@
-<!-- -mt-16 cancels the shell's header offset so the backdrop runs to the very top of the page,
-     behind the transparent nav; the padding below restores breathing room for the content. -->
+<!-- -mt-16 cancels the shell's header offset so a backdrop can run to the very top of the page,
+     behind the transparent nav; the padding below restores breathing room for the content.
+
+     Everything conditional here hangs off `backdrop` in hero-section.ts, which is currently false —
+     the section renders blank, ready for a different treatment. -->
 <section
+  [appHeaderBackdropTint]="backdrop"
   class="relative isolate -mt-16 flex min-h-[42rem] items-center overflow-hidden lg:min-h-[46rem]"
 >
-  <!-- Layer 1: a still stand-in in the scene's own colours, so there is no white flash before the
-       shader paints and no empty box where WebGL is unavailable. -->
-  <div class="absolute inset-0 -z-20 bg-hero-fallback"></div>
+  @if (backdrop) {
+    <!-- Layer 1: a still stand-in in the scene's own colours, so there is no white flash before the
+         shader paints and no empty box where WebGL is unavailable. -->
+    <div class="absolute inset-0 -z-20 bg-hero-fallback"></div>
 
-  <!-- Layer 2: the animated shader canvas, fading in once it has a frame to show. -->
-  <app-hero-backdrop class="absolute inset-0 -z-10" />
-
-  <!-- No scrims. The bottom fade was washing out the sea, which is the best part of the scene,
-       and the sky behind the copy is already dark enough for white type to hold up. -->
+    <!-- Layer 2: the animated shader canvas, fading in once it has a frame to show. -->
+    <app-hero-backdrop class="absolute inset-0 -z-10" />
+  }
 
   <div class="container-page relative w-full pb-24 pt-40 sm:pt-44">
     <div class="max-w-2xl">
       <h1
-        class="on-scene text-balance text-4xl leading-[1.06] tracking-[-0.03em] text-white sm:text-5xl lg:text-[3.6rem]"
+        class="text-balance text-4xl leading-[1.06] tracking-[-0.03em] sm:text-5xl lg:text-[3.6rem]"
+        [class]="backdrop ? 'on-scene text-white' : 'text-ink'"
       >
         Every profile is a
-        <span class="block text-brand-200">different, believable machine.</span>
+        <span class="block" [class]="backdrop ? 'text-brand-200' : 'text-gradient-brand'">
+          different, believable machine.
+        </span>
       </h1>
 
       <p
-        class="on-scene mt-7 max-w-xl text-pretty text-base leading-relaxed text-white/85 sm:text-lg"
+        class="mt-7 max-w-xl text-pretty text-base leading-relaxed sm:text-lg"
+        [class]="backdrop ? 'on-scene text-white/85' : 'text-muted'"
       >
         Lobster gives each browser profile a coherent device and network identity — screen, GPU,
         fonts, timezone and locale that agree with one another. It is applied in C++ inside our own
@@ -34,7 +41,12 @@
         <app-shiny-cta link="/auth/sign-up">Get started</app-shiny-cta>
         <a
           routerLink="/pricing"
-          class="on-scene text-[0.9375rem] text-white/85 underline-offset-4 transition-colors hover:text-white hover:underline"
+          class="text-[0.9375rem] underline-offset-4 transition-colors hover:underline"
+          [class]="
+            backdrop
+              ? 'on-scene text-white/85 hover:text-white'
+              : 'text-ink-soft hover:text-brand-700'
+          "
         >
           View pricing
         </a>
