@@ -235,6 +235,11 @@ async function streamEvents(signal: AbortSignal): Promise<void> {
       refreshConfig = true;
     } finally {
       streamConnected = false;
+      // Re-read bridge.json after ANY stream end, not only after a throw. A sidecar restart closes the
+      // SSE response cleanly, so the read loop simply finishes and no exception is raised — leaving the
+      // cached credentials in place, the rotation undetected, and the in-flight run hanging forever
+      // with no terminal event. Reconnecting is exactly when the config is most likely to have changed.
+      refreshConfig = true;
     }
     await retryDelay(signal);
   }

@@ -76,11 +76,7 @@ test('events arriving before POST /run returns are correlated and delivered', as
       return json({ origin: 'http://127.0.0.1:40102', token: 'token-two', profileId: 'p1' });
     }
     if (target.includes('/events?')) {
-      return eventsResponse(
-        init.signal,
-        [`id: 1\ndata: ${JSON.stringify(started)}\n\n`],
-        false,
-      );
+      return eventsResponse(init.signal, [`id: 1\ndata: ${JSON.stringify(started)}\n\n`], false);
     }
     if (target.endsWith('/run')) {
       await new Promise((resolve) => setTimeout(resolve, 10));

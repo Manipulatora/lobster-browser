@@ -160,7 +160,26 @@ body {
 .md ul,
 .md ol {
   margin: 8px 0;
-  padding-left: 20px;
+  padding-left: 22px;
+}
+/* Tailwind's preflight resets list-style to none, which silently stripped the bullets and NUMBERS
+   from every list the model produced — "step 2" rendered as an unlabelled indented line. */
+.md ul {
+  list-style: disc outside;
+}
+.md ol {
+  list-style: decimal outside;
+}
+.md ul ul {
+  list-style: circle outside;
+}
+.md li::marker {
+  color: var(--ink-soft);
+}
+/* A task list is checkbox-labelled, so its bullet is noise. */
+.md li:has(> input[type='checkbox']) {
+  list-style: none;
+  margin-left: -18px;
 }
 .md li {
   margin: 3px 0;
@@ -200,6 +219,85 @@ body {
   border: 0;
   border-top: 1px solid var(--line);
   margin: 12px 0;
+}
+
+/* Tables. Wide ones scroll inside their own box so a table can never push the whole conversation
+   sideways — the panel is narrow and models emit wide tables constantly. */
+.md .lobee-table {
+  margin: 10px 0;
+  overflow-x: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+}
+.md table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+}
+.md th,
+.md td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+.md th {
+  background: var(--violet-050);
+  font-weight: 600;
+  color: var(--ink);
+}
+.md tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* Code blocks carry a language label and a copy button, so answers containing code are usable
+   rather than merely visible. */
+.md .lobee-code {
+  margin: 10px 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.md .lobee-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 4px 12px;
+  background: var(--violet-050);
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.md .lobee-code-head button {
+  border: 0;
+  background: none;
+  color: var(--violet-600);
+  font-size: 11px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.md .lobee-code-head button:hover {
+  background: var(--violet-100);
+}
+.md .lobee-code pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+.md img {
+  max-width: 100%;
+  border-radius: 8px;
+  margin: 6px 0;
+}
+.md del {
+  opacity: 0.7;
+}
+.md li input[type='checkbox'] {
+  margin-right: 6px;
+  vertical-align: middle;
 }
 
 /* Quiet scrollbars */

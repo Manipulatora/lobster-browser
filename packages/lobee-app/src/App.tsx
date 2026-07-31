@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { ChevronDownIcon, MagnifyingGlassIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { brandIcon } from './icons';
 import { renderMarkdown } from './md';
-import { fetchModels, fetchStatus, resumeTask, runTask, sendInput } from './bridge';
+import { fetchModels, fetchStatus, resumeTask, runTask, sendInput, stopRun } from './bridge';
 import {
   ALL_EFFORTS,
   EFFORT_LABEL,
@@ -44,6 +44,8 @@ interface Turn {
   statusText: string;
   steps: Map<number, Step>;
   answer: string;
+  /** Why the run failed. Kept apart from `answer` so a failure never renders as a reply. */
+  failure: string;
   await: AwaitPrompt | null;
   inputError: string;
   animateAnswer: boolean;
@@ -110,13 +112,18 @@ function applyEvent(turn: Turn, ev: AgentEvent): Turn {
       };
     case 'run.finished': {
       const ok = ev.status === 'done';
-      const answer = ev.result || ev.error || turn.answer;
+      // An error is NOT an answer. Keeping them in the same field rendered failures as though the
+      // model had replied — Markdown-formatted, indistinguishable from a real response, with nothing
+      // to retry from. They are separate fields so the UI can say plainly that something went wrong.
+      const answer = ok ? ev.result || turn.answer : turn.answer;
+      const failure = ok ? '' : ev.error || ev.result || 'The run ended without a result.';
       return {
         ...turn,
         steps: settleThinking(turn.steps),
         status: ok ? 'done' : ev.status === 'error' ? 'error' : 'stopped',
         statusText: ok ? 'Done' : ev.status === 'error' ? 'Failed' : 'Stopped',
         answer,
+        failure,
         await: null,
         inputError: '',
         animateAnswer: ok && !!answer && (turn.status !== 'done' || turn.answer !== answer),
@@ -138,7 +145,8 @@ function storedToTurn(stored: StoredTurn): Turn {
     statusText:
       stored.status === 'done' ? 'Done' : stored.status === 'error' ? 'Failed' : 'Stopped',
     steps: new Map(),
-    answer: stored.answer,
+    answer: stored.status === 'done' ? stored.answer : '',
+    failure: stored.status === 'done' ? '' : stored.answer,
     await: null,
     inputError: '',
     animateAnswer: false,
@@ -163,7 +171,12 @@ function snapshotToTurn(snapshot: AgentRunSnapshot, id: number): Turn {
               ? 'Failed'
               : 'Stopped',
     steps: new Map(),
-    answer: snapshot.result || snapshot.error || '',
+    answer:
+      snapshot.status === 'error' || snapshot.status === 'stopped' ? '' : snapshot.result || '',
+    failure:
+      snapshot.status === 'error' || snapshot.status === 'stopped'
+        ? snapshot.error || snapshot.result || ''
+        : '',
     await:
       snapshot.status === 'awaiting_input' && snapshot.awaitingPrompt
         ? {
@@ -185,7 +198,7 @@ function toStoredTurn(turn: Turn): StoredTurn | null {
     ...(turn.startedAt ? { startedAt: turn.startedAt } : {}),
     task: turn.task,
     status: turn.status,
-    answer: turn.answer,
+    answer: turn.answer || turn.failure,
   };
 }
 
@@ -340,6 +353,26 @@ function TurnView({
       </div>
       {turn.await && <AwaitBox turn={turn} onReply={onReply} />}
       {turn.answer && <ProgressiveMarkdown text={turn.answer} animate={turn.animateAnswer} />}
+      {turn.failure && (
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[12.5px] text-rose-900"
+        >
+          <span aria-hidden="true" className="mt-px shrink-0 font-semibold">
+            !
+          </span>
+          <span className="min-w-0">{turn.failure}</span>
+        </div>
+      )}
+      {turn.answer && !turn.animateAnswer && (
+        <button
+          type="button"
+          onClick={() => void navigator.clipboard?.writeText(turn.answer)}
+          className="self-start rounded-lg px-2 py-1 text-[11.5px] text-ink-soft transition-colors hover:bg-violet-50 hover:text-violet-700"
+        >
+          Copy
+        </button>
+      )}
     </div>
   );
 }
@@ -683,6 +716,7 @@ export function App() {
       statusText: 'Working…',
       steps: new Map(),
       answer: '',
+      failure: '',
       await: null,
       inputError: '',
       animateAnswer: false,
@@ -710,15 +744,28 @@ export function App() {
     <div className="flex h-screen flex-col bg-white">
       <header className="flex items-center justify-between border-b border-line px-3.5 py-2">
         <span className="text-[0.8125rem] font-medium text-ink">Lobee</span>
-        <button
-          type="button"
-          onClick={startNewChat}
-          disabled={busy || turns.length === 0}
-          title="Start a new conversation"
-          className="rounded-lg px-2 py-1 text-[0.75rem] text-ink-soft transition-colors hover:bg-violet-50 hover:text-violet-700 disabled:pointer-events-none disabled:opacity-40"
-        >
-          New chat
-        </button>
+        {busy ? (
+          // The sidecar has always exposed POST /stop and the bridge has always had stopRun(); the
+          // panel simply never called it, so a long agent run could not be cancelled from the UI.
+          <button
+            type="button"
+            onClick={stopRun}
+            title="Stop the current run"
+            className="rounded-lg border border-rose-200 px-2 py-1 text-[0.75rem] text-rose-700 transition-colors hover:bg-rose-50"
+          >
+            Stop
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={startNewChat}
+            disabled={turns.length === 0}
+            title="Start a new conversation"
+            className="rounded-lg px-2 py-1 text-[0.75rem] text-ink-soft transition-colors hover:bg-violet-50 hover:text-violet-700 disabled:pointer-events-none disabled:opacity-40"
+          >
+            New chat
+          </button>
+        )}
       </header>
       <main
         ref={streamRef}
