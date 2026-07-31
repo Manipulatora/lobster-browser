@@ -15,6 +15,8 @@ export interface ExecOutcome {
   terminal?: { success: boolean; summary: string };
   needsInput?: { prompt: string; sensitive?: boolean; targetId?: number };
   extracted?: string;
+  /** Structured rows the run accumulates into its dataset. */
+  collected?: { rows: Array<Record<string, string>>; columns?: string[] };
   /** Base64 PNG requested for the next model step; never persisted. */
   image?: string;
 }
@@ -363,6 +365,14 @@ export async function executeAction(
         return {
           outcome: `extracted ${extracted.length} characters of page text for: ${action.description}${truncated ? ' (page was longer than the limit; the tail was cut)' : ''}`,
           extracted,
+        };
+      }
+      case 'collect': {
+        // The rows are already validated and bounded by the parser; the loop owns accumulation and
+        // dedupe, so execution here is just acknowledgement.
+        return {
+          outcome: `collected ${action.rows.length} row(s)`,
+          collected: { rows: action.rows, ...(action.columns ? { columns: action.columns } : {}) },
         };
       }
       case 'browser_config': {

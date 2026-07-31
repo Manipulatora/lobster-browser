@@ -258,6 +258,10 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     /** The call id the NEXT observation answers, so the pairing providers require stays intact. */
     let lastToolCallId: string | undefined;
     let readEvidence: string[] = [];
+    /** Rows the run has collected, in order, deduplicated by their full content. */
+    const dataset: Array<Record<string, string>> = [];
+    const datasetSeen = new Set<string>();
+    let datasetColumns: string[] = [];
     let siteMemoryHost = '';
     let siteMemoryContext = '';
     let pendingImage: string | undefined;
@@ -562,9 +566,16 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       await appendSafe(memory, runId, step, raw.url, safeAction, outcome.outcome, now, log);
 
       if (outcome.terminal) {
+        // A collected dataset is the ACTUAL result of a scrape. Appending it verbatim means a
+        // hundred-row table is not squeezed through a 4,000-char summary the model has to re-type
+        // from memory — which is where transcription errors and dropped pages came from.
+        const summary = outcome.terminal.summary || outcome.outcome;
         return outcome.terminal.success
-          ? await finish('done', outcome.terminal.summary || outcome.outcome)
-          : await finish('error', '', outcome.terminal.summary || outcome.outcome);
+          ? await finish(
+              'done',
+              dataset.length ? `${summary}\n\n${renderDataset(dataset, datasetColumns)}` : summary,
+            )
+          : await finish('error', '', summary);
       }
       history.push(`${step}. ${outcome.outcome}`);
       // Keep a bounded evidence ledger across pagination. Unlike one-shot read state, page-one values
@@ -578,6 +589,26 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           description,
           outcome.extracted,
         );
+      }
+      if (outcome.collected) {
+        if (outcome.collected.columns?.length) datasetColumns = outcome.collected.columns;
+        let added = 0;
+        for (const row of outcome.collected.rows) {
+          if (dataset.length >= 5_000) break;
+          // Dedupe on the whole row: re-visiting page 1 after paginating back is normal, and silently
+          // doubling every row is worse than dropping a genuine duplicate.
+          const key = JSON.stringify(row);
+          if (datasetSeen.has(key)) continue;
+          datasetSeen.add(key);
+          dataset.push(row);
+          added += 1;
+          for (const column of Object.keys(row)) {
+            if (!datasetColumns.includes(column)) datasetColumns.push(column);
+          }
+        }
+        const skipped = outcome.collected.rows.length - added;
+        history[history.length - 1] =
+          `${step}. collected ${added} new row(s)${skipped > 0 ? `, ${skipped} duplicate(s) ignored` : ''} — ${dataset.length} total so far`;
       }
       if (action.kind === 'extract') lastExtractedView = observationFingerprint(raw);
       if (outcome.image) pendingImage = outcome.image;
@@ -776,6 +807,27 @@ function appendExtractedEvidence(
     next[0] = clip(next[0], MAX_EXTRACT_LEDGER_CHARS);
   }
   return next;
+}
+
+/**
+ * Render the collected rows as a Markdown table, which the panel now renders properly and which the
+ * user can copy straight into a spreadsheet. Falls back to listing rows when there are too many
+ * columns for a table to stay readable.
+ */
+function renderDataset(
+  rows: ReadonlyArray<Record<string, string>>,
+  columns: readonly string[],
+): string {
+  const cols = columns.length ? columns : [...new Set(rows.flatMap((row) => Object.keys(row)))];
+  const header = `Collected ${rows.length} row(s):`;
+  if (cols.length === 0) return header;
+  const escape = (value: string): string => value.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+  const lines = [
+    `| ${cols.join(' | ')} |`,
+    `| ${cols.map(() => '---').join(' | ')} |`,
+    ...rows.map((row) => `| ${cols.map((c) => escape(row[c] ?? '')).join(' | ')} |`),
+  ];
+  return `${header}\n\n${lines.join('\n')}`;
 }
 
 function hostOf(url: string): string {

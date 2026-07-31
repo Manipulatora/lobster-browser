@@ -17,6 +17,7 @@ const KINDS = [
   'tab',
   'wait',
   'extract',
+  'collect',
   'remember',
   'browser_config',
   'ask',
@@ -82,6 +83,19 @@ export const ACT_TOOL = {
         maxLength: 1000,
         description: 'remember: the durable fact value.',
       },
+      columns: {
+        type: 'array',
+        items: { type: 'string', maxLength: 100 },
+        maxItems: 40,
+        description: 'collect: column names, given once on the first collect of the run.',
+      },
+      rows: {
+        type: 'array',
+        maxItems: 200,
+        items: { type: 'object', additionalProperties: { type: 'string' } },
+        description:
+          'collect: rows to add to the dataset, each a map of column name to cell value. Values must come verbatim from the page.',
+      },
       op: {
         type: 'string',
         enum: BROWSER_CONFIG_OPS,
@@ -137,6 +151,7 @@ export function buildActionReference(opts: { vision: boolean; uploads: boolean }
     '- key {key}; scroll {direction,amount?,id?}; drag {fromId,toId}',
     '- navigate {url}; back {}; tab {operation,index?,url?}; wait {ms?}',
     '- extract {description}: read the current page as structured text (tables keep their rows, lists their items). Use it when the answer is longer than the element list shows.',
+    '- collect {rows, columns?}: THE way to scrape. Add rows to a dataset the harness keeps for you — deduplicated, safe across pagination, and returned in full at the end. Give `columns` once on the first call. Collect each page as you go, then click Next and collect again; never re-type collected data into your final answer, and never invent a value you did not see on the page.',
   ];
   if (opts.vision) {
     lines.push(
@@ -352,6 +367,32 @@ export function parseAction(raw: RawActionInput): ParseActionResult {
       return description
         ? ok({ kind, description, ...note(raw) })
         : bad('extract requires "description"');
+    }
+    case 'collect': {
+      const rows = Array.isArray(raw.rows) ? raw.rows : null;
+      if (!rows || rows.length === 0) return bad('collect requires a non-empty "rows" array');
+      if (rows.length > 200) return bad('collect accepts at most 200 rows per call');
+      const columns = strings(raw.columns, 40);
+      const clean: Array<Record<string, string>> = [];
+      for (const row of rows) {
+        if (!row || typeof row !== 'object' || Array.isArray(row)) {
+          return bad('each collect row must be an object of column -> value');
+        }
+        const entry: Record<string, string> = {};
+        for (const [key, value] of Object.entries(row as Record<string, unknown>)) {
+          if (key.length > 100) return bad('collect column names must be 100 characters or fewer');
+          // Coerce numbers/booleans rather than rejecting: a model emitting a bare price is being
+          // reasonable, and failing the whole batch over it wastes a scraped page.
+          if (typeof value === 'string') entry[key] = value.slice(0, 2_000);
+          else if (typeof value === 'number' || typeof value === 'boolean')
+            entry[key] = String(value);
+          else if (value === null || value === undefined) entry[key] = '';
+          else return bad(`collect value for "${key}" must be text, number, or boolean`);
+        }
+        if (Object.keys(entry).length > 40) return bad('collect rows may have at most 40 columns');
+        clean.push(entry);
+      }
+      return ok({ kind, rows: clean, ...(columns ? { columns } : {}), ...note(raw) });
     }
     case 'remember': {
       const factKey = str(raw.factKey, 100);

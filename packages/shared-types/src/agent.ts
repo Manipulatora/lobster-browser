@@ -181,6 +181,23 @@ export type AgentAction =
   | { kind: 'wait'; ms?: number; note?: string }
   /** Pull requested info out of the current page into the run result (no page mutation). */
   | { kind: 'extract'; description: string; note?: string }
+  /**
+   * Add rows to the run's dataset — the scraping primitive.
+   *
+   * `extract` returns prose the model must re-type into its final answer, which is where scraped
+   * values get transcribed wrong and where earlier pages fall out of a bounded text ledger. `collect`
+   * instead accumulates STRUCTURED rows the harness owns: they are deduplicated, survive pagination,
+   * and are returned verbatim at the end, so a hundred-row scrape is not limited by what fits in a
+   * summary.
+   */
+  | {
+      kind: 'collect';
+      /** Column names, given once on the first call and reused for the rest of the run. */
+      columns?: string[];
+      /** Rows to append; each is a map of column name → cell value. */
+      rows: Array<Record<string, string>>;
+      note?: string;
+    }
   /** Persist a durable per-domain fact to this profile's memory (agent-authored learning). */
   | { kind: 'remember'; factKey: string; factValue: string; note?: string }
   /**
