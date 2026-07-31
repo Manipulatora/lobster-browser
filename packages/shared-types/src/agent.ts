@@ -310,6 +310,13 @@ export interface AgentStartParams {
   /** Natural-language task, e.g. "log into example.com and download the latest invoice". */
   task: string;
   /**
+   * The conversation this run belongs to. The sidecar loads that thread's prior turns as real
+   * assistant/user messages and appends this exchange when the run ends — this is what makes a
+   * follow-up ("do that again for the other site") resolvable. A new id starts a fresh conversation;
+   * omitting it runs with no history at all.
+   */
+  threadId?: string;
+  /**
    * Absolute per-profile agent memory directory (`<userDataDir>/agent`). The Rust core owns the
    * profiles dir and passes it; the sidecar resolves memory ONLY from here, so one profile can never
    * read another's memory (isolation is structural, not a runtime check).

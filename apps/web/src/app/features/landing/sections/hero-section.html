@@ -2,7 +2,7 @@
      behind the transparent nav; the padding below restores breathing room for the content.
 
      Everything conditional here hangs off `backdrop` in hero-section.ts, which is currently false —
-     the section renders blank, ready for a different treatment. -->
+     the section keeps its light treatment while the product film sits beside the copy. -->
 <section
   [appHeaderBackdropTint]="backdrop"
   class="relative isolate -mt-16 flex min-h-[42rem] items-center overflow-hidden lg:min-h-[46rem]"
@@ -17,39 +17,81 @@
   }
 
   <div class="container-page relative w-full pb-24 pt-40 sm:pt-44">
-    <div class="max-w-2xl">
-      <h1
-        class="text-balance text-4xl leading-[1.06] tracking-[-0.03em] sm:text-5xl lg:text-[3.6rem]"
-        [class]="backdrop ? 'on-scene text-white' : 'text-ink'"
-      >
-        Every profile is a
-        <span class="block" [class]="backdrop ? 'text-brand-200' : 'text-gradient-brand'">
-          different, believable machine.
-        </span>
-      </h1>
-
-      <p
-        class="mt-7 max-w-xl text-pretty text-base leading-relaxed sm:text-lg"
-        [class]="backdrop ? 'on-scene text-white/85' : 'text-muted'"
-      >
-        Lobster gives each browser profile a coherent device and network identity — screen, GPU,
-        fonts, timezone and locale that agree with one another. It is applied in C++ inside our own
-        Chromium kernel, never by a JavaScript overlay that anti-bot systems can read.
-      </p>
-
-      <div class="mt-10 flex flex-wrap items-center gap-5">
-        <app-shiny-cta link="/auth/sign-up">Get started</app-shiny-cta>
-        <a
-          routerLink="/pricing"
-          class="text-[0.9375rem] underline-offset-4 transition-colors hover:underline"
-          [class]="
-            backdrop
-              ? 'on-scene text-white/85 hover:text-white'
-              : 'text-ink-soft hover:text-brand-700'
-          "
+    <div
+      class="grid items-center gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(28rem,0.92fr)] lg:gap-6 xl:gap-10"
+    >
+      <div class="max-w-2xl">
+        <h1
+          class="text-balance text-4xl leading-[1.06] tracking-[-0.03em] sm:text-5xl lg:text-[3.6rem]"
+          [class]="backdrop ? 'on-scene text-white' : 'text-ink'"
         >
-          View pricing
-        </a>
+          Manage multiple accounts securely.
+          <span class="block" [class]="backdrop ? 'text-brand-200' : 'text-gradient-brand'">
+            Save time with intelligent agents.
+          </span>
+        </h1>
+
+        <p
+          class="mt-7 max-w-xl text-pretty text-base leading-relaxed sm:text-lg"
+          [class]="backdrop ? 'on-scene text-white/85' : 'text-muted'"
+        >
+          Create and manage browser profiles at scale—without operational friction, IP bans, or
+          unnecessary overhead.
+        </p>
+
+        <div class="mt-10 flex flex-wrap items-center gap-5">
+          <app-shiny-cta link="/auth/sign-up">Get started</app-shiny-cta>
+          <a
+            routerLink="/pricing"
+            class="text-[0.9375rem] underline-offset-4 transition-colors hover:underline"
+            [class]="
+              backdrop
+                ? 'on-scene text-white/85 hover:text-white'
+                : 'text-ink-soft hover:text-brand-700'
+            "
+          >
+            View pricing
+          </a>
+        </div>
+      </div>
+
+      <div
+        class="relative isolate mx-auto w-full max-w-[36rem] overflow-hidden lg:mx-0 lg:justify-self-end"
+      >
+        <video
+          class="block aspect-square w-full object-contain motion-reduce:hidden"
+          autoplay
+          muted
+          loop
+          playsinline
+          preload="metadata"
+          poster="/video/lobster-hero-v3-poster.webp"
+          width="1300"
+          height="1300"
+          aria-hidden="true"
+          tabindex="-1"
+        >
+          <source src="/video/lobster-hero-v3.webm" type="video/webm" />
+        </video>
+        <img
+          class="hidden aspect-square w-full object-contain motion-reduce:block"
+          src="/video/lobster-hero-v3-poster.webp"
+          alt=""
+          width="900"
+          height="900"
+        />
+        <!-- The matte is drawn by the browser, so the outer area stays exact page-white even after
+             the film passes through a YUV video codec. Its aperture matches the compositor. -->
+        <span
+          class="pointer-events-none absolute inset-[6.615%] z-10 rounded-[10.46%]"
+          style="box-shadow: 0 0 0 100vmax #fff"
+          aria-hidden="true"
+        ></span>
+        <span class="sr-only">
+          A seamless lifestyle film showing people running their work with Lobster Browser, a violet
+          virtual lobster performing agentic tasks, and platform icons flowing into the Lobster
+          mark.
+        </span>
       </div>
     </div>
   </div>

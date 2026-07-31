@@ -156,6 +156,7 @@ export class AgentManager {
         profileId: params.profileId,
         task: params.task,
         runId: sessionId,
+        ...(params.threadId ? { threadId: params.threadId } : {}),
         llmConfig: params.llm,
         config,
       },
@@ -310,6 +311,11 @@ export class AgentManager {
 
 function validateStartParams(params: AgentStartParams): void {
   if (!/^[a-zA-Z0-9_-]{1,128}$/.test(params.profileId)) throw new Error('invalid agent profile id');
+  // The thread id becomes a filename in the profile's memory dir, so it is constrained here rather
+  // than sanitized later — a traversal-shaped id must never reach the store at all.
+  if (params.threadId !== undefined && !/^[a-zA-Z0-9_-]{1,128}$/.test(params.threadId)) {
+    throw new Error('invalid agent thread id');
+  }
   if (typeof params.task !== 'string' || !params.task.trim() || params.task.length > 20_000) {
     throw new Error('agent task must be 1..20000 characters');
   }

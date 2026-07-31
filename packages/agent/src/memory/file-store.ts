@@ -1,12 +1,20 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import type { AgentUsage } from '@lobster/shared-types';
 import type { BuiltinSkill } from '../skills.js';
 import { formatSkills } from '../skills.js';
 import { redactUrl } from '../security.js';
 import type { StepRecord } from '../types.js';
-import type { FactRecord, MemorySettings, MemoryStore, RunRecord } from './types.js';
+import type {
+  FactRecord,
+  MemorySettings,
+  MemoryStore,
+  RunRecord,
+  ThreadMessage,
+  ThreadRecord,
+  ThreadSummary,
+} from './types.js';
 
 interface MemoryDoc {
   version: 1;
@@ -18,9 +26,22 @@ interface MemoryDoc {
 const EMPTY_DOC: MemoryDoc = { version: 1, facts: [], skills: [], settings: {} };
 const PREFIX = 'lobster-memory-v1:';
 const MAX_CONTEXT_FACTS = 12;
-const MAX_ASK_CONTEXT_TURNS = 8;
-const MAX_ASK_CONTEXT_CHARS = 4_000;
-const MAX_RECENT_RUN_FILES = 200;
+
+/**
+ * Thread bounds.
+ *
+ * These are deliberately an order of magnitude above the old recall budget, and — far more importantly —
+ * they CLIP rather than DROP. The previous design used one 4,000-char constant as both the per-turn and
+ * the whole-history budget and `continue`d past anything larger, so a single detailed answer erased its
+ * own turn from history. A clipped turn still carries its question, its beginning, and a visible marker;
+ * a dropped turn is indistinguishable from one that never happened.
+ */
+const MAX_THREAD_MESSAGE_CHARS = 24_000;
+/** Recent turns kept verbatim before older ones are eligible for compaction. */
+const THREAD_VERBATIM_TURNS = 12;
+/** Total budget for a thread's message bodies (~30k tokens) before older turns compact. */
+const MAX_THREAD_CHARS = 120_000;
+const MAX_THREAD_FILES = 200;
 const SECRET_FACT = /(password|passcode|otp|token|secret|api.?key|private.?key|seed|cvv|cvc)/i;
 const REDACTED_SENSITIVE = '[REDACTED: credential-like content]';
 
@@ -31,15 +52,105 @@ const REDACTED_SENSITIVE = '[REDACTED: credential-like content]';
  */
 export class FileMemoryStore implements MemoryStore {
   private readonly runsDir: string;
+  private readonly threadsDir: string;
   private readonly docPath: string;
   private readonly key: Buffer;
 
   constructor(memoryDir: string, opts: { encryptionKey: string }) {
     this.runsDir = join(memoryDir, 'runs');
+    this.threadsDir = join(memoryDir, 'threads');
     this.docPath = join(memoryDir, 'memory.json');
     this.key = Buffer.from(opts.encryptionKey, 'base64');
     if (this.key.length !== 32) {
       throw new Error('agent memory encryption key must be 32 bytes (base64 encoded)');
+    }
+  }
+
+  async loadThread(threadId: string): Promise<ThreadMessage[]> {
+    const record = await this.readThread(threadId);
+    return record?.messages ?? [];
+  }
+
+  async appendThreadTurn(
+    threadId: string,
+    turn: { user: string; assistant: string; status: 'done' | 'error' | 'stopped' },
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    const record: ThreadRecord = (await this.readThread(threadId)) ?? {
+      id: threadId,
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+    };
+
+    // Credential-bearing text must not become durable history even though the envelope is encrypted.
+    // Unlike runs — which quarantined the WHOLE turn and made it unrecallable — only the offending
+    // field is replaced here, so the rest of the conversation survives the redaction.
+    const user = redactCredentialLikeText(turn.user);
+    const assistant = redactCredentialLikeText(turn.assistant);
+
+    record.messages.push(clipThreadMessage({ role: 'user', content: user.text, ts: now }));
+    record.messages.push(
+      clipThreadMessage({
+        role: 'assistant',
+        content: assistant.text,
+        ts: now,
+        status: turn.status,
+      }),
+    );
+    record.updatedAt = now;
+    record.title ??= deriveThreadTitle(user.text);
+    compactThread(record);
+    await this.writeJson(this.threadPath(threadId), record);
+  }
+
+  async listThreads(limit = 50): Promise<ThreadSummary[]> {
+    let names: string[];
+    try {
+      names = (await readdir(this.threadsDir)).filter((name) =>
+        /^[a-zA-Z0-9_-]+\.json$/.test(name),
+      );
+    } catch (error) {
+      if (isMissing(error)) return [];
+      throw error;
+    }
+    const summaries: ThreadSummary[] = [];
+    for (const name of names.slice(0, MAX_THREAD_FILES)) {
+      // Best-effort, exactly like run recall: one unreadable thread must never break the list.
+      try {
+        const loaded = await this.readJson<ThreadRecord>(join(this.threadsDir, name));
+        if (!loaded) continue;
+        const record = loaded.value;
+        if (!Array.isArray(record.messages)) continue;
+        summaries.push({
+          id: record.id,
+          title: record.title ?? deriveThreadTitle(record.messages[0]?.content ?? ''),
+          updatedAt: record.updatedAt,
+          messageCount: record.messages.length,
+        });
+      } catch {
+        continue;
+      }
+    }
+    return summaries
+      .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+      .slice(0, Math.max(1, limit));
+  }
+
+  private threadPath(threadId: string): string {
+    return join(this.threadsDir, `${threadId.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`);
+  }
+
+  private async readThread(threadId: string): Promise<ThreadRecord | null> {
+    try {
+      const loaded = await this.readJson<ThreadRecord>(this.threadPath(threadId));
+      if (!loaded) return null;
+      const record = loaded.value;
+      if (!Array.isArray(record.messages)) return null;
+      return record;
+    } catch {
+      // A corrupt or wrong-key thread degrades to "no history", never an error that kills the run.
+      return null;
     }
   }
 
@@ -71,30 +182,6 @@ export class FileMemoryStore implements MemoryStore {
     // dump both costs tokens and invites context rot / over-trusting stale facts.
     const joined = parts.join('\n\n');
     return joined.length > 4000 ? `${joined.slice(0, 3999)}…` : joined;
-  }
-
-  async loadConversationContext(): Promise<string> {
-    const runs = await this.readRecentRuns();
-    const turns = runs
-      .filter(isRecallableConversationRun)
-      .sort(compareRunsChronologically)
-      .slice(-MAX_ASK_CONTEXT_TURNS);
-    if (turns.length === 0) return '';
-
-    // Keep the newest complete turns, never a half-truncated user/assistant pair. Work backwards until
-    // the bound is reached, then restore chronological order for the model.
-    const selected: string[] = [];
-    let size = 0;
-    for (let index = turns.length - 1; index >= 0; index -= 1) {
-      const run = turns[index]!;
-      const block = `User: ${normalizeContextText(run.task)}\nAssistant: ${normalizeContextText(run.summary ?? '')}`;
-      if (block.length > MAX_ASK_CONTEXT_CHARS) continue;
-      const separator = selected.length ? 2 : 0;
-      if (size + separator + block.length > MAX_ASK_CONTEXT_CHARS) break;
-      selected.push(block);
-      size += separator + block.length;
-    }
-    return selected.reverse().join('\n\n');
   }
 
   async startRun(
@@ -269,47 +356,6 @@ export class FileMemoryStore implements MemoryStore {
     }
   }
 
-  private async readRecentRuns(): Promise<RunRecord[]> {
-    let names: string[];
-    try {
-      names = (await readdir(this.runsDir)).filter((name) => /^[a-zA-Z0-9_-]+\.json$/.test(name));
-    } catch (error) {
-      if (isMissing(error)) return [];
-      throw error;
-    }
-    const byMtime = await Promise.all(
-      names.map(async (name) => {
-        const path = join(this.runsDir, name);
-        try {
-          return { name, mtime: (await stat(path)).mtimeMs };
-        } catch {
-          return null;
-        }
-      }),
-    );
-    const recent = byMtime
-      .filter((entry): entry is { name: string; mtime: number } => entry !== null)
-      .sort((a, b) => b.mtime - a.mtime)
-      .slice(0, MAX_RECENT_RUN_FILES);
-    const runs: RunRecord[] = [];
-    for (const entry of recent) {
-      const path = join(this.runsDir, entry.name);
-      // Conversation recall is BEST-EFFORT: a single unreadable run — corrupt, half-written, or
-      // encrypted under a rotated key — must never break recall of the others or error the live run.
-      // Skip it and keep going.
-      try {
-        const loaded = await this.readJson<RunRecord>(path);
-        if (!loaded) continue;
-        const scrubbed = scrubPersistedRun(loaded.value);
-        if (loaded.legacy || scrubbed) await this.writeJson(path, loaded.value);
-        runs.push(loaded.value);
-      } catch {
-        continue;
-      }
-    }
-    return runs;
-  }
-
   /**
    * A process crash can leave a durable `running` record forever. Starting a new run in the same
    * per-profile store is a safe recovery boundary (AgentManager permits only one live run per profile),
@@ -401,28 +447,71 @@ function isMissing(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT');
 }
 
-function compareRunsChronologically(a: RunRecord, b: RunRecord): number {
-  const byStart = a.startedAt.localeCompare(b.startedAt);
-  return byStart || a.id.localeCompare(b.id);
+/**
+ * Bound one message WITHOUT losing the turn. An over-long answer keeps its head and tail — the opening
+ * usually states the conclusion and the ending usually states the outcome — with an explicit marker in
+ * between so neither the model nor the user mistakes a clipped answer for a complete one.
+ */
+function clipThreadMessage(message: ThreadMessage): ThreadMessage {
+  if (message.content.length <= MAX_THREAD_MESSAGE_CHARS) return message;
+  const keep = Math.floor(MAX_THREAD_MESSAGE_CHARS / 2) - 40;
+  const head = message.content.slice(0, keep);
+  const tail = message.content.slice(-keep);
+  return {
+    ...message,
+    content: `${head}\n\n[… ${message.content.length - keep * 2} characters omitted from this stored message …]\n\n${tail}`,
+    clipped: true,
+  };
 }
 
-function isRecallableConversationRun(
-  run: RunRecord,
-): run is RunRecord & { task: string; summary: string; startedAt: string } {
-  return (
-    (run.mode === 'ask' || run.mode === 'agent') &&
-    run.status === 'done' &&
-    run.sensitive !== true &&
-    typeof run.task === 'string' &&
-    Boolean(run.task.trim()) &&
-    typeof run.summary === 'string' &&
-    Boolean(run.summary.trim()) &&
-    typeof run.startedAt === 'string'
-  );
+/**
+ * Keep a thread inside its budget by collapsing its OLDEST turns into a single `compaction` entry,
+ * newest-first, until the remainder fits. The most recent {@link THREAD_VERBATIM_TURNS} turns are never
+ * touched, so ordinary follow-ups ("do that again for the other site") always have their referent.
+ *
+ * This is structural compaction — it records what was discussed, not what was concluded. An LLM-written
+ * summary is strictly better and belongs here later; the important property today is that the thread
+ * degrades visibly and in order rather than losing arbitrary turns to a size test.
+ */
+function compactThread(record: ThreadRecord): void {
+  const total = (): number => record.messages.reduce((sum, m) => sum + m.content.length, 0);
+  if (total() <= MAX_THREAD_CHARS) return;
+
+  while (total() > MAX_THREAD_CHARS && record.messages.length > THREAD_VERBATIM_TURNS) {
+    const existing =
+      record.messages[0]?.role === 'compaction' ? record.messages.shift() : undefined;
+    const absorbed: ThreadMessage[] = [];
+    // Absorb whole exchanges so a user turn never outlives its answer.
+    for (let i = 0; i < 2 && record.messages.length > THREAD_VERBATIM_TURNS; i += 1) {
+      const next = record.messages.shift();
+      if (next) absorbed.push(next);
+    }
+    if (absorbed.length === 0) {
+      if (existing) record.messages.unshift(existing);
+      break;
+    }
+    const topics = absorbed
+      .filter((m) => m.role === 'user')
+      .map((m) => m.content.replace(/\s+/g, ' ').trim().slice(0, 120))
+      .filter(Boolean);
+    const previous = existing ? `${existing.content}\n` : '';
+    record.messages.unshift({
+      role: 'compaction',
+      ts: absorbed[0]?.ts ?? record.createdAt,
+      content:
+        `${previous}Earlier in this conversation the user asked about: ${topics.join('; ') || '(untitled)'}.`.slice(
+          0,
+          MAX_THREAD_MESSAGE_CHARS,
+        ),
+    });
+  }
 }
 
-function normalizeContextText(value: string): string {
-  return value.replace(/\s+/g, ' ').trim();
+/** A short, human title for the panel's thread list, taken from the opening request. */
+function deriveThreadTitle(firstUserMessage: string): string {
+  const text = firstUserMessage.replace(/\s+/g, ' ').trim();
+  if (!text) return 'New chat';
+  return text.length > 60 ? `${text.slice(0, 59)}…` : text;
 }
 
 /**

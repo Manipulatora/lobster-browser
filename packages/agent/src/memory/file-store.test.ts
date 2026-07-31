@@ -8,30 +8,6 @@ import { FileMemoryStore } from './file-store.js';
 
 const key = (): string => randomBytes(32).toString('base64');
 
-async function recordRun(
-  store: FileMemoryStore,
-  input: {
-    id: string;
-    task: string;
-    startedAt: string;
-    summary: string;
-    status?: string;
-    mode?: 'ask' | 'agent';
-    model?: string;
-  },
-): Promise<void> {
-  await store.startRun(input.id, input.task, input.startedAt, {
-    ...(input.mode ? { mode: input.mode } : {}),
-    ...(input.model ? { model: input.model } : {}),
-  });
-  await store.finishRun(input.id, {
-    status: input.status ?? 'done',
-    summary: input.summary,
-    usage: { tokensIn: 10, tokensOut: 5 },
-    endedAt: new Date(Date.parse(input.startedAt) + 1_000).toISOString(),
-  });
-}
-
 test('memory is authenticated/encrypted, atomically updated, and domain-scoped', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'lobster-agent-memory-'));
   try {
@@ -87,7 +63,6 @@ test('legacy plaintext run records migrate and a wrong key fails authentication'
     const store = new FileMemoryStore(dir, { encryptionKey });
     await store.startRun('new', 'new', 'x');
     assert.match(await readFile(join(dir, 'runs', 'old.json'), 'utf8'), /^lobster-memory-v1:/);
-    assert.equal(await store.loadConversationContext(), '');
     const wrong = new FileMemoryStore(dir, { encryptionKey: key() });
     await assert.rejects(
       wrong.appendStep('new', { index: 1, url: '', action: '', outcome: '', ts: '' }),
@@ -119,162 +94,107 @@ test('secret-labelled facts are rejected', async () => {
   }
 });
 
-test('conversation recall spans Ask and Agent modes but excludes legacy, failed, and sensitive runs', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lobster-agent-conversation-'));
-  const encryptionKey = key();
-  try {
-    await mkdir(join(dir, 'runs'), { recursive: true });
-    await writeFile(
-      join(dir, 'runs', 'legacy.json'),
-      JSON.stringify({
-        id: 'legacy',
-        task: 'Legacy question',
-        status: 'done',
-        startedAt: '2026-01-01T00:00:00.000Z',
-        summary: 'Legacy answer',
-        steps: [],
-      }),
-    );
-    const store = new FileMemoryStore(dir, { encryptionKey });
-    await recordRun(store, {
-      id: 'ask-1',
-      task: 'My name is Ada.',
-      startedAt: '2026-01-02T00:00:00.000Z',
-      summary: 'I will remember that your name is Ada.',
-      mode: 'ask',
-      model: 'claude-test',
-    });
-    await recordRun(store, {
-      id: 'agent-1',
-      task: 'Open example.com',
-      startedAt: '2026-01-03T00:00:00.000Z',
-      summary: 'Opened the page.',
-      mode: 'agent',
-    });
-    await recordRun(store, {
-      id: 'ask-failed',
-      task: 'A failed question',
-      startedAt: '2026-01-04T00:00:00.000Z',
-      summary: 'Provider unavailable.',
-      status: 'error',
-      mode: 'ask',
-    });
-    await recordRun(store, {
-      id: 'ask-secret-task',
-      task: 'My password is hunter2',
-      startedAt: '2026-01-05T00:00:00.000Z',
-      summary: 'Understood.',
-      mode: 'ask',
-    });
-    await recordRun(store, {
-      id: 'ask-secret-output',
-      task: 'Show the temporary authorization value.',
-      startedAt: '2026-01-06T00:00:00.000Z',
-      summary: 'Bearer abcdefghijklmnopqrst',
-      mode: 'ask',
-    });
-    await recordRun(store, {
-      id: 'ask-2',
-      task: 'My favorite color is violet.',
-      startedAt: '2026-01-07T00:00:00.000Z',
-      summary: 'Noted: violet.',
-      mode: 'ask',
-    });
+// ---------------------------------------------------------------------------------------------------
+// Conversation threads. These cover the reported failure directly: a long answer used to delete its own
+// turn from history, because one 4,000-char constant served as BOTH the per-turn and the total budget
+// and oversized turns were skipped rather than clipped.
 
-    // Re-instantiation models a new sidecar/app process using the stable per-profile memory key.
-    const reloaded = new FileMemoryStore(dir, { encryptionKey });
-    const context = await reloaded.loadConversationContext();
-    assert.match(context, /User: My name is Ada\./);
-    assert.match(context, /Assistant: I will remember that your name is Ada\./);
-    assert.match(context, /User: My favorite color is violet\./);
-    assert.match(context, /User: Open example\.com/);
-    assert.match(context, /Assistant: Opened the page\./);
-    assert.ok(context.indexOf('My name is Ada') < context.indexOf('favorite color'));
-    assert.doesNotMatch(
-      context,
-      /Legacy question|failed question|hunter2|authorization value|abcdefghijklmnopqrst/,
-    );
-    assert.match(await readFile(join(dir, 'runs', 'legacy.json'), 'utf8'), /^lobster-memory-v1:/);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('recall is best-effort: a corrupt or wrong-key run file is skipped, never fatal', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lobster-agent-recall-resilient-'));
-  const encryptionKey = key();
-  try {
-    const store = new FileMemoryStore(dir, { encryptionKey });
-    await recordRun(store, {
-      id: 'good-1',
-      task: 'My name is Ada.',
-      startedAt: '2026-03-01T00:00:00.000Z',
-      summary: 'Hello, Ada!',
-      mode: 'ask',
-    });
-    // A garbage file and a run encrypted under a DIFFERENT key (as after a key rotation) sit beside it.
-    await writeFile(join(dir, 'runs', 'corrupt.json'), 'lobster-memory-v1:@@not-base64@@');
-    const other = new FileMemoryStore(dir, { encryptionKey: key() });
-    await recordRun(other, {
-      id: 'badkey-1',
-      task: 'From another key',
-      startedAt: '2026-03-02T00:00:00.000Z',
-      summary: 'unreadable here',
-      mode: 'ask',
-    });
-    // The good run is still recalled; the unreadable files are skipped and do NOT throw.
-    const context = await store.loadConversationContext();
-    assert.match(context, /User: My name is Ada\./);
-    assert.doesNotMatch(context, /another key|unreadable here/);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('Ask conversation context is bounded to recent complete turns', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lobster-agent-conversation-bound-'));
+test('a long answer keeps its turn instead of erasing it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-thread-'));
   try {
     const store = new FileMemoryStore(dir, { encryptionKey: key() });
-    for (let index = 0; index < 10; index += 1) {
-      await recordRun(store, {
-        id: `ask-${index}`,
-        task: `Question ${index} ${'q'.repeat(220)}`,
-        startedAt: `2026-02-${String(index + 1).padStart(2, '0')}T00:00:00.000Z`,
-        summary: `Answer ${index} ${'a'.repeat(220)}`,
-        mode: 'ask',
+    // Comfortably past the old 4,000-char drop threshold, and typical of the Markdown the Ask prompt
+    // explicitly asks the model to produce.
+    const long = `# Proxies\n\n${'A detailed paragraph explaining the setup. '.repeat(200)}`;
+    assert.ok(long.length > 4_000);
+
+    await store.appendThreadTurn('t1', {
+      user: 'How do I configure a proxy?',
+      assistant: long,
+      status: 'done',
+    });
+    await store.appendThreadTurn('t1', {
+      user: 'And DNS?',
+      assistant: 'Use DNS-over-HTTPS.',
+      status: 'done',
+    });
+
+    const messages = await store.loadThread('t1');
+    assert.equal(messages.length, 4);
+    assert.equal(messages[0]?.content, 'How do I configure a proxy?');
+    // The answer may be clipped to fit, but the turn must still be there and still be recognisable.
+    assert.match(messages[1]?.content ?? '', /Proxies/);
+    assert.equal(messages[1]?.role, 'assistant');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failed turn is retained and labelled, so "try that again" has a referent', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-thread-'));
+  try {
+    const store = new FileMemoryStore(dir, { encryptionKey: key() });
+    await store.appendThreadTurn('t1', {
+      user: 'Summarise this page.',
+      assistant: 'The page could not be reached.',
+      status: 'error',
+    });
+    const messages = await store.loadThread('t1');
+    assert.equal(messages.length, 2);
+    assert.equal(messages[0]?.content, 'Summarise this page.');
+    assert.equal(messages[1]?.status, 'error');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('threads are isolated: an unrelated conversation never bleeds in', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-thread-'));
+  try {
+    const store = new FileMemoryStore(dir, { encryptionKey: key() });
+    await store.appendThreadTurn('work', {
+      user: 'Book a flight.',
+      assistant: 'Done.',
+      status: 'done',
+    });
+    await store.appendThreadTurn('other', {
+      user: 'What is Rust?',
+      assistant: 'A language.',
+      status: 'done',
+    });
+
+    const work = await store.loadThread('work');
+    assert.equal(work.length, 2);
+    assert.ok(!work.some((m) => /Rust/.test(m.content)));
+    assert.equal((await store.loadThread('unknown')).length, 0);
+
+    const listed = await store.listThreads();
+    assert.deepEqual(listed.map((t) => t.id).sort(), ['other', 'work']);
+    assert.equal(listed.find((t) => t.id === 'work')?.title, 'Book a flight.');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an overlong thread compacts oldest-first and keeps recent turns verbatim', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-thread-'));
+  try {
+    const store = new FileMemoryStore(dir, { encryptionKey: key() });
+    const bulky = 'x'.repeat(12_000);
+    for (let i = 0; i < 20; i += 1) {
+      await store.appendThreadTurn('t1', {
+        user: `Question ${i}`,
+        assistant: bulky,
+        status: 'done',
       });
     }
-    const context = await store.loadConversationContext();
-    assert.ok(
-      context.length <= 4_000,
-      'conversation context must stay inside its hard character bound',
-    );
-    assert.doesNotMatch(context, /Question 0 /);
-    assert.match(context, /Question 9 /);
-    assert.ok(context.indexOf('Question 8 ') < context.indexOf('Question 9 '));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test('starting a new run marks an interrupted running Ask record stale so it is never recalled', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'lobster-agent-stale-run-'));
-  try {
-    const store = new FileMemoryStore(dir, { encryptionKey: key() });
-    await store.startRun('stale', 'An unfinished question', '2026-03-01T00:00:00.000Z', {
-      mode: 'ask',
-      model: 'claude-test',
-    });
-    await recordRun(store, {
-      id: 'current',
-      task: 'A completed question',
-      startedAt: '2026-03-02T00:00:00.000Z',
-      summary: 'A completed answer',
-      mode: 'ask',
-    });
-    const context = await store.loadConversationContext();
-    assert.doesNotMatch(context, /unfinished question/);
-    assert.match(context, /completed question/);
+    const messages = await store.loadThread('t1');
+    // Oldest turns collapsed into a visible marker rather than vanishing silently...
+    assert.equal(messages[0]?.role, 'compaction');
+    assert.match(messages[0]?.content ?? '', /Question 0/);
+    // ...and the newest exchange is still present, untouched.
+    assert.equal(messages.at(-2)?.content, 'Question 19');
+    assert.equal(messages.at(-1)?.content, bulky);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

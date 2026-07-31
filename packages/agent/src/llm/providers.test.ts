@@ -7,7 +7,7 @@ import type { LlmRequest } from './types.js';
 const request: LlmRequest = {
   model: 'model-test',
   system: 'system',
-  user: 'page',
+  messages: [{ role: 'user', content: 'page' }],
   tools: [{ name: 'act', description: 'act', inputSchema: { type: 'object' } }],
   forceTool: 'act',
   maxTokens: 100,

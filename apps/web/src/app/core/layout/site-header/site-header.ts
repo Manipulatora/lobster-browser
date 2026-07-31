@@ -1,4 +1,12 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import {
+  afterNextRender,
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  inject,
+  signal,
+} from '@angular/core';
+import { DOCUMENT } from '@angular/common';
 import { RouterLink, RouterLinkActive } from '@angular/router';
 import { NgIcon, provideIcons } from '@ng-icons/core';
 import { heroBars3, heroXMark } from '@ng-icons/heroicons/outline';
@@ -8,12 +16,8 @@ import { PRIMARY_NAV } from '../../../shared/data/site-nav';
 import { HeaderTheme } from '../header-theme';
 
 /**
- * Fully transparent marketing header: no background, no blur, no border.
- *
- * Because it is transparent, what sits behind it changes as the page scrolls — the landing hero is
- * a dark animated scene, the sections below are white. The link colour follows {@link HeaderTheme},
- * which dark sections claim while they are under the bar, so the switch happens mid-scroll rather
- * than only on navigation.
+ * Transparent at the top of the page, then frosted once content scrolls beneath it.
+ * Link colour still follows {@link HeaderTheme} so the glass works over light and dark sections.
  */
 @Component({
   selector: 'app-site-header',
@@ -25,9 +29,25 @@ import { HeaderTheme } from '../header-theme';
 export class SiteHeader {
   protected readonly nav = PRIMARY_NAV;
   protected readonly menuOpen = signal(false);
+  protected readonly scrolled = signal(false);
 
   /** Light links while a dark section is behind the bar; ink otherwise. */
   protected readonly onDarkBackdrop = inject(HeaderTheme).overDark;
+
+  private readonly document = inject(DOCUMENT);
+  private readonly destroyRef = inject(DestroyRef);
+
+  constructor() {
+    afterNextRender(() => {
+      const view = this.document.defaultView;
+      if (!view) return;
+
+      const updateScrollState = (): void => this.scrolled.set(view.scrollY > 12);
+      updateScrollState();
+      view.addEventListener('scroll', updateScrollState, { passive: true });
+      this.destroyRef.onDestroy(() => view.removeEventListener('scroll', updateScrollState));
+    });
+  }
 
   protected toggleMenu(): void {
     this.menuOpen.update((open) => !open);

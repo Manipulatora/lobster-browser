@@ -3,7 +3,15 @@ import { ChevronDownIcon, MagnifyingGlassIcon, CheckIcon } from '@heroicons/reac
 import { brandIcon } from './icons';
 import { renderMarkdown } from './md';
 import { fetchModels, fetchStatus, resumeTask, runTask, sendInput } from './bridge';
-import { ALL_EFFORTS, EFFORT_LABEL, FALLBACK_MODELS, brandTitle, mapRoster, store } from './models';
+import {
+  ALL_EFFORTS,
+  EFFORT_LABEL,
+  FALLBACK_MODELS,
+  brandTitle,
+  mapRoster,
+  newThreadId,
+  store,
+} from './models';
 import {
   loadTranscript,
   redactTranscriptText,
@@ -446,6 +454,21 @@ export function App() {
   const [transcriptReady, setTranscriptReady] = useState(false);
   const [menu, setMenu] = useState<'mode' | 'model' | 'effort' | null>(null);
   const [query, setQuery] = useState('');
+  /** Conversation the composer writes into; hydrated from storage, replaced by "New chat". */
+  const [threadId, setThreadId] = useState('');
+
+  /**
+   * Begin a fresh conversation. The old thread stays on disk — this mints a new id rather than
+   * deleting anything, so "New chat" means "start clean", never "destroy what I had". Per-domain
+   * learned facts are profile-scoped and deliberately survive: they are knowledge, not conversation.
+   */
+  const startNewChat = useCallback(() => {
+    const id = newThreadId();
+    store.set({ threadId: id });
+    setThreadId(id);
+    setTurns([]);
+    void saveTranscript([]);
+  }, []);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
@@ -466,6 +489,11 @@ export function App() {
       setMode(p.mode === 'ask' ? 'ask' : 'agent');
       setModel(p.model);
       setEffort(ALL_EFFORTS.includes(p.effort) ? p.effort : 'medium');
+      // First ever open (or storage cleared) starts a conversation rather than running thread-less,
+      // which would silently disable memory.
+      const resolvedThread = p.threadId || newThreadId();
+      if (!p.threadId) store.set({ threadId: resolvedThread });
+      setThreadId(resolvedThread);
       const res = await fetchModels();
       if (!alive || !res?.models?.length) return;
       const roster = mapRoster(res.models as Array<Record<string, unknown>>);
@@ -663,7 +691,7 @@ export function App() {
     setBusy(true);
     const start = await runTask(
       task,
-      { mode, model, effort: efforts.length ? effort : undefined },
+      { mode, model, effort: efforts.length ? effort : undefined, threadId },
       {
         onEvent: (ev) => patchTurn(id, ev),
       },
@@ -680,6 +708,18 @@ export function App() {
 
   return (
     <div className="flex h-screen flex-col bg-white">
+      <header className="flex items-center justify-between border-b border-line px-3.5 py-2">
+        <span className="text-[0.8125rem] font-medium text-ink">Lobee</span>
+        <button
+          type="button"
+          onClick={startNewChat}
+          disabled={busy || turns.length === 0}
+          title="Start a new conversation"
+          className="rounded-lg px-2 py-1 text-[0.75rem] text-ink-soft transition-colors hover:bg-violet-50 hover:text-violet-700 disabled:pointer-events-none disabled:opacity-40"
+        >
+          New chat
+        </button>
+      </header>
       <main
         ref={streamRef}
         className="flex-1 overflow-y-auto px-3.5 pb-2 pt-4"

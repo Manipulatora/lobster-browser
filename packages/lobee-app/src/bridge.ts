@@ -12,6 +12,8 @@ export interface RunConfig {
   mode: string;
   model: string;
   effort?: string;
+  /** Conversation this message belongs to; the sidecar resolves prior turns from it. */
+  threadId?: string;
 }
 export interface RunHandlers {
   onEvent: (e: AgentEvent) => void;
@@ -308,7 +310,13 @@ export async function runTask(
     await ensureEventStream();
     const res = await bridgeFetch('/run', {
       method: 'POST',
-      body: JSON.stringify({ task, mode: cfg.mode, model: cfg.model, effort: cfg.effort }),
+      body: JSON.stringify({
+        task,
+        mode: cfg.mode,
+        model: cfg.model,
+        effort: cfg.effort,
+        threadId: cfg.threadId,
+      }),
     });
     const data = (await res.json().catch(() => ({}))) as {
       ok?: boolean;

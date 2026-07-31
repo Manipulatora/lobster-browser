@@ -1,4 +1,4 @@
-import type { LlmClient, LlmRequest, LlmResult, LlmToolCall } from './types.js';
+import type { LlmClient, LlmMessage, LlmRequest, LlmResult, LlmToolCall } from './types.js';
 import { fetchWithRetry } from './http.js';
 
 /**
@@ -39,20 +39,7 @@ export class AnthropicClient implements LlmClient {
           ...(req.cachePrefix !== false ? { cache_control: { type: 'ephemeral' } } : {}),
         },
       ],
-      messages: [
-        {
-          role: 'user',
-          content: req.images?.length
-            ? [
-                { type: 'text', text: req.user },
-                ...req.images.map((image) => ({
-                  type: 'image',
-                  source: { type: 'base64', media_type: image.mediaType, data: image.data },
-                })),
-              ]
-            : req.user,
-        },
-      ],
+      messages: toAnthropicMessages(req.messages, req.cachePrefix !== false),
       ...(req.tools.length
         ? {
             tools: req.tools.map((t) => ({
@@ -89,7 +76,11 @@ export class AnthropicClient implements LlmClient {
     let text = '';
     for (const block of json.content ?? []) {
       if (block.type === 'tool_use' && block.name && block.input && !toolCall) {
-        toolCall = { name: block.name, input: block.input as Record<string, unknown> };
+        toolCall = {
+          id: block.id ?? `call_${Math.random().toString(36).slice(2, 10)}`,
+          name: block.name,
+          input: block.input as Record<string, unknown>,
+        };
       } else if (block.type === 'text' && typeof block.text === 'string') {
         text += block.text;
       }
@@ -110,8 +101,65 @@ export class AnthropicClient implements LlmClient {
   }
 }
 
+/**
+ * Map the neutral message list onto Anthropic's wire shape.
+ *
+ * Two rules drive the structure. Tool results are USER content blocks here (not a `tool` role as in the
+ * OpenAI dialect), and consecutive results must be merged into ONE user message — sending them as
+ * separate user turns is rejected. A `cache_control` breakpoint also goes on the final block, so the
+ * whole conversation prefix is cached across steps rather than only the system prompt; on a long run
+ * that is the difference between re-paying for every prior observation and reading it at ~0.1×.
+ */
+function toAnthropicMessages(
+  messages: readonly LlmMessage[],
+  cache: boolean,
+): Array<Record<string, unknown>> {
+  const out: Array<{ role: 'user' | 'assistant'; content: Array<Record<string, unknown>> }> = [];
+
+  for (const message of messages) {
+    if (message.role === 'tool') {
+      const last = out.at(-1);
+      const block = {
+        type: 'tool_result',
+        tool_use_id: message.toolCallId,
+        content: message.content,
+      };
+      // Merge into the open user turn when the previous message was also a result.
+      if (last?.role === 'user' && last.content.every((b) => b.type === 'tool_result')) {
+        last.content.push(block);
+      } else {
+        out.push({ role: 'user', content: [block] });
+      }
+      continue;
+    }
+    if (message.role === 'assistant') {
+      const content: Array<Record<string, unknown>> = [];
+      if (message.content?.trim()) content.push({ type: 'text', text: message.content });
+      for (const call of message.toolCalls ?? []) {
+        content.push({ type: 'tool_use', id: call.id, name: call.name, input: call.input });
+      }
+      if (content.length) out.push({ role: 'assistant', content });
+      continue;
+    }
+    const content: Array<Record<string, unknown>> = [{ type: 'text', text: message.content }];
+    for (const image of message.images ?? []) {
+      content.push({
+        type: 'image',
+        source: { type: 'base64', media_type: image.mediaType, data: image.data },
+      });
+    }
+    out.push({ role: 'user', content });
+  }
+
+  if (cache) {
+    const lastBlock = out.at(-1)?.content.at(-1);
+    if (lastBlock) lastBlock.cache_control = { type: 'ephemeral' };
+  }
+  return out;
+}
+
 interface AnthropicResponse {
-  content?: Array<{ type: string; text?: string; name?: string; input?: unknown }>;
+  content?: Array<{ type: string; id?: string; text?: string; name?: string; input?: unknown }>;
   stop_reason?: string;
   usage?: {
     input_tokens?: number;

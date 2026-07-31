@@ -1,4 +1,4 @@
-import type { LlmClient, LlmRequest, LlmResult, LlmToolCall } from './types.js';
+import type { LlmClient, LlmMessage, LlmRequest, LlmResult, LlmToolCall } from './types.js';
 import { fetchWithRetry } from './http.js';
 
 export class GoogleClient implements LlmClient {
@@ -19,13 +19,9 @@ export class GoogleClient implements LlmClient {
 
   async complete(req: LlmRequest): Promise<LlmResult> {
     const model = encodeURIComponent(req.model || this.defaultModel);
-    const parts: Array<Record<string, unknown>> = [{ text: req.user }];
-    for (const image of req.images ?? []) {
-      parts.push({ inlineData: { mimeType: image.mediaType, data: image.data } });
-    }
     const body: Record<string, unknown> = {
       systemInstruction: { parts: [{ text: req.system }] },
-      contents: [{ role: 'user', parts }],
+      contents: toGoogleContents(req.messages),
       ...(req.tools.length
         ? {
             tools: [
@@ -62,7 +58,13 @@ export class GoogleClient implements LlmClient {
     let text = '';
     for (const part of candidate?.content?.parts ?? []) {
       if (!toolCall && part.functionCall?.name) {
-        toolCall = { name: part.functionCall.name, input: part.functionCall.args ?? {} };
+        // Google correlates a response to a call BY NAME rather than by id, so the neutral id is the
+        // name — round-tripping it through `toGoogleContents` reproduces exactly what Google expects.
+        toolCall = {
+          id: part.functionCall.name,
+          name: part.functionCall.name,
+          input: part.functionCall.args ?? {},
+        };
       }
       if (part.text) text += part.text;
     }
@@ -80,6 +82,52 @@ export class GoogleClient implements LlmClient {
       },
     };
   }
+}
+
+/**
+ * Map the neutral message list onto Google's `contents`.
+ *
+ * Three shape differences matter: the assistant role is spelled `model`; a tool result is a
+ * `functionResponse` part inside a **user** turn; and the response is matched to its call by NAME, not
+ * by an id — so we look back for the call this result answers and reuse that name. Consecutive results
+ * merge into one turn, mirroring the Anthropic rule.
+ */
+function toGoogleContents(messages: readonly LlmMessage[]): Array<Record<string, unknown>> {
+  const out: Array<{ role: 'user' | 'model'; parts: Array<Record<string, unknown>> }> = [];
+  /** Call id → tool name, so a later result can be addressed the way Google requires. */
+  const callNames = new Map<string, string>();
+
+  for (const message of messages) {
+    if (message.role === 'tool') {
+      const name = callNames.get(message.toolCallId) ?? message.toolCallId;
+      const part = {
+        functionResponse: { name, response: { result: message.content } },
+      };
+      const last = out.at(-1);
+      if (last?.role === 'user' && last.parts.every((p) => 'functionResponse' in p)) {
+        last.parts.push(part);
+      } else {
+        out.push({ role: 'user', parts: [part] });
+      }
+      continue;
+    }
+    if (message.role === 'assistant') {
+      const parts: Array<Record<string, unknown>> = [];
+      if (message.content?.trim()) parts.push({ text: message.content });
+      for (const call of message.toolCalls ?? []) {
+        callNames.set(call.id, call.name);
+        parts.push({ functionCall: { name: call.name, args: call.input } });
+      }
+      if (parts.length) out.push({ role: 'model', parts });
+      continue;
+    }
+    const parts: Array<Record<string, unknown>> = [{ text: message.content }];
+    for (const image of message.images ?? []) {
+      parts.push({ inlineData: { mimeType: image.mediaType, data: image.data } });
+    }
+    out.push({ role: 'user', parts });
+  }
+  return out;
 }
 
 interface GoogleResponse {

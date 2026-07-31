@@ -1,4 +1,4 @@
-import type { LlmClient, LlmRequest, LlmResult, LlmToolCall } from './types.js';
+import type { LlmClient, LlmMessage, LlmRequest, LlmResult, LlmToolCall } from './types.js';
 import { fetchWithRetry } from './http.js';
 
 export class OpenAiCompatibleClient implements LlmClient {
@@ -23,15 +23,6 @@ export class OpenAiCompatibleClient implements LlmClient {
   }
 
   async complete(req: LlmRequest): Promise<LlmResult> {
-    const user = req.images?.length
-      ? [
-          { type: 'text', text: req.user },
-          ...req.images.map((image) => ({
-            type: 'image_url',
-            image_url: { url: `data:${image.mediaType};base64,${image.data}`, detail: 'auto' },
-          })),
-        ]
-      : req.user;
     const model = req.model || this.defaultModel;
     // Prompt caching (OpenRouter dialect only): mark the STABLE system block (which renders after the
     // tool schema, so one breakpoint caches tools+system) as cacheable. Across a run's steps the system
@@ -47,10 +38,7 @@ export class OpenAiCompatibleClient implements LlmClient {
     const body = {
       model,
       max_tokens: req.maxTokens,
-      messages: [
-        { role: 'system', content: systemContent },
-        { role: 'user', content: user },
-      ],
+      messages: [{ role: 'system', content: systemContent }, ...toOpenAiMessages(req.messages)],
       // Tool-less chat (Ask mode) sends no tools/tool_choice and gets a plain text answer.
       ...(req.tools.length
         ? {
@@ -94,16 +82,19 @@ export class OpenAiCompatibleClient implements LlmClient {
       throw new Error(`${this.provider} ${response.status}: ${await safeError(response)}`);
     const json = (await response.json()) as OpenAiResponse;
     const choice = json.choices?.[0];
-    const call = choice?.message?.tool_calls?.[0]?.function;
+    const rawCall = choice?.message?.tool_calls?.[0];
+    const call = rawCall?.function;
     let toolCall: LlmToolCall | undefined;
     if (call?.name) {
+      const id = rawCall?.id ?? `call_${Math.random().toString(36).slice(2, 10)}`;
       try {
         toolCall = {
+          id,
           name: call.name,
           input: JSON.parse(call.arguments || '{}') as Record<string, unknown>,
         };
       } catch {
-        toolCall = { name: call.name, input: {} };
+        toolCall = { id, name: call.name, input: {} };
       }
     }
     return {
@@ -121,12 +112,52 @@ export class OpenAiCompatibleClient implements LlmClient {
   }
 }
 
+/**
+ * Map the neutral message list onto the OpenAI chat dialect: tool results are their own `tool` role
+ * keyed by `tool_call_id`, and assistant tool calls carry JSON-encoded `arguments` (the wire format is
+ * a string, not an object).
+ */
+function toOpenAiMessages(messages: readonly LlmMessage[]): Array<Record<string, unknown>> {
+  return messages.map((message) => {
+    if (message.role === 'tool') {
+      return { role: 'tool', tool_call_id: message.toolCallId, content: message.content };
+    }
+    if (message.role === 'assistant') {
+      const calls = message.toolCalls ?? [];
+      return {
+        role: 'assistant',
+        content: message.content ?? '',
+        ...(calls.length
+          ? {
+              tool_calls: calls.map((call) => ({
+                id: call.id,
+                type: 'function',
+                function: { name: call.name, arguments: JSON.stringify(call.input) },
+              })),
+            }
+          : {}),
+      };
+    }
+    if (!message.images?.length) return { role: 'user', content: message.content };
+    return {
+      role: 'user',
+      content: [
+        { type: 'text', text: message.content },
+        ...message.images.map((image) => ({
+          type: 'image_url',
+          image_url: { url: `data:${image.mediaType};base64,${image.data}`, detail: 'auto' },
+        })),
+      ],
+    };
+  });
+}
+
 interface OpenAiResponse {
   choices?: Array<{
     finish_reason?: string;
     message?: {
       content?: string;
-      tool_calls?: Array<{ function?: { name?: string; arguments?: string } }>;
+      tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
     };
   }>;
   usage?: {

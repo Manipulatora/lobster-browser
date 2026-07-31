@@ -158,6 +158,13 @@ export class AgentBridge {
     const effort = ['low', 'medium', 'high'].includes(body.effort as string)
       ? (body.effort as 'low' | 'medium' | 'high')
       : undefined;
+    // The panel owns conversation identity: it sends the thread the message belongs to, and mints a new
+    // id for "New chat". An id that fails this shape is rejected outright rather than coerced, since it
+    // names a file in the profile's encrypted memory directory.
+    const threadId = typeof body.threadId === 'string' ? body.threadId : '';
+    if (threadId && !/^[a-zA-Z0-9_-]{1,128}$/.test(threadId)) {
+      return json(res, 400, { ok: false, error: 'invalid threadId' });
+    }
 
     if (!entry.memoryDir || !entry.memoryKey) {
       return json(res, 409, { ok: false, error: 'this profile is not provisioned for Lobee runs' });
@@ -181,6 +188,7 @@ export class AgentBridge {
       task,
       memoryDir: entry.memoryDir,
       memoryKey: entry.memoryKey,
+      ...(threadId ? { threadId } : {}),
       llm,
       config: { mode },
     });

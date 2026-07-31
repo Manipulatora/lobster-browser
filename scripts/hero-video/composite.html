@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lobster Browser lifestyle film compositor</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 1300px;
+        height: 1300px;
+        margin: 0;
+        overflow: hidden;
+        background: #ffffff;
+      }
+
+      body {
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      }
+
+      #stage {
+        position: relative;
+        width: 1300px;
+        height: 1300px;
+        overflow: hidden;
+        isolation: isolate;
+        background: #ffffff;
+      }
+
+      #markHalo {
+        position: absolute;
+        left: 650px;
+        top: 650px;
+        width: 530px;
+        height: 530px;
+        border-radius: 50%;
+        background: radial-gradient(
+          circle,
+          rgba(124, 58, 237, 0.2) 0%,
+          rgba(139, 92, 246, 0.07) 38%,
+          transparent 72%
+        );
+        filter: blur(6px);
+        transform: translate(-50%, -50%);
+        transform-origin: center;
+        z-index: 28;
+      }
+
+      #brandMark {
+        position: absolute;
+        left: 650px;
+        top: 650px;
+        width: 260px;
+        height: 260px;
+        transform: translate(-50%, -50%);
+        transform-origin: center;
+        z-index: 31;
+        will-change: transform, opacity;
+      }
+
+      #brandMark img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        filter: drop-shadow(0 28px 48px rgba(46, 16, 101, 0.18));
+      }
+
+      .ring {
+        position: absolute;
+        left: 650px;
+        top: 650px;
+        border: 1.5px solid rgba(124, 58, 237, 0.18);
+        border-radius: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 27;
+      }
+
+      #ringA {
+        width: 390px;
+        height: 390px;
+      }
+
+      #ringB {
+        width: 520px;
+        height: 520px;
+        border-color: rgba(139, 92, 246, 0.1);
+      }
+
+      .scene {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        z-index: 5;
+        pointer-events: none;
+      }
+
+      .film-frame {
+        position: absolute;
+        inset: 86px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.92);
+        border-radius: 118px;
+        background: #f7f4fb;
+        box-shadow: inset 0 0 0 1px rgba(124, 58, 237, 0.04);
+        transform-origin: center;
+        will-change: transform, clip-path;
+      }
+
+      .film-frame video {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      .film-frame::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background:
+          linear-gradient(
+            180deg,
+            rgba(255, 255, 255, 0.1),
+            transparent 22%,
+            transparent 78%,
+            rgba(255, 255, 255, 0.16)
+          ),
+          radial-gradient(circle at center, transparent 56%, rgba(35, 19, 61, 0.13) 116%);
+        pointer-events: none;
+      }
+
+      .violet-glass {
+        position: absolute;
+        inset: 86px;
+        overflow: hidden;
+        border-radius: 118px;
+        background: linear-gradient(135deg, rgba(124, 58, 237, 0.02), rgba(168, 85, 247, 0.08));
+        mix-blend-mode: screen;
+      }
+
+      #transitionWash {
+        position: absolute;
+        inset: -160px;
+        z-index: 24;
+        opacity: 0;
+        background: radial-gradient(
+          circle at center,
+          rgba(255, 255, 255, 0.98) 0%,
+          rgba(245, 238, 255, 0.94) 30%,
+          rgba(124, 58, 237, 0.08) 64%,
+          transparent 78%
+        );
+        transform: scale(0.55);
+        pointer-events: none;
+      }
+
+      #agentFlow {
+        position: absolute;
+        inset: 0;
+        z-index: 11;
+        overflow: hidden;
+        border-radius: 118px;
+        pointer-events: none;
+      }
+
+      .agent-node {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 18px;
+        height: 18px;
+        border: 2px solid rgba(255, 255, 255, 0.9);
+        border-radius: 50%;
+        background: #8b5cf6;
+        box-shadow:
+          0 0 0 8px rgba(139, 92, 246, 0.12),
+          0 0 28px rgba(124, 58, 237, 0.7);
+        opacity: 0;
+      }
+
+      .agent-line {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        height: 2px;
+        width: 260px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.92), #a78bfa);
+        box-shadow: 0 0 18px rgba(139, 92, 246, 0.55);
+        opacity: 0;
+        transform-origin: left center;
+      }
+
+      #verificationPulse {
+        position: absolute;
+        left: 78%;
+        top: 35%;
+        width: 120px;
+        height: 120px;
+        border: 4px solid rgba(255, 255, 255, 0.92);
+        border-radius: 50%;
+        opacity: 0;
+        box-shadow:
+          0 0 0 16px rgba(124, 58, 237, 0.15),
+          0 0 60px rgba(124, 58, 237, 0.42);
+      }
+
+      #iconScene {
+        z-index: 18;
+        background:
+          radial-gradient(circle at 50% 50%, rgba(124, 58, 237, 0.11), transparent 35%), #ffffff;
+      }
+
+      #orbitField {
+        position: absolute;
+        inset: 0;
+        z-index: 19;
+      }
+
+      #trails {
+        position: absolute;
+        inset: 0;
+        width: 1300px;
+        height: 1300px;
+        overflow: visible;
+        opacity: 0;
+      }
+
+      #trails path {
+        fill: none;
+        stroke: url(#trailGradient);
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-dasharray: 6 13;
+        filter: drop-shadow(0 0 8px rgba(124, 58, 237, 0.28));
+      }
+
+      .social-chip {
+        position: absolute;
+        left: 650px;
+        top: 650px;
+        width: 128px;
+        height: 128px;
+        display: grid;
+        place-items: center;
+        border: 2px solid rgba(255, 255, 255, 0.95);
+        border-radius: 38px;
+        background: var(--chip-background, var(--chip-color));
+        box-shadow:
+          0 30px 54px color-mix(in srgb, var(--chip-color) 27%, transparent),
+          inset 0 2px 0 rgba(255, 255, 255, 0.32),
+          inset 0 -9px 18px rgba(15, 8, 30, 0.14);
+        transform: translate(-50%, -50%);
+        transform-origin: center;
+        opacity: 0;
+        will-change: transform, opacity;
+      }
+
+      .social-chip::before {
+        content: '';
+        position: absolute;
+        inset: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        border-radius: 29px;
+      }
+
+      .social-chip img {
+        width: 62px;
+        height: 62px;
+        object-fit: contain;
+        filter: brightness(0) invert(1) drop-shadow(0 4px 7px rgba(0, 0, 0, 0.18));
+      }
+
+      .social-chip.instagram {
+        --chip-background: linear-gradient(
+          135deg,
+          #833ab4 3%,
+          #c13584 38%,
+          #fd1d1d 67%,
+          #fcb045 100%
+        );
+      }
+
+      #coreFlash {
+        position: absolute;
+        left: 650px;
+        top: 650px;
+        width: 420px;
+        height: 420px;
+        border: 2px solid rgba(139, 92, 246, 0.28);
+        border-radius: 50%;
+        opacity: 0;
+        transform: translate(-50%, -50%);
+        z-index: 29;
+      }
+
+      /* The site hero is white. This topmost matte prevents shadows, transition light, and video
+         compression from tinting the area outside the rounded film aperture. */
+      #outerMatte {
+        position: absolute;
+        inset: 86px;
+        z-index: 100;
+        border-radius: 118px;
+        box-shadow: 0 0 0 200px #ffffff;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="stage">
+      <section id="openingScene" class="scene" aria-hidden="true">
+        <div id="openingFrame" class="film-frame">
+          <video id="openingVideo" muted playsinline></video>
+        </div>
+        <div class="violet-glass"></div>
+      </section>
+
+      <section id="businessScene" class="scene" aria-hidden="true">
+        <div id="businessFrame" class="film-frame">
+          <video id="businessVideo" muted playsinline></video>
+        </div>
+        <div class="violet-glass"></div>
+      </section>
+
+      <section id="agentScene" class="scene" aria-hidden="true">
+        <div id="agentFrame" class="film-frame">
+          <video id="agentVideo" muted playsinline></video>
+          <div id="agentFlow">
+            <div class="agent-line"></div>
+            <div class="agent-line"></div>
+            <div class="agent-line"></div>
+            <div class="agent-line"></div>
+            <div class="agent-line"></div>
+            <div class="agent-line"></div>
+            <div class="agent-node"></div>
+            <div class="agent-node"></div>
+            <div class="agent-node"></div>
+            <div class="agent-node"></div>
+            <div class="agent-node"></div>
+            <div class="agent-node"></div>
+            <div class="agent-node"></div>
+            <div class="agent-node"></div>
+            <div class="agent-node"></div>
+            <div class="agent-node"></div>
+            <div id="verificationPulse"></div>
+          </div>
+        </div>
+        <div class="violet-glass"></div>
+      </section>
+
+      <section id="iconScene" class="scene" aria-hidden="true">
+        <div id="orbitField">
+          <svg id="trails" viewBox="0 0 1300 1300">
+            <defs>
+              <linearGradient id="trailGradient" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#c4b5fd" stop-opacity="0.2" />
+                <stop offset="0.5" stop-color="#8b5cf6" stop-opacity="0.8" />
+                <stop offset="1" stop-color="#6d28d9" stop-opacity="0.35" />
+              </linearGradient>
+            </defs>
+            <path d="M650 650 C510 535 420 430 320 345" />
+            <path d="M650 650 C645 500 650 395 650 270" />
+            <path d="M650 650 C790 530 890 430 980 345" />
+            <path d="M650 650 C805 690 920 730 1010 810" />
+            <path d="M650 650 C655 795 650 900 650 1015" />
+            <path d="M650 650 C490 690 380 735 290 810" />
+          </svg>
+
+          <div class="social-chip" data-index="0" style="--chip-color: #0a66c2">
+            <img src="icons-v2/linkedin.svg" alt="" />
+          </div>
+          <div class="social-chip" data-index="1" style="--chip-color: #1877f2">
+            <img src="icons-v2/facebook.svg" alt="" />
+          </div>
+          <div class="social-chip instagram" data-index="2" style="--chip-color: #c13584">
+            <img src="icons-v2/instagram.svg" alt="" />
+          </div>
+          <div class="social-chip" data-index="3" style="--chip-color: #1da1f2">
+            <img src="icons-v2/twitter.svg" alt="" />
+          </div>
+          <div class="social-chip" data-index="4" style="--chip-color: #14a800">
+            <img src="icons-v2/upwork.svg" alt="" />
+          </div>
+          <div class="social-chip" data-index="5" style="--chip-color: #29b2fe">
+            <img src="icons-v2/freelancer.svg" alt="" />
+          </div>
+        </div>
+      </section>
+
+      <div id="transitionWash"></div>
+      <div id="markHalo"></div>
+      <div id="ringA" class="ring"></div>
+      <div id="ringB" class="ring"></div>
+      <div id="coreFlash"></div>
+      <div id="brandMark">
+        <img src="../../apps/desktop/src/assets/brand/icon.png" alt="" />
+      </div>
+      <div id="outerMatte"></div>
+    </main>
+
+    <script>
+      const fps = 30;
+      const totalFrames = 20 * fps;
+      const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
+      const mix = (start, end, amount) => start + (end - start) * amount;
+      const smooth = (edge0, edge1, value) => {
+        const amount = clamp((value - edge0) / (edge1 - edge0));
+        return amount * amount * (3 - 2 * amount);
+      };
+      const easeOut = (value) => 1 - Math.pow(1 - clamp(value), 3);
+      const windowOpacity = (time, inStart, inEnd, outStart, outEnd) =>
+        smooth(inStart, inEnd, time) * (1 - smooth(outStart, outEnd, time));
+      const flashAt = (time, center, width) => {
+        const distance = Math.abs(time - center) / width;
+        return Math.pow(clamp(1 - distance), 2);
+      };
+
+      const openingScene = document.querySelector('#openingScene');
+      const businessScene = document.querySelector('#businessScene');
+      const agentScene = document.querySelector('#agentScene');
+      const iconScene = document.querySelector('#iconScene');
+      const openingFrame = document.querySelector('#openingFrame');
+      const businessFrame = document.querySelector('#businessFrame');
+      const agentFrame = document.querySelector('#agentFrame');
+      const openingVideo = document.querySelector('#openingVideo');
+      const businessVideo = document.querySelector('#businessVideo');
+      const agentVideo = document.querySelector('#agentVideo');
+      const brandMark = document.querySelector('#brandMark');
+      const markHalo = document.querySelector('#markHalo');
+      const ringA = document.querySelector('#ringA');
+      const ringB = document.querySelector('#ringB');
+      const transitionWash = document.querySelector('#transitionWash');
+      const coreFlash = document.querySelector('#coreFlash');
+      const trails = document.querySelector('#trails');
+      const socialChips = [...document.querySelectorAll('.social-chip')];
+      const agentNodes = [...document.querySelectorAll('.agent-node')];
+      const agentLines = [...document.querySelectorAll('.agent-line')];
+      const verificationPulse = document.querySelector('#verificationPulse');
+
+      const orbitPositions = [
+        [-330, -305],
+        [0, -380],
+        [330, -305],
+        [360, 175],
+        [0, 365],
+        [-360, 175],
+      ];
+
+      function waitForMetadata(video) {
+        if (video.readyState >= 1) return Promise.resolve();
+        return new Promise((resolve, reject) => {
+          video.addEventListener('loadedmetadata', resolve, { once: true });
+          video.addEventListener('error', reject, { once: true });
+        });
+      }
+
+      window.configureAssets = async ({ opening, business, agent }) => {
+        openingVideo.src = opening;
+        businessVideo.src = business;
+        agentVideo.src = agent;
+        await Promise.all([
+          waitForMetadata(openingVideo),
+          waitForMetadata(businessVideo),
+          waitForMetadata(agentVideo),
+          document.fonts.ready,
+        ]);
+      };
+
+      function setFilmFrame(element, opacity, progress) {
+        const reveal = easeOut(clamp(progress));
+        element.style.transform = `scale(${mix(1.075, 1, reveal)}) translateY(${mix(28, 0, reveal)}px)`;
+        element.style.clipPath = `circle(${mix(13, 76, reveal)}% at 50% 50%)`;
+        element.parentElement.style.opacity = opacity.toFixed(5);
+      }
+
+      function setAnchorState(time, frame) {
+        const openingMark = 1 - smooth(0.62, 1.35, time);
+        const iconMark = smooth(13.72, 14.25, time);
+        const returning = smooth(18.12, 19.2, time);
+        const markOpacity = Math.max(openingMark, iconMark);
+
+        let scale = 1 + 0.018 * Math.sin(time * Math.PI * 1.45);
+        if (time >= 13.72 && time < 18.3) {
+          const absorption = clamp((time - 14.35) / 3.45);
+          const pulse = [15.05, 15.57, 16.09, 16.61, 17.13, 17.65].reduce(
+            (sum, center) => sum + flashAt(time, center, 0.24),
+            0,
+          );
+          scale = mix(0.64, 1.23, easeOut(absorption)) + pulse * 0.055;
+        } else if (time >= 18.3) {
+          scale = mix(1.23, 1, returning);
+        }
+
+        brandMark.style.opacity = markOpacity.toFixed(5);
+        brandMark.style.transform = `translate(-50%, -50%) scale(${scale.toFixed(5)})`;
+
+        const haloOpacity = Math.max(openingMark * 0.9, iconMark * 0.92);
+        markHalo.style.opacity = haloOpacity.toFixed(5);
+        markHalo.style.transform = `translate(-50%, -50%) scale(${(scale * 0.98).toFixed(5)})`;
+
+        const ringOpacity = Math.max(openingMark, returning * iconMark);
+        ringA.style.opacity = (ringOpacity * 0.65).toFixed(5);
+        ringB.style.opacity = (ringOpacity * 0.42).toFixed(5);
+        ringA.style.transform = `translate(-50%, -50%) scale(${(1 + 0.08 * Math.sin(time * 2.1)).toFixed(5)})`;
+        ringB.style.transform = `translate(-50%, -50%) scale(${(1 + 0.06 * Math.cos(time * 1.7)).toFixed(5)})`;
+
+        const corePulse = [15.05, 15.57, 16.09, 16.61, 17.13, 17.65].reduce(
+          (maximum, center) => Math.max(maximum, flashAt(time, center, 0.22)),
+          0,
+        );
+        coreFlash.style.opacity = (corePulse * 0.72).toFixed(5);
+        coreFlash.style.transform = `translate(-50%, -50%) scale(${mix(0.42, 1.3, 1 - corePulse).toFixed(5)})`;
+
+        if (frame === 0 || frame === totalFrames - 1) {
+          brandMark.style.opacity = '1';
+          brandMark.style.transform = 'translate(-50%, -50%) scale(1)';
+          markHalo.style.opacity = '0.9';
+          markHalo.style.transform = 'translate(-50%, -50%) scale(0.98)';
+          ringA.style.opacity = '0.65';
+          ringB.style.opacity = '0.42';
+          ringA.style.transform = 'translate(-50%, -50%) scale(1)';
+          ringB.style.transform = 'translate(-50%, -50%) scale(1.06)';
+          coreFlash.style.opacity = '0';
+        }
+      }
+
+      function renderAgentFlow(time, agentOpacity) {
+        const progress = clamp((time - 9.35) / 4.35);
+        agentLines.forEach((line, index) => {
+          const angle = [-158, -128, -24, 16, 48, 142][index];
+          const local = smooth(index * 0.075, index * 0.075 + 0.24, progress);
+          line.style.opacity = (
+            agentOpacity *
+            local *
+            (1 - smooth(0.78, 1, progress)) *
+            0.78
+          ).toFixed(5);
+          line.style.transform = `rotate(${angle}deg) scaleX(${local.toFixed(5)})`;
+        });
+
+        agentNodes.forEach((node, index) => {
+          const angle = (index / agentNodes.length) * Math.PI * 2 - Math.PI * 0.74;
+          const radius = 190 + (index % 3) * 72;
+          const local = smooth(index * 0.045, index * 0.045 + 0.22, progress);
+          const travel = 0.82 + 0.18 * Math.sin(time * 2.2 + index);
+          const x = Math.cos(angle) * radius * travel;
+          const y = Math.sin(angle) * radius * travel;
+          node.style.opacity = (
+            agentOpacity *
+            local *
+            (0.62 + 0.28 * Math.sin(time * 3 + index))
+          ).toFixed(5);
+          node.style.transform = `translate(calc(-50% + ${x.toFixed(2)}px), calc(-50% + ${y.toFixed(2)}px)) scale(${mix(0.55, 1, local).toFixed(5)})`;
+        });
+
+        const verify = smooth(0.55, 0.68, progress) * (1 - smooth(0.83, 0.96, progress));
+        verificationPulse.style.opacity = (agentOpacity * verify * 0.9).toFixed(5);
+        verificationPulse.style.transform = `translate(-50%, -50%) scale(${mix(0.48, 1.25, verify).toFixed(5)})`;
+      }
+
+      function renderSocialAbsorption(time, iconOpacity) {
+        const sceneProgress = clamp((time - 13.8) / 4.45);
+        trails.style.opacity = (
+          iconOpacity *
+          (1 - smooth(0.67, 0.96, sceneProgress)) *
+          0.7
+        ).toFixed(5);
+        trails.style.strokeDashoffset = String(-time * 36);
+
+        socialChips.forEach((chip, index) => {
+          const absorbCenter = 15.05 + index * 0.52;
+          const absorption = smooth(absorbCenter - 0.32, absorbCenter + 0.08, time);
+          const appear = smooth(13.84 + index * 0.035, 14.22 + index * 0.035, time);
+          const orbitAngle = time * 0.2 + index * 0.55;
+          const [baseX, baseY] = orbitPositions[index];
+          const orbitX = baseX + Math.cos(orbitAngle) * 15;
+          const orbitY = baseY + Math.sin(orbitAngle * 1.12) * 14;
+          const x = mix(orbitX, 0, easeOut(absorption));
+          const y = mix(orbitY, 0, easeOut(absorption));
+          const scale = mix(1, 0.18, easeOut(absorption));
+          const opacity = iconOpacity * appear * (1 - smooth(0.69, 1, absorption));
+          const rotateX = Math.sin(time * 1.5 + index) * 8 * (1 - absorption);
+          const rotateY = Math.cos(time * 1.25 + index) * 11 * (1 - absorption);
+          const rotateZ = Math.sin(time + index) * 4 * (1 - absorption);
+
+          chip.style.opacity = opacity.toFixed(5);
+          chip.style.transform = `translate(calc(-50% + ${x.toFixed(2)}px), calc(-50% + ${y.toFixed(2)}px)) perspective(700px) rotateX(${rotateX.toFixed(2)}deg) rotateY(${rotateY.toFixed(2)}deg) rotateZ(${rotateZ.toFixed(2)}deg) scale(${scale.toFixed(5)})`;
+        });
+      }
+
+      window.renderFrame = async (frame) => {
+        const time = frame / fps;
+        const openingOpacity = windowOpacity(time, 0.72, 1.35, 4.72, 5.42);
+        const businessOpacity = windowOpacity(time, 4.92, 5.52, 8.78, 9.5);
+        const agentOpacity = windowOpacity(time, 8.92, 9.58, 13.72, 14.55);
+        const iconOpacity = windowOpacity(time, 13.78, 14.4, 18.28, 18.95);
+
+        const seeks = [];
+        if (openingOpacity > 0.001) {
+          seeks.push(
+            window.seekVideo(openingVideo, clamp(time - 0.82, 0.04, openingVideo.duration - 0.06)),
+          );
+        }
+        if (businessOpacity > 0.001) {
+          seeks.push(
+            window.seekVideo(
+              businessVideo,
+              clamp(time - 4.96, 0.04, businessVideo.duration - 0.06),
+            ),
+          );
+        }
+        if (agentOpacity > 0.001) {
+          seeks.push(
+            window.seekVideo(agentVideo, clamp(time - 8.98, 0.04, agentVideo.duration - 0.06)),
+          );
+        }
+        await Promise.all(seeks);
+
+        setFilmFrame(openingFrame, openingOpacity, clamp((time - 0.62) / 1.05));
+        setFilmFrame(businessFrame, businessOpacity, clamp((time - 4.82) / 0.95));
+        setFilmFrame(agentFrame, agentOpacity, clamp((time - 8.82) / 0.98));
+
+        iconScene.style.opacity = iconOpacity.toFixed(5);
+        renderAgentFlow(time, agentOpacity);
+        renderSocialAbsorption(time, iconOpacity);
+        setAnchorState(time, frame);
+
+        const transitionOpacity = Math.max(
+          flashAt(time, 5.12, 0.48),
+          flashAt(time, 9.12, 0.48),
+          flashAt(time, 14.04, 0.5),
+        );
+        transitionWash.style.opacity = (transitionOpacity * 0.68).toFixed(5);
+        transitionWash.style.transform = `scale(${mix(0.56, 1.18, easeOut(transitionOpacity)).toFixed(5)})`;
+
+        if (frame === 0 || frame === totalFrames - 1) {
+          openingScene.style.opacity = '0';
+          businessScene.style.opacity = '0';
+          agentScene.style.opacity = '0';
+          iconScene.style.opacity = '0';
+          transitionWash.style.opacity = '0';
+          socialChips.forEach((chip) => (chip.style.opacity = '0'));
+          trails.style.opacity = '0';
+        }
+
+        document.body.dataset.frame = String(frame);
+      };
+    </script>
+  </body>
+</html>

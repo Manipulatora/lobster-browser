@@ -44,8 +44,25 @@ export interface Persisted {
   mode: string;
   model: string;
   effort: Effort;
+  /**
+   * The conversation the composer is currently writing into. Persisted so closing and reopening the
+   * panel continues the SAME conversation rather than silently starting a new one — the sidecar
+   * resolves prior turns from this id, so losing it would look exactly like amnesia.
+   */
+  threadId: string;
 }
-const DEFAULTS: Persisted = { mode: 'agent', model: 'anthropic/claude-opus-4.8', effort: 'medium' };
+const DEFAULTS: Persisted = {
+  mode: 'agent',
+  model: 'anthropic/claude-opus-4.8',
+  effort: 'medium',
+  threadId: '',
+};
+
+/** A fresh conversation id. Constrained to the charset the sidecar accepts for a memory filename. */
+export function newThreadId(): string {
+  const random = Math.random().toString(36).slice(2, 10);
+  return `t${Date.now().toString(36)}${random}`.replace(/[^a-zA-Z0-9_-]/g, '');
+}
 
 /** Persist to chrome.storage.local when available, else localStorage (standalone). */
 export const store = {

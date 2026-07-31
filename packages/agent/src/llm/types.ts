@@ -14,16 +14,38 @@ export interface LlmTool {
   inputSchema: Record<string, unknown>;
 }
 
-/** One request. The loop rebuilds this each step: cached `system`, a single `user` message, one tool. */
+/** An image attached to a user turn. Ephemeral — never persisted into thread history. */
+export interface LlmImage {
+  mediaType: 'image/png' | 'image/jpeg';
+  data: string;
+}
+
+/**
+ * One turn in the conversation.
+ *
+ * This is a REAL message array, not a transcript pasted into a single user string. That distinction is
+ * load-bearing: the model must see its own prior tool calls as assistant turns and their outcomes as
+ * tool results, otherwise every step is a stateless guess and the harness has to re-narrate history as
+ * prose (which is both lossy and far more expensive).
+ *
+ * `tool` turns MUST directly follow the assistant turn whose `toolCalls` they answer, and every tool
+ * call needs a matching result — Anthropic and OpenAI both reject a dangling call. {@link normalizeMessages}
+ * enforces that so a cancelled or errored step cannot produce an unsendable history.
+ */
+export type LlmMessage =
+  | { role: 'user'; content: string; images?: LlmImage[] }
+  | { role: 'assistant'; content?: string; toolCalls?: LlmToolCall[] }
+  | { role: 'tool'; toolCallId: string; content: string };
+
+/** One request. `system` is the cached stable prefix; `messages` is the conversation. */
 export interface LlmRequest {
   model: string;
+  /** Stable, cacheable system prefix (persona + operating rules + task). */
   system: string;
-  /** The step's user content (task/history/observation live here or in `system`). */
-  user: string;
-  /** Ephemeral visual fallbacks. Adapters send these as image inputs; callers never persist them. */
-  images?: Array<{ mediaType: 'image/png' | 'image/jpeg'; data: string }>;
+  /** The conversation so far, oldest first. Must end with a `user` or `tool` turn. */
+  messages: LlmMessage[];
   tools: LlmTool[];
-  /** Force the model to call this tool (structured action output). */
+  /** Force the model to call this tool (structured action output). Empty = let the model choose. */
   forceTool: string;
   maxTokens: number;
   /**
@@ -41,10 +63,18 @@ export interface LlmRequest {
   effort?: 'low' | 'medium' | 'high';
   /** Abort the in-flight HTTP request when the run is stopped. */
   signal?: AbortSignal;
+  /** Receive assistant text as it arrives. Adapters that stream call this; others never do. */
+  onTextDelta?: (delta: string) => void;
 }
 
 /** A tool call the model returned. */
 export interface LlmToolCall {
+  /**
+   * Provider-assigned call id, echoed back on the matching `tool` turn. Synthesized when a provider
+   * omits it (Google names calls rather than issuing ids), because the correlation is what makes a
+   * multi-step history replayable.
+   */
+  id: string;
   name: string;
   /** Parsed JSON arguments (adapters parse provider-specific encodings before returning). */
   input: Record<string, unknown>;
@@ -61,8 +91,63 @@ export interface LlmResult {
 }
 
 export interface LlmClient {
-  /** One non-streaming completion. Rejects on transport/HTTP error (the loop treats it as a step error). */
+  /** One completion. Rejects on transport/HTTP error (the loop treats it as a step error). */
   complete(req: LlmRequest): Promise<LlmResult>;
   /** Provider label for logs/usage. */
   readonly provider: string;
+}
+
+/**
+ * Make a message list safe to send to any provider.
+ *
+ * Providers are strict about tool-call bookkeeping in ways that are easy to violate accidentally: a run
+ * aborted mid-step, a step that threw before executing, or a history trimmed at the wrong boundary all
+ * leave an assistant `tool_use` with no result, which is a hard 400 rather than a degraded answer. Rather
+ * than making every call site defensive, repair it in one place:
+ *
+ *   - a tool result with no preceding call is dropped (it would reference an unknown id);
+ *   - a tool call with no result gets a synthetic one, so the turn stays well-formed;
+ *   - an assistant turn with neither text nor calls is dropped (some providers reject empty content);
+ *   - leading tool turns are dropped, since a conversation cannot open with a result.
+ */
+export function normalizeMessages(messages: readonly LlmMessage[]): LlmMessage[] {
+  const out: LlmMessage[] = [];
+  /** Ids called by the most recent assistant turn that have not yet been answered. */
+  let outstanding: string[] = [];
+
+  const settleOutstanding = (): void => {
+    for (const id of outstanding) {
+      out.push({
+        role: 'tool',
+        toolCallId: id,
+        content: 'This step did not complete, so no result was produced.',
+      });
+    }
+    outstanding = [];
+  };
+
+  for (const message of messages) {
+    if (message.role === 'tool') {
+      const index = outstanding.indexOf(message.toolCallId);
+      if (index === -1) continue; // answers nothing we asked for
+      outstanding.splice(index, 1);
+      out.push(message);
+      continue;
+    }
+    // A new user/assistant turn closes the previous tool round.
+    settleOutstanding();
+    if (message.role === 'assistant') {
+      const hasText = Boolean(message.content && message.content.trim());
+      const calls = message.toolCalls ?? [];
+      if (!hasText && calls.length === 0) continue;
+      out.push(message);
+      outstanding = calls.map((call) => call.id);
+      continue;
+    }
+    out.push(message);
+  }
+  settleOutstanding();
+
+  while (out.length && out[0]!.role === 'tool') out.shift();
+  return out;
 }

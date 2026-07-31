@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { AgentEvent, AgentUsage } from '@lobster/shared-types';
 import type { BrowserDriver, Point } from './driver.js';
 import type { LlmClient, LlmRequest, LlmResult } from './llm/index.js';
-import type { MemoryStore } from './memory/index.js';
+import type { MemoryStore, ThreadMessage } from './memory/index.js';
 import { EXTRACT_SCRIPT } from './perception/extract-script.js';
 import { resolveConfig, runAgent } from './loop.js';
 
@@ -90,22 +90,44 @@ class ScriptedLlm implements LlmClient {
       summary: 'script exhausted',
     };
     const usage: AgentUsage = { tokensIn: 10, tokensOut: 5 };
-    return Promise.resolve({ toolCall: { name: 'act', input }, stopReason: 'tool', usage });
+    return Promise.resolve({
+      toolCall: { id: `call_${this.i}`, name: 'act', input },
+      stopReason: 'tool',
+      usage,
+    });
   }
+}
+
+/** Every piece of text in a request, for "the model was told X" assertions. */
+function allText(request: LlmRequest): string {
+  return request.messages
+    .map((m) => (m.role === 'assistant' ? JSON.stringify(m.toolCalls ?? []) : m.content))
+    .join('\n');
 }
 
 class FakeMemory implements MemoryStore {
   steps: unknown[] = [];
+  /** Prior turns of the conversation under test, in stored form. */
+  thread: ThreadMessage[] = [];
+  appendedTurns: Array<{ user: string; assistant: string; status: string }> = [];
   finished?: { status: string; summary: string };
-  conversationContext = '';
   siteContexts: string[] = [];
   started?: { task: string; mode?: string; model?: string };
   async loadContext(domain?: string): Promise<string> {
     if (domain) this.siteContexts.push(domain);
     return domain ? `site preference for ${domain}` : '';
   }
-  async loadConversationContext(): Promise<string> {
-    return this.conversationContext;
+  async loadThread(): Promise<ThreadMessage[]> {
+    return this.thread;
+  }
+  async appendThreadTurn(
+    _threadId: string,
+    turn: { user: string; assistant: string; status: 'done' | 'error' | 'stopped' },
+  ): Promise<void> {
+    this.appendedTurns.push(turn);
+  }
+  async listThreads(): Promise<[]> {
+    return [];
   }
   async startRun(
     _id: string,
@@ -144,6 +166,7 @@ function run(script: Array<Record<string, unknown>>, humanInput = 'ok') {
     promise: runAgent(
       {
         sessionId: 's1',
+        threadId: 'thread1',
         profileId: 'p1',
         task: 'search for shoes',
         runId: 's1',
@@ -193,7 +216,10 @@ test('runs a type+submit then finishes done, emitting the expected event arc', a
 test('Ask mode injects bounded prior conversation and persists run metadata', async () => {
   const driver = new FakeDriver();
   const memory = new FakeMemory();
-  memory.conversationContext = 'User: My name is Ada.\nAssistant: Nice to meet you, Ada.';
+  memory.thread = [
+    { role: 'user', content: 'My name is Ada.', ts: 'T1' },
+    { role: 'assistant', content: 'Nice to meet you, Ada.', ts: 'T2', status: 'done' },
+  ];
   const events: AgentEvent[] = [];
   const requests: LlmRequest[] = [];
   const llm: LlmClient = {
@@ -214,6 +240,7 @@ test('Ask mode injects bounded prior conversation and persists run metadata', as
       profileId: 'p1',
       task: 'What is my name?',
       runId: 'ask-2',
+      threadId: 'thread1',
       llmConfig: { provider: 'anthropic', model: 'claude-test', apiKey: 'x' },
       config: resolveConfig({ mode: 'ask' }),
     },
@@ -234,13 +261,20 @@ test('Ask mode injects bounded prior conversation and persists run metadata', as
     model: 'claude-test',
   });
   assert.equal(requests.length, 1);
-  assert.match(requests[0]!.user, /My name is Ada/);
-  assert.match(requests[0]!.user, /BEGIN_CURRENT_USER_MESSAGE\nWhat is my name\?/);
-  assert.ok(
-    requests[0]!.user.indexOf('My name is Ada') < requests[0]!.user.indexOf('What is my name?'),
-    'prior conversation must precede the current user message',
+  // Prior turns arrive as REAL alternating messages, not a transcript pasted into one user string.
+  assert.deepEqual(
+    requests[0]!.messages.map((m) => [m.role, 'content' in m ? m.content : '']),
+    [
+      ['user', 'My name is Ada.'],
+      ['assistant', 'Nice to meet you, Ada.'],
+      ['user', 'What is my name?'],
+    ],
   );
   assert.equal(memory.finished?.summary, 'Your name is Ada.');
+  // The exchange is written back, so the NEXT message can see it.
+  assert.deepEqual(memory.appendedTurns, [
+    { user: 'What is my name?', assistant: 'Your name is Ada.', status: 'done' },
+  ]);
   const finished = events.find((event) => event.type === 'run.finished');
   assert.ok(finished && finished.type === 'run.finished' && finished.status === 'done');
 });
@@ -259,10 +293,15 @@ test('Agent mode receives prior conversation and refreshes site-scoped memory', 
   const { promise, memory, llm } = run([
     { kind: 'done', success: true, summary: 'You like violet.' },
   ]);
-  memory.conversationContext = 'User: I like violet.\nAssistant: I will remember that.';
+  memory.thread = [
+    { role: 'user', content: 'I like violet.', ts: 'T1' },
+    { role: 'assistant', content: 'I will remember that.', ts: 'T2', status: 'done' },
+  ];
   await promise;
-  assert.match(llm.requests[0]!.user, /I like violet/);
-  assert.match(llm.requests[0]!.user, /site preference for example\.test/);
+  const first = llm.requests[0]!.messages;
+  assert.equal(first[0]?.role, 'user');
+  assert.match(allText(llm.requests[0]!), /I like violet/);
+  assert.match(allText(llm.requests[0]!), /site preference for example\.test/);
   assert.deepEqual(memory.siteContexts, ['example.test']);
 });
 
@@ -326,9 +365,9 @@ test('multi-page extracts remain in a bounded evidence ledger after clicking Nex
       sleep: async () => {},
     },
   );
-  assert.match(llm.requests[2]!.user, /PAGE ONE: Ada, 10/);
-  assert.match(llm.requests[3]!.user, /PAGE ONE: Ada, 10/);
-  assert.match(llm.requests[3]!.user, /PAGE TWO: Grace, 20/);
+  assert.match(allText(llm.requests[2]!), /PAGE ONE: Ada, 10/);
+  assert.match(allText(llm.requests[3]!), /PAGE ONE: Ada, 10/);
+  assert.match(allText(llm.requests[3]!), /PAGE TWO: Grace, 20/);
 });
 
 test('stops cleanly when aborted before finishing', async () => {

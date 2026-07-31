@@ -16,7 +16,9 @@ import type { BrowserDriver } from './driver.js';
 import { executeAction } from './executor.js';
 import type { Sleep } from './executor.js';
 import type { LlmClient } from './llm/index.js';
-import type { MemoryStore } from './memory/index.js';
+import type { LlmMessage } from './llm/types.js';
+import { normalizeMessages } from './llm/types.js';
+import type { MemoryStore, ThreadMessage } from './memory/index.js';
 import {
   actionRisk,
   assessNavigation,
@@ -25,12 +27,7 @@ import {
 } from './policy.js';
 import { perceive } from './perception/perceive.js';
 import { renderObservation, sameElements } from './perception/serialize.js';
-import {
-  buildAskPrompt,
-  buildAskUserPrompt,
-  buildStepPrompt,
-  buildSystemPrompt,
-} from './prompt.js';
+import { buildAskPrompt, buildStepPrompt, buildSystemPrompt } from './prompt.js';
 import { describeSafeAction, isSensitiveElement, redactAction, redactUrl } from './security.js';
 import type { RawPerception } from './types.js';
 
@@ -50,6 +47,12 @@ export interface AgentRunParams {
   profileId: string;
   task: string;
   runId: string;
+  /**
+   * The conversation this run belongs to. Prior turns are loaded from it and this run's exchange is
+   * appended when it finishes, which is what makes "remember what I just asked" work. Omit for a
+   * one-off run with no conversational context.
+   */
+  threadId?: string;
   llmConfig: AgentLlmConfig;
   config: AgentConfig;
 }
@@ -110,7 +113,7 @@ const MUTATING: ReadonlySet<AgentAction['kind']> = new Set([
 ]);
 
 export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Promise<void> {
-  const { sessionId, profileId, task, runId, llmConfig, config } = params;
+  const { sessionId, profileId, task, runId, threadId, llmConfig, config } = params;
   const { driver, llm, memory, emit, signal, now } = deps;
   const usage: AgentUsage = { tokensIn: 0, tokensOut: 0 };
   const history: string[] = [];
@@ -143,6 +146,20 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         log('warn', `Could not finalize encrypted run memory: ${safeError(memoryError)}`);
       }
     }
+    // Record the exchange in its thread REGARDLESS of outcome. A failed or stopped attempt is exactly
+    // what the next message ("try that again, but…") refers to; excluding it was why follow-ups landed
+    // with no idea what had just been attempted.
+    if (threadId) {
+      try {
+        await memory.appendThreadTurn(threadId, {
+          user: task,
+          assistant: result || error || '',
+          status,
+        });
+      } catch (threadError) {
+        log('warn', `Could not append the conversation turn: ${safeError(threadError)}`);
+      }
+    }
     emit({
       type: 'run.finished',
       ...base,
@@ -168,11 +185,15 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     // Could not record this run — it just won't be persisted or recalled later. Continue.
   }
 
-  let conversationContext = '';
-  try {
-    conversationContext = await memory.loadConversationContext();
-  } catch {
-    conversationContext = ''; // recall unavailable this turn — proceed with none
+  // Prior turns of THIS conversation, as real messages. Scoped to the thread, so an unrelated task on
+  // the same profile can no longer bleed into this one.
+  let priorTurns: LlmMessage[] = [];
+  if (threadId) {
+    try {
+      priorTurns = threadToMessages(await memory.loadThread(threadId));
+    } catch {
+      priorTurns = []; // recall unavailable this turn — proceed with none
+    }
   }
 
   // ASK mode: a single chat completion, no browser and no tools — the model answers from its own
@@ -182,7 +203,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       const result = await llm.complete({
         model: llmConfig.model,
         system: buildAskPrompt(),
-        user: buildAskUserPrompt(task, conversationContext),
+        messages: normalizeMessages([...priorTurns, { role: 'user', content: task }]),
         tools: [],
         forceTool: '',
         maxTokens: llmConfig.effort ? 8000 : 2048,
@@ -228,6 +249,10 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     const memoryContext = await memory.loadContext(undefined, task);
     const system = buildSystemPrompt({ task, config, memoryContext });
     let previous: RawPerception | null = null;
+    /** This run's assistant/tool exchange, appended to the thread's prior turns each step. */
+    const stepMessages: LlmMessage[] = [];
+    /** The call id the NEXT observation answers, so the pairing providers require stays intact. */
+    let lastToolCallId: string | undefined;
     let readEvidence: string[] = [];
     let siteMemoryHost = '';
     let siteMemoryContext = '';
@@ -283,19 +308,36 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         nudges.push(
           `BUDGET: step ${step} of ${config.maxSteps}. Wrap up — consolidate what you already have and call \`done\`; do not start new exploration.`,
         );
-      const user = buildStepPrompt({
-        history: nudges.length ? [...history, ...nudges] : history,
+      const stepText = buildStepPrompt({
+        history: nudges,
         observation: rendered,
         step,
+        // Every path that ends a step appends its outcome here, so the newest entry is precisely what
+        // the tool result should report.
+        ...(history.length ? { outcome: history[history.length - 1]! } : {}),
         ...(readEvidence.length ? { readState: readEvidence.join('\n\n') } : {}),
-        ...(conversationContext ? { conversationContext } : {}),
         ...(siteMemoryContext ? { siteMemoryContext } : {}),
       });
+      // Step 1 opens the turn as a user message; every later step is the RESULT of the tool call the
+      // model just made. Feeding observations back as tool results is what gives the model a genuine
+      // record of its own actions — the old design re-narrated them as prose because a single-message
+      // request had nowhere else to put them.
+      if (step === 1) {
+        stepMessages.push({ role: 'user', content: stepText });
+      } else if (lastToolCallId) {
+        stepMessages.push({ role: 'tool', toolCallId: lastToolCallId, content: stepText });
+      } else {
+        stepMessages.push({ role: 'user', content: stepText });
+      }
       // Reasoning effort consumes from `max_tokens` (OpenRouter converts effort→thinking budget for
       // Anthropic, up to ~0.8×max_tokens at High), so raise the cap when effort is on to leave room for
       // the forced action call; otherwise the tiny tool-call output only needs ~1024.
       const maxTokens = llmConfig.effort ? 8000 : 1024;
-      const estimated = estimateTokens(system) + estimateTokens(user) + maxTokens;
+      const conversation = normalizeMessages([...priorTurns, ...pruneObservations(stepMessages)]);
+      const estimated =
+        estimateTokens(system) +
+        conversation.reduce((sum, m) => sum + estimateTokens(messageText(m)), 0) +
+        maxTokens;
       if (config.tokenBudget && usage.tokensIn + usage.tokensOut + estimated > config.tokenBudget) {
         return await finish(
           'stopped',
@@ -309,7 +351,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       const result = await llm.complete({
         model: step === 1 || recovery ? llmConfig.model : (llmConfig.stepModel ?? llmConfig.model),
         system,
-        user,
+        messages: imageForStep ? attachImageToLastTurn(conversation, imageForStep) : conversation,
         tools: [
           {
             name: ACT_TOOL.name,
@@ -322,7 +364,6 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         cachePrefix: true,
         sessionId: runId,
         ...(llmConfig.effort ? { effort: llmConfig.effort } : {}),
-        ...(imageForStep ? { images: [{ mediaType: 'image/png', data: imageForStep }] } : {}),
         signal,
       });
       recovery = false;
@@ -349,6 +390,16 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       invalidActions = 0;
       const action = parsed.action;
       const safeAction = redactAction(action, raw);
+      // Record the model's own choice as an assistant turn. Every path below may `continue`, and the
+      // next step answers THIS call id — so the assistant/tool pairing stays well-formed even when the
+      // action is blocked, rejected, or never executed.
+      stepMessages.push({
+        role: 'assistant',
+        toolCalls: [
+          { ...result.toolCall, input: safeAction as unknown as Record<string, unknown> },
+        ],
+      });
+      lastToolCallId = result.toolCall.id;
       emit({ type: 'step.action', ...base, step, action: safeAction, ts: now() });
 
       if (
@@ -766,6 +817,88 @@ function observationFingerprint(raw: RawPerception): string {
 
 function estimateTokens(value: string): number {
   return Math.ceil(value.length / 3.5);
+}
+
+/** All text in a message, for budgeting. */
+function messageText(message: LlmMessage): string {
+  if (message.role === 'assistant') {
+    return (message.content ?? '') + JSON.stringify(message.toolCalls ?? []);
+  }
+  return message.content;
+}
+
+/** Stored thread turns → request messages. */
+function threadToMessages(stored: readonly ThreadMessage[]): LlmMessage[] {
+  const out: LlmMessage[] = [];
+  for (const message of stored) {
+    if (!message.content.trim()) continue;
+    if (message.role === 'compaction') {
+      out.push({
+        role: 'user',
+        content: `[Earlier context, summarized] ${message.content}`,
+      });
+      continue;
+    }
+    if (message.role === 'user') {
+      out.push({ role: 'user', content: message.content });
+      continue;
+    }
+    // Label an unsuccessful attempt rather than dropping it, so the model can tell a real answer from
+    // one that failed — and so "try that again" has something to refer to.
+    const prefix =
+      message.status === 'error'
+        ? '[This attempt failed] '
+        : message.status === 'stopped'
+          ? '[This attempt was stopped before finishing] '
+          : '';
+    out.push({ role: 'assistant', content: `${prefix}${message.content}` });
+  }
+  return out;
+}
+
+/** Number of recent step observations kept at full size. */
+const VERBATIM_OBSERVATIONS = 6;
+
+/**
+ * Keep the run's own exchange bounded without breaking its structure.
+ *
+ * Page snapshots dominate an agent run's token cost, and every one of them stays relevant only for a
+ * step or two. Older TOOL RESULTS are therefore reduced to their first line (the URL/title and outcome),
+ * while every assistant turn — the record of what the agent actually DID — is preserved in full. The
+ * shape of the conversation is never altered, so the call/result pairing providers require survives.
+ */
+function pruneObservations(messages: readonly LlmMessage[]): LlmMessage[] {
+  const toolIndices = messages.flatMap((m, i) => (m.role === 'tool' ? [i] : []));
+  if (toolIndices.length <= VERBATIM_OBSERVATIONS) return [...messages];
+  const cutoff = toolIndices[toolIndices.length - VERBATIM_OBSERVATIONS]!;
+  return messages.map((message, index) => {
+    if (message.role !== 'tool' || index >= cutoff) return message;
+    const firstLine = message.content.split('\n', 1)[0] ?? '';
+    return {
+      ...message,
+      content: `${firstLine.slice(0, 300)}\n(older page snapshot omitted to save context)`,
+    };
+  });
+}
+
+/**
+ * Attach a screenshot to the newest turn. Vision arrives as an extra content part on the message the
+ * model is about to answer; a tool result cannot carry an image on every provider, so in that case a
+ * trailing user turn carries it instead.
+ */
+function attachImageToLastTurn(messages: readonly LlmMessage[], image: string): LlmMessage[] {
+  const out = [...messages];
+  const last = out.at(-1);
+  if (last?.role === 'user') {
+    out[out.length - 1] = { ...last, images: [{ mediaType: 'image/png', data: image }] };
+    return out;
+  }
+  out.push({
+    role: 'user',
+    content: 'Visual observation of the current page:',
+    images: [{ mediaType: 'image/png', data: image }],
+  });
+  return out;
 }
 
 function safeError(error: unknown): string {

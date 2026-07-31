@@ -38,19 +38,65 @@ export interface RunRecord {
 }
 
 /**
+ * One turn in a conversation thread.
+ *
+ * `compaction` is a real, first-class entry rather than a destructive rewrite: when a thread outgrows
+ * its budget the older turns collapse into a summary the user can SEE, instead of silently vanishing.
+ * That visibility is the point — the previous design dropped turns with no trace, so the model answered
+ * from a history that quietly disagreed with what was on screen.
+ */
+export interface ThreadMessage {
+  role: 'user' | 'assistant' | 'compaction';
+  content: string;
+  ts: string;
+  /**
+   * Outcome of the run that produced an assistant turn. Failed and stopped turns are RETAINED (the
+   * follow-up is usually "try again, but…", which is unanswerable without them) and labelled, so the
+   * model can tell an answer apart from an attempt.
+   */
+  status?: 'done' | 'error' | 'stopped';
+  /** True when the stored text was clipped to fit the per-message bound. */
+  clipped?: boolean;
+}
+
+/** A conversation thread: the unit "New chat" creates and the panel shows. */
+export interface ThreadRecord {
+  id: string;
+  title?: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: ThreadMessage[];
+}
+
+/** A thread as listed in the panel's history, without its body. */
+export interface ThreadSummary {
+  id: string;
+  title: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+/**
  * Per-profile agent memory. Every method is scoped to ONE profile's directory; there is no API to
  * reach another profile's memory, so cross-profile isolation is structural (see AgentStartParams.memoryDir).
  * The default implementation is file-backed (no native deps) — a SQLite impl can replace it behind this
  * interface without touching callers.
  */
 export interface MemoryStore {
+  /** Read one thread's turns, oldest first. Unknown thread → empty (a new conversation). */
+  loadThread(threadId: string): Promise<ThreadMessage[]>;
+  /**
+   * Append a completed exchange. Never drops the turn: oversized content is clipped with a visible
+   * marker, and older turns compact rather than disappear.
+   */
+  appendThreadTurn(
+    threadId: string,
+    turn: { user: string; assistant: string; status: 'done' | 'error' | 'stopped' },
+  ): Promise<void>;
+  /** Threads for this profile, newest first. */
+  listThreads(limit?: number): Promise<ThreadSummary[]>;
   /** Build the compact "what this profile knows" block for the system prompt (facts for `domain` + skills). */
   loadContext(domain?: string, task?: string): Promise<string>;
-  /**
-   * Build bounded chronological context from recent successful chat/agent turns. Legacy records,
-   * unsuccessful runs, and credential-like turns are deliberately excluded.
-   */
-  loadConversationContext(): Promise<string>;
   /** Begin a run; returns the run id used by subsequent step/finish calls. */
   startRun(
     runId: string,
