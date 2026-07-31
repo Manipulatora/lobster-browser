@@ -10,6 +10,7 @@ import { ACT_TOOL, parseAction } from './actions.js';
 import {
   assessUiSettingsIntent,
   isBrowserConfigSurfaceUrl,
+  isPrivilegedInternalUrl,
   isVettedBrowserConfigUrl,
 } from './browser-config-guard.js';
 import type { BrowserDriver } from './driver.js';
@@ -438,6 +439,28 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       }
       if (action.kind === 'screenshot' && !config.visionFallback) {
         history.push(`${step}. blocked: visual fallback is disabled for this run`);
+        continue;
+      }
+
+      // A privileged browser-internal page that is NOT a vetted settings surface is off limits
+      // entirely — the agent leaves rather than acting. The navigation policy already refuses to open
+      // one, but the agent can still ARRIVE on one: by switching to a tab the human opened, or by the
+      // driver adopting a popup. `chrome://policy` in particular exposes `setLocalTestPolicies`, which
+      // sets enterprise policy — proxy included — straight past every guard in browser-config-guard.ts,
+      // so a page reached by accident must not become a way around the fingerprint/proxy protections.
+      if (
+        isPrivilegedInternalUrl(raw.url) &&
+        !isVettedBrowserConfigUrl(raw.url) &&
+        action.kind !== 'tab' &&
+        action.kind !== 'navigate' &&
+        action.kind !== 'back' &&
+        action.kind !== 'done'
+      ) {
+        const outcome =
+          'blocked: this is a privileged browser page outside the vetted settings surface. Leave it (switch tabs, go back, or navigate to a normal site) before continuing.';
+        history.push(`${step}. ${outcome}`);
+        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log);
+        recovery = true;
         continue;
       }
 

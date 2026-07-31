@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { parseAction } from './actions.js';
 import {
   assessBrowserConfig,
+  isPrivilegedInternalUrl,
   assessUiSettingsIntent,
   isVettedBrowserConfigUrl,
   normalizeBrowserPermission,
@@ -203,4 +204,34 @@ test('destructive config ops are annotated high-risk for confirm-mode prompts', 
   assert.equal(actionRisk(cfg({ op: 'clear_cookies', domain: 'a.com' }), page).high, true);
   assert.equal(actionRisk(cfg({ op: 'clear_all_cookies' }), page).high, true);
   assert.equal(actionRisk(cfg({ op: 'clear_cache' }), page).high, false);
+});
+
+test('a privileged internal page reached by accident is off limits, not a settings surface', () => {
+  // The navigation policy refuses to OPEN these, but the agent can still arrive on one: by switching
+  // to a tab the human left open, or by the driver adopting a popup. chrome://policy is the reason
+  // this matters — its page context exposes setLocalTestPolicies, which applies enterprise policy
+  // (proxy included) past every preference guard in browser-config-guard.ts.
+  for (const url of [
+    'chrome://policy/',
+    'chrome://flags/',
+    'chrome://history/',
+    'chrome://version/',
+    'chrome://settings/languages',
+    'chrome://net-export/',
+    'devtools://devtools/bundled/inspector.html',
+    'chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html',
+    'chrome-untrusted://terminal/',
+  ]) {
+    assert.equal(isPrivilegedInternalUrl(url), true, `${url} must be treated as privileged`);
+    assert.equal(isVettedBrowserConfigUrl(url), false, `${url} must not be vetted`);
+  }
+
+  // Ordinary web pages and a blank tab are unaffected — this must not make normal browsing refuse.
+  for (const url of ['https://example.com/', 'http://localhost:3000/x', 'about:blank']) {
+    assert.equal(isPrivilegedInternalUrl(url), false, `${url} must stay ordinary`);
+  }
+
+  // The vetted settings pages the agent legitimately drives remain usable.
+  assert.equal(isVettedBrowserConfigUrl('chrome://settings/appearance'), true);
+  assert.equal(isPrivilegedInternalUrl('chrome://settings/appearance'), true);
 });

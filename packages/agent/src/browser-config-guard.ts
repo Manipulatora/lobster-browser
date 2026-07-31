@@ -325,6 +325,33 @@ export function isVettedBrowserConfigUrl(raw: string): boolean {
   return [...allowed].some((base) => path === base || path.startsWith(`${base}/`));
 }
 
+/**
+ * A privileged browser-internal page: one whose JavaScript context is granted the browser's own APIs
+ * rather than ordinary web capabilities.
+ *
+ * These pages are NOT websites and must never be treated as one. `chrome://policy` exposes
+ * `setLocalTestPolicies`, which applies enterprise policy — including the proxy — straight past every
+ * preference guard in this file; `chrome://flags` can change engine behaviour that the fingerprint
+ * layer assumes; `devtools://` and extension pages carry their own privileged surfaces. Verified on the
+ * fork (Chrome/152) that these pages load with `chrome.send` available in page context.
+ *
+ * The agent can arrive on one WITHOUT navigating there — by switching to a tab the human opened, or by
+ * the driver adopting a popup — so vetting the navigation alone was never sufficient.
+ */
+export function isPrivilegedInternalUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  const scheme = url.protocol.replace(/:$/, '').toLowerCase();
+  if (scheme === 'about') return url.pathname.replace(/^\/+/, '') !== 'blank';
+  return ['chrome', 'chrome-untrusted', 'chrome-search', 'devtools', 'chrome-extension'].includes(
+    scheme,
+  );
+}
+
 /** Whether this is browser configuration UI at all, including a non-vetted/blocked subsection. */
 export function isBrowserConfigSurfaceUrl(raw: string): boolean {
   try {
