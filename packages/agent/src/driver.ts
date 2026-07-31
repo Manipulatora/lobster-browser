@@ -37,12 +37,24 @@ export interface BrowserConfigCommand {
     | 'clear_site_data'
     | 'clear_cache'
     | 'set_permission'
-    | 'set_downloads';
+    | 'set_downloads'
+    /** Write Chromium preferences through the browser's own settings API. */
+    | 'set_prefs'
+    /** Read Chromium preferences, to report current state or verify a write. */
+    | 'get_prefs';
   domain?: string;
   origin?: string;
   permission?: string;
   setting?: 'granted' | 'denied' | 'prompt';
   behavior?: 'allow' | 'deny' | 'default';
+  /**
+   * Preference writes for `set_prefs`. ALREADY SCREENED by the browser-config guard — the driver
+   * applies these verbatim and performs no safety filtering of its own, because the guard is the single
+   * place that decides what the agent may touch (see browser-config-guard.ts).
+   */
+  prefs?: Array<{ key: string; value: unknown }>;
+  /** Preference keys for `get_prefs`. */
+  keys?: string[];
 }
 
 export interface BrowserDriver {

@@ -363,11 +363,131 @@ export class CdpBrowserDriver implements BrowserDriver {
         await this.browser.send('Browser.setDownloadBehavior', { behavior });
         return `set download behavior to ${behavior}`;
       }
+      case 'set_prefs': {
+        const prefs = command.prefs ?? [];
+        if (prefs.length === 0) throw new Error('set_prefs needs at least one preference');
+        // Verify by READ-BACK, not by the callback. `setPref` reports an unknown key through
+        // `chrome.runtime.lastError` rather than a false result, so trusting the callback alone would
+        // report a typo'd or removed pref as successfully applied — the agent would then tell the user
+        // it changed a setting it never touched. Reading the value back afterwards is the only claim
+        // we can actually stand behind, and it also catches prefs that are policy-enforced.
+        const applied = await this.withSettingsPage<
+          Array<{ key: string; ok: boolean; why?: string }>
+        >(
+          `new Promise((resolve) => {
+             const entries = ${JSON.stringify(prefs)};
+             const settle = (fn) => new Promise((done) => fn(done));
+             const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+             Promise.all(entries.map(async (entry) => {
+               const existing = await settle((d) => chrome.settingsPrivate.getPref(entry.key, d));
+               if (chrome.runtime.lastError || !existing) {
+                 void chrome.runtime.lastError;
+                 return { key: entry.key, ok: false, why: 'no such browser setting' };
+               }
+               await settle((d) => chrome.settingsPrivate.setPref(entry.key, entry.value, '', d));
+               if (chrome.runtime.lastError) {
+                 void chrome.runtime.lastError;
+                 return { key: entry.key, ok: false, why: 'the browser refused the value' };
+               }
+               const after = await settle((d) => chrome.settingsPrivate.getPref(entry.key, d));
+               void chrome.runtime.lastError;
+               return same(after && after.value, entry.value)
+                 ? { key: entry.key, ok: true }
+                 : { key: entry.key, ok: false, why: 'the value did not stick (it may be enforced by policy)' };
+             })).then(resolve);
+           })`,
+        );
+        const failed = applied.filter((entry) => !entry.ok);
+        const describeFailures = (): string =>
+          failed.map((entry) => `${entry.key} (${entry.why ?? 'refused'})`).join('; ');
+        if (failed.length === applied.length)
+          throw new Error(`could not apply ${describeFailures()}`);
+        const ok = applied.filter((entry) => entry.ok).map((entry) => entry.key);
+        return failed.length
+          ? `applied and verified ${ok.join(', ')}; could NOT apply ${describeFailures()}`
+          : `applied and verified ${ok.join(', ')}`;
+      }
+      case 'get_prefs': {
+        const keys = command.keys ?? [];
+        if (keys.length === 0) throw new Error('get_prefs needs at least one key');
+        const values = await this.withSettingsPage<Array<[string, unknown]>>(
+          `new Promise((resolve) => {
+             const keys = ${JSON.stringify(keys)};
+             let done = 0;
+             const out = [];
+             for (const key of keys) {
+               chrome.settingsPrivate.getPref(key, (pref) => {
+                 out.push([key, pref ? pref.value : null]);
+                 if (++done === keys.length) resolve(out);
+               });
+             }
+           })`,
+        );
+        return values.map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join('\n');
+      }
       default: {
         const never: never = command.op;
         throw new Error(`unsupported browser-config op ${String(never)}`);
       }
     }
+  }
+
+  /**
+   * Run one expression in a `chrome://settings` page context and return its value.
+   *
+   * WebUI pages are granted the browser's own privileged bindings — `chrome.settingsPrivate` is the
+   * very API the settings UI uses to read and write preferences. Evaluating there applies a setting
+   * SEMANTICALLY and instantly, instead of opening the settings page and clicking through its controls
+   * with the perception loop (brittle, slow, and dependent on Chromium's UI markup not changing).
+   *
+   * The page is a throwaway: created, used, and closed. It is never activated, never becomes the
+   * agent's working target, and never disturbs whatever the user is looking at — so unlike the old
+   * UI-fallback path, nothing about the visible browser changes. `Runtime.evaluate` on a fresh session
+   * keeps the leak-free invariant: no `*.enable`, no events, no automation tell.
+   *
+   * Chromium's WebUI attach restriction is enforced only for `chrome.debugger` extensions, not for a
+   * `--remote-debugging-port` client, which is why this works with no fork patch. Verified against the
+   * real fork (Chrome/152).
+   */
+  private async withSettingsPage<T>(expression: string): Promise<T> {
+    const { targetId } = (await this.browser.send('Target.createTarget', {
+      url: 'chrome://settings/',
+      background: true,
+    })) as { targetId: string };
+    let session: PersistentCdpSession | undefined;
+    try {
+      const wsUrl = await this.waitForTargetWs(targetId);
+      session = await openPersistentCdpSession(wsUrl, { resolveTarget: false });
+      // The bindings are injected with the page, which has just been created; poll briefly rather than
+      // sleeping a fixed amount, so a slow machine does not fail and a fast one does not wait.
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const ready = await cdpEvaluate<boolean>(
+          session,
+          `typeof chrome !== 'undefined' && !!chrome.settingsPrivate`,
+        ).catch(() => false);
+        if (ready) break;
+        await sleep(100);
+      }
+      return await cdpEvaluate<T>(session, expression);
+    } finally {
+      try {
+        session?.close();
+      } catch {
+        // The target is closed next regardless.
+      }
+      await this.browser.send('Target.closeTarget', { targetId }).catch(() => {});
+    }
+  }
+
+  /** A newly created target exposes its debugger URL asynchronously; wait for it to appear. */
+  private async waitForTargetWs(targetId: string): Promise<string> {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const targets = await listCdpTargets(this.browserWs).catch(() => []);
+      const match = targets.find((target) => target.id === targetId);
+      if (match?.webSocketDebuggerUrl) return match.webSocketDebuggerUrl;
+      await sleep(100);
+    }
+    throw new Error('the browser settings page did not expose an automation endpoint');
   }
 
   close(): void {
