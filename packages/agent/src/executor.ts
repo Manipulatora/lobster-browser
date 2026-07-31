@@ -28,41 +28,137 @@ export interface ExecOptions {
   navigationApproved?: boolean;
 }
 
+/**
+ * Structure-preserving page extraction.
+ *
+ * The previous version walked text nodes and did `parts.join(' ')`, which flattened an entire table or
+ * product grid into ONE space-separated line. Reconstructing "row 3, column 2" from that is guesswork,
+ * and guessing is exactly how a scrape reports a price against the wrong product. Tables now emit one
+ * line per row with `|` between cells, lists emit one item per line, headings are marked, and link text
+ * carries its href — so the row/column relationships the answer depends on survive into the model's
+ * context instead of having to be inferred.
+ */
 const EXTRACT_TEXT = `(() => {
-  const chunks = [];
+  const MAX = 12000;
+  const out = [];
+  let budget = MAX;
+  const push = (line) => {
+    if (budget <= 0) return;
+    const value = String(line).replace(/[ \\t]+/g, ' ').trim();
+    if (!value) return;
+    out.push(value);
+    budget -= value.length + 1;
+  };
+  const txt = (el) => {
+    if (!el) return '';
+    const raw = el.innerText != null ? el.innerText : el.textContent;
+    return String(raw || '').replace(/\\s+/g, ' ').trim();
+  };
+  const shown = (el) => {
+    if (!el || el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+    const view = el.ownerDocument && el.ownerDocument.defaultView;
+    if (!view) return true;
+    const style = view.getComputedStyle(el);
+    return !style || (style.display !== 'none' && style.visibility !== 'hidden');
+  };
+  const SKIP = /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE|SVG|CANVAS|IFRAME|OBJECT|VIDEO|AUDIO)$/;
+  const BLOCK = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DETAILS|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|HEADER|MAIN|NAV|P|PRE|SECTION|SUMMARY)$/;
+  // Anything whose presence means a container is more than a run of inline text.
+  const STRUCTURAL = 'h1,h2,h3,h4,h5,h6,table,ul,ol,li,p,div,section,article,header,footer,nav,form,pre,blockquote,dl,figure,details,fieldset,address,main,aside';
+
+  /** One line of text in document order, with each link's target shown after its label. */
+  const inlineWithLinks = (el) => {
+    let value = '';
+    const visit = (n) => {
+      if (!n || budget <= 0) return;
+      if (n.nodeType === 3) { value += n.nodeValue || ''; return; }
+      if (n.nodeType !== 1) return;
+      if (SKIP.test(n.tagName || '') || !shown(n)) return;
+      if (n.tagName === 'BR') { value += ' '; return; }
+      const before = value.length;
+      for (const child of Array.prototype.slice.call(n.childNodes || [])) visit(child);
+      if (n.tagName === 'A') {
+        const href = n.getAttribute('href') || '';
+        // A label alone loses WHICH link it was; the href is often the identifier a scrape needs.
+        if (href && !/^(#|javascript:)/i.test(href) && value.length > before) {
+          value += ' (' + href + ')';
+        }
+      }
+    };
+    for (const child of Array.prototype.slice.call(el.childNodes || [])) visit(child);
+    return value;
+  };
+
+  const walk = (node, depth) => {
+    if (budget <= 0 || depth > 30 || !node) return;
+    const tag = node.tagName || '';
+    if (SKIP.test(tag) || !shown(node)) return;
+
+    if (/^H[1-6]$/.test(tag)) { push('#'.repeat(Number(tag[1])) + ' ' + txt(node)); return; }
+
+    if (tag === 'TABLE') {
+      const rows = node.rows ? Array.prototype.slice.call(node.rows, 0, 300) : [];
+      for (const row of rows) {
+        const cells = Array.prototype.slice.call(row.cells || [], 0, 40).map(txt);
+        if (cells.some((c) => c)) push(cells.join(' | '));
+        if (budget <= 0) break;
+      }
+      push('');
+      return;
+    }
+
+    if (tag === 'UL' || tag === 'OL') {
+      const items = node.children ? Array.prototype.slice.call(node.children, 0, 300) : [];
+      let index = 1;
+      for (const item of items) {
+        if (item.tagName !== 'LI' || !shown(item)) continue;
+        // A nested list is handled by recursion; only this item's own text goes on its line.
+        const nested = item.querySelector('ul,ol');
+        const own = nested ? txt(item).replace(txt(nested), '').trim() : txt(item);
+        push((tag === 'OL' ? index++ + '. ' : '- ') + own);
+        if (nested) walk(nested, depth + 1);
+        if (budget <= 0) break;
+      }
+      push('');
+      return;
+    }
+
+    if (tag === 'BR') { push(''); return; }
+
+    // A container holding only inline content is emitted as ONE line, in document order, with link
+    // targets annotated in place. Recursing into its children instead would split a sentence around
+    // its own links ("See ... for details." then "the returns policy"), which reads as two facts.
+    if (!node.querySelector || !node.querySelector(STRUCTURAL)) {
+      push(inlineWithLinks(node));
+      return;
+    }
+
+    const children = node.children ? Array.prototype.slice.call(node.children) : [];
+    for (const child of children) {
+      walk(child, depth + 1);
+      if (budget <= 0) break;
+    }
+    if (BLOCK.test(tag)) push('');
+  };
+
   const roots = [document];
-  const seen = new Set();
-  let visitedTextNodes = 0;
-  const addText = (root) => {
+  for (let i = 0; i < roots.length && i < 32; i++) {
+    const root = roots[i];
     const doc = root.nodeType === 9 ? root : root.ownerDocument;
     const start = root.nodeType === 9
       ? (root.querySelector('main,[role="main"],article') || root.body || root.documentElement)
       : root;
-    if (!doc || !start) return;
-    const walker = doc.createTreeWalker(start, NodeFilter.SHOW_TEXT);
-    const parts = [];
-    let node;
-    while ((node = walker.nextNode()) && visitedTextNodes < 6000) {
-      visitedTextNodes++;
-      const parent = node.parentElement;
-      if (!parent || /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/i.test(parent.tagName)) continue;
-      if (parent.hidden || parent.getAttribute('aria-hidden') === 'true') continue;
-      const text = (node.nodeValue || '').replace(/\\s+/g, ' ').trim();
-      if (text) parts.push(text);
-    }
-    const value = parts.join(' ').trim();
-    if (value && !seen.has(value)) { seen.add(value); chunks.push(value); }
-    for (const el of start.querySelectorAll ? start.querySelectorAll('*') : []) {
+    if (!doc || !start) continue;
+    walk(start, 0);
+    const all = start.querySelectorAll ? start.querySelectorAll('*') : [];
+    for (const el of Array.prototype.slice.call(all, 0, 4000)) {
       if (el.shadowRoot) roots.push(el.shadowRoot);
-      if (el.tagName === 'IFRAME') {
-        try { if (el.contentDocument) roots.push(el.contentDocument); } catch {}
-      }
       if (roots.length >= 32) break;
     }
-  };
-  for (let i = 0; i < roots.length && i < 32; i++) addText(roots[i]);
-  const text = chunks.join('\\n\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
-  return text.length > 6000 ? text.slice(0, 6000) + '\\u2026' : text;
+  }
+
+  const text = out.join('\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
+  return text.length > MAX ? text.slice(0, MAX) + '\\u2026[truncated]' : text;
 })()`;
 
 export async function executeAction(
@@ -245,8 +341,29 @@ export async function executeAction(
         return { outcome: `waited ${ms}ms` };
       }
       case 'extract': {
-        const extracted = await driver.evaluate<string>(EXTRACT_TEXT).catch(() => '');
-        return { outcome: `extracted page text for: ${action.description}`, extracted };
+        // Report what actually happened. Swallowing the failure and still saying "extracted" let the
+        // model believe it had captured the page when it had captured nothing — it would then answer
+        // from memory or invention rather than retrying, which is precisely the grounding failure the
+        // system prompt forbids.
+        let extracted: string;
+        try {
+          extracted = await driver.evaluate<string>(EXTRACT_TEXT);
+        } catch (error) {
+          return {
+            outcome: `error: could not read the page text (${error instanceof Error ? error.message : String(error)})`,
+          };
+        }
+        if (!extracted || !extracted.trim()) {
+          return {
+            outcome:
+              'error: the page returned no readable text (it may still be loading, be blocked, or render inside a cross-origin frame)',
+          };
+        }
+        const truncated = extracted.includes('…[truncated]');
+        return {
+          outcome: `extracted ${extracted.length} characters of page text for: ${action.description}${truncated ? ' (page was longer than the limit; the tail was cut)' : ''}`,
+          extracted,
+        };
       }
       case 'browser_config': {
         // The anti-detect guard is the FIRST gate: it hard-blocks any fingerprint/proxy-touching
