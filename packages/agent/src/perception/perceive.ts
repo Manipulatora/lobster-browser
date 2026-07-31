@@ -37,14 +37,26 @@ export async function perceive(driver: BrowserDriver): Promise<RawPerception> {
     };
   }
   let raw: Partial<RawPerception> | null = null;
+  let failure = '';
   try {
     raw = await driver.evaluate<Partial<RawPerception>>(EXTRACT_SCRIPT);
-  } catch {
+  } catch (error) {
     raw = null;
+    failure = error instanceof Error ? error.message : String(error);
   }
   if (!raw || !Array.isArray(raw.elements)) {
     const url = raw?.url ?? (await safeUrl(driver));
-    return emptyPerception(url);
+    // Do NOT present a failed read as a blank page. "(no interactive elements visible)" is a claim
+    // about the page; when the read itself failed it is a false one, and the model would respond by
+    // scrolling or waiting forever instead of recovering or handing off. Say what went wrong.
+    const empty = emptyPerception(url);
+    return failure
+      ? {
+          ...empty,
+          signals: [...(empty.signals ?? []), 'page-unreadable'],
+          text: `The page could not be read: ${failure}`,
+        }
+      : empty;
   }
   // Re-index defensively so indices are always a dense 0..n-1 the model can trust, even if the script
   // ever skips one. Coordinates/fields are taken verbatim from the in-page measurement.

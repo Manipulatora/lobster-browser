@@ -63,8 +63,31 @@ export class CdpBrowserDriver implements BrowserDriver {
     }
   }
 
-  evaluate<T>(expression: string): Promise<T> {
-    return cdpEvaluate<T>(this.page, expression);
+  async evaluate<T>(expression: string): Promise<T> {
+    try {
+      return await cdpEvaluate<T>(this.page, expression);
+    } catch (error) {
+      // A native alert()/confirm()/beforeunload blocks the renderer, so every Runtime.evaluate hangs
+      // until the CDP command timeout. Perception then returned an empty page with no explanation and
+      // each further step cost another 30s, with no way out.
+      //
+      // This CANNOT be auto-dismissed here. Handling a dialog requires Page.handleJavaScriptDialog,
+      // and the fork's page_handler.cc rejects it with "No dialog is showing" unless `pending_dialog_`
+      // was populated — which only happens while the Page domain is enabled, i.e. exactly the
+      // automation tell this driver exists to avoid. Verified against the fork and by experiment.
+      //
+      // So convert an unexplained hang into an actionable failure: the model is told what is blocking
+      // and can hand off to the human, the same way it does for a captcha.
+      if (!/timed out/i.test(String(error))) throw error;
+      const dismissed = await this.page
+        .send('Page.handleJavaScriptDialog', { accept: false })
+        .then(() => true)
+        .catch(() => false);
+      if (dismissed) return await cdpEvaluate<T>(this.page, expression);
+      throw new Error(
+        'the page is not responding, which usually means a native browser dialog (alert/confirm/print/beforeunload) is open and blocking it — this cannot be dismissed automatically, so ask the human to close the dialog',
+      );
+    }
   }
 
   async click(
@@ -186,7 +209,20 @@ export class CdpBrowserDriver implements BrowserDriver {
   }
 
   async navigate(url: string): Promise<void> {
+    const before = await cdpEvaluate<string>(this.page, 'location.href').catch(() => '');
     await this.page.send('Page.navigate', { url });
+    // `Page.navigate` resolves when navigation STARTS, not when the new document exists. The settle
+    // poll then samples the OLD page, and if the server's TTFB exceeds ~450ms it sees a stable,
+    // `complete` document and returns immediately — so the agent perceives and acts on the page it
+    // was trying to leave. Wait for the document to actually turn over first.
+    if (!before) return;
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const current = await cdpEvaluate<string>(this.page, 'location.href').catch(() => '');
+      // Any change counts, including a redirect to somewhere other than the requested URL.
+      if (current && current !== before) return;
+      await sleep(100);
+    }
   }
 
   async goBack(): Promise<void> {

@@ -27,7 +27,7 @@ export { perceive } from './perception/perceive.js';
 export { renderObservation, sameElements } from './perception/serialize.js';
 export { EXTRACT_SCRIPT, MAX_ELEMENTS, MAX_NAME } from './perception/extract-script.js';
 
-export { ACT_TOOL, ACTION_REFERENCE, parseAction } from './actions.js';
+export { ACT_TOOL, buildActionReference, parseAction } from './actions.js';
 export type { RawActionInput, ParseActionResult } from './actions.js';
 export { executeAction } from './executor.js';
 export type { ExecOutcome, ExecOptions, Sleep } from './executor.js';

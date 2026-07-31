@@ -190,7 +190,12 @@ export class AgentBridge {
       memoryKey: entry.memoryKey,
       ...(threadId ? { threadId } : {}),
       llm,
-      config: { mode },
+      // Vision is the documented escape hatch for what the text perception structurally cannot see:
+      // cross-origin iframes (payment forms, captchas, consent dialogs) and canvas/custom widgets.
+      // It was never enabled by any caller, so those pages were simply dead ends while the prompt
+      // advertised a fallback that always answered "blocked". It stays cheap because a screenshot is
+      // only captured when the model asks for one, or when a page has almost no readable elements.
+      config: { mode, visionFallback: true },
     });
     return json(res, 200, { ok: true, ...result });
   }

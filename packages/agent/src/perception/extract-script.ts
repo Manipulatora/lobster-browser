@@ -230,6 +230,22 @@ export const EXTRACT_SCRIPT = `(() => {
     if (/sign in|log in|password/i.test(signalText)) signals.push('login');
     if (document.querySelector('[role="dialog"],dialog[open],[aria-modal="true"]')) signals.push('dialog');
     if (document.querySelector('canvas')) signals.push('canvas');
+    // A cross-origin frame is STRUCTURALLY invisible to this extractor: contentDocument throws, so its
+    // controls produce no elements at all. Without a signal the model sees a page that looks simply
+    // empty and has no idea a payment form, captcha or consent dialog is sitting in front of it. Say
+    // so, and say it only when the frame is big enough to matter.
+    try {
+      var blindFrames = 0;
+      for (var fi = 0; fi < document.querySelectorAll('iframe').length && fi < 40; fi++) {
+        var fr = document.querySelectorAll('iframe')[fi];
+        var reachable = false;
+        try { reachable = !!(fr.contentDocument && fr.contentDocument.documentElement); } catch (e) { reachable = false; }
+        if (reachable) continue;
+        var fb = fr.getBoundingClientRect();
+        if (fb.width >= 60 && fb.height >= 40) blindFrames++;
+      }
+      if (blindFrames > 0) signals.push('cross-origin-frame:' + blindFrames);
+    } catch (e) {}
     return {
       url: safeUrl(location.href),
       title: document.title || '',

@@ -122,16 +122,46 @@ export const ACT_TOOL = {
   },
 } as const;
 
-export const ACTION_REFERENCE = `Actions (one per tool call):
-- click {id, button?, count?}; hover {id}; type {id,text,clear?,submit?}; select {id,values}
-- after a screenshot only: click_at {x,y,...} or type_at {x,y,text,...} in CSS viewport coordinates
-- key {key}; scroll {direction,amount?,id?}; drag {fromId,toId}; upload {id,paths}
-- navigate {url}; back {}; tab {operation,index?,url?}; wait {ms?}
-- extract {description}; screenshot {description?}
-- remember {factKey,factValue}: save a durable per-site fact you'll want next time (e.g. "login = SSO via Google", "cookie-accept = button 'Agree'"). NEVER remember secrets.
-- browser_config {op,...}: change browser settings directly (not the page). Live ops (applied instantly): clear_cookies {domain}; clear_all_cookies {}; clear_site_data {origin|domain}; clear_cache {}; set_permission {origin|domain, permission (geolocation|notifications|camera|microphone|clipboard-read|clipboard-write|midi), setting (granted|denied|prompt)}; set_downloads {behavior (allow|deny|default)}. Use clear_all_cookies when the user says all/every site's cookies — do NOT search chrome://settings for it. Settings-page ops (open the real settings UI, then change it with normal click/select — Chromium applies it live): open_settings {value} where value is an area like "privacy", "appearance", "cookies", "content", "notifications", "downloads", "search", "site settings", or "new tab"; plus shortcuts set_theme {value:"dark"|"light"}, set_privacy {}, set_content_default {}. After a settings-page op, perceive the page and operate the specific control. This touches real browser config, so only use it when the task calls for it. You can NEVER change fingerprint or proxy/network settings (user-agent, languages, timezone, screen, canvas/WebGL, WebRTC, proxy, …) — those are hard-blocked to protect the profile's identity; don't attempt them.
-- ask {question,sensitive?,targetId?}; done {success,summary}
-For passwords/OTP/payment secrets, NEVER ask the human to paste a secret into ordinary chat. Use ask with sensitive:true plus targetId (or targetX+targetY after a screenshot) so the harness types it directly without exposing it to you. Captchas require a human handoff; do not attempt to bypass them.`;
+/**
+ * The action list the model is shown, built from what is ACTUALLY available this run.
+ *
+ * It used to be one fixed string that advertised `screenshot`, `click_at`, `type_at` and `upload`
+ * unconditionally — all four of which are gated behind config no caller ever set. The model would
+ * therefore choose an action it could not use, burn a step on `blocked: …`, and learn nothing. A
+ * capability the run does not have is simply not described.
+ */
+export function buildActionReference(opts: { vision: boolean; uploads: boolean }): string {
+  const lines = [
+    'Actions (one per tool call):',
+    '- click {id, button?, count?}; hover {id}; type {id,text,clear?,submit?}; select {id,values}',
+    '- key {key}; scroll {direction,amount?,id?}; drag {fromId,toId}',
+    '- navigate {url}; back {}; tab {operation,index?,url?}; wait {ms?}',
+    '- extract {description}: read the current page as structured text (tables keep their rows, lists their items). Use it when the answer is longer than the element list shows.',
+  ];
+  if (opts.vision) {
+    lines.push(
+      '- screenshot {description?}: capture the page visually. Use it when the element list is empty or the content is a canvas/image/custom widget you cannot otherwise read.',
+      '- after a screenshot ONLY, in that same next step: click_at {x,y,...} or type_at {x,y,text,...} using CSS viewport coordinates from the image.',
+    );
+  }
+  if (opts.uploads) {
+    lines.push(
+      '- upload {id,paths}: attach files to a file input (only paths under the allowed roots).',
+    );
+  }
+  lines.push(
+    '- remember {factKey,factValue}: save a durable per-site fact you\'ll want next time (e.g. "login = SSO via Google", "cookie-accept = button \'Agree\'"). NEVER remember secrets.',
+    '- browser_config {op,...}: change browser settings directly (not the page). Live ops, applied instantly and invisibly with no page opened: clear_cookies {domain}; clear_all_cookies {}; clear_site_data {origin|domain}; clear_cache {}; set_permission {origin|domain, permission (geolocation|notifications|camera|microphone|clipboard-read|clipboard-write|midi), setting (granted|denied|prompt)}; set_downloads {behavior (allow|deny|default)}. Use clear_all_cookies when the user says all/every site\'s cookies — never go looking through the settings UI for it. Settings-page ops for the long tail: open_settings {value} where value is an area like "privacy", "appearance", "cookies", "content", "notifications", "downloads", "search", "site settings", or "new tab"; plus set_theme {value:"dark"|"light"}, set_privacy {}, set_content_default {}. These open a vetted settings page in a SEPARATE BACKGROUND tab (the user\'s tab is untouched); perceive it, operate the specific control, then CLOSE that tab. You can NEVER change fingerprint or proxy/network settings (user-agent, languages, timezone, screen, canvas/WebGL, WebRTC, proxy, DNS, fonts) — hard-blocked to protect the profile\'s identity; don\'t attempt them.',
+    '- ask {question,sensitive?,targetId?}; done {success,summary}',
+  );
+  const secrets = opts.vision
+    ? 'Use ask with sensitive:true plus targetId (or targetX+targetY after a screenshot)'
+    : 'Use ask with sensitive:true plus targetId';
+  lines.push(
+    `For passwords/OTP/payment secrets, NEVER ask the human to paste a secret into ordinary chat. ${secrets} so the harness types it directly without exposing it to you. Captchas require a human handoff; do not attempt to bypass them.`,
+  );
+  return lines.join('\n');
+}
 
 export interface RawActionInput {
   [key: string]: unknown;
