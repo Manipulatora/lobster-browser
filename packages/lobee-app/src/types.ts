@@ -13,6 +13,7 @@ export interface AgentEvent {
     | 'step.observation'
     | 'run.needsInput'
     | 'run.finished'
+    | 'answer.delta'
     | 'usage'
     | 'log';
   sessionId?: string;
@@ -22,6 +23,8 @@ export interface AgentEvent {
   action?: AgentAction;
   url?: string;
   title?: string;
+  /** Streamed fragment of the assistant reply (`answer.delta`). */
+  text?: string;
   prompt?: string;
   kind?: 'ask' | 'confirm';
   sensitive?: boolean;

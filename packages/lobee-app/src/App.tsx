@@ -46,6 +46,8 @@ interface Turn {
   answer: string;
   /** Why the run failed. Kept apart from `answer` so a failure never renders as a reply. */
   failure: string;
+  /** True once any text arrived as a live stream, so the finish handler does not re-animate it. */
+  streamed: boolean;
   await: AwaitPrompt | null;
   inputError: string;
   animateAnswer: boolean;
@@ -110,6 +112,18 @@ function applyEvent(turn: Turn, ev: AgentEvent): Turn {
         },
         inputError: '',
       };
+    case 'answer.delta':
+      // Real streaming: the reply grows as the model writes it. `animateAnswer` stays false because
+      // the text is ALREADY arriving progressively — replaying it through the typewriter would show
+      // the answer twice, at two different speeds.
+      return {
+        ...turn,
+        status: 'running',
+        statusText: 'Writing…',
+        answer: turn.answer + (ev.text ?? ''),
+        streamed: true,
+        animateAnswer: false,
+      };
     case 'run.finished': {
       const ok = ev.status === 'done';
       // An error is NOT an answer. Keeping them in the same field rendered failures as though the
@@ -126,7 +140,8 @@ function applyEvent(turn: Turn, ev: AgentEvent): Turn {
         failure,
         await: null,
         inputError: '',
-        animateAnswer: ok && !!answer && (turn.status !== 'done' || turn.answer !== answer),
+        animateAnswer:
+          !turn.streamed && ok && !!answer && (turn.status !== 'done' || turn.answer !== answer),
         ...(ev.sessionId ? { sessionId: ev.sessionId } : {}),
       };
     }
@@ -147,6 +162,7 @@ function storedToTurn(stored: StoredTurn): Turn {
     steps: new Map(),
     answer: stored.status === 'done' ? stored.answer : '',
     failure: stored.status === 'done' ? '' : stored.answer,
+    streamed: false,
     await: null,
     inputError: '',
     animateAnswer: false,
@@ -177,6 +193,7 @@ function snapshotToTurn(snapshot: AgentRunSnapshot, id: number): Turn {
       snapshot.status === 'error' || snapshot.status === 'stopped'
         ? snapshot.error || snapshot.result || ''
         : '',
+    streamed: false,
     await:
       snapshot.status === 'awaiting_input' && snapshot.awaitingPrompt
         ? {
@@ -717,6 +734,7 @@ export function App() {
       steps: new Map(),
       answer: '',
       failure: '',
+      streamed: false,
       await: null,
       inputError: '',
       animateAnswer: false,
@@ -731,7 +749,7 @@ export function App() {
       },
     );
     if (start === 'unavailable') {
-      mockRun(id, task, mode, patchTurn); // standalone (file://) fallback
+      reportNoBridge(id, patchTurn); // no sidecar bridge — say so rather than invent a reply
     } else if (start === 'failed' && el && !el.value.trim()) {
       // Preserve the exact prompt for a one-click retry after a real transport/model startup failure.
       el.value = task;
@@ -1005,47 +1023,20 @@ function ModelMenu({
   );
 }
 
-// Standalone (file://) fallback: exercises the reducer + renderer with a scripted event sequence.
-function mockRun(
-  id: number,
-  task: string,
-  mode: Mode,
-  patch: (id: number, ev: AgentEvent) => void,
-) {
-  const md =
-    `Here's a quick summary of **${task.slice(0, 60)}**:\n\n` +
-    `## What I found\n- First key point\n- A second detail, with \`inline code\`\n- A [reference link](https://example.com)\n\n` +
-    `> Wire up the sidecar bridge and this becomes a real answer from your selected model.`;
-  const seq: AgentEvent[] =
-    mode === 'ask'
-      ? [
-          { type: 'run.started' },
-          { type: 'step.thinking', step: 1 },
-          { type: 'run.finished', status: 'done', result: md },
-        ]
-      : [
-          { type: 'run.started' },
-          { type: 'run.needsBrowser' },
-          { type: 'step.thinking', step: 1 },
-          { type: 'step.observation', step: 1, url: 'https://example.com', title: 'Example' },
-          {
-            type: 'step.action',
-            step: 1,
-            action: { kind: 'navigate', url: 'https://example.com' },
-          },
-          { type: 'step.thinking', step: 2 },
-          {
-            type: 'step.action',
-            step: 2,
-            action: { kind: 'click', id: 3, note: 'Opened the first result' },
-          },
-          { type: 'run.finished', status: 'done', result: md },
-        ];
-  let i = 0;
-  const tick = () => {
-    if (i >= seq.length) return;
-    patch(id, seq[i++]!);
-    setTimeout(tick, 420);
-  };
-  tick();
+/**
+ * The panel opened without a sidecar bridge (standalone file://, or a profile that was never
+ * provisioned for Lobee).
+ *
+ * This used to replay a scripted "answer" — invented content, delivered as run.finished with
+ * status 'done', claiming in Agent mode to have navigated and clicked. It was indistinguishable
+ * from a real reply and was persisted into the transcript like one. A demo fixture is not worth a
+ * product that can silently fabricate answers, so it says what is actually true instead.
+ */
+function reportNoBridge(id: number, patch: (id: number, ev: AgentEvent) => void): void {
+  patch(id, {
+    type: 'run.finished',
+    status: 'error',
+    error:
+      'Lobee is not connected to this profile\u2019s agent service, so nothing was run. Open the panel from a Lobster profile window and try again.',
+  });
 }

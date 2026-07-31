@@ -208,6 +208,148 @@ export class AgentLlmService {
     return payload;
   }
 
+  /**
+   * Forward a STREAMING completion, returning the upstream SSE body for the controller to pipe.
+   *
+   * Streaming exists for one reason: an answer that appears a token at a time reads as responsive,
+   * while the same answer delivered whole after ten seconds reads as broken. The panel previously
+   * faked it with a typewriter over the finished text, which cannot help with the part that actually
+   * feels slow — the wait before anything appears.
+   *
+   * Metering still happens, just at the end: `stream_options.include_usage` makes OpenRouter emit a
+   * final chunk carrying usage, which {@link meterStreamedUsage} reads as the bytes pass through. The
+   * proxy therefore never has to buffer the response to account for it.
+   */
+  async chatCompletionStream(
+    raw: ChatBody,
+    signal?: AbortSignal,
+  ): Promise<{ status: number; stream: ReadableStream<Uint8Array> | null; body?: unknown }> {
+    const { key, forward, timeoutMs } = await this.prepare(raw);
+    const streaming: ChatBody = {
+      ...forward,
+      stream: true,
+      // Ask for the usage chunk explicitly; without it a streamed run would be unmetered.
+      stream_options: { include_usage: true },
+    };
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(
+        'https://openrouter.ai/api/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${key}`,
+            'content-type': 'application/json',
+            accept: 'text/event-stream',
+            'http-referer': 'https://lobster.browser',
+            'x-title': 'Lobster Agent',
+          },
+          body: JSON.stringify(streaming),
+        },
+        timeoutMs,
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof UpstreamTimeoutError) {
+        throw new GatewayTimeoutException('upstream OpenRouter request timed out');
+      }
+      throw new ServiceUnavailableException('upstream OpenRouter request failed');
+    }
+
+    if (!res.ok || !res.body) {
+      const body = (await res.json().catch(() => ({}))) as OpenRouterErrorBody;
+      this.logger.warn(
+        `agent/llm upstream_error stream model=${String(forward.model)} status=${res.status} code=${diagnosticCode(body.error?.code ?? body.error?.type)}`,
+      );
+      return { status: res.status, stream: null, body };
+    }
+    return {
+      status: res.status,
+      stream: res.body.pipeThrough(this.meterStreamedUsage(String(forward.model))),
+    };
+  }
+
+  /**
+   * Pass SSE bytes through untouched while watching for the usage chunk.
+   *
+   * Deliberately a transform and not a parse: the panel needs the frames verbatim, and the only thing
+   * the server needs from them is the accounting. Message content is never logged (anonymity product).
+   */
+  private meterStreamedUsage(model: string): TransformStream<Uint8Array, Uint8Array> {
+    const decoder = new TextDecoder();
+    let tail = '';
+    let counted = false;
+    const meter = (usage: OpenRouterUsage): void => {
+      if (counted) return;
+      counted = true;
+      const used = (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
+      this.meteredTokens += used;
+      this.meteredRequests += 1;
+      this.logger.log(
+        `agent/llm model=${model} in=${usage.prompt_tokens ?? 0} out=${usage.completion_tokens ?? 0} lifetimeTokens=${this.meteredTokens} streamed=1`,
+      );
+    };
+    return new TransformStream<Uint8Array, Uint8Array>({
+      transform: (chunk, controller) => {
+        controller.enqueue(chunk);
+        // Keep only the trailing partial line; a usage chunk is small and arrives whole in practice.
+        tail = (tail + decoder.decode(chunk, { stream: true })).slice(-16_384);
+        for (const line of tail.split('\n')) {
+          const payload = line.startsWith('data:') ? line.slice(5).trim() : '';
+          if (!payload || payload === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(payload) as { usage?: OpenRouterUsage };
+            if (parsed.usage) meter(parsed.usage);
+          } catch {
+            // A partial frame at the boundary — the next chunk completes it.
+          }
+        }
+      },
+      flush: () => {
+        if (!counted) this.meteredRequests += 1;
+      },
+    });
+  }
+
+  /** Shared validation + guard rails for both the streaming and non-streaming paths. */
+  private async prepare(
+    raw: ChatBody,
+  ): Promise<{ key: string; forward: ChatBody; timeoutMs: number }> {
+    const key = this.config.get<string>('OPENROUTER_API_KEY')?.trim();
+    if (!key) throw new ServiceUnavailableException('OPENROUTER_API_KEY is not configured');
+    if (typeof raw.model !== 'string' || !Array.isArray(raw.messages)) {
+      throw new BadRequestException('body must include a string `model` and a `messages` array');
+    }
+    const model = raw.model;
+    if (model.length > 300 || !MODEL_ID.test(model)) {
+      throw new BadRequestException('body contains an invalid `model` id');
+    }
+    if (raw.tools !== undefined && !Array.isArray(raw.tools)) {
+      throw new BadRequestException('`tools` must be an array when provided');
+    }
+    const requiresTools = Array.isArray(raw.tools) && raw.tools.length > 0;
+    if (!requiresTools && raw.tool_choice !== undefined) {
+      throw new BadRequestException('`tool_choice` requires at least one tool');
+    }
+    await this.assertModelAllowed(model, requiresTools);
+    const cap = toBoundedPositiveInt(this.config.get('AGENT_MAX_OUTPUT_TOKENS'), 8192, 32_768);
+    const requested = toPositiveInt(raw.max_tokens, cap);
+    return {
+      key,
+      forward: {
+        ...raw,
+        model,
+        max_tokens: Math.min(requested, cap),
+        ...(requiresTools && model.startsWith('anthropic/') ? { tool_choice: 'auto' } : {}),
+      },
+      timeoutMs: toBoundedPositiveInt(
+        this.config.get('AGENT_UPSTREAM_TIMEOUT_MS'),
+        DEFAULT_COMPLETION_TIMEOUT_MS,
+        120_000,
+      ),
+    };
+  }
+
   async chatCompletion(
     raw: ChatBody,
     signal?: AbortSignal,
@@ -221,9 +363,6 @@ export class AgentLlmService {
     const model = raw.model;
     if (model.length > 300 || !MODEL_ID.test(model)) {
       throw new BadRequestException('body contains an invalid `model` id');
-    }
-    if (raw.stream === true) {
-      throw new BadRequestException('streaming is not supported on the managed proxy');
     }
     if (raw.tools !== undefined && !Array.isArray(raw.tools)) {
       throw new BadRequestException('`tools` must be an array when provided');

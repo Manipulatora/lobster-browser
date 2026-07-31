@@ -209,6 +209,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         forceTool: '',
         maxTokens: llmConfig.effort ? 8000 : 2048,
         cachePrefix: true,
+        // Chat is where the wait is felt, so this is where streaming earns its keep. Adapters that
+        // cannot stream ignore the callback and the answer simply arrives whole, as before.
+        onTextDelta: (text) => emit({ type: 'answer.delta', ...base, text, ts: now() }),
         ...(llmConfig.effort ? { effort: llmConfig.effort } : {}),
         signal,
       });

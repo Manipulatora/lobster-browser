@@ -279,6 +279,12 @@ export type AgentEvent =
    * browser is attached. A run that never needs the web never emits this (and no browser opens).
    */
   | { type: 'run.needsBrowser'; sessionId: string; profileId: string; ts: string }
+  /**
+   * A fragment of the assistant's reply, as the model produces it. The panel appends these so an
+   * answer appears while it is being written; a run that finishes without ever emitting one simply
+   * renders its result at the end, so this is additive and never required.
+   */
+  | { type: 'answer.delta'; sessionId: string; profileId: string; text: string; ts: string }
   | { type: 'usage'; sessionId: string; profileId: string; usage: AgentUsage; ts: string }
   | {
       type: 'run.finished';

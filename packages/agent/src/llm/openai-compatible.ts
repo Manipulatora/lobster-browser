@@ -64,12 +64,20 @@ export class OpenAiCompatibleClient implements LlmClient {
       ...(cache && req.sessionId ? { session_id: req.sessionId.slice(0, 256) } : {}),
       ...providerPin(model, cache),
     };
+    // Stream only when the caller wants deltas AND no tool is in play. A forced tool call produces a
+    // single structured object with no prose to reveal progressively, so streaming it would add
+    // reassembly risk for no benefit — Ask mode is where the wait is actually felt.
+    const wantsStream = Boolean(req.onTextDelta) && req.tools.length === 0;
     const response = await fetchWithRetry(
       `${this.baseUrl}/chat/completions`,
       {
         method: 'POST',
-        headers: { authorization: `Bearer ${this.apiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+        headers: {
+          authorization: `Bearer ${this.apiKey}`,
+          'content-type': 'application/json',
+          ...(wantsStream ? { accept: 'text/event-stream' } : {}),
+        },
+        body: JSON.stringify(wantsStream ? { ...body, stream: true } : body),
       },
       {
         ...(req.signal ? { signal: req.signal } : {}),
@@ -80,6 +88,9 @@ export class OpenAiCompatibleClient implements LlmClient {
     );
     if (!response.ok)
       throw new Error(`${this.provider} ${response.status}: ${await safeError(response)}`);
+    if (wantsStream && response.body) {
+      return readSseCompletion(response.body, req.onTextDelta!);
+    }
     const json = (await response.json()) as OpenAiResponse;
     const choice = json.choices?.[0];
     const rawCall = choice?.message?.tool_calls?.[0];
@@ -150,6 +161,82 @@ function toOpenAiMessages(messages: readonly LlmMessage[]): Array<Record<string,
       ],
     };
   });
+}
+
+/**
+ * Consume an OpenAI-dialect SSE stream into the same {@link LlmResult} the non-streaming path returns,
+ * reporting text deltas as they arrive.
+ *
+ * The caller is deliberately unaware of which transport was used: the loop still gets one resolved
+ * result, so streaming is purely additive and a provider that cannot stream degrades to the buffered
+ * path with no behavioural difference beyond the missing deltas.
+ */
+async function readSseCompletion(
+  body: ReadableStream<Uint8Array>,
+  onTextDelta: (delta: string) => void,
+): Promise<LlmResult> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let text = '';
+  let stopReason = 'stop';
+  const usage = { tokensIn: 0, tokensOut: 0, cachedTokensIn: undefined as number | undefined };
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary: number;
+      while ((boundary = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, boundary).trim();
+        buffer = buffer.slice(boundary + 1);
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        let chunk: OpenAiStreamChunk;
+        try {
+          chunk = JSON.parse(payload) as OpenAiStreamChunk;
+        } catch {
+          continue; // a keep-alive or comment frame
+        }
+        const choice = chunk.choices?.[0];
+        const delta = choice?.delta?.content;
+        if (delta) {
+          text += delta;
+          onTextDelta(delta);
+        }
+        if (choice?.finish_reason) stopReason = normalizeStop(choice.finish_reason);
+        if (chunk.usage) {
+          usage.tokensIn = chunk.usage.prompt_tokens ?? usage.tokensIn;
+          usage.tokensOut = chunk.usage.completion_tokens ?? usage.tokensOut;
+          const cached = chunk.usage.prompt_tokens_details?.cached_tokens;
+          if (cached !== undefined) usage.cachedTokensIn = cached;
+        }
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+
+  return {
+    ...(text ? { text } : {}),
+    stopReason,
+    usage: {
+      tokensIn: usage.tokensIn,
+      tokensOut: usage.tokensOut,
+      ...(usage.cachedTokensIn !== undefined ? { cachedTokensIn: usage.cachedTokensIn } : {}),
+    },
+  };
+}
+
+interface OpenAiStreamChunk {
+  choices?: Array<{ delta?: { content?: string }; finish_reason?: string }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
 }
 
 interface OpenAiResponse {

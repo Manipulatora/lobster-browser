@@ -433,3 +433,84 @@ test('HTTP helper retries a per-attempt timeout but honors caller cancellation',
     globalThis.fetch = original;
   }
 });
+
+test('a streamed chat reports deltas as they arrive and still resolves one complete result', async () => {
+  const original = globalThis.fetch;
+  let sentBody: Record<string, unknown> = {};
+  let sentAccept = '';
+  // A realistic OpenAI-dialect stream: chunked mid-frame, a keep-alive comment, a usage-only chunk,
+  // and [DONE]. Splitting a frame across chunk boundaries is the case a naive line reader gets wrong.
+  const frames = [
+    'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"lo, "}}]}\n\ndata: {"choices":[{"delta":{"content":"wo',
+    'rld"}}]}\n\n: keep-alive\n\n',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+    'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4}}\n\n',
+    'data: [DONE]\n\n',
+  ];
+  globalThis.fetch = (async (_input, init) => {
+    sentBody = JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>;
+    sentAccept = String((init as RequestInit).headers?.['accept' as never] ?? '');
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(encoder.encode(frame));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const client = createLlmClient({ provider: 'openrouter', model: 'x/y', apiKey: 'k' });
+    const deltas: string[] = [];
+    const result = await client.complete({
+      ...request,
+      tools: [],
+      forceTool: '',
+      onTextDelta: (text) => deltas.push(text),
+    });
+
+    assert.equal(sentBody.stream, true, 'the request must opt into streaming');
+    assert.match(sentAccept, /event-stream/);
+    // Deltas arrive progressively — that is the whole point.
+    assert.deepEqual(deltas, ['Hel', 'lo, ', 'world']);
+    // …and the caller still gets ONE assembled result, identical in shape to the buffered path,
+    // including the frame that was split across two network chunks.
+    assert.equal(result.text, 'Hello, world');
+    assert.equal(result.stopReason, 'stop');
+    assert.deepEqual(result.usage, { tokensIn: 11, tokensOut: 4 });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a tool-calling step never streams, because a forced call has no prose to reveal', async () => {
+  const original = globalThis.fetch;
+  let streamed: unknown = 'unset';
+  globalThis.fetch = (async (_input, init) => {
+    streamed = JSON.parse(String((init as RequestInit).body)).stream;
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            finish_reason: 'tool_calls',
+            message: { tool_calls: [{ id: 'c1', function: { name: 'act', arguments: '{}' } }] },
+          },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  try {
+    const client = createLlmClient({ provider: 'openrouter', model: 'x/y', apiKey: 'k' });
+    const result = await client.complete({ ...request, onTextDelta: () => {} });
+    assert.equal(streamed, undefined, 'a request carrying tools must not set stream');
+    assert.equal(result.toolCall?.name, 'act');
+  } finally {
+    globalThis.fetch = original;
+  }
+});

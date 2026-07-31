@@ -246,3 +246,83 @@ test('upstream error logs retain codes but never provider messages', async () =>
     globalThis.fetch = original;
   }
 });
+
+test('a streamed completion pipes SSE through untouched and still meters usage', async () => {
+  const original = globalThis.fetch;
+  let forwarded: Record<string, unknown> = {};
+  const frames = [
+    'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":" there"}}]}\n\n',
+    'data: {"choices":[],"usage":{"prompt_tokens":21,"completion_tokens":6}}\n\n',
+    'data: [DONE]\n\n',
+  ];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    forwarded = JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>;
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(encoder.encode(frame));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' });
+    const { status, stream } = await service.chatCompletionStream({
+      model: 'openai/ask-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+    });
+    assert.equal(status, 200);
+    assert.ok(stream);
+
+    // Usage must be requested, or a streamed run would silently go unbilled.
+    assert.deepEqual(forwarded.stream_options, { include_usage: true });
+    assert.equal(forwarded.stream, true);
+
+    const received: string[] = [];
+    const reader = stream!.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received.push(decoder.decode(value));
+    }
+    // Bytes reach the client exactly as they arrived — the proxy must not reshape frames.
+    assert.equal(received.join(''), frames.join(''));
+    assert.deepEqual(service.usage(), { meteredTokens: 27, meteredRequests: 1 });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a streamed request for a model outside the roster is refused before any bytes flow', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    throw new Error('upstream must not be contacted for a disallowed model');
+  }) as typeof fetch;
+  try {
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' });
+    await assert.rejects(
+      service.chatCompletionStream({
+        model: 'evil/model',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      }),
+      BadRequestException,
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});

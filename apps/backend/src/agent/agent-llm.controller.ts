@@ -31,6 +31,40 @@ export class AgentLlmController {
     request.once('aborted', cancel);
     response.once('close', cancel);
     try {
+      if (body.stream === true) {
+        const {
+          status,
+          stream,
+          body: error,
+        } = await this.service.chatCompletionStream(body, cancellation.signal);
+        if (!stream) {
+          response.status(status).json(error ?? {});
+          return;
+        }
+        // Pipe the upstream SSE through verbatim. `no-transform` and the disabled Nginx buffer are
+        // load-bearing: an intermediary that buffers would deliver the whole answer at once, which is
+        // exactly the behaviour streaming exists to remove.
+        response.status(status);
+        response.setHeader('content-type', 'text/event-stream; charset=utf-8');
+        response.setHeader('cache-control', 'no-cache, no-transform');
+        response.setHeader('connection', 'keep-alive');
+        response.setHeader('x-accel-buffering', 'no');
+        response.flushHeaders?.();
+        const reader = stream.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!response.write(Buffer.from(value))) {
+              await new Promise((resolve) => response.once('drain', resolve));
+            }
+          }
+        } finally {
+          reader.cancel().catch(() => {});
+          response.end();
+        }
+        return;
+      }
       const { status, body: json } = await this.service.chatCompletion(body, cancellation.signal);
       response.status(status).json(json);
     } finally {
