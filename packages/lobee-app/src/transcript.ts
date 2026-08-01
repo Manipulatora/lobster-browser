@@ -1,5 +1,11 @@
 export type StoredTurnStatus = 'done' | 'error' | 'stopped';
 
+/** One recorded step of the activity trail, kept so a reopened panel still shows what the agent did. */
+export interface StoredStep {
+  label: string;
+  ctx: string;
+}
+
 export interface StoredTurn {
   id: number;
   sessionId?: string;
@@ -7,6 +13,14 @@ export interface StoredTurn {
   status: StoredTurnStatus;
   answer: string;
   startedAt?: string;
+  /**
+   * The step trail. Previously discarded on save, so reopening the panel reduced a twenty-step agent
+   * run to a single line of final text — the user lost all evidence of what had actually been done.
+   */
+  steps?: StoredStep[];
+  /** Tokens this turn consumed, so cost stays visible after a reload. */
+  tokensIn?: number;
+  tokensOut?: number;
 }
 
 const KEY = 'lobee.transcript.v1';
@@ -14,6 +28,8 @@ const MAX_TURNS = 24;
 const MAX_TOTAL_CHARS = 240_000;
 const MAX_TASK_CHARS = 4_000;
 const MAX_ANSWER_CHARS = 40_000;
+const MAX_STEPS_PER_TURN = 60;
+const MAX_STEP_CHARS = 200;
 
 function clipped(value: unknown, max: number): string {
   return typeof value === 'string' ? value.slice(0, max) : '';
@@ -39,10 +55,27 @@ function normalize(raw: unknown): StoredTurn[] {
     const id = Number(row.id);
     const task = redactTranscriptText(clipped(row.task, MAX_TASK_CHARS));
     if (!Number.isSafeInteger(id) || id < 1 || !task) continue;
+    const steps = Array.isArray(row.steps)
+      ? (row.steps as unknown[])
+          .filter((step): step is Record<string, unknown> => !!step && typeof step === 'object')
+          .slice(0, MAX_STEPS_PER_TURN)
+          .map((step) => ({
+            label: redactTranscriptText(clipped(step.label, MAX_STEP_CHARS)),
+            ctx: redactTranscriptText(clipped(step.ctx, MAX_STEP_CHARS)),
+          }))
+          .filter((step) => step.label || step.ctx)
+      : [];
+    const num = (value: unknown): number | undefined =>
+      typeof value === 'number' && Number.isFinite(value) && value >= 0
+        ? Math.floor(value)
+        : undefined;
     valid.push({
       id,
       task,
       status,
+      ...(steps.length ? { steps } : {}),
+      ...(num(row.tokensIn) !== undefined ? { tokensIn: num(row.tokensIn) } : {}),
+      ...(num(row.tokensOut) !== undefined ? { tokensOut: num(row.tokensOut) } : {}),
       answer: redactTranscriptText(clipped(row.answer, MAX_ANSWER_CHARS)),
       ...(typeof row.sessionId === 'string' && row.sessionId
         ? { sessionId: row.sessionId.slice(0, 128) }

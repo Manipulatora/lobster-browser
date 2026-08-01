@@ -48,6 +48,9 @@ interface Turn {
   failure: string;
   /** True once any text arrived as a live stream, so the finish handler does not re-animate it. */
   streamed: boolean;
+  /** Provider-reported tokens for this turn. Events were already flowing; nothing displayed them. */
+  tokensIn: number;
+  tokensOut: number;
   await: AwaitPrompt | null;
   inputError: string;
   animateAnswer: boolean;
@@ -112,6 +115,14 @@ function applyEvent(turn: Turn, ev: AgentEvent): Turn {
         },
         inputError: '',
       };
+    case 'usage':
+      // These events always flowed; the reducer simply fell through to `default` and discarded them,
+      // so the panel could never show what a run cost.
+      return {
+        ...turn,
+        tokensIn: turn.tokensIn + (ev.usage?.tokensIn ?? 0),
+        tokensOut: turn.tokensOut + (ev.usage?.tokensOut ?? 0),
+      };
     case 'answer.delta':
       // Real streaming: the reply grows as the model writes it. `animateAnswer` stays false because
       // the text is ALREADY arriving progressively — replaying it through the typewriter would show
@@ -159,10 +170,17 @@ function storedToTurn(stored: StoredTurn): Turn {
     status: stored.status,
     statusText:
       stored.status === 'done' ? 'Done' : stored.status === 'error' ? 'Failed' : 'Stopped',
-    steps: new Map(),
+    steps: new Map(
+      (stored.steps ?? []).map((step, index) => [
+        index,
+        { label: step.label, ctx: step.ctx, thinking: false, done: true },
+      ]),
+    ),
     answer: stored.status === 'done' ? stored.answer : '',
     failure: stored.status === 'done' ? '' : stored.answer,
     streamed: false,
+    tokensIn: stored.tokensIn ?? 0,
+    tokensOut: stored.tokensOut ?? 0,
     await: null,
     inputError: '',
     animateAnswer: false,
@@ -194,6 +212,8 @@ function snapshotToTurn(snapshot: AgentRunSnapshot, id: number): Turn {
         ? snapshot.error || snapshot.result || ''
         : '',
     streamed: false,
+    tokensIn: 0,
+    tokensOut: 0,
     await:
       snapshot.status === 'awaiting_input' && snapshot.awaitingPrompt
         ? {
@@ -216,6 +236,15 @@ function toStoredTurn(turn: Turn): StoredTurn | null {
     task: turn.task,
     status: turn.status,
     answer: turn.answer || turn.failure,
+    ...(turn.steps.size
+      ? {
+          steps: [...turn.steps.entries()]
+            .sort((a, b) => a[0] - b[0])
+            .map(([, step]) => ({ label: step.label, ctx: step.ctx })),
+        }
+      : {}),
+    ...(turn.tokensIn ? { tokensIn: turn.tokensIn } : {}),
+    ...(turn.tokensOut ? { tokensOut: turn.tokensOut } : {}),
   };
 }
 
@@ -342,9 +371,11 @@ function Status({ turn, hasThinking }: { turn: Turn; hasThinking: boolean }) {
 function TurnView({
   turn,
   onReply,
+  onRegenerate,
 }: {
   turn: Turn;
   onReply: (t: Turn, text: string) => Promise<boolean>;
+  onRegenerate: (t: Turn) => void;
 }) {
   const steps = [...turn.steps.entries()].sort((a, b) => a[0] - b[0]);
   const hasThinking = steps.some(([, step]) => step.thinking);
@@ -381,14 +412,31 @@ function TurnView({
           <span className="min-w-0">{turn.failure}</span>
         </div>
       )}
-      {turn.answer && !turn.animateAnswer && (
-        <button
-          type="button"
-          onClick={() => void navigator.clipboard?.writeText(turn.answer)}
-          className="self-start rounded-lg px-2 py-1 text-[11.5px] text-ink-soft transition-colors hover:bg-violet-50 hover:text-violet-700"
-        >
-          Copy
-        </button>
+      {turn.status !== 'running' && turn.status !== '' && !turn.animateAnswer && (
+        <div className="flex items-center gap-1 text-[11.5px] text-ink-soft">
+          {turn.answer && (
+            <button
+              type="button"
+              onClick={() => void navigator.clipboard?.writeText(turn.answer)}
+              className="rounded-lg px-2 py-1 transition-colors hover:bg-violet-50 hover:text-violet-700"
+            >
+              Copy
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onRegenerate(turn)}
+            title="Run this message again"
+            className="rounded-lg px-2 py-1 transition-colors hover:bg-violet-50 hover:text-violet-700"
+          >
+            Retry
+          </button>
+          {(turn.tokensIn > 0 || turn.tokensOut > 0) && (
+            <span className="ml-auto tabular-nums" title="Tokens in / out for this message">
+              {turn.tokensIn.toLocaleString()} in · {turn.tokensOut.toLocaleString()} out
+            </span>
+          )}
+        </div>
       )}
     </div>
   );
@@ -716,6 +764,22 @@ export function App() {
     }
   }, []);
 
+  /**
+   * Run a past message again. It re-submits through the ordinary path rather than replaying anything,
+   * so the retry is a real new turn: it lands in the thread, gets its own steps, and can be stopped.
+   */
+  const regenerate = useCallback(
+    (turn: Turn) => {
+      if (busy) return;
+      const el = inputRef.current;
+      if (!el) return;
+      el.value = turn.task;
+      autogrow();
+      el.focus();
+    },
+    [busy],
+  );
+
   const submit = useCallback(async () => {
     const el = inputRef.current;
     const task = (el?.value ?? '').trim();
@@ -735,6 +799,8 @@ export function App() {
       answer: '',
       failure: '',
       streamed: false,
+      tokensIn: 0,
+      tokensOut: 0,
       await: null,
       inputError: '',
       animateAnswer: false,
@@ -795,7 +861,7 @@ export function App() {
       >
         <div ref={contentRef} role="log" aria-live="off" className="flex flex-col gap-2.5">
           {turns.map((t) => (
-            <TurnView key={t.id} turn={t} onReply={onReply} />
+            <TurnView key={t.id} turn={t} onReply={onReply} onRegenerate={regenerate} />
           ))}
         </div>
       </main>

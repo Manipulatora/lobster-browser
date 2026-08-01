@@ -490,16 +490,33 @@ function compactThread(record: ThreadRecord): void {
       if (existing) record.messages.unshift(existing);
       break;
     }
-    const topics = absorbed
-      .filter((m) => m.role === 'user')
-      .map((m) => m.content.replace(/\s+/g, ' ').trim().slice(0, 120))
-      .filter(Boolean);
+    // Record what was CONCLUDED, not merely what was discussed. A list of topics tells the model the
+    // subject came up; it does not tell it the answer, so a follow-up ("use that same account") had
+    // nothing to resolve against. Pair each request with the outcome it produced.
+    const exchanges: string[] = [];
+    for (let index = 0; index < absorbed.length; index += 1) {
+      const message = absorbed[index]!;
+      if (message.role !== 'user') continue;
+      const reply = absorbed[index + 1];
+      const asked = message.content.replace(/\s+/g, ' ').trim().slice(0, 160);
+      if (!asked) continue;
+      const answered =
+        reply && reply.role === 'assistant'
+          ? reply.content.replace(/\s+/g, ' ').trim().slice(0, 220)
+          : '';
+      const failed = reply?.status && reply.status !== 'done';
+      exchanges.push(
+        answered
+          ? `- asked: ${asked}\n  ${failed ? `(attempt ${reply?.status})` : 'answer'}: ${answered}`
+          : `- asked: ${asked}`,
+      );
+    }
     const previous = existing ? `${existing.content}\n` : '';
     record.messages.unshift({
       role: 'compaction',
       ts: absorbed[0]?.ts ?? record.createdAt,
       content:
-        `${previous}Earlier in this conversation the user asked about: ${topics.join('; ') || '(untitled)'}.`.slice(
+        `${previous}Earlier in this conversation (summarized, may be incomplete — do not report these as things you did in the current turn):\n${exchanges.join('\n') || '- (no recoverable detail)'}`.slice(
           0,
           MAX_THREAD_MESSAGE_CHARS,
         ),

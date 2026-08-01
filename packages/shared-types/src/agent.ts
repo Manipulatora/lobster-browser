@@ -174,7 +174,13 @@ export type AgentAction =
   | {
       kind: 'tab';
       operation: 'list' | 'new' | 'switch' | 'close';
+      /**
+       * Positional index from the last `tab list`. FRAGILE: the list is re-enumerated on every call,
+       * so any tab opening or closing in between shifts every index. Prefer `tabId`.
+       */
       index?: number;
+      /** Stable target id from `tab list`, unaffected by other tabs opening or closing. */
+      tabId?: string;
       url?: string;
       note?: string;
     }

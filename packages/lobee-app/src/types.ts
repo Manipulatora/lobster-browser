@@ -25,6 +25,8 @@ export interface AgentEvent {
   title?: string;
   /** Streamed fragment of the assistant reply (`answer.delta`). */
   text?: string;
+  /** Provider-reported token counts (`usage`). */
+  usage?: { tokensIn?: number; tokensOut?: number; cachedTokensIn?: number; costUsd?: number };
   prompt?: string;
   kind?: 'ask' | 'confirm';
   sensitive?: boolean;

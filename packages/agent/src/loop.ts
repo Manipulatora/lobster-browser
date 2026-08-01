@@ -342,10 +342,17 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // the forced action call; otherwise the tiny tool-call output only needs ~1024.
       const maxTokens = llmConfig.effort ? 8000 : 1024;
       const conversation = normalizeMessages([...priorTurns, ...pruneObservations(stepMessages)]);
+      // Budget from what the provider ACTUALLY billed for prior steps, falling back to an estimate
+      // only for the very first request (when nothing has been reported yet). A chars/3.5 guess drifts
+      // per model and language, and over a 40-step run the error compounds into either an early stop
+      // or a blown budget.
+      const measuredPerStep = step > 1 ? (usage.tokensIn + usage.tokensOut) / (step - 1) : 0;
       const estimated =
-        estimateTokens(system) +
-        conversation.reduce((sum, m) => sum + estimateTokens(messageText(m)), 0) +
-        maxTokens;
+        measuredPerStep > 0
+          ? Math.ceil(measuredPerStep)
+          : estimateTokens(system) +
+            conversation.reduce((sum, m) => sum + estimateTokens(messageText(m)), 0) +
+            maxTokens;
       if (config.tokenBudget && usage.tokensIn + usage.tokensOut + estimated > config.tokenBudget) {
         return await finish(
           'stopped',
@@ -577,7 +584,12 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             )
           : await finish('error', '', summary);
       }
-      history.push(`${step}. ${outcome.outcome}`);
+      // A popup the page opened has silently become the working target; say so in the same breath as
+      // the action's outcome, so the model knows which page it is now on.
+      const adopted = driver.takeAdoptedPopup?.();
+      history.push(
+        `${step}. ${outcome.outcome}${adopted ? ` — the page opened a new tab (${redactUrl(adopted)}); you are now on it` : ''}`,
+      );
       // Keep a bounded evidence ledger across pagination. Unlike one-shot read state, page-one values
       // remain available after clicking Next, while a hard total cap prevents runaway prompt growth.
       if (outcome.extracted) {
@@ -802,7 +814,18 @@ function appendExtractedEvidence(
 ): string[] {
   const entry = `Extract ${step} — ${clip(description, 160)} — ${redactUrl(url)}\n${clip(text, MAX_EXTRACT_ENTRY_CHARS)}`;
   const next = [...existing, entry];
-  while (next.length > 1 && next.join('\n\n').length > MAX_EXTRACT_LEDGER_CHARS) next.shift();
+  let dropped = 0;
+  while (next.length > 1 && next.join('\n\n').length > MAX_EXTRACT_LEDGER_CHARS) {
+    next.shift();
+    dropped += 1;
+  }
+  // Say what was lost. Dropping the earliest pages silently let a paginated read report a total that
+  // quietly excluded page one; a visible notice lets the model re-read or switch to `collect`.
+  if (dropped > 0) {
+    next.unshift(
+      `[${dropped} earlier extract(s) dropped to stay within the context budget — if you still need that data, re-read those pages or use \`collect\` so the harness keeps rows for you]`,
+    );
+  }
   if (next[0] && next[0].length > MAX_EXTRACT_LEDGER_CHARS) {
     next[0] = clip(next[0], MAX_EXTRACT_LEDGER_CHARS);
   }

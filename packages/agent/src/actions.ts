@@ -83,6 +83,11 @@ export const ACT_TOOL = {
         maxLength: 1000,
         description: 'remember: the durable fact value.',
       },
+      tabId: {
+        type: 'string',
+        maxLength: 200,
+        description: 'tab switch/close: the stable id from `tab list`. Prefer this over index.',
+      },
       columns: {
         type: 'array',
         items: { type: 'string', maxLength: 100 },
@@ -149,7 +154,7 @@ export function buildActionReference(opts: { vision: boolean; uploads: boolean }
     'Actions (one per tool call):',
     '- click {id, button?, count?}; hover {id}; type {id,text,clear?,submit?}; select {id,values}',
     '- key {key}; scroll {direction,amount?,id?}; drag {fromId,toId}',
-    '- navigate {url}; back {}; tab {operation,index?,url?}; wait {ms?}',
+    '- navigate {url}; back {}; wait {ms?}; tab {operation,tabId?,url?}: list/new/switch/close. Address tabs by the `tabId` from `tab list`, not by position — positions shift whenever any tab opens or closes.',
     '- extract {description}: read the current page as structured text (tables keep their rows, lists their items). Use it when the answer is longer than the element list shows.',
     '- collect {rows, columns?}: THE way to scrape. Add rows to a dataset the harness keeps for you — deduplicated, safe across pagination, and returned in full at the end. Give `columns` once on the first call. Collect each page as you go, then click Next and collect again; never re-type collected data into your final answer, and never invent a value you did not see on the page.',
   ];
@@ -345,14 +350,16 @@ export function parseAction(raw: RawActionInput): ParseActionResult {
         return bad('tab requires operation list/new/switch/close');
       }
       const tabIndex = id(raw, 'index');
+      const tabId = str(raw.tabId, 200);
       const url = str(raw.url, 8192);
-      if ((operation === 'switch' || operation === 'close') && tabIndex === undefined) {
-        return bad(`tab ${operation} requires non-negative integer "index"`);
+      if ((operation === 'switch' || operation === 'close') && tabIndex === undefined && !tabId) {
+        return bad(`tab ${operation} requires "tabId" (preferred) or "index"`);
       }
       return ok({
         kind,
         operation,
         ...(tabIndex !== undefined ? { index: tabIndex } : {}),
+        ...(tabId ? { tabId } : {}),
         ...(url ? { url } : {}),
         ...note(raw),
       });

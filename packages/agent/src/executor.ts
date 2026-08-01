@@ -163,6 +163,59 @@ const EXTRACT_TEXT = `(() => {
   return text.length > MAX ? text.slice(0, MAX) + '\\u2026[truncated]' : text;
 })()`;
 
+/**
+ * Confirm the element still under a measured point is the one the model chose.
+ *
+ * Coordinates are measured when the page is perceived, then an LLM round trip of 1-20s passes before
+ * the click is dispatched. Nothing re-checked the target in between, so a cookie banner, a lazily
+ * loaded image, or a sticky header appearing in that window silently redirected the click to whatever
+ * had moved under the cursor — a wrong click that reports success, which is the worst kind.
+ *
+ * Deliberately conservative: it only refuses when it can positively identify a DIFFERENT labelled
+ * control. An unreadable point, a driver that cannot evaluate, or an ambiguous match all proceed, so
+ * this can cost a wrong click but never blocks a correct one.
+ */
+async function pointStillMatches(
+  driver: BrowserDriver,
+  element: PerceivedElement,
+): Promise<{ ok: true } | { ok: false; found: string }> {
+  const script = `(() => {
+    const el = document.elementFromPoint(${Math.round(element.x)}, ${Math.round(element.y)});
+    if (!el) return null;
+    const target = el.closest('a,button,input,textarea,select,summary,label,[role],[onclick],[tabindex],[contenteditable]') || el;
+    const name = (
+      target.getAttribute('aria-label') ||
+      target.getAttribute('placeholder') ||
+      target.getAttribute('title') ||
+      target.getAttribute('alt') ||
+      target.value ||
+      target.innerText ||
+      target.textContent ||
+      ''
+    ).replace(/\\s+/g, ' ').trim().slice(0, 120);
+    return { name: name, role: (target.getAttribute('role') || target.tagName || '').toLowerCase() };
+  })()`;
+  let seen: { name?: string; role?: string } | null = null;
+  try {
+    seen = await driver.evaluate<{ name?: string; role?: string } | null>(script);
+  } catch {
+    return { ok: true }; // cannot verify — do not block the action
+  }
+  if (!seen || typeof seen !== 'object') return { ok: true };
+  const expected = (element.name ?? '').trim().toLowerCase();
+  const actual = (seen.name ?? '').trim().toLowerCase();
+  // Only a confident mismatch counts: both sides labelled, and neither contains the other.
+  if (!expected || !actual) return { ok: true };
+  if (expected === actual || expected.includes(actual) || actual.includes(expected)) {
+    return { ok: true };
+  }
+  return { ok: false, found: `${seen.role ?? 'element'} ${JSON.stringify(seen.name ?? '')}` };
+}
+
+const staleTarget = (index: number, element: PerceivedElement, found: string): ExecOutcome => ({
+  outcome: `error: the page moved — [${index}] should be ${element.role} ${JSON.stringify(element.name)} but ${found} is there now. Re-read the page and use a fresh index.`,
+});
+
 export async function executeAction(
   action: AgentAction,
   perception: RawPerception,
@@ -177,6 +230,8 @@ export async function executeAction(
       case 'click': {
         const el = findElement(perception, action.id);
         if (!el) return missing(action.id, perception);
+        const fresh = await pointStillMatches(driver, el);
+        if (!fresh.ok) return staleTarget(action.id, el, fresh.found);
         await driver.click(point(el), {
           ...(action.button ? { button: action.button } : {}),
           ...(action.count ? { count: action.count } : {}),
@@ -207,6 +262,8 @@ export async function executeAction(
       case 'type': {
         const el = findElement(perception, action.id);
         if (!el) return missing(action.id, perception);
+        const stillThere = await pointStillMatches(driver, el);
+        if (!stillThere.ok) return staleTarget(action.id, el, stillThere.found);
         await driver.click(point(el));
         if (action.clear) await driver.selectAll();
         await driver.type(action.text);
@@ -309,7 +366,7 @@ export async function executeAction(
         if (action.operation === 'list') {
           const tabs = await driver.listTabs();
           return {
-            outcome: `tabs: ${tabs.map((tab) => `[${tab.index}]${tab.active ? '*' : ''} ${JSON.stringify(tab.title)} ${redactUrl(tab.url)}`).join(' | ') || '(none)'}`,
+            outcome: `tabs: ${tabs.map((tab) => `${tab.active ? '*' : ''}tabId=${tab.id} ${JSON.stringify(tab.title)} ${redactUrl(tab.url)}`).join(' | ') || '(none)'}`,
           };
         }
         if (action.operation === 'new') {
@@ -326,8 +383,18 @@ export async function executeAction(
           await driver.waitForSettle();
           return { outcome: `opened a new tab${action.url ? ` at ${redactUrl(action.url)}` : ''}` };
         }
+        if (action.tabId) {
+          // Stable addressing: unaffected by other tabs opening or closing between list and act.
+          const byId = action.operation === 'switch' ? driver.switchTabById : driver.closeTabById;
+          if (!byId) return { outcome: 'error: this driver cannot address tabs by id' };
+          await byId.call(driver, action.tabId);
+          if (action.operation === 'switch') await driver.waitForSettle();
+          return {
+            outcome: `${action.operation === 'switch' ? 'switched to' : 'closed'} tab ${action.tabId}`,
+          };
+        }
         if (action.index === undefined)
-          return { outcome: `error: tab ${action.operation} needs an index` };
+          return { outcome: `error: tab ${action.operation} needs a tabId or index` };
         if (action.operation === 'switch') {
           await driver.switchTab(action.index);
           await driver.waitForSettle();

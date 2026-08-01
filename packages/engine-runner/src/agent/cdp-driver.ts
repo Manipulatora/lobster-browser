@@ -23,6 +23,8 @@ export class CdpBrowserDriver implements BrowserDriver {
   private knownTargets: Set<string>;
   private cursor: Point = { x: 200, y: 200 };
   private isClosed = false;
+  /** URL of a popup adopted since the last action reported, so the switch is never silent. */
+  private adoptedPopup: string | undefined;
 
   private constructor(
     browserWs: string,
@@ -259,6 +261,34 @@ export class CdpBrowserDriver implements BrowserDriver {
     const target = await this.waitForTarget(created.targetId);
     this.knownTargets.add(target.id);
     await this.switchTo(target);
+  }
+
+  /** Resolve a tab by its stable target id rather than its position in the enumeration. */
+  private async tabById(id: string): Promise<CdpTarget> {
+    const targets = controllableTargets(await listCdpTargets(this.browserWs));
+    const target = targets.find((item) => item.id === id);
+    if (!target) throw new Error(`no tab with id ${id} (it may have been closed)`);
+    return target;
+  }
+
+  async switchTabById(id: string): Promise<void> {
+    const target = await this.tabById(id);
+    this.knownTargets.add(target.id);
+    await this.switchTo(target);
+    await this.browser.send('Target.activateTarget', { targetId: target.id });
+  }
+
+  async closeTabById(id: string): Promise<void> {
+    const targets = controllableTargets(await listCdpTargets(this.browserWs));
+    const target = targets.find((item) => item.id === id);
+    if (!target) throw new Error(`no tab with id ${id} (it may have been closed)`);
+    if (targets.length === 1) throw new Error('refusing to close the only browser tab');
+    if (target.id === this.targetId) {
+      const next = targets.find((item) => item.id !== target.id) as CdpTarget;
+      await this.switchTo(next);
+      await this.browser.send('Target.activateTarget', { targetId: next.id });
+    }
+    await this.browser.send('Target.closeTarget', { targetId: target.id });
   }
 
   async switchTab(index: number): Promise<void> {
@@ -572,6 +602,15 @@ export class CdpBrowserDriver implements BrowserDriver {
     return resolved.object.objectId;
   }
 
+  /**
+   * Follow a popup the page just opened, the way a person would.
+   *
+   * This is necessary — a click that opens a window must not leave the agent driving the old page —
+   * but it was also SILENT and unconditional. Any new target adopted the agent, including a tab the
+   * HUMAN opened while the run was in flight, and the model was never told its working page had
+   * changed underneath it. Now the switch is recorded so the next action outcome can say so, which
+   * turns an invisible context swap into something the model can notice and correct.
+   */
   private async adoptPopupIfPresent(): Promise<void> {
     const targets = await listCdpTargets(this.browserWs).catch(() => []);
     const fresh = controllableTargets(targets).filter(
@@ -579,10 +618,22 @@ export class CdpBrowserDriver implements BrowserDriver {
     );
     for (const target of targets) this.knownTargets.add(target.id);
     const newest = fresh.at(-1);
-    if (newest) {
-      await this.switchTo(newest);
-      await this.browser.send('Target.activateTarget', { targetId: newest.id }).catch(() => {});
-    }
+    if (!newest) return;
+    const from = this.targetId;
+    await this.switchTo(newest);
+    await this.browser.send('Target.activateTarget', { targetId: newest.id }).catch(() => {});
+    if (this.targetId !== from) this.adoptedPopup = newest.url || '(new tab)';
+  }
+
+  /**
+   * Report and clear a pending popup adoption. The executor folds this into the action's outcome, so
+   * the model reads "…and the page opened a new tab, which you are now on" instead of silently
+   * finding itself somewhere else next step.
+   */
+  takeAdoptedPopup(): string | undefined {
+    const adopted = this.adoptedPopup;
+    this.adoptedPopup = undefined;
+    return adopted;
   }
 
   private async switchTo(target: CdpTarget): Promise<void> {

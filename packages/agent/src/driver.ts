@@ -121,7 +121,11 @@ export interface BrowserDriver {
    */
   newTab(url?: string, opts?: { background?: boolean }): Promise<void>;
   switchTab(index: number): Promise<void>;
+  /** Switch by stable target id, immune to positional drift. Optional for minimal drivers. */
+  switchTabById?(id: string): Promise<void>;
   closeTab(index: number): Promise<void>;
+  /** Close by stable target id. Optional for minimal drivers. */
+  closeTabById?(id: string): Promise<void>;
 
   /** Current top-frame URL. */
   currentUrl(): Promise<string>;
@@ -137,6 +141,12 @@ export interface BrowserDriver {
    * — also a command, no `Page.enable`). Optional: a driver may omit it if vision is unsupported.
    */
   screenshot?(): Promise<string>;
+
+  /**
+   * Report (and clear) a popup the driver adopted as the working target since the last call. Optional;
+   * drivers that never adopt may omit it.
+   */
+  takeAdoptedPopup?(): string | undefined;
 
   /** Release browser protocol resources. Safe to call repeatedly. */
   close?(): void;
