@@ -178,49 +178,86 @@ export class CdpBrowserDriver implements BrowserDriver {
   }
 
   /**
-   * Attach files the way a person does.
+   * Attach files to an upload control.
    *
-   * A bare `DOM.setFileInputFiles` is functionally correct but behaviourally wrong: the page sees
-   * `change` appear with no preceding click, and — more importantly — the site's OWN click handler
-   * never runs, which breaks every uploader built as a styled button that calls `input.click()`.
-   * Measured against this fork, the raw call also completes in ~40ms, where a human spends seconds in
-   * a file picker.
+   * `DOM.setFileInputFiles` is not merely similar to a human upload — it is the SAME Blink code path.
+   * `SetFilesFromPaths()` calls `FilesChosen()` → `SetFilesAndDispatchEvents()`, which is exactly what
+   * the native picker's callback does. Verified by measurement on this fork: both `input` and `change`
+   * fire with `isTrusted: true`, the FileList holds genuine `File` objects, `lastModified` is the real
+   * on-disk mtime, and the MIME type is properly sniffed. There is nothing in the page to distinguish.
    *
-   * So the sequence mirrors a real upload: a humanized pointer click on the control the model chose
-   * (genuinely trusted — the site's handler runs), a pause of the length a person needs to pick a
-   * file, then the files. The OS picker that the click would normally raise is suppressed by
-   * `Page.setInterceptFileChooserDialog`, which — verified against this fork — is accepted as a plain
-   * command WITHOUT `Page.enable`, so the stealth invariant is intact. Without that suppression the
-   * click would open a native dialog and hang the run exactly like an alert().
+   * An earlier version of this method clicked the control first and suppressed the resulting dialog
+   * with `Page.setInterceptFileChooserDialog`. That was WRONG and shipped briefly: the command is
+   * accepted without `Page.enable` but is a silent no-op, because the probe that reads
+   * `suppress_file_chooser_` is only wired up inside `InspectorPageAgent::enable()`. The flag was set
+   * and never consulted, so the click opened a REAL OS dialog — invisible in headless testing, which
+   * is why it passed, and a hung run plus an undismissable dialog over the user's browser in the
+   * headed profile this product actually runs. Clicking is therefore not available to us at all.
    *
-   * Interception is always turned back off. Leaving it on would silently break file pickers for the
-   * HUMAN using this profile afterwards.
+   * Drag-and-drop covers what direct assignment cannot: a drop-zone UI with no reachable input. CDP's
+   * `Input.dispatchDragEvent` injects at the browser level, so the events are genuinely trusted and
+   * transient user activation is present — unlike a page-script `DataTransfer` simulation, which is
+   * untrusted and is the thing that actually gets uploads rejected in the wild.
    */
   async uploadFiles(point: Point, paths: string[]): Promise<void> {
-    let intercepting = false;
+    // 1. A file input AT or around the point — the ordinary case, and the most faithful path.
+    if (await this.trySetFiles(point, paths, false)) return;
+
+    // 2. Nothing there: most likely a drop zone. Dropping is the only thing that reaches those, and
+    //    assigning to some hidden input instead would leave the site's own handler unaware a file
+    //    arrived — the upload silently would not register.
+    await this.dropFilesAt(point, paths);
+    if (await this.anyFileInputPopulated()) return;
+
+    // 3. Neither: a hidden input with no structural relationship to the visible control (the styled
+    //    "Attach" button pattern). Unambiguous only when the page has exactly one.
+    if (await this.trySetFiles(point, paths, true)) return;
+    throw new Error('no upload control was found at that position');
+  }
+
+  /** True when some file input on the page now holds a file — i.e. the drop was taken. */
+  private async anyFileInputPopulated(): Promise<boolean> {
+    return cdpEvaluate<boolean>(
+      this.page,
+      `[...document.querySelectorAll('input[type=file]')].some((i) => i.files && i.files.length > 0)`,
+    ).catch(() => false);
+  }
+
+  private async trySetFiles(
+    point: Point,
+    paths: string[],
+    allowPageWide: boolean,
+  ): Promise<boolean> {
     try {
-      await this.page.send('Page.setInterceptFileChooserDialog', { enabled: true });
-      intercepting = true;
-    } catch {
-      // Older protocol revision: fall back to setting the files without the click, which still works.
-    }
-    try {
-      if (intercepting) {
-        await this.click(point);
-        // The time a person spends in a picker. Randomized, because a fixed delay is itself a pattern.
-        await sleep(550 + Math.floor(Math.random() * 900));
-      }
-      await this.setFilesAt(point, paths);
-    } finally {
-      if (intercepting) {
-        await this.page
-          .send('Page.setInterceptFileChooserDialog', { enabled: false })
-          .catch(() => {});
-      }
+      await this.setFilesAt(point, paths, allowPageWide);
+      return true;
+    } catch (error) {
+      if (/not a file input/i.test(String(error))) return false;
+      throw error;
     }
   }
 
-  private async setFilesAt(point: Point, paths: string[]): Promise<void> {
+  /** Drop files onto a custom upload zone using browser-level (trusted) drag events. */
+  private async dropFilesAt(point: Point, paths: string[]): Promise<void> {
+    const data = { items: [], files: paths, dragOperationsMask: 1 };
+    await this.page.send('Input.dispatchDragEvent', {
+      type: 'dragEnter',
+      x: point.x,
+      y: point.y,
+      data,
+    });
+    await sleep(60 + Math.floor(Math.random() * 90));
+    await this.page.send('Input.dispatchDragEvent', {
+      type: 'dragOver',
+      x: point.x,
+      y: point.y,
+      data,
+    });
+    await sleep(60 + Math.floor(Math.random() * 90));
+    await this.page.send('Input.dispatchDragEvent', { type: 'drop', x: point.x, y: point.y, data });
+  }
+
+  private async setFilesAt(point: Point, paths: string[], allowPageWide: boolean): Promise<void> {
     const objectId = await this.objectAt(point);
     let inputObjectId = objectId;
     try {
@@ -234,12 +271,16 @@ export class CdpBrowserDriver implements BrowserDriver {
         // upload failed with "the selected element is not a file input" — the feature was broken as
         // well as disabled. Walk outward instead: out of any shadow root via its host, then up the
         // parent chain, which also handles the common styled-button-wrapping-a-hidden-input pattern.
-        functionDeclaration: `function() {
+        functionDeclaration: `function(pageWide) {
           let node = this;
           for (let hops = 0; hops < 6 && node; hops += 1) {
             if (node instanceof HTMLInputElement && node.type === 'file') return node;
             if (node instanceof HTMLLabelElement && node.control instanceof HTMLInputElement && node.control.type === 'file') return node.control;
-            if (node.querySelector) {
+            // Do NOT search from body/html: that turns a "local" lookup into a page-wide one, and
+            // would claim a drop zone's unrelated sibling input — attaching the file where the site's
+            // own drop handler never sees it.
+            const tag = node.tagName;
+            if (node.querySelector && tag !== 'BODY' && tag !== 'HTML') {
               const nested = node.querySelector('input[type=file]');
               if (nested) return nested;
             }
@@ -247,11 +288,13 @@ export class CdpBrowserDriver implements BrowserDriver {
             node = root && root.host ? root.host : node.parentElement;
           }
           // Widely-used pattern: a styled button with no structural relationship to a hidden input
-          // elsewhere in the document. Only fall back when the choice is unambiguous — guessing
-          // between several inputs could attach a file to the wrong form field.
+          // elsewhere in the document. Only reached as a last resort, and only when the choice is
+          // unambiguous — guessing between several inputs could attach a file to the wrong form.
+          if (!pageWide) return null;
           const all = document.querySelectorAll('input[type=file]');
           return all.length === 1 ? all[0] : null;
         }`,
+        arguments: [{ value: allowPageWide }],
         returnByValue: false,
       })) as { result?: { objectId?: string; subtype?: string } };
       if (!result.result?.objectId || result.result.subtype === 'null') {
