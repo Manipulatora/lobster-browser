@@ -177,16 +177,80 @@ export class CdpBrowserDriver implements BrowserDriver {
     await this.pressKey('Enter');
   }
 
+  /**
+   * Attach files the way a person does.
+   *
+   * A bare `DOM.setFileInputFiles` is functionally correct but behaviourally wrong: the page sees
+   * `change` appear with no preceding click, and — more importantly — the site's OWN click handler
+   * never runs, which breaks every uploader built as a styled button that calls `input.click()`.
+   * Measured against this fork, the raw call also completes in ~40ms, where a human spends seconds in
+   * a file picker.
+   *
+   * So the sequence mirrors a real upload: a humanized pointer click on the control the model chose
+   * (genuinely trusted — the site's handler runs), a pause of the length a person needs to pick a
+   * file, then the files. The OS picker that the click would normally raise is suppressed by
+   * `Page.setInterceptFileChooserDialog`, which — verified against this fork — is accepted as a plain
+   * command WITHOUT `Page.enable`, so the stealth invariant is intact. Without that suppression the
+   * click would open a native dialog and hang the run exactly like an alert().
+   *
+   * Interception is always turned back off. Leaving it on would silently break file pickers for the
+   * HUMAN using this profile afterwards.
+   */
   async uploadFiles(point: Point, paths: string[]): Promise<void> {
+    let intercepting = false;
+    try {
+      await this.page.send('Page.setInterceptFileChooserDialog', { enabled: true });
+      intercepting = true;
+    } catch {
+      // Older protocol revision: fall back to setting the files without the click, which still works.
+    }
+    try {
+      if (intercepting) {
+        await this.click(point);
+        // The time a person spends in a picker. Randomized, because a fixed delay is itself a pattern.
+        await sleep(550 + Math.floor(Math.random() * 900));
+      }
+      await this.setFilesAt(point, paths);
+    } finally {
+      if (intercepting) {
+        await this.page
+          .send('Page.setInterceptFileChooserDialog', { enabled: false })
+          .catch(() => {});
+      }
+    }
+  }
+
+  private async setFilesAt(point: Point, paths: string[]): Promise<void> {
     const objectId = await this.objectAt(point);
     let inputObjectId = objectId;
     try {
       const result = (await this.page.send('Runtime.callFunctionOn', {
         objectId,
+        // Resolve the file input from whatever the hit-test landed on.
+        //
+        // The point at a file input's centre lands on the "Choose File" button INSIDE its user-agent
+        // shadow root (the hit test is called with includeUserAgentShadowDOM). That node is neither an
+        // input nor a label and contains no input, so the obvious three checks all missed it and every
+        // upload failed with "the selected element is not a file input" — the feature was broken as
+        // well as disabled. Walk outward instead: out of any shadow root via its host, then up the
+        // parent chain, which also handles the common styled-button-wrapping-a-hidden-input pattern.
         functionDeclaration: `function() {
-          if (this instanceof HTMLInputElement && this.type === 'file') return this;
-          if (this instanceof HTMLLabelElement && this.control instanceof HTMLInputElement && this.control.type === 'file') return this.control;
-          return this.querySelector && this.querySelector('input[type=file]');
+          let node = this;
+          for (let hops = 0; hops < 6 && node; hops += 1) {
+            if (node instanceof HTMLInputElement && node.type === 'file') return node;
+            if (node instanceof HTMLLabelElement && node.control instanceof HTMLInputElement && node.control.type === 'file') return node.control;
+            if (node.querySelector) {
+              const nested = node.querySelector('input[type=file]');
+              if (nested) return nested;
+            }
+            const root = node.getRootNode && node.getRootNode();
+            node = root && root.host ? root.host : node.parentElement;
+          }
+          // Widely-used pattern: a styled button with no structural relationship to a hidden input
+          // elsewhere in the document. Only fall back when the choice is unambiguous — guessing
+          // between several inputs could attach a file to the wrong form field.
+          const all = document.querySelectorAll('input[type=file]');
+          return all.length === 1 ? all[0] : null;
         }`,
         returnByValue: false,
       })) as { result?: { objectId?: string; subtype?: string } };

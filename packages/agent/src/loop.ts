@@ -1,4 +1,5 @@
-import { isAbsolute } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, isAbsolute } from 'node:path';
 import type {
   AgentAction,
   AgentConfig,
@@ -80,6 +81,12 @@ export function resolveConfig(partial: Partial<AgentConfig> | undefined): AgentC
   const allowedUploadRoots = (partial?.allowedUploadRoots ?? []).map((root) => {
     if (typeof root !== 'string' || !isAbsolute(root))
       throw new Error('allowedUploadRoots must be absolute paths');
+    // A root of `/` or a home directory makes the allowlist meaningless — everything is "within" it —
+    // and misconfiguring it is silent, so refuse the degenerate cases outright.
+    const normalized = root.replace(/[/\\]+$/, '');
+    if (!normalized || normalized === homedir().replace(/[/\\]+$/, '')) {
+      throw new Error('allowedUploadRoots must not be the filesystem root or the home directory');
+    }
     return root;
   });
   if (allowedUploadRoots.length > 20) throw new Error('at most 20 upload roots are allowed');
@@ -537,15 +544,23 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // In `auto` the run NEVER pauses for approval — the user chose full autonomy, and risk
       // heuristics only annotate the confirm prompt when `confirm` mode gates mutating actions.
       const risk = actionRisk(action, raw);
+      // `upload` ALWAYS asks, whatever the autonomy setting. Everything else the agent does happens
+      // inside the browser and is recoverable; sending a local file to a website is the one action
+      // that leaves the machine and cannot be taken back. `auto` was never meant to cover that — the
+      // config's own docs say irreversible actions can still gate — and because no caller ever sets
+      // `confirm`, the risk flag was being computed and then discarded on every run.
       const needsConfirm =
-        config.autonomy === 'confirm' && (MUTATING.has(action.kind) || risk.high);
+        action.kind === 'upload' ||
+        (config.autonomy === 'confirm' && (MUTATING.has(action.kind) || risk.high));
       if (needsConfirm && !navigationApproved) {
-        const approved = await confirm(
-          `Approve ${describeSafeAction(action, raw)}${risk.reason ? `? (${risk.reason})` : '?'}`,
-          safeAction,
-          base,
-          deps,
-        );
+        // The prompt must name the files and the destination. Redaction is right for the transcript,
+        // but it was also applied to the APPROVAL text, so the one human who could stop an exfiltration
+        // was shown "upload 1 local file(s) through [7]" — a blank cheque.
+        const prompt =
+          action.kind === 'upload'
+            ? `Approve uploading ${action.paths.map((p) => JSON.stringify(basename(p))).join(', ')} to ${hostOf(raw.url) || redactUrl(raw.url)}?`
+            : `Approve ${describeSafeAction(action, raw)}${risk.reason ? `? (${risk.reason})` : '?'}`;
+        const approved = await confirm(prompt, safeAction, base, deps);
         if (!approved) {
           history.push(`${step}. user rejected ${describeSafeAction(action, raw)}`);
           continue;

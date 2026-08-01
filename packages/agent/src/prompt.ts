@@ -46,7 +46,7 @@ Each step you receive the current page as a compact list of the visible, interac
 Only in-viewport elements are listed. If what you need isn't there, scroll to reveal more, wait for it to load, or navigate.
 
 HOW YOU ACT
-${buildActionReference({ vision: config.visionFallback === true, uploads: (config.allowedUploadRoots?.length ?? 0) > 0 })}
+${buildActionReference({ vision: config.visionFallback === true, uploads: (config.allowedUploadRoots?.length ?? 0) > 0, uploadRoots: config.allowedUploadRoots ?? [] })}
 
 OPERATING PRINCIPLES
 - The browser starts CLOSED. FIRST analyse the task and decide whether it needs the web at all. Greetings, small talk, and questions you can answer from your own knowledge ("what is an apple?") are NOT web tasks: reply on step 1 with \`done\` (success=true) and a short, direct answer — the browser then never opens. Only when the task genuinely requires acting on a website, take a browser action (\`navigate\`, …); that first action opens the browser automatically.

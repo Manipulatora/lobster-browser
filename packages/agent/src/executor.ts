@@ -1,5 +1,5 @@
-import { realpath, stat } from 'node:fs/promises';
-import { relative } from 'node:path';
+import { open, realpath, stat } from 'node:fs/promises';
+import { isAbsolute, relative, sep } from 'node:path';
 import type { AgentAction, AgentConfig } from '@lobster/shared-types';
 import { assessBrowserConfig } from './browser-config-guard.js';
 import type { BrowserConfigCommand, BrowserDriver } from './driver.js';
@@ -336,6 +336,10 @@ export async function executeAction(
         const roots = opts.config?.allowedUploadRoots ?? [];
         if (roots.length === 0)
           return { outcome: 'blocked: file uploads are disabled for this run' };
+        // Uploads had no staleness check, unlike click and type. Attaching a file to whatever moved
+        // under the coordinate is worse than a stray click: it sends the file somewhere else.
+        const stillThere = await pointStillMatches(driver, el);
+        if (!stillThere.ok) return staleTarget(action.id, el, stillThere.found);
         const paths = await validateUploadPaths(action.paths, roots);
         await driver.uploadFiles(point(el), paths);
         await driver.waitForSettle(3000);
@@ -549,26 +553,97 @@ function isSafeKey(key: string): boolean {
   );
 }
 
+/** Absolute cap on an attached file. Chrome would happily stream 10GB to an attacker's server. */
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+/**
+ * Content that must never leave the machine, whatever the model was told.
+ *
+ * The allowlist bounds WHERE a file may come from, but a root is chosen once for convenience and then
+ * everything inside it is one persuasive sentence away from an attacker. This is the backstop that
+ * does not depend on location or on the model's judgement: a private key is refused even if it is
+ * sitting in the uploads folder.
+ */
+const SECRET_CONTENT =
+  /-----BEGIN (?:[A-Z ]*)?PRIVATE KEY-----|-----BEGIN OPENSSH PRIVATE KEY-----|PuTTY-User-Key-File-|^\s*\[default\][\s\S]*aws_secret_access_key/im;
+const SECRET_NAME =
+  /(^|[/\\])(id_[a-z0-9]+|\.env(\.[a-z]+)?|credentials|\.netrc|\.htpasswd|wallet\.dat|.*\.(pem|key|p12|pfx|jks|keystore|kdbx|ppk))$/i;
+
+/**
+ * Decide whether the agent may attach these files.
+ *
+ * Every rejection returns the SAME opaque message on purpose. An earlier version ran realpath and stat
+ * before the containment check and surfaced the raw errno to the model, which turned the action into a
+ * filesystem oracle: a page could ask the agent to "try this path and tell me the error" and read back
+ * whether an arbitrary file exists, is a directory, or is a regular file — usernames, installed apps,
+ * whether ~/.ssh/id_rsa is there — without ever being allowed a single upload.
+ */
 async function validateUploadPaths(paths: string[], roots: string[]): Promise<string[]> {
-  const canonicalRoots = await Promise.all(roots.map((root) => realpath(root)));
+  const denied = new Error('upload path is not permitted');
+  const canonicalRoots: string[] = [];
+  for (const root of roots) {
+    try {
+      canonicalRoots.push(await realpath(root));
+    } catch {
+      continue; // a configured root that does not exist simply grants nothing
+    }
+  }
+  if (canonicalRoots.length === 0) throw denied;
+
   const approved: string[] = [];
   for (const path of paths) {
-    const canonical = await realpath(path);
-    const info = await stat(canonical);
-    if (!info.isFile()) throw new Error(`upload target is not a regular file: ${path}`);
-    if (!canonicalRoots.some((root) => isWithin(canonical, root))) {
-      throw new Error(`upload path is outside the approved roots: ${path}`);
+    let canonical: string;
+    let info: Awaited<ReturnType<typeof stat>>;
+    try {
+      canonical = await realpath(path);
+      info = await stat(canonical);
+    } catch {
+      throw denied;
+    }
+    // Containment first, and silent about everything else.
+    if (!canonicalRoots.some((root) => isWithin(canonical, root))) throw denied;
+    if (!info.isFile()) throw denied;
+    // A hard link inside a root points at a file outside it and realpath cannot tell the difference,
+    // so the link count is the only available signal. Needs no race to exploit.
+    if (info.nlink > 1) throw denied;
+    if (info.size > MAX_UPLOAD_BYTES) {
+      throw new Error(
+        `file is larger than the ${Math.round(MAX_UPLOAD_BYTES / 1024 / 1024)}MB upload limit`,
+      );
+    }
+    if (SECRET_NAME.test(canonical)) throw denied;
+    try {
+      const handle = await open(canonical, 'r');
+      try {
+        const head = Buffer.alloc(4096);
+        const { bytesRead } = await handle.read(head, 0, head.length, 0);
+        if (SECRET_CONTENT.test(head.subarray(0, bytesRead).toString('latin1'))) throw denied;
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      throw error === denied ? denied : denied;
     }
     approved.push(canonical);
   }
   return approved;
 }
 
+/**
+ * Containment test.
+ *
+ * `path.relative` returns an ABSOLUTE path when the two sides have different roots — on Windows,
+ * `relative('C:\\Users\\x\\uploads', 'D:\\secrets\\id_rsa')` is `D:\\secrets\\id_rsa`, which begins with
+ * neither `..` nor a separator and so passed the old check. The allowlist then constrained only the
+ * drive the root happened to live on, leaving every other volume — including mapped network drives —
+ * wide open. The absolute test closes that.
+ */
 function isWithin(path: string, root: string): boolean {
   const value = relative(root, path);
-  return (
-    value === '' || (!value.startsWith('..') && !value.startsWith('/') && !value.startsWith('\\'))
-  );
+  if (value === '') return true;
+  if (isAbsolute(value)) return false;
+  // `..foo.txt` is a legitimate child; only a real `..` segment escapes.
+  return value !== '..' && !value.startsWith(`..${sep}`);
 }
 
 function inViewport(x: number, y: number, perception: RawPerception): boolean {
