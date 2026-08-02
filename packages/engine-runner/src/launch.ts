@@ -1,7 +1,29 @@
 import type { Fingerprint, LaunchParams } from '@lobster/shared-types';
 import { toEnginePlaywrightProxy } from '@lobster/proxy';
+import { getBridgeOrigin } from './agent/bridge-registry.js';
 import { buildGpuArgs } from './gpu.js';
 import { buildProxyHardeningArgs } from './proxy-hardening.js';
+
+/**
+ * The sidecar's own loopback agent bridge as a `host:port` bypass entry, or nothing when no bridge is
+ * running (CI harnesses, unit tests — where `getBridgeOrigin()` is empty and behaviour is unchanged).
+ *
+ * The Lobee side panel reaches this origin directly from the browser, so a proxied profile must not
+ * route it through the upstream — see {@link ProxyHardeningOptions.loopbackAllowlist}.
+ */
+function loopbackBridgeAllowlist(): string[] {
+  const origin = getBridgeOrigin();
+  if (!origin) return [];
+  try {
+    const url = new URL(origin);
+    if (!url.port) return [];
+    // Chromium bypass entries need IPv6 hosts bracketed; `URL.hostname` strips the brackets.
+    const host = url.hostname.includes(':') ? `[${url.hostname}]` : url.hostname;
+    return [`${host}:${url.port}`];
+  } catch {
+    return [];
+  }
+}
 
 function chromeWebRtcFlagPolicy(params: LaunchParams): string {
   switch (params.webrtcPolicy) {
@@ -40,7 +62,9 @@ export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOption
       'WebRTC default_public_interface_only is unsafe with a proxy because host ICE may bypass it',
     );
   }
-  const proxyHardening = buildProxyHardeningArgs(params.proxy);
+  const proxyHardening = buildProxyHardeningArgs(params.proxy, {
+    loopbackAllowlist: loopbackBridgeAllowlist(),
+  });
   const proxyDisabledFeatures =
     proxyHardening
       .find((arg) => arg.startsWith('--disable-features='))

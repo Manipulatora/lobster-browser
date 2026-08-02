@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Fingerprint, LaunchParams } from '@lobster/shared-types';
+import { setBridgeOrigin } from './agent/bridge-registry.js';
 import { buildCdpEmulation, buildFingerprintInitScript, buildLaunchOptions } from './launch.js';
 
 function sampleFingerprint(): Fingerprint {
@@ -140,6 +141,40 @@ test('buildLaunchOptions honors an explicit WebRTC launch policy', () => {
       }),
     /unsafe with a proxy/,
   );
+});
+
+test('a proxied launch still lets the browser reach the sidecar agent bridge on loopback', () => {
+  // `<-loopback>` removes Chromium's implicit localhost bypass, so a proxied profile hands even
+  // 127.0.0.1 requests to the upstream — where loopback is the PROVIDER's machine. The Lobee side
+  // panel talks to the sidecar bridge over exactly such a URL, so its own origin must be re-added
+  // AFTER `<-loopback>` (which erases anything before it) or the panel is dead on every proxied profile.
+  const params: LaunchParams = {
+    profileId: 'p',
+    engine: 'lobium',
+    userDataDir: '/d',
+    fingerprint: sampleFingerprint(),
+    proxy: { id: 'x', type: 'http', host: 'proxy.example', port: 8080 },
+  };
+
+  const withoutBridge = buildLaunchOptions(params);
+  assert.ok(
+    withoutBridge.args.includes('--proxy-bypass-list=<-loopback>'),
+    'no bridge running (CI harnesses, unit tests) must leave the hardening exactly as it was',
+  );
+
+  setBridgeOrigin('http://127.0.0.1:45231');
+  try {
+    const withBridge = buildLaunchOptions(params);
+    assert.ok(withBridge.args.includes('--proxy-bypass-list=<-loopback>;127.0.0.1:45231'));
+    // Chromium honors ONE value per switch, so the bypass rule must never be split across two flags.
+    assert.equal(withBridge.args.filter((a) => a.startsWith('--proxy-bypass-list=')).length, 1);
+    // An unproxied profile needs no bypass list at all — the implicit loopback bypass is intact.
+    const { proxy: _proxy, ...unproxied } = params;
+    const noProxy = buildLaunchOptions(unproxied);
+    assert.ok(!noProxy.args.some((a) => a.startsWith('--proxy-bypass-list=')));
+  } finally {
+    setBridgeOrigin('');
+  }
 });
 
 test('buildLaunchOptions omits GPU flags by default and adds ANGLE flags when LOBSTER_GPU=gpu', () => {
