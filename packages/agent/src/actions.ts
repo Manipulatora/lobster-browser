@@ -146,7 +146,13 @@ export const ACT_TOOL = {
       values: { type: 'array', items: { type: 'string' }, maxItems: 20 },
       key: { type: 'string', maxLength: 80 },
       direction: { type: 'string', enum: ['up', 'down'] },
-      amount: { type: 'integer', minimum: 1, maximum: 10_000 },
+      amount: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 10_000,
+        description:
+          'scroll: distance in CSS PIXELS, not screens or clicks. Omit it to move one screenful (~80% of the viewport), which is almost always what you want.',
+      },
       paths: { type: 'array', items: { type: 'string' }, maxItems: 20 },
       url: { type: 'string', maxLength: 8_192 },
       operation: { type: 'string', enum: ['list', 'new', 'switch', 'close'] },
@@ -233,7 +239,7 @@ export function buildActionReference(opts: {
   const lines = [
     'Actions (one per tool call):',
     '- click {id, button?, count?}; hover {id}; type {id,text,clear?,submit?}; select {id,values}',
-    '- key {key}; scroll {direction,amount?,id?}; drag {fromId,toId}',
+    '- key {key}; scroll {direction,amount?,id?} — `amount` is in PIXELS, so omit it to move a whole screenful; drag {fromId,toId}',
     '- navigate {url}; back {}; wait {ms?}; tab {operation,tabId?,url?}: list/new/switch/close. Address tabs by the `tabId` from `tab list`, not by position — positions shift whenever any tab opens or closes.',
     '- extract {description}: read the current page as structured text (tables keep their rows, lists their items). Use it when the answer is longer than the element list shows.',
     '- collect {rows, columns?}: THE way to scrape. Add rows to a dataset the harness keeps for you — deduplicated, safe across pagination, and returned in full at the end. Give `columns` once on the first call. Collect each page as you go, then click Next and collect again; never re-type collected data into your final answer, and never invent a value you did not see on the page.',

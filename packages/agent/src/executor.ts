@@ -148,8 +148,13 @@ const EXTRACT_TEXT = `(() => {
   for (let i = 0; i < roots.length && i < 32; i++) {
     const root = roots[i];
     const doc = root.nodeType === 9 ? root : root.ownerDocument;
+    // Landmarks ONLY — never 'article'. \`main\`/\`[role=main]\` are page-level and unique by spec, so
+    // scoping to them skips nav/footer chrome. \`<article>\` is the opposite: it marks a REPEATABLE
+    // unit, so product grids, search results and feeds are built from many of them. Including it here
+    // meant querySelector matched the FIRST tile and the whole extraction was scoped to one item —
+    // books.toscrape.com returned 52 characters of a 2,029-character page, one book out of twenty.
     const start = root.nodeType === 9
-      ? (root.querySelector('main,[role="main"],article') || root.body || root.documentElement)
+      ? (root.querySelector('main,[role="main"]') || root.body || root.documentElement)
       : root;
     if (!doc || !start) continue;
     walk(start, 0);
@@ -318,8 +323,11 @@ export async function executeAction(
         const amount = action.amount ?? Math.round((perception.viewportH || 720) * 0.8);
         await driver.scrollBy(0, amount * (action.direction === 'up' ? -1 : 1));
         await sleepAbortable(250, sleep, opts.signal);
+        // Report the DISTANCE. `amount` is pixels, and a model that meant "3 screens" and wrote 3 saw
+        // only "scrolled down" — indistinguishable from a full page move, so it never learned the unit
+        // and kept scrolling 3px at a time until the step budget ran out.
         return {
-          outcome: `scrolled ${action.direction}${action.id === undefined ? '' : ` over [${action.id}]`}`,
+          outcome: `scrolled ${action.direction} ${amount}px${action.id === undefined ? '' : ` over [${action.id}]`}`,
         };
       }
       case 'drag': {

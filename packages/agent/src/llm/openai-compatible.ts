@@ -52,7 +52,10 @@ export class OpenAiCompatibleClient implements LlmClient {
     const body = {
       model,
       max_tokens: req.maxTokens,
-      messages: [{ role: 'system', content: systemContent }, ...toOpenAiMessages(req.messages)],
+      messages: [
+        { role: 'system', content: systemContent },
+        ...toOpenAiMessages(req.messages, cache),
+      ],
       // Tool-less chat (Ask mode) sends no tools/tool_choice and gets a plain text answer.
       ...(req.tools.length
         ? {
@@ -142,8 +145,48 @@ export class OpenAiCompatibleClient implements LlmClient {
  * keyed by `tool_call_id`, and assistant tool calls carry JSON-encoded `arguments` (the wire format is
  * a string, not an object).
  */
-function toOpenAiMessages(messages: readonly LlmMessage[]): Array<Record<string, unknown>> {
-  return messages.map((message) => {
+/**
+ * Place the ONE rolling cache breakpoint on the last message.
+ *
+ * The system block alone is not where the cost is. Measured against claude-sonnet-5 through the managed
+ * proxy on a realistic 18k-token step (a ~2.5k system prefix plus six page snapshots):
+ *
+ *   system block marked only          -> 6,441 / 18,060 cached  (36%)
+ *   + last message marked             -> 18,058 / 18,060 cached (100%)
+ *
+ * i.e. ~11.6k additional prompt tokens per step read at the cached rate instead of full price. The
+ * conversation prefix is stable across a run's steps — observations are appended, never rewritten —
+ * so the marker rolls forward and each step reads everything before it from cache.
+ *
+ * EXACTLY ONE marker is added here. Anthropic caps cache breakpoints, and the system block already
+ * carries one; adding more risks a 400 on the only transport the product ships.
+ *
+ * An assistant turn is deliberately skipped: its content may be null alongside `tool_calls`, and there
+ * is no safe place to hang the marker. In Lobee's flow the tail is always a tool result or a user
+ * message, so this is a defensive fallback rather than a live path.
+ */
+function markCacheBreakpoint(message: Record<string, unknown>): Record<string, unknown> {
+  const cacheControl = { type: 'ephemeral' };
+  if (message.role === 'assistant') return message;
+  if (typeof message.content === 'string') {
+    return {
+      ...message,
+      content: [{ type: 'text', text: message.content, cache_control: cacheControl }],
+    };
+  }
+  if (Array.isArray(message.content) && message.content.length > 0) {
+    const parts = [...(message.content as Array<Record<string, unknown>>)];
+    parts[parts.length - 1] = { ...parts[parts.length - 1], cache_control: cacheControl };
+    return { ...message, content: parts };
+  }
+  return message;
+}
+
+function toOpenAiMessages(
+  messages: readonly LlmMessage[],
+  cacheConversation = false,
+): Array<Record<string, unknown>> {
+  const mapped: Array<Record<string, unknown>> = messages.map((message) => {
     if (message.role === 'tool') {
       return { role: 'tool', tool_call_id: message.toolCallId, content: message.content };
     }
@@ -175,6 +218,9 @@ function toOpenAiMessages(messages: readonly LlmMessage[]): Array<Record<string,
       ],
     };
   });
+  const last = mapped.length - 1;
+  if (cacheConversation && last >= 0) mapped[last] = markCacheBreakpoint(mapped[last]!);
+  return mapped;
 }
 
 /**

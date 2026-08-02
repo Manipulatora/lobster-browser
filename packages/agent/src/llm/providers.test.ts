@@ -123,6 +123,23 @@ test('managed/OpenRouter emits caching fields; BYOK-direct OpenAI must NOT (woul
       Array.isArray(sys) && sys[0]?.cache_control,
       'managed system block should carry cache_control',
     );
+    // Exactly ONE rolling breakpoint on the message array, on the LAST message. Measured worth ~11.6k
+    // extra cached prompt tokens per step (36% -> 100% of an 18k request); a SECOND one risks a 400 on
+    // the only transport the product ships, so the count is asserted, not just the presence.
+    const msgs = body.messages as Array<{ role: string; content: unknown }>;
+    const marked = msgs.filter(
+      (m) =>
+        Array.isArray(m.content) &&
+        (m.content as Array<{ cache_control?: unknown }>).some((p) => p.cache_control),
+    );
+    assert.equal(marked.length, 2, 'exactly the system block and the last message may be marked');
+    assert.equal(marked[0]?.role, 'system');
+    assert.equal(
+      marked[1],
+      msgs[msgs.length - 1],
+      'the message marker must sit on the LAST message',
+    );
+
     assert.equal(body.session_id, 'run-1');
     assert.deepEqual(body.provider, { order: ['anthropic'] });
     assert.equal(body.tool_choice, 'auto', 'Claude thinking requires automatic tool selection');
