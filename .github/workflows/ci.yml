@@ -121,8 +121,15 @@ jobs:
       - run: npx patchright install --with-deps chromium
       - run: npm test --workspace @lobster/engine-runner
 
+  # The SOFTWARE tier of docs/OPERATIONS.md (§3): catalog diversity, coherence over 6000 personas, and
+  # the derivation/coherence unit contracts. Runs anywhere — no GPU, no proxy, no browser.
+  #
+  # This job used to run `ci/validation/run.mjs`, which derived a fingerprint and applied it over CDP
+  # through patchright. That harness was deleted with the CDP-spoofing path it exercised (production
+  # fingerprinting is native — docs/ENGINEERING.md §1), so the job had been failing on every run. The
+  # heavier tiers it cannot cover here are the real-GPU gate (real-gpu-gate.yml) and lobium-detect.
   fingerprint-gate:
-    name: Fingerprint validation gate (live detector)
+    name: Fingerprint software gate (coherence / diversity / regressions)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -131,9 +138,17 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm install --no-audit --no-fund
-      - run: sudo apt-get update && sudo apt-get install -y xvfb
-      - run: npx patchright install --with-deps chromium
-      # Build the packages the harness imports (its dist output).
+      # Build the packages the harness imports, plus the fingerprint unit tests it runs from dist/.
       - run: npx tsc -b packages/shared-types packages/proxy packages/fingerprint packages/engine-runner
-      # Real run: derive a fingerprint, launch it headful under Xvfb, validate against bot.sannysoft.com.
-      - run: xvfb-run -a node ci/validation/run.mjs
+      - name: Run the software regression gate
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+        run: |
+          # The live TLS/JA4 check reads a real ClientHello and therefore needs a built Lobium binary,
+          # which github-hosted runners do not have. Skip it cleanly there (JA4 is gated on the
+          # self-hosted real-GPU runner); run it whenever a binary IS provisioned.
+          if [ -z "${LOBSTER_LOBIUM_BIN:-}" ] || [ ! -x "$LOBSTER_LOBIUM_BIN" ]; then
+            echo "No Lobium binary on this runner — skipping the live TLS/JA4 check."
+            export SKIP_TLS=1
+          fi
+          node ci/validation/regression-gate.mjs

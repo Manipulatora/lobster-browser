@@ -103,6 +103,14 @@ async function run(os) {
   }
 }
 
+// This gate reads a REAL ClientHello, so it needs the real engine. Say so plainly instead of failing
+// deep inside `spawn(undefined, …)` — regression-gate surfaces this line as the check's detail, and a
+// cryptic ENOENT there is exactly how a broken harness stays broken.
+if (!LOBIUM) {
+  console.log('TLS GATE: SKIPPED — no Lobium binary (set LOBSTER_LOBIUM_BIN, or SKIP_TLS=1 to skip).');
+  process.exit(2);
+}
+
 let ok = true;
 for (const os of (process.env.OSES || 'windows').split(',')) {
   const r = await run(os);
