@@ -22,6 +22,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { resolveLobiumBinary } from '@lobster/engine-runner';
+import { startFixtureServer } from './agent-fixtures.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..');
@@ -123,6 +124,78 @@ const TASKS = [
     expect: /block|refus|cannot|could not|unable/i,
     wantSuccess: false,
   },
+  // ---- Pathological fixtures (loopback, deterministic) ----------------------------------------
+  {
+    id: 'shadow-dom',
+    why: 'content inside an open shadow root must be perceivable and clickable',
+    local: true,
+    task: 'Open {ORIGIN}/shadow. Click the "Reveal reference" button and report the reference code it shows.',
+    maxSteps: 10,
+    expect: /ZQ-8831/,
+  },
+  {
+    id: 'custom-combobox',
+    why: 'a div/role=listbox dropdown — the native select path cannot drive it',
+    local: true,
+    task: 'Open {ORIGIN}/combobox. Choose the region "Copper Basin" from the dropdown and report the allocation code that appears.',
+    maxSteps: 12,
+    expect: /CB-2290/,
+  },
+  {
+    id: 'consent-wall',
+    why: 'an overlay hides the answer until it is dismissed',
+    local: true,
+    task: 'Open {ORIGIN}/consent and tell me the Q3 net revenue figure.',
+    maxSteps: 10,
+    expect: /4[,.]?182[,.]?900/,
+  },
+  {
+    id: 'dense-index',
+    why: '400 links: priority-ordered truncation must not permanently hide the target',
+    local: true,
+    task: 'Open {ORIGIN}/dense. One record in the list has a clearance token next to it. Find it and report the token.',
+    maxSteps: 16,
+    expect: /QT-5566/,
+  },
+  {
+    id: 'same-origin-iframe',
+    why: 'a readable iframe must be descended into, not reported as unreadable',
+    local: true,
+    task: 'Open {ORIGIN}/iframe and report the settlement identifier shown on the page.',
+    maxSteps: 10,
+    expect: /SX-7742/,
+  },
+  {
+    id: 'late-content',
+    why: 'the value changes twice — reporting the interim one is a grounding failure',
+    local: true,
+    task: 'Open {ORIGIN}/lazy and report the FINAL balance once the page has finished updating.',
+    maxSteps: 12,
+    expect: /9[,.]?314/,
+  },
+  {
+    id: 'gated-control',
+    why: 'a disabled button enables only after another field is used — requires re-observation',
+    local: true,
+    task: 'Open {ORIGIN}/gated. Type the unlock word "lobee" into the field, then press Continue, and report the vault number.',
+    maxSteps: 12,
+    expect: /VN-6120/,
+  },
+  // ---- Messy real sites ------------------------------------------------------------------------
+  {
+    id: 'dense-real-list',
+    why: 'a real element-dense list page (30 stories, ~120 links)',
+    task: 'Go to https://news.ycombinator.com/ and tell me the title of the very top story and how many points it has.',
+    maxSteps: 12,
+    expect: /point/i,
+  },
+  {
+    id: 'long-article',
+    why: 'a very long article — find one specific fact inside it',
+    task: 'Go to https://en.wikipedia.org/wiki/Web_scraping and tell me, in one sentence, what the "robots.txt" file is used for according to that page.',
+    maxSteps: 12,
+    expect: /robot|crawl|exclusion|disallow/i,
+  },
 ];
 
 const selected = process.argv.slice(2).filter((a) => !a.startsWith('-'));
@@ -164,6 +237,10 @@ if (!proxy) {
   console.log('AGENT BATTERY: SKIPPED — no managed LLM proxy (set LOBSTER_AGENT_PROXY_URL/TOKEN).');
   process.exit(2);
 }
+
+// Loopback fixture server for the pathological pages. Started only when a selected task needs it.
+const needsFixtures = battery.some((t) => t.local);
+const fixtures = needsFixtures ? await startFixtureServer() : null;
 
 const root = await mkdtemp(join(tmpdir(), 'agent-battery-'));
 const sidecar = spawn('node', [join(REPO, 'packages/engine-runner/dist/index.js')], {
@@ -236,9 +313,10 @@ try {
   for (const t of battery) {
     events = [];
     const began = Date.now();
+    const taskText = t.local ? t.task.replaceAll('{ORIGIN}', fixtures.origin) : t.task;
     const res = await call('agent.start', {
       profileId,
-      task: t.task,
+      task: taskText,
       memoryDir: join(root, 'agent'),
       memoryKey: randomBytes(32).toString('base64'),
       threadId: `battery-${t.id}`,
@@ -249,7 +327,13 @@ try {
         baseUrl: proxy.url,
         apiKey: proxy.token,
       },
-      config: { mode: 'agent', maxSteps: t.maxSteps, visionFallback: true },
+      // Loopback is blocked by default (SSRF guard); the fixture tasks are the only ones allowed it.
+      config: {
+        mode: 'agent',
+        maxSteps: t.maxSteps,
+        visionFallback: true,
+        ...(t.local ? { allowPrivateNetwork: true } : {}),
+      },
     });
     if (!res.ok) {
       results.push({ ...t, verdict: 'FAIL', why: `start rejected: ${JSON.stringify(res.error)}` });
@@ -304,6 +388,7 @@ try {
   sidecar.stdin.end();
   await wait(1000);
   sidecar.kill('SIGKILL');
+  fixtures?.close();
   await rm(root, { recursive: true, force: true }).catch(() => {});
 }
 
