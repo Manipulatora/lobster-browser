@@ -944,8 +944,20 @@ function clip(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-const MAX_EXTRACT_ENTRY_CHARS = 3_000;
-const MAX_EXTRACT_LEDGER_CHARS = 8_000;
+/**
+ * Per-extract and whole-ledger budgets, in characters.
+ *
+ * The entry budget MUST NOT be smaller than what `extract` can produce (its own cap is 12,000), or a
+ * single page is silently beheaded: the outcome line still reports "extracted 3933 characters" while
+ * the model receives 3,000 of them. That is exactly how a 400-row index lost the row it was asked
+ * for — the extractor found it at character ~3,700 and the ledger cut it off, so the agent scrolled
+ * and re-extracted the same page repeatedly, each time being told it had succeeded.
+ *
+ * Affording this got much cheaper: since the ledger is now stripped from every tool message except
+ * the newest, a bigger budget rides once per request rather than up to seven times.
+ */
+const MAX_EXTRACT_ENTRY_CHARS = 12_000;
+const MAX_EXTRACT_LEDGER_CHARS = 16_000;
 
 function appendExtractedEvidence(
   existing: string[],
@@ -954,7 +966,13 @@ function appendExtractedEvidence(
   description: string,
   text: string,
 ): string[] {
-  const entry = `Extract ${step} — ${clip(description, 160)} — ${redactUrl(url)}\n${clip(text, MAX_EXTRACT_ENTRY_CHARS)}`;
+  // Clip LOUDLY. A bare ellipsis reads as a formatting flourish; a count reads as missing evidence and
+  // is something the model can act on (narrow the read, or use `collect` page by page).
+  const body =
+    text.length > MAX_EXTRACT_ENTRY_CHARS
+      ? `${text.slice(0, MAX_EXTRACT_ENTRY_CHARS)}\n[…${text.length - MAX_EXTRACT_ENTRY_CHARS} more characters of this page were cut from the record. If what you need is missing, read a narrower part of the page or use \`collect\` as you go.]`
+      : text;
+  const entry = `Extract ${step} — ${clip(description, 160)} — ${redactUrl(url)}\n${body}`;
   const next = [...existing, entry];
   let dropped = 0;
   while (next.length > 1 && next.join('\n\n').length > MAX_EXTRACT_LEDGER_CHARS) {

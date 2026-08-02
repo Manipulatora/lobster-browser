@@ -916,3 +916,50 @@ test('harness notes are marked, and a page cannot forge that marker', async () =
     }
   }
 });
+
+test('an extract longer than the ledger entry budget says how much it cut', async () => {
+  // The outcome line reports the extractor's character count. If the ledger silently keeps fewer, the
+  // model is told it succeeded while the evidence it needs is gone — which is how a 400-row index lost
+  // the one row it was asked for.
+  const long = Array.from({ length: 2000 }, (_, i) => `Record ${i} value-${i}`).join('\n');
+  const driver = new FakeDriver();
+  driver.evaluate = (async (expression: string) => {
+    if (expression === EXTRACT_SCRIPT) return PAGE;
+    if (expression === 'location.href') return PAGE.url;
+    if (expression === 'document.readyState') return 'complete';
+    return long;
+  }) as FakeDriver['evaluate'];
+
+  const memory = new FakeMemory();
+  const events: AgentEvent[] = [];
+  const llm = new ScriptedLlm([
+    { kind: 'extract', description: 'everything' },
+    { kind: 'done', success: true, summary: 'ok' },
+  ]);
+  let n = 0;
+  await runAgent(
+    {
+      sessionId: 's',
+      profileId: 'p',
+      task: 'read it all',
+      runId: 's',
+      llmConfig: { provider: 'anthropic', model: 'claude-opus-4-8', apiKey: 'x' },
+      config: resolveConfig({ maxSteps: 4 }),
+    },
+    {
+      driver,
+      llm,
+      memory,
+      emit: (e) => events.push(e),
+      waitForInput: async () => 'ok',
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+
+  const ledger = llm.requests.map(allText).join('\n');
+  assert.match(ledger, /more characters of this page were cut/, 'the cut must be announced');
+  // And enough must survive that a value past the OLD 3,000-char limit is still readable.
+  assert.match(ledger, /Record 4\d\d /, 'the entry budget must cover a realistically long page');
+});
