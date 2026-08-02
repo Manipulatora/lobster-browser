@@ -9,7 +9,7 @@ export { listModels } from './models.js';
 export type { ListModelsConfig } from './models.js';
 export { AnthropicClient } from './anthropic.js';
 export { GoogleClient } from './google.js';
-export { OpenAiCompatibleClient } from './openai-compatible.js';
+export { OpenAiCompatibleClient, usesAutomaticToolChoice } from './openai-compatible.js';
 
 /**
  * Build the LLM client from its {@link AgentLlmConfig}. Managed mode routes through the backend proxy

@@ -3,6 +3,7 @@ import { isAbsolute, relative, sep } from 'node:path';
 import type { AgentAction, AgentConfig } from '@lobster/shared-types';
 import { assessBrowserConfig } from './browser-config-guard.js';
 import type { BrowserConfigCommand, BrowserDriver } from './driver.js';
+import { MAX_SCREENSHOT_BASE64_CHARS } from './driver.js';
 import { assessNavigation } from './policy.js';
 import { isSensitiveElement, redactUrl } from './security.js';
 import type { PerceivedElement, RawPerception } from './types.js';
@@ -495,8 +496,10 @@ export async function executeAction(
         if (!driver.screenshot)
           return { outcome: 'error: screenshots are unavailable in this browser driver' };
         const image = await driver.screenshot();
-        if (!image || image.length > 16_000_000) {
-          return { outcome: 'error: screenshot was empty or exceeded the 12MB visual-input limit' };
+        if (!image || image.length > MAX_SCREENSHOT_BASE64_CHARS) {
+          return {
+            outcome: `error: screenshot was empty or exceeded the ${Math.round(MAX_SCREENSHOT_BASE64_CHARS / 1_000_000)}MB visual-input limit`,
+          };
         }
         return {
           outcome: `captured a visual observation${action.description ? ` for ${action.description}` : ''}`,

@@ -1,6 +1,20 @@
 import type { LlmClient, LlmMessage, LlmRequest, LlmResult, LlmToolCall } from './types.js';
 import { fetchWithRetry } from './http.js';
 
+/**
+ * True when this (provider, model) pair cannot be given a FORCED tool choice, so the model may answer
+ * in prose instead of calling `act`. Claude's adaptive-thinking models reject `tool_choice: {function}`
+ * over OpenRouter, so the adapter sends `'auto'` for them.
+ *
+ * Exported because the system prompt has to compensate with an explicit "every step is one `act` call"
+ * clause — and the condition must be stated in exactly ONE place, or the prompt and the wire drift
+ * apart silently.
+ */
+export function usesAutomaticToolChoice(provider: string, model: string): boolean {
+  const openRouter = provider === 'managed' || provider === 'openrouter';
+  return openRouter && model.startsWith('anthropic/');
+}
+
 export class OpenAiCompatibleClient implements LlmClient {
   readonly provider: string;
   private readonly apiKey: string;
@@ -31,7 +45,7 @@ export class OpenAiCompatibleClient implements LlmClient {
     const cache = this.openRouter && req.cachePrefix !== false;
     // Claude's current adaptive-thinking models reject a forced tool choice. Keep the schema and rely on
     // the agent system prompt plus its strict result validator, but let Claude select the action tool.
-    const useAutomaticToolChoice = this.openRouter && model.startsWith('anthropic/');
+    const useAutomaticToolChoice = usesAutomaticToolChoice(this.provider, model);
     const systemContent = cache
       ? [{ type: 'text', text: req.system, cache_control: { type: 'ephemeral' } }]
       : req.system;
@@ -89,7 +103,7 @@ export class OpenAiCompatibleClient implements LlmClient {
     if (!response.ok)
       throw new Error(`${this.provider} ${response.status}: ${await safeError(response)}`);
     if (wantsStream && response.body) {
-      return readSseCompletion(response.body, req.onTextDelta!);
+      return readSseCompletion(response.body, req.onTextDelta!, req.signal);
     }
     const json = (await response.json()) as OpenAiResponse;
     const choice = json.choices?.[0];
@@ -171,9 +185,21 @@ function toOpenAiMessages(messages: readonly LlmMessage[]): Array<Record<string,
  * result, so streaming is purely additive and a provider that cannot stream degrades to the buffered
  * path with no behavioural difference beyond the missing deltas.
  */
+/**
+ * Longest gap between stream chunks before the body is treated as dead.
+ *
+ * `fetchWithRetry`'s per-attempt timeout only covers the initial `fetch()`; once the response is
+ * returned it clears that timer, so nothing bounds how long the BODY takes. A proxy that accepts the
+ * request and then stalls left `runAgent` unresolved forever, and because the manager keeps the session
+ * in `running` until the run resolves, that wedged the profile against every subsequent run — with
+ * `stop()` unable to break it. This watchdog is what makes a stalled stream fail instead of hang.
+ */
+const STREAM_IDLE_TIMEOUT_MS = 90_000;
+
 async function readSseCompletion(
   body: ReadableStream<Uint8Array>,
   onTextDelta: (delta: string) => void,
+  signal?: AbortSignal,
 ): Promise<LlmResult> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -182,9 +208,24 @@ async function readSseCompletion(
   let stopReason = 'stop';
   const usage = { tokensIn: 0, tokensOut: 0, cachedTokensIn: undefined as number | undefined };
 
+  // Cancelling the reader is what unblocks the pending `read()`; the loop then throws and the caller
+  // sees a real error rather than an unresolved promise.
+  const onAbort = (): void => void reader.cancel().catch(() => {});
+  signal?.addEventListener('abort', onAbort, { once: true });
+
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      let idle: ReturnType<typeof setTimeout> | undefined;
+      const { done, value } = await Promise.race([
+        reader.read(),
+        new Promise<never>((_resolve, reject) => {
+          idle = setTimeout(
+            () => reject(new Error('the model stream stalled (no data for 90s)')),
+            STREAM_IDLE_TIMEOUT_MS,
+          );
+          idle.unref?.();
+        }),
+      ]).finally(() => clearTimeout(idle));
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let boundary: number;
@@ -216,7 +257,14 @@ async function readSseCompletion(
       }
     }
   } finally {
+    signal?.removeEventListener('abort', onAbort);
     reader.cancel().catch(() => {});
+  }
+
+  // A 200 that yields no content at all is a proxy failure mode, not an answer. Say so plainly rather
+  // than returning an empty result the loop reports as "the model returned no answer".
+  if (!text.trim() && usage.tokensOut === 0) {
+    throw new Error('the model stream ended without producing any content');
   }
 
   return {

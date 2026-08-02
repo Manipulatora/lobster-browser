@@ -7,7 +7,7 @@ import type {
   AgentLlmConfig,
   AgentUsage,
 } from '@lobster/shared-types';
-import { ACT_TOOL, parseAction } from './actions.js';
+import { ACT_TOOL, actionCapability, parseAction } from './actions.js';
 import {
   assessUiSettingsIntent,
   isBrowserConfigSurfaceUrl,
@@ -15,9 +15,11 @@ import {
   isVettedBrowserConfigUrl,
 } from './browser-config-guard.js';
 import type { BrowserDriver } from './driver.js';
+import { MAX_SCREENSHOT_BASE64_CHARS } from './driver.js';
 import { executeAction } from './executor.js';
 import type { Sleep } from './executor.js';
 import type { LlmClient } from './llm/index.js';
+import { usesAutomaticToolChoice } from './llm/index.js';
 import type { LlmMessage } from './llm/types.js';
 import { normalizeMessages } from './llm/types.js';
 import type { MemoryStore, ThreadMessage } from './memory/index.js';
@@ -29,8 +31,21 @@ import {
 } from './policy.js';
 import { perceive } from './perception/perceive.js';
 import { renderObservation, sameElements } from './perception/serialize.js';
-import { buildAskPrompt, buildStepPrompt, buildSystemPrompt } from './prompt.js';
-import { describeSafeAction, isSensitiveElement, redactAction, redactUrl } from './security.js';
+import {
+  buildAskPrompt,
+  buildStepPrompt,
+  buildSystemPrompt,
+  EVIDENCE_PREAMBLE,
+  SITE_MEMORY_PREAMBLE,
+  VERBATIM_OBSERVATIONS,
+} from './prompt.js';
+import {
+  describeSafeAction,
+  isSensitiveElement,
+  redactAction,
+  redactRawActionInput,
+  redactUrl,
+} from './security.js';
 import type { RawPerception } from './types.js';
 
 export interface AgentRunDeps {
@@ -105,21 +120,6 @@ export function resolveConfig(partial: Partial<AgentConfig> | undefined): AgentC
   };
 }
 
-const MUTATING: ReadonlySet<AgentAction['kind']> = new Set([
-  'click',
-  'click_at',
-  'type',
-  'type_at',
-  'select',
-  'key',
-  'drag',
-  'upload',
-  'navigate',
-  'back',
-  'tab',
-  'browser_config',
-]);
-
 export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Promise<void> {
   const { sessionId, profileId, task, runId, threadId, llmConfig, config } = params;
   const { driver, llm, memory, emit, signal, now } = deps;
@@ -130,6 +130,14 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
   const log = (level: 'debug' | 'info' | 'warn' | 'error', message: string): void =>
     emit({ type: 'log', ...base, level, message, ts: now() });
+  /**
+   * Report a memory degradation on its own typed channel as well as the log. Memory failing is
+   * survivable but must never be INVISIBLE: a profile that has silently stopped remembering anything
+   * looked exactly like one that was working.
+   */
+  const memoryDegraded = (scope: 'run' | 'thread' | 'step', reason: string): void => {
+    emit({ type: 'memory.degraded', ...base, scope, reason, ts: now() });
+  };
   const addUsage = (value: AgentUsage): void => {
     usage.tokensIn += value.tokensIn;
     usage.tokensOut += value.tokensOut;
@@ -152,6 +160,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         });
       } catch (memoryError) {
         log('warn', `Could not finalize encrypted run memory: ${safeError(memoryError)}`);
+        memoryDegraded('run', safeError(memoryError));
       }
     }
     // Record the exchange in its thread REGARDLESS of outcome. A failed or stopped attempt is exactly
@@ -166,6 +175,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         });
       } catch (threadError) {
         log('warn', `Could not append the conversation turn: ${safeError(threadError)}`);
+        memoryDegraded('thread', safeError(threadError));
       }
     }
     emit({
@@ -198,7 +208,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
   let priorTurns: LlmMessage[] = [];
   if (threadId) {
     try {
-      priorTurns = threadToMessages(await memory.loadThread(threadId));
+      priorTurns = capPriorTurns(threadToMessages(await memory.loadThread(threadId)));
     } catch {
       priorTurns = []; // recall unavailable this turn — proceed with none
     }
@@ -258,7 +268,12 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     // Skills are task-scoped and stable, so they stay in the cacheable system prefix. Site facts are
     // loaded separately after each navigation and remain user-level untrusted data.
     const memoryContext = await memory.loadContext(undefined, task);
-    const system = buildSystemPrompt({ task, config, memoryContext });
+    const system = buildSystemPrompt({
+      task,
+      config,
+      memoryContext,
+      toolChoiceIsAdvisory: usesAutomaticToolChoice(llmConfig.provider, llmConfig.model),
+    });
     let previous: RawPerception | null = null;
     /** This run's assistant/tool exchange, appended to the thread's prior turns each step. */
     const stepMessages: LlmMessage[] = [];
@@ -276,10 +291,47 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     let repeatCount = 0;
     let recovery = false;
     let invalidActions = 0;
+    /** True while a token-truncated response is being retried, so the retry cannot itself loop. */
+    let truncatedRetry = false;
+    /**
+     * A correction for the NEXT step, delivered through the ordinary nudge channel rather than as its
+     * own message. A standalone user message would sit next to the step prompt (also a user message
+     * once `lastToolCallId` is cleared), and `toAnthropicMessages` turns each into its own turn.
+     */
+    let pendingCorrection = '';
+    /**
+     * Refusals by the guard chain. `repeatCount` cannot see these: it is assigned only after every gate
+     * has passed, so each `continue` above it bypasses the loop detector entirely and the same denied
+     * navigation could be re-issued on all 40 steps, receiving the same one-line refusal each time.
+     *
+     * These counters change NUDGES and TERMINATION only — never permissions. A blocked action stays
+     * blocked; the agent is simply told to stop pushing on a locked door, and the run ends honestly
+     * rather than silently burning its budget.
+     */
+    let consecutiveBlocks = 0;
+    let totalBlocks = 0;
+    let lastBlockReason = '';
+    const noteBlocked = (reason: string): void => {
+      consecutiveBlocks += 1;
+      totalBlocks += 1;
+      lastBlockReason = reason;
+      if (consecutiveBlocks >= 3) {
+        recovery = true;
+        pendingCorrection = `${consecutiveBlocks} actions in a row were refused by the harness (most recently: ${reason}). Pushing on this will not start working — take a materially different approach. If nothing else can advance the task, finish with \`done\` (success=false) and say what was blocked.`;
+      }
+    };
     let lastExtractedView = '';
 
     for (let step = 1; step <= config.maxSteps; step += 1) {
       if (signal.aborted) return await finish('stopped', 'Stopped by user.');
+      // Stop honestly rather than spending the remaining budget re-issuing refused actions. The user
+      // gets a real reason instead of a run that quietly hit its step limit having done nothing.
+      if (totalBlocks >= 10) {
+        return await finish(
+          'stopped',
+          `Stopped after ${totalBlocks} actions were refused by the harness. The last reason was: ${lastBlockReason}`,
+        );
+      }
 
       const raw = await perceive(driver);
       const currentHost = hostOf(raw.url);
@@ -311,10 +363,14 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         raw.signals?.includes('canvas')
       ) {
         const captured = await driver.screenshot().catch(() => undefined);
-        if (captured && captured.length <= 16_000_000) pendingImage = captured;
+        if (captured && captured.length <= MAX_SCREENSHOT_BASE64_CHARS) pendingImage = captured;
       }
 
       const nudges: string[] = [];
+      if (pendingCorrection) {
+        nudges.push(pendingCorrection);
+        pendingCorrection = '';
+      }
       if (recovery)
         nudges.push(
           'RECOVERY: the last behavior repeated. Re-read the page and choose a materially different action.',
@@ -327,6 +383,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         history: nudges,
         observation: rendered,
         step,
+        url: raw.url,
         // Every path that ends a step appends its outcome here, so the newest entry is precisely what
         // the tool result should report.
         ...(history.length ? { outcome: history[history.length - 1]! } : {}),
@@ -394,8 +451,36 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
       if (result.stopReason === 'refusal')
         return await finish('error', '', 'The model refused this task.');
+
+      // A response cut off at the token cap carries no usable action. Retry the SAME step once before
+      // spending a strike: with `effort` on, most of `maxTokens` is thinking budget (see above), so a
+      // truncation is a budgeting accident rather than a model failure. Only a second truncation in a
+      // row is treated as a real invalid step.
+      if (result.stopReason === 'length' && !truncatedRetry) {
+        truncatedRetry = true;
+        pendingCorrection =
+          'Your previous response hit the output token limit before it produced an action. Resume directly — no apology, no recap. Emit only the `act` tool call.';
+        lastToolCallId = undefined;
+        step -= 1; // this step produced nothing; retry it without consuming step budget
+        continue;
+      }
+      truncatedRetry = false;
+
       if (!result.toolCall) {
+        // No tool call: the model answered in prose. On the shipped panel path `tool_choice` is 'auto'
+        // (adaptive-thinking models reject a forced choice), so this is routine, not exotic.
+        //
+        // Clearing `lastToolCallId` is the load-bearing line. Without it the NEXT step emits a second
+        // `tool` message answering an already-answered call id, `normalizeMessages` drops it as
+        // answering nothing, and the model is re-sent a byte-identical conversation — no new
+        // observation, no complaint, no way to recover, until the 3-strike kill fires.
         invalidActions += 1;
+        if (result.text && result.text.trim()) {
+          stepMessages.push({ role: 'assistant', content: result.text });
+        }
+        lastToolCallId = undefined;
+        pendingCorrection =
+          'That reply contained no `act` tool call, so nothing happened on the page. Do not answer in prose: every step is exactly one `act` tool call. If the task is already complete, call `act` with kind "done".';
         history.push(`${step}. no structured action returned`);
         if (invalidActions >= 3)
           return await finish('error', '', 'The model repeatedly returned no valid action.');
@@ -403,13 +488,29 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       }
       const parsed = parseAction(result.toolCall.input);
       if (!parsed.ok) {
+        // Answer the failed call ON ITS OWN id, in this same step. The rejected payload has to go back
+        // (the model cannot fix a call it is not shown) but it never parsed, so `redactAction` cannot
+        // be used — `redactRawActionInput` blanks by key instead.
         invalidActions += 1;
+        stepMessages.push({
+          role: 'assistant',
+          toolCalls: [{ ...result.toolCall, input: redactRawActionInput(result.toolCall.input) }],
+        });
+        lastToolCallId = result.toolCall.id;
+        stepMessages.push({
+          role: 'tool',
+          toolCallId: result.toolCall.id,
+          content: `That action was rejected and nothing happened on the page: ${parsed.error}\nFix exactly that field and call \`act\` again.`,
+        });
+        lastToolCallId = undefined; // the diagnosis already answered this call
         history.push(`${step}. invalid action: ${parsed.error}`);
         if (invalidActions >= 3)
           return await finish('error', '', 'The model repeatedly returned invalid actions.');
         continue;
       }
-      invalidActions = 0;
+      // Decay rather than reset: a model that alternates one good action with one bad one would never
+      // trip the limit on a hard reset, and would burn the whole step budget instead.
+      invalidActions = Math.max(0, invalidActions - 1);
       const action = parsed.action;
       const safeAction = redactAction(action, raw);
       // Record the model's own choice as an assistant turn. Every path below may `continue`, and the
@@ -425,11 +526,11 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       emit({ type: 'step.action', ...base, step, action: safeAction, ts: now() });
 
       if (
-        (action.kind === 'click_at' ||
-          action.kind === 'type_at' ||
+        (actionCapability(action.kind).needsScreenshot ||
           (action.kind === 'ask' && action.targetX !== undefined)) &&
         !imageForStep
       ) {
+        noteBlocked('coordinate actions require a screenshot in the same model step');
         history.push(
           `${step}. blocked: coordinate actions require a screenshot in the same model step`,
         );
@@ -451,7 +552,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             await memory.rememberFact({ domain, key: action.factKey, value: action.factValue });
             const outcome = `remembered "${action.factKey}" for ${domain}`;
             history.push(`${step}. ${outcome}`);
-            await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log);
+            await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
+              memoryDegraded('step', r),
+            );
           } catch (error) {
             history.push(`${step}. could not remember: ${safeError(error)}`);
           }
@@ -459,6 +562,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         continue;
       }
       if (action.kind === 'screenshot' && !config.visionFallback) {
+        noteBlocked('visual fallback is disabled for this run');
         history.push(`${step}. blocked: visual fallback is disabled for this run`);
         continue;
       }
@@ -472,15 +576,15 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       if (
         isPrivilegedInternalUrl(raw.url) &&
         !isVettedBrowserConfigUrl(raw.url) &&
-        action.kind !== 'tab' &&
-        action.kind !== 'navigate' &&
-        action.kind !== 'back' &&
-        action.kind !== 'done'
+        !actionCapability(action.kind).allowedOnPrivilegedPage
       ) {
         const outcome =
           'blocked: this is a privileged browser page outside the vetted settings surface. Leave it (switch tabs, go back, or navigate to a normal site) before continuing.';
+        noteBlocked('this is a privileged browser page outside the vetted settings surface');
         history.push(`${step}. ${outcome}`);
-        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log);
+        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
+          memoryDegraded('step', r),
+        );
         recovery = true;
         continue;
       }
@@ -499,8 +603,11 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             : coordinate
               ? 'blocked: coordinate actions are not allowed on browser settings pages; use a labelled control'
               : (settingsAssessment.reason ?? 'blocked: browser setting is not permitted');
+          noteBlocked(outcome.replace(/^blocked: /, ''));
           history.push(`${step}. ${outcome}`);
-          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log);
+          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
+            memoryDegraded('step', r),
+          );
           continue;
         }
       }
@@ -508,6 +615,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       if (action.kind === 'extract' && lastExtractedView === observationFingerprint(raw)) {
         const outcome =
           'blocked: this unchanged page view was already extracted; use the existing result or change the page';
+        noteBlocked('this page view was already extracted');
         history.push(`${step}. ${outcome}`);
         recovery = true;
         continue;
@@ -523,8 +631,11 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           : assessNavigation(target, raw.url, config);
         if (decision.verdict === 'deny') {
           const outcome = `blocked: ${decision.reason}`;
+          noteBlocked(decision.reason);
           history.push(`${step}. ${outcome}`);
-          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log);
+          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
+            memoryDegraded('step', r),
+          );
           continue;
         }
         if (decision.verdict === 'confirm') {
@@ -551,7 +662,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // `confirm`, the risk flag was being computed and then discarded on every run.
       const needsConfirm =
         action.kind === 'upload' ||
-        (config.autonomy === 'confirm' && (MUTATING.has(action.kind) || risk.high));
+        (config.autonomy === 'confirm' && (actionCapability(action.kind).mutating || risk.high));
       if (needsConfirm && !navigationApproved) {
         // The prompt must name the files and the destination. Redaction is right for the transcript,
         // but it was also applied to the APPROVAL text, so the one human who could stop an exfiltration
@@ -565,6 +676,15 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           history.push(`${step}. user rejected ${describeSafeAction(action, raw)}`);
           continue;
         }
+      }
+
+      // In `auto` the run never pauses, so a high-risk action proceeds — but the risk assessment was
+      // previously computed and then discarded on every shipped run, since no caller sets `confirm`.
+      // Surface it on the harness channel instead: the model gets one line of "you are about to do
+      // something consequential" before the NEXT step, and the user sees it in the transcript. This
+      // changes nothing about what is permitted.
+      if (risk.high && risk.reason && !needsConfirm) {
+        pendingCorrection = `You just took a consequential action (${risk.reason}). Verify from the next snapshot that it did what the task asked — and do not repeat it.`;
       }
 
       const fingerprint = `${raw.url}|${JSON.stringify(safeAction)}`;
@@ -585,7 +705,12 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         signal,
         navigationApproved,
       });
-      await appendSafe(memory, runId, step, raw.url, safeAction, outcome.outcome, now, log);
+      // An action that actually ran clears the consecutive streak (but not the total): the agent found
+      // something it is allowed to do, so it is no longer stuck against the same wall.
+      consecutiveBlocks = 0;
+      await appendSafe(memory, runId, step, raw.url, safeAction, outcome.outcome, now, log, (r) =>
+        memoryDegraded('step', r),
+      );
 
       if (outcome.terminal) {
         // A collected dataset is the ACTUAL result of a scrape. Appending it verbatim means a
@@ -643,7 +768,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // Catch redirects/popups/JS navigations that could not be predicted from an href. `browser_config`
       // is exempt: its only navigation is the UI-fallback jump to a vetted `chrome://settings` page
       // (already guarded and, being a non-http scheme, would otherwise trip the web-navigation policy).
-      if (MUTATING.has(action.kind) && action.kind !== 'browser_config') {
+      if (actionCapability(action.kind).mutating && action.kind !== 'browser_config') {
         const afterUrl = await safe(() => driver.currentUrl(), raw.url);
         if (afterUrl !== raw.url) {
           const trustedInternalMove =
@@ -781,6 +906,7 @@ async function appendSafe(
   outcome: string,
   now: () => string,
   log: (level: 'warn', message: string) => void,
+  onDegraded?: (reason: string) => void,
 ): Promise<void> {
   try {
     await memory.appendStep(runId, {
@@ -792,6 +918,7 @@ async function appendSafe(
     });
   } catch (error) {
     log('warn', `Could not persist encrypted agent step: ${safeError(error)}`);
+    onDegraded?.(safeError(error));
   }
 }
 
@@ -943,6 +1070,33 @@ function messageText(message: LlmMessage): string {
   return message.content;
 }
 
+/**
+ * Per-request budget for conversation history, in characters (~8.5k tokens).
+ *
+ * Separate from the STORE's own bound: a thread may legitimately hold `MAX_THREAD_CHARS` (120k) and
+ * Ask mode benefits from all of it, but in an agent run that block rides on every one of up to 40
+ * steps and is uncached on the managed path. Cap the request view; leave the durable record alone.
+ */
+const MAX_PRIOR_TURN_CHARS = 30_000;
+
+/**
+ * Keep the newest whole turns that fit the budget. Walking BACKWARDS matters: the most recent exchange
+ * is what a follow-up ("try that again, but…") refers to. Whole messages only — a half-dropped turn
+ * would strip the `[This attempt failed]` labelling that makes a retry request intelligible.
+ */
+function capPriorTurns(messages: readonly LlmMessage[]): LlmMessage[] {
+  const kept: LlmMessage[] = [];
+  let budget = MAX_PRIOR_TURN_CHARS;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]!;
+    const size = messageText(message).length;
+    if (kept.length > 0 && size > budget) break;
+    budget -= size;
+    kept.unshift(message);
+  }
+  return kept;
+}
+
 /** Stored thread turns → request messages. */
 function threadToMessages(stored: readonly ThreadMessage[]): LlmMessage[] {
   const out: LlmMessage[] = [];
@@ -972,29 +1126,77 @@ function threadToMessages(stored: readonly ThreadMessage[]): LlmMessage[] {
   return out;
 }
 
-/** Number of recent step observations kept at full size. */
-const VERBATIM_OBSERVATIONS = 6;
-
 /**
  * Keep the run's own exchange bounded without breaking its structure.
  *
  * Page snapshots dominate an agent run's token cost, and every one of them stays relevant only for a
- * step or two. Older TOOL RESULTS are therefore reduced to their first line (the URL/title and outcome),
- * while every assistant turn — the record of what the agent actually DID — is preserved in full. The
- * shape of the conversation is never altered, so the call/result pairing providers require survives.
+ * step or two. Older TOOL RESULTS are therefore reduced to their HEADER LINE — step number, URL and the
+ * outcome of the action that produced them (see `buildStepPrompt`) — while every assistant turn, the
+ * record of what the agent actually DID, is preserved in full. The shape of the conversation is never
+ * altered, so the call/result pairing providers require survives.
  */
 function pruneObservations(messages: readonly LlmMessage[]): LlmMessage[] {
   const toolIndices = messages.flatMap((m, i) => (m.role === 'tool' ? [i] : []));
-  if (toolIndices.length <= VERBATIM_OBSERVATIONS) return [...messages];
-  const cutoff = toolIndices[toolIndices.length - VERBATIM_OBSERVATIONS]!;
+  const cutoff =
+    toolIndices.length > VERBATIM_OBSERVATIONS
+      ? toolIndices[toolIndices.length - VERBATIM_OBSERVATIONS]!
+      : -1;
+  // The newest message that carries the re-sent blocks keeps them; every older copy is stale by
+  // definition, since both blocks are rebuilt in full on every step.
+  const newestWithBlocks = messages.reduce(
+    (found, message, index) => (hasResentBlocks(message) ? index : found),
+    -1,
+  );
+
   return messages.map((message, index) => {
-    if (message.role !== 'tool' || index >= cutoff) return message;
-    const firstLine = message.content.split('\n', 1)[0] ?? '';
-    return {
-      ...message,
-      content: `${firstLine.slice(0, 300)}\n(older page snapshot omitted to save context)`,
-    };
+    if (message.role === 'tool' && cutoff >= 0 && index < cutoff) {
+      const headerLine = message.content.split('\n', 1)[0] ?? '';
+      return {
+        ...message,
+        content: `${headerLine.slice(0, 300)}\n(older page snapshot omitted to save context)`,
+      };
+    }
+    if (index !== newestWithBlocks && hasResentBlocks(message)) {
+      return { ...message, content: stripResentBlocks(message.content) };
+    }
+    return message;
   });
+}
+
+function hasResentBlocks(message: LlmMessage): message is LlmMessage & { content: string } {
+  if (message.role === 'assistant') return false;
+  const content = message.content;
+  return (
+    typeof content === 'string' &&
+    (content.includes(EVIDENCE_PREAMBLE) || content.includes(SITE_MEMORY_PREAMBLE))
+  );
+}
+
+/**
+ * Remove the evidence-ledger and site-memory blocks from a step prompt that is no longer the newest.
+ *
+ * Both are rebuilt in full on EVERY step, so up to seven byte-identical copies of an 8,000-char ledger
+ * plus a 4,000-char memory block could be live in one request — re-billed in full on the managed path,
+ * which places no cache breakpoint on the message array.
+ *
+ * The cut is anchored on each block's preamble and ends at the FIRST closing fence after it. That
+ * precision is the whole trick: the ledger shares `BEGIN/END_UNTRUSTED_WEB_CONTENT` with the page
+ * snapshot, so a greedy match would delete the observation the step exists to deliver. Whatever is
+ * removed is always a COMPLETE fenced unit — never content stripped of its "untrusted data" framing.
+ */
+function stripResentBlocks(content: string): string {
+  const cut = (text: string, preamble: string, endFence: string): string => {
+    const start = text.indexOf(preamble);
+    if (start === -1) return text;
+    const end = text.indexOf(endFence, start);
+    if (end === -1) return text; // malformed: leave it whole rather than truncate mid-fence
+    return `${text.slice(0, start)}(earlier copy of this block omitted; the current one is below)\n${text.slice(end + endFence.length + 1)}`;
+  };
+  return cut(
+    cut(content, EVIDENCE_PREAMBLE, 'END_UNTRUSTED_WEB_CONTENT'),
+    SITE_MEMORY_PREAMBLE,
+    'END_UNTRUSTED_LOCAL_MEMORY',
+  );
 }
 
 /**

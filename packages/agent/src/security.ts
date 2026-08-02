@@ -39,6 +39,28 @@ export function redactAction(action: AgentAction, perception?: RawPerception): A
   return action;
 }
 
+/**
+ * Blank the secret-bearing fields of an action payload that FAILED to parse.
+ *
+ * {@link redactAction} cannot help here: it takes a parsed `AgentAction`, and on a parse failure there
+ * is none. But the rejected payload still has to go back into the conversation — the model cannot fix a
+ * call it is not shown — and a malformed `type`/`type_at`/`upload` can carry exactly the material the
+ * redaction rules exist to keep out of history. So blank by KEY, unconditionally: an unparsed payload
+ * has no trustworthy `kind` to decide on, and over-blanking a diagnosis costs nothing.
+ */
+export function redactRawActionInput(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key === 'text' || key === 'factValue') out[key] = '[REDACTED]';
+    else if (key === 'paths') out[key] = '[LOCAL FILE]';
+    else if (key === 'url' && typeof value === 'string') out[key] = redactUrl(value);
+    else if (typeof value === 'string' && value.length > 200) out[key] = `${value.slice(0, 199)}…`;
+    else out[key] = value;
+  }
+  return out;
+}
+
 export function redactUrl(value: string): string {
   try {
     const url = new URL(value);

@@ -25,6 +25,82 @@ const KINDS = [
   'done',
 ] as const;
 
+/**
+ * What each action kind is allowed to do, in ONE place.
+ *
+ * These properties used to live as hand-maintained literals scattered across `loop.ts`: a `MUTATING`
+ * Set, an inline `kind !== 'tab' && kind !== 'navigate' && …` chain, and two more open-coded checks —
+ * each hundreds of lines from the guard that consumed it. That is fine until a 22nd kind is added and
+ * one of them is missed, and the failure is silent and unsafe in a specific way: a kind absent from
+ * `MUTATING` does not merely skip a confirm prompt, it **disables the post-action navigation-drift
+ * check**, the mechanism that catches redirects, popups and JS navigations an href could not predict.
+ *
+ * Declaring the table as `Record<AgentAction['kind'], …>` makes a missing entry a COMPILE error, and
+ * the defaults are pessimistic — assume it mutates, assume it is not allowed on a privileged page — so
+ * a half-filled entry produces an over-restricted action rather than an under-guarded one.
+ *
+ * This table FEEDS the guard chain; it does not replace it. The fingerprint/proxy denylist and the
+ * privileged-page block stay explicit code paths.
+ */
+export interface ActionCapability {
+  /** Can change the page or browser: gates the drift check and the confirm gate. */
+  mutating: boolean;
+  /** Coordinate-based, so it needs a screenshot captured in the SAME model step. */
+  needsScreenshot: boolean;
+  /** May still be used while the agent is sitting on a privileged browser-internal page. */
+  allowedOnPrivilegedPage: boolean;
+  /** Only advertised (and only usable) when the run has the vision fallback enabled. */
+  requiresVision: boolean;
+  /** Only advertised (and only usable) when the run has upload roots configured. */
+  requiresUploadRoots: boolean;
+}
+
+const DEFAULT_CAPABILITY: ActionCapability = {
+  mutating: true,
+  needsScreenshot: false,
+  allowedOnPrivilegedPage: false,
+  requiresVision: false,
+  requiresUploadRoots: false,
+};
+
+const cap = (overrides: Partial<ActionCapability> = {}): ActionCapability => ({
+  ...DEFAULT_CAPABILITY,
+  ...overrides,
+});
+
+/** Read-only actions: observing a page cannot navigate it, so the drift check does not apply. */
+const READ_ONLY = cap({ mutating: false });
+
+export const ACTION_CAPABILITIES: Record<AgentAction['kind'], ActionCapability> = {
+  click: cap(),
+  click_at: cap({ needsScreenshot: true, requiresVision: true }),
+  hover: READ_ONLY,
+  type: cap(),
+  type_at: cap({ needsScreenshot: true, requiresVision: true }),
+  select: cap(),
+  key: cap(),
+  scroll: READ_ONLY,
+  drag: cap(),
+  upload: cap({ requiresUploadRoots: true }),
+  navigate: cap({ allowedOnPrivilegedPage: true }),
+  back: cap({ allowedOnPrivilegedPage: true }),
+  tab: cap({ allowedOnPrivilegedPage: true }),
+  wait: READ_ONLY,
+  extract: READ_ONLY,
+  collect: READ_ONLY,
+  remember: READ_ONLY,
+  browser_config: cap(),
+  ask: READ_ONLY,
+  screenshot: { ...READ_ONLY, requiresVision: true },
+  done: { ...READ_ONLY, allowedOnPrivilegedPage: true },
+};
+
+export function actionCapability(kind: AgentAction['kind']): ActionCapability {
+  // A kind with no entry cannot occur (the Record is exhaustive), but if one ever did, the pessimistic
+  // default is the one that keeps every guard switched on.
+  return ACTION_CAPABILITIES[kind] ?? DEFAULT_CAPABILITY;
+}
+
 const BROWSER_CONFIG_OPS = [
   'clear_cookies',
   'clear_all_cookies',
@@ -175,8 +251,34 @@ export function buildActionReference(opts: {
   }
   lines.push(
     '- remember {factKey,factValue}: save a durable per-site fact you\'ll want next time (e.g. "login = SSO via Google", "cookie-accept = button \'Agree\'"). NEVER remember secrets.',
-    '- browser_config {op,...}: change browser settings directly (not the page). Live ops, applied instantly and invisibly with no page opened: clear_cookies {domain}; clear_all_cookies {}; clear_site_data {origin|domain}; clear_cache {}; set_permission {origin|domain, permission (geolocation|notifications|camera|microphone|clipboard-read|clipboard-write|midi), setting (granted|denied|prompt)}; set_downloads {behavior (allow|deny|default)}. Use clear_all_cookies when the user says all/every site\'s cookies — never go looking through the settings UI for it. Settings-page ops for the long tail: open_settings {value} where value is an area like "privacy", "appearance", "cookies", "content", "notifications", "downloads", "search", "site settings", or "new tab"; plus set_theme {value:"dark"|"light"}, set_privacy {}, set_content_default {}. These open a vetted settings page in a SEPARATE BACKGROUND tab (the user\'s tab is untouched); perceive it, operate the specific control, then CLOSE that tab. You can NEVER change fingerprint or proxy/network settings (user-agent, languages, timezone, screen, canvas/WebGL, WebRTC, proxy, DNS, fonts) — hard-blocked to protect the profile\'s identity; don\'t attempt them.',
+    // `browser_config` is split across four lines. It used to be one run-on paragraph carrying six live
+    // ops, four UI ops, a synonym rule, a three-step background-tab workflow and a hard prohibition —
+    // while every neighbouring bullet was one short sentence. The prohibition wording is asserted by
+    // tests and must stay byte-identical wherever it lives.
+    '- browser_config {op,...}: change the BROWSER, not the page.',
+    "  · Live ops — applied instantly and invisibly, nothing opened: clear_cookies {domain}; clear_all_cookies {}; clear_site_data {origin|domain}; clear_cache {}; set_permission {origin|domain, permission (geolocation|notifications|camera|microphone|clipboard-read|clipboard-write|midi), setting (granted|denied|prompt)}; set_downloads {behavior (allow|deny|default)}. When the user says all/every site's cookies, that is clear_all_cookies — never hunt for it in the settings UI.",
+    '  · Settings-page ops for the long tail: open_settings {value} for an area like "privacy", "appearance", "cookies", "content", "notifications", "downloads", "search", "site settings", "new tab"; plus set_theme {value:"dark"|"light"}, set_privacy {}, set_content_default {}.',
+    "  · A settings op opens a vetted page in a SEPARATE BACKGROUND tab — the user's tab is untouched. Perceive it, operate the one control you came for, then CLOSE that tab.",
+    "  · You can NEVER change fingerprint or proxy/network settings (user-agent, languages, timezone, screen, canvas/WebGL, WebRTC, proxy, DNS, fonts) — hard-blocked to protect the profile's identity; don't attempt them.",
     '- ask {question,sensitive?,targetId?}; done {success,summary}',
+  );
+  // Two worked examples, in the action reference (part of the cached system prefix) and never in the
+  // per-step prompt. They target the two rules most often broken in practice: `collect` losing its
+  // columns, and a `done` summary quoting a figure that was never actually on screen.
+  lines.push(
+    '',
+    'Examples:',
+    '<example>',
+    'First page of a results table, scraping name + price:',
+    '  act {kind:"collect", columns:["name","price"], rows:[{name:"Runner X",price:"$89.00"},{name:"Trail Y",price:"$120.00"}]}',
+    'Then click Next and collect again WITHOUT columns — the harness keeps them, deduplicates rows, and returns the whole table at the end.',
+    '<commentary>columns are given once, on the first collect of the run. Values are copied verbatim from the page; none are reformatted, rounded, or remembered from an earlier page.</commentary>',
+    '</example>',
+    '<example>',
+    'Finishing a task whose answer is two figures you read on the page:',
+    '  act {kind:"done", success:true, summary:"Cart total is $209.00 across 2 items (Runner X $89.00, Trail Y $120.00)."}',
+    '<commentary>every figure appears verbatim in a snapshot or tool result from this run. If the total had only been implied — never displayed — the correct summary states what WAS shown and says the total was not visible, rather than adding the numbers up.</commentary>',
+    '</example>',
   );
   const secrets = opts.vision
     ? 'Use ask with sensitive:true plus targetId (or targetX+targetY after a screenshot)'
@@ -200,8 +302,21 @@ const integer = (value: unknown): number | undefined =>
   typeof value === 'number' && Number.isSafeInteger(value) ? value : undefined;
 const bool = (value: unknown): boolean | undefined =>
   typeof value === 'boolean' ? value : undefined;
+/**
+ * Free-text ANNOTATIONS clamp; they never gate behaviour, so an over-long one must be shortened rather
+ * than dropped. `str` returns `undefined` past its limit, which is right for semantic parameters (a
+ * 30k-char `url` is a bug, not a long URL) but silently destroyed the two fields the user actually
+ * reads: a 4,001-char `done.summary` became `''` — the run's entire result, gone, reported as success.
+ */
+const clamp = (value: unknown, max: number): string | undefined =>
+  typeof value === 'string'
+    ? value.length <= max
+      ? value
+      : `${value.slice(0, max - 1)}…`
+    : undefined;
+
 const note = (raw: RawActionInput): { note?: string } => {
-  const value = str(raw.note, 160);
+  const value = clamp(raw.note, 160);
   return value ? { note: value } : {};
 };
 const id = (raw: RawActionInput, field = 'id'): number | undefined => {
@@ -481,7 +596,7 @@ export function parseAction(raw: RawActionInput): ParseActionResult {
     }
     case 'done': {
       const success = bool(raw.success) ?? false;
-      const summary = str(raw.summary, 4000) ?? '';
+      const summary = clamp(raw.summary, 4000) ?? '';
       return ok({ kind, success, summary });
     }
     default:

@@ -151,11 +151,23 @@ function toAnthropicMessages(
     out.push({ role: 'user', content });
   }
 
+  // Collapse any consecutive same-role turns into one. Anthropic requires alternating roles, and the
+  // mapping above can legitimately produce two user turns in a row — a tool result becomes a user turn,
+  // so a result immediately followed by the next step's user message is two. Merging their content
+  // blocks is exactly equivalent on the wire and removes a whole class of 400s at the source, rather
+  // than making every call site remember not to emit the shape.
+  const merged: typeof out = [];
+  for (const turn of out) {
+    const last = merged.at(-1);
+    if (last?.role === turn.role) last.content.push(...turn.content);
+    else merged.push(turn);
+  }
+
   if (cache) {
-    const lastBlock = out.at(-1)?.content.at(-1);
+    const lastBlock = merged.at(-1)?.content.at(-1);
     if (lastBlock) lastBlock.cache_control = { type: 'ephemeral' };
   }
-  return out;
+  return merged;
 }
 
 interface AnthropicResponse {

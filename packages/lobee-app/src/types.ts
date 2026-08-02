@@ -15,6 +15,7 @@ export interface AgentEvent {
     | 'run.finished'
     | 'answer.delta'
     | 'usage'
+    | 'memory.degraded'
     | 'log';
   sessionId?: string;
   profileId?: string;
@@ -31,6 +32,9 @@ export interface AgentEvent {
   kind?: 'ask' | 'confirm';
   sensitive?: boolean;
   status?: 'done' | 'error' | 'stopped';
+  /** Which memory operation degraded (`memory.degraded`). */
+  scope?: 'run' | 'thread' | 'step';
+  reason?: string;
   result?: string;
   error?: string;
   [k: string]: unknown;

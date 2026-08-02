@@ -57,6 +57,18 @@ export interface BrowserConfigCommand {
   keys?: string[];
 }
 
+/**
+ * Largest screenshot the vision path may carry, measured on the BASE64 STRING (which is what the API
+ * counts). Anthropic rejects an image block above 5 MB base64 with a 400, and a 400 is not retryable —
+ * it propagates out of the loop and kills the run.
+ *
+ * The previous gates allowed 16,000,000 chars, 3.2× that limit, and reported it as a "12MB" limit —
+ * so the two numbers in the code and the number in the error message were three different values, and
+ * the case most likely to exceed them is precisely the one that triggers auto-capture: a full-page
+ * canvas with almost no readable elements.
+ */
+export const MAX_SCREENSHOT_BASE64_CHARS = 5_000_000;
+
 export interface BrowserDriver {
   /**
    * Deep browser-config operations that run against the BROWSER target over leak-free CDP (Storage.* /

@@ -51,6 +51,10 @@ interface Turn {
   /** Provider-reported tokens for this turn. Events were already flowing; nothing displayed them. */
   tokensIn: number;
   tokensOut: number;
+  /** Prompt tokens served from cache, so a cold cache is visible rather than merely expensive. */
+  cachedTokensIn: number;
+  /** Set when memory failed mid-run. Surfaced so silent forgetting stops looking like success. */
+  memoryWarning: string;
   await: AwaitPrompt | null;
   inputError: string;
   animateAnswer: boolean;
@@ -122,6 +126,9 @@ function applyEvent(turn: Turn, ev: AgentEvent): Turn {
         ...turn,
         tokensIn: turn.tokensIn + (ev.usage?.tokensIn ?? 0),
         tokensOut: turn.tokensOut + (ev.usage?.tokensOut ?? 0),
+        // Cache hits are reported per call by every adapter and were being thrown away. Without this
+        // there is no way to tell an expensive run from a cold-cache one.
+        cachedTokensIn: turn.cachedTokensIn + (ev.usage?.cachedTokensIn ?? 0),
       };
     case 'answer.delta':
       // Real streaming: the reply grows as the model writes it. `animateAnswer` stays false because
@@ -156,6 +163,18 @@ function applyEvent(turn: Turn, ev: AgentEvent): Turn {
         ...(ev.sessionId ? { sessionId: ev.sessionId } : {}),
       };
     }
+    // Memory is best-effort by design, but a profile that has quietly stopped remembering must not
+    // look identical to one that is working. One line, not a modal: the run itself still succeeded.
+    case 'memory.degraded':
+      return {
+        ...turn,
+        memoryWarning:
+          ev.scope === 'thread'
+            ? 'This conversation could not be saved, so the next message may not recall it.'
+            : ev.scope === 'run'
+              ? 'This run could not be recorded to the profile memory.'
+              : 'Some run details could not be saved to the profile memory.',
+      };
     default:
       return turn;
   }
@@ -180,6 +199,8 @@ function storedToTurn(stored: StoredTurn): Turn {
     failure: stored.status === 'done' ? '' : stored.answer,
     streamed: false,
     tokensIn: stored.tokensIn ?? 0,
+    cachedTokensIn: 0,
+    memoryWarning: '',
     tokensOut: stored.tokensOut ?? 0,
     await: null,
     inputError: '',
@@ -214,6 +235,8 @@ function snapshotToTurn(snapshot: AgentRunSnapshot, id: number): Turn {
     streamed: false,
     tokensIn: 0,
     tokensOut: 0,
+    cachedTokensIn: 0,
+    memoryWarning: '',
     await:
       snapshot.status === 'awaiting_input' && snapshot.awaitingPrompt
         ? {
@@ -410,6 +433,14 @@ function TurnView({
             !
           </span>
           <span className="min-w-0">{turn.failure}</span>
+        </div>
+      )}
+      {turn.memoryWarning && (
+        <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-900">
+          <span aria-hidden="true" className="mt-px shrink-0 font-semibold">
+            !
+          </span>
+          <span className="min-w-0">{turn.memoryWarning}</span>
         </div>
       )}
       {turn.status !== 'running' && turn.status !== '' && !turn.animateAnswer && (
@@ -801,6 +832,8 @@ export function App() {
       streamed: false,
       tokensIn: 0,
       tokensOut: 0,
+      cachedTokensIn: 0,
+      memoryWarning: '',
       await: null,
       inputError: '',
       animateAnswer: false,

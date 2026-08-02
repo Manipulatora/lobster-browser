@@ -25,8 +25,14 @@ export class AgentBridge {
 
   constructor(private readonly agents: AgentManager) {}
 
+  /** True when at least one panel is currently streaming this profile's events. */
+  hasSubscriber(profileId: string): boolean {
+    return (this.subscribers.get(profileId)?.size ?? 0) > 0;
+  }
+
   /** Start listening on 127.0.0.1:<ephemeral>; records the origin in the registry and returns it. */
   async start(): Promise<string> {
+    this.agents.setPresenceProbe((profileId) => this.hasSubscriber(profileId));
     this.server = createServer((req, res) => void this.handle(req, res));
     await new Promise<void>((resolve, reject) => {
       this.server!.once('error', reject);
@@ -188,6 +194,7 @@ export class AgentBridge {
     };
     const result = await this.agents.start({
       profileId: entry.profileId,
+      origin: 'panel',
       task,
       memoryDir: entry.memoryDir,
       memoryKey: entry.memoryKey,

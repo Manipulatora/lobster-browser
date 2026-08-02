@@ -15,6 +15,17 @@ import { LazyBrowserDriver } from './lazy-driver.js';
 /** How long a run will wait for the desktop core to launch the profile after `run.needsBrowser`. */
 const BROWSER_ATTACH_TIMEOUT_MS = 180_000;
 
+/**
+ * How long a run will wait for a human to answer an `ask`/`confirm` before giving up.
+ *
+ * Without this the wait was a bare `new Promise` with no timer: closing the side panel mid-question
+ * left the run pending forever, the session never left `running`, and `start()` then rejected every
+ * subsequent run on that profile — a permanent wedge that `stop()` could not clear either, because
+ * nothing was left to deliver the rejection. Timing out resolves to a truthful terminal state; it is
+ * never treated as approval.
+ */
+const HUMAN_INPUT_TIMEOUT_MS = 10 * 60_000;
+
 /** How the manager reaches a running profile's CDP endpoint (injected so it's decoupled + testable). */
 export type ResolveWs = (profileId: string) => Promise<string | undefined>;
 
@@ -50,6 +61,18 @@ export class AgentManager {
   private readonly sessions = new Map<string, Session>();
   private readonly resolveWs: ResolveWs;
   private readonly emit: (event: AgentEvent) => void;
+
+  /**
+   * Is a human actually attached to this profile's UI? Installed by the loopback bridge once it is
+   * listening. Consulted ONLY for runs that declare `origin: 'panel'` — the desktop path streams over
+   * stdio/Tauri events and has no bridge subscriber, so judging it by this probe would wrongly refuse
+   * every desktop `ask`. Absent probe = assume a human is present (the pre-existing behaviour).
+   */
+  private presenceProbe: ((profileId: string) => boolean) | undefined;
+
+  setPresenceProbe(probe: (profileId: string) => boolean): void {
+    this.presenceProbe = probe;
+  }
 
   constructor(deps: { resolveWs: ResolveWs; emit: (event: AgentEvent) => void }) {
     this.resolveWs = deps.resolveWs;
@@ -142,10 +165,47 @@ export class AgentManager {
       action?: AgentAction,
     ): Promise<string> =>
       new Promise<string>((resolve, reject) => {
+        // Nobody is watching: a question would pause the run until the timeout for an answer that can
+        // never arrive. Fail immediately and truthfully instead — the user reads a real reason in the
+        // transcript rather than finding a run that stalled for ten minutes.
+        if (
+          params.origin === 'panel' &&
+          this.presenceProbe &&
+          !this.presenceProbe(params.profileId)
+        ) {
+          reject(
+            new Error(
+              `the agent needed a human (${kind}) but the Lobee panel is not open for this profile`,
+            ),
+          );
+          return;
+        }
         session.awaitingPrompt = prompt;
         session.awaitingKind = kind;
         session.awaitingSensitive = action?.kind === 'ask' && action.sensitive === true;
-        session.pendingInput = { resolve, reject };
+        const timer = setTimeout(() => {
+          if (session.pendingInput !== entry) return; // already answered
+          session.pendingInput = undefined;
+          session.awaitingPrompt = undefined;
+          session.awaitingKind = undefined;
+          session.awaitingSensitive = undefined;
+          // Reject, never resolve: resolving would hand the loop a string, and for a `confirm` the
+          // only safe reading of "nobody answered" is "not approved" — while for an `ask` an invented
+          // answer would be typed into a real field.
+          reject(new Error('no one answered the agent within 10 minutes'));
+        }, HUMAN_INPUT_TIMEOUT_MS);
+        timer.unref?.();
+        const entry = {
+          resolve: (text: string): void => {
+            clearTimeout(timer);
+            resolve(text);
+          },
+          reject: (error: Error): void => {
+            clearTimeout(timer);
+            reject(error);
+          },
+        };
+        session.pendingInput = entry;
       });
 
     // Fire-and-forget: tear down CDP on completion but retain the small final snapshot until the next

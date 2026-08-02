@@ -199,3 +199,31 @@ test('an overlong thread compacts oldest-first and keeps recent turns verbatim',
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('site hints carry a human age and name the cap that hid the rest', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-mem-age-'));
+  try {
+    const store = new FileMemoryStore(dir, { encryptionKey: key() });
+    const old = new Date(Date.now() - 47 * 86_400_000).toISOString();
+    // 14 facts for one host: more than the 12-fact context cap.
+    for (let i = 0; i < 14; i += 1) {
+      await store.rememberFact({
+        domain: 'shop.test',
+        key: `k${i}`,
+        value: `v${i}`,
+        updatedAt: old,
+      });
+    }
+    const context = await store.loadContext('shop.test');
+
+    assert.match(context, /saved 47 days ago/, 'age must be rendered as a human interval');
+    assert.match(context, /likely stale/, 'an old fact must invite verification');
+    assert.match(
+      context,
+      /older facts? for this site not shown/,
+      'a silently truncated list reads as "this is everything known"',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

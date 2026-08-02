@@ -320,6 +320,26 @@ export type AgentEvent =
       usage: AgentUsage;
       ts: string;
     }
+  /**
+   * A memory operation failed and the run continued without it.
+   *
+   * Memory is deliberately best-effort — a broken or rotated store must never stop the agent doing the
+   * user's task — but "best effort" silently became "no effort" in the UI: these degradations were only
+   * ever emitted as generic `log` events, which the panel drops on its `default` branch. A profile that
+   * had quietly stopped remembering anything looked pixel-identical to one that was working. This is a
+   * DISTINCT event rather than surfacing raw `log`, so the panel renders exactly this class of problem
+   * and not arbitrary internal warnings.
+   */
+  | {
+      type: 'memory.degraded';
+      sessionId: string;
+      profileId: string;
+      /** Which operation degraded — `run` (record), `thread` (conversation), or `step`. */
+      scope: 'run' | 'thread' | 'step';
+      /** Safe, human-readable reason. Never carries page-derived or secret material. */
+      reason: string;
+      ts: string;
+    }
   | {
       type: 'log';
       sessionId: string;
@@ -336,6 +356,12 @@ export type AgentEvent =
  */
 export interface AgentStartParams {
   profileId: string;
+  /**
+   * Which surface started this run. `panel` runs stream to the in-browser side panel over the loopback
+   * bridge, so the sidecar can tell whether a human is still attached and refuse to pause for input
+   * nobody can give. Omitted (or `desktop`) keeps the previous behaviour of assuming a human is there.
+   */
+  origin?: 'panel' | 'desktop';
   /** Natural-language task, e.g. "log into example.com and download the latest invoice". */
   task: string;
   /**
