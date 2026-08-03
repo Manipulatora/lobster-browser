@@ -71,6 +71,22 @@ const FIXTURES = {
      </script>`,
   ),
 
+  // Same site, same consent wall, but the figure is NOT here. A run that only knows the number from a
+  // PREVIOUS run's memory can answer; a run that re-reads the page cannot. That isolation is what makes
+  // a memory-recall test mean anything.
+  '/consent-archive': page(
+    'Consent wall',
+    `<div id="veil" style="position:fixed;inset:0;background:#000d;color:#fff;display:flex;
+          align-items:center;justify-content:center;flex-direction:column;gap:12px;z-index:9999">
+       <p>We value your privacy.</p>
+       <button id="accept">Accept all</button>
+     </div>
+     <h1>Archive</h1><p>Quarterly figures for Q3 are no longer published on this page.</p>
+     <script>
+       document.getElementById('accept').addEventListener('click', () => document.getElementById('veil').remove());
+     </script>`,
+  ),
+
   // 400 links with the answer among them: does priority-ordered truncation hide it?
   '/dense': page(
     'Dense index',

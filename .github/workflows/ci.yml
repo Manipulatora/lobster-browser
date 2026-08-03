@@ -152,3 +152,44 @@ jobs:
             export SKIP_TLS=1
           fi
           node ci/validation/regression-gate.mjs
+      # Grader strength for the LIVE battery. Needs no browser, model or credit, so it runs here rather
+      # than in the opt-in job: a grader that a model can satisfy blind turns a capability test into a
+      # trivia quiz, and that regression must be caught on every PR.
+      - run: node --test ci/validation/agent-battery.test.mjs
+
+  # LIVE agent capability battery. Opt-in, because it needs a built Lobium binary AND provider credit,
+  # neither of which a github-hosted runner has. Enable by setting the `agent-battery` environment with
+  # LOBSTER_LOBIUM_BIN + LOBSTER_AGENT_PROXY_URL/TOKEN on a self-hosted runner.
+  #
+  # The harness distinguishes three outcomes and CI must honour them: 0 = pass, 1 = a real agent
+  # regression, 2 = could not run (no binary, no proxy, or provider capacity exhausted mid-run). Only
+  # exit 1 is a failure — treating "the wallet is empty" as a red build trains people to ignore it.
+  agent-battery:
+    name: Agent capability battery (live, opt-in)
+    runs-on: ubuntu-latest
+    if: ${{ vars.LOBSTER_ENABLE_AGENT_BATTERY == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: npm run build --workspaces --if-present
+      - name: Run the battery
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_AGENT_PROXY_URL: ${{ vars.LOBSTER_AGENT_PROXY_URL }}
+          LOBSTER_AGENT_PROXY_TOKEN: ${{ secrets.LOBSTER_AGENT_PROXY_TOKEN }}
+          # Every task is repeated; a stochastic system that passes once has proved very little.
+          AGENT_BATTERY_REPEAT: '3'
+        run: |
+          set +e
+          node ci/validation/agent-battery.mjs --repeat=$AGENT_BATTERY_REPEAT
+          code=$?
+          set -e
+          if [ "$code" = "2" ]; then
+            echo "::notice::agent battery could not run (no engine/proxy, or provider capacity) — not a regression"
+            exit 0
+          fi
+          exit $code
