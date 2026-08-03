@@ -519,10 +519,12 @@ export async function executeAction(
           outcome: `done (${action.success ? 'success' : 'gave up'}): ${action.summary}`,
           terminal: { success: action.success, summary: action.summary },
         };
-      // `remember` is a memory action handled in the loop before execution — it never drives the
-      // browser, so it's a no-op here (present only to keep the switch exhaustive).
+      // `remember` and `learn` are memory actions handled in the loop before execution — neither drives
+      // the browser, so they are no-ops here (present only to keep the switch exhaustive).
       case 'remember':
         return { outcome: `remembered "${action.factKey}"` };
+      case 'learn':
+        return { outcome: `learned "${action.skillName}"` };
       default: {
         const exhaustive: never = action;
         return { outcome: `error: unknown action ${JSON.stringify(exhaustive)}` };

@@ -165,7 +165,7 @@ class FakeMemory implements MemoryStore {
     this.finished = { status: o.status, summary: o.summary };
   }
   async rememberFact(): Promise<void> {}
-  async learnSkill(): Promise<void> {}
+  async learnSkill(_skill: unknown): Promise<void> {}
   async getSettings(): Promise<Record<string, never>> {
     return {};
   }
@@ -1023,4 +1023,45 @@ test('a context-window 400 is recovered from, not turned into a dead run', async
   assert.equal(finished.status, 'done', 'the run must survive a context 400');
   assert.equal(finished.result, 'recovered');
   assert.ok(seen[1]! < seen[0]!, `retry must ask for fewer output tokens (${seen.join(' -> ')})`);
+});
+
+test('a learned procedure is scoped to the host the run was actually on', async () => {
+  // The model names the skill; the HARNESS sets its domain from the visited page. Otherwise a run could
+  // scope a procedure to a site it never touched, and later steer a run on that site.
+  const learned: Array<Record<string, unknown>> = [];
+  const { promise, memory } = run([
+    {
+      kind: 'learn',
+      skillName: 'export-invoice',
+      skillTrigger: 'you need the invoice PDF',
+      skillSteps: '1. Reports tab. 2. Export.',
+    },
+    { kind: 'done', success: true, summary: 'ok' },
+  ]);
+  memory.learnSkill = async (skill: unknown) => {
+    learned.push(skill as Record<string, unknown>);
+  };
+  await promise;
+
+  assert.equal(learned.length, 1, 'the learn action must reach the store');
+  const skill = learned[0]!;
+  assert.equal(skill.name, 'export-invoice');
+  assert.equal(skill.origin, 'learned', 'it must never masquerade as a vetted built-in');
+  assert.equal(skill.domain, 'example.test', 'the harness sets the domain from the visited page');
+});
+
+test('a malformed learn is rejected rather than stored', async () => {
+  const learned: unknown[] = [];
+  const { promise, memory, llm } = run([
+    { kind: 'scroll', direction: 'down', amount: 100 },
+    { kind: 'learn', skillName: 'has spaces and is not kebab', skillTrigger: 't', skillSteps: 's' },
+    { kind: 'done', success: true, summary: 'ok' },
+  ]);
+  memory.learnSkill = async (s: unknown) => {
+    learned.push(s);
+  };
+  await promise;
+
+  assert.equal(learned.length, 0, 'an invalid skill name must not be stored');
+  assert.match(llm.requests.map(allText).join('\n'), /kebab-case/, 'and the model is told why');
 });

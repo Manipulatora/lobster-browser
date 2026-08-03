@@ -1,8 +1,9 @@
 /**
  * Built-in skill pack — reusable procedures distilled from common web tasks, so the agent invokes a
  * known recipe instead of re-deriving it from scratch each time (fewer tokens, more reliable). These
- * are read-only defaults; per-profile LEARNED skills (saved from successful runs) live in the profile's
- * memory and are merged on top. A "skill" here is a short procedure the model reads as guidance — not
+ * are read-only defaults; per-profile LEARNED skills live in the profile's encrypted memory and are
+ * merged on top. A skill is learned only when the agent explicitly proposes one with the `learn` action
+ * after finishing a task — never inferred from a page, and never from text a page supplied. A "skill" here is a short procedure the model reads as guidance — not
  * code — matching how strong agent harnesses expose progressive, on-demand expertise.
  */
 
@@ -12,6 +13,16 @@ export interface BuiltinSkill {
   trigger: string;
   /** The procedure, as terse numbered guidance. */
   steps: string;
+  /**
+   * Where this procedure came from. Absent means a vetted built-in shipped with the product; `learned`
+   * means the agent wrote it after finishing a task, having read pages it does not control. The two are
+   * never presented to the model as equally authoritative.
+   */
+  origin?: 'learned';
+  /** Host a learned skill was derived on. Set by the harness, never by the model. */
+  domain?: string;
+  /** When it was learned, so a stale procedure can be recognised as such. */
+  learnedAt?: string;
 }
 
 export const BUILTIN_SKILLS: BuiltinSkill[] = [
@@ -78,17 +89,36 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
   },
 ];
 
-/** Render skills (built-in + learned) as a compact block for the system prompt. */
-export function formatSkills(learned: BuiltinSkill[] = [], query = ''): string {
-  const merged = new Map(BUILTIN_SKILLS.map((skill) => [skill.name, skill]));
-  for (const skill of learned) merged.set(skill.name, skill);
-  const all = [...merged.values()];
+/**
+ * Render skills as a compact block for the system prompt.
+ *
+ * A LEARNED skill never silently replaces a built-in: built-ins are vetted product content, learned
+ * ones were written by the model after reading pages it does not control. They are name-spaced apart,
+ * labelled, and — when a host is known — only the ones learned on that host are offered, so a procedure
+ * derived on one site cannot steer a run on another.
+ */
+export function formatSkills(learned: BuiltinSkill[] = [], query = '', host = ''): string {
+  const scoped = learned.filter(
+    (skill) => !skill.domain || !host || hostMatches(host, skill.domain),
+  );
+  const all = [
+    ...BUILTIN_SKILLS,
+    ...scoped.filter((s) => !BUILTIN_SKILLS.some((b) => b.name === s.name)),
+  ];
   const selected = query ? selectSkills(all, query) : all.slice(0, 6);
   if (selected.length === 0) return '';
-  return (
-    'Skills you can apply (use when the trigger matches):\n' +
-    selected.map((s) => `- ${s.name} — when ${s.trigger}: ${s.steps}`).join('\n')
-  );
+  const render = (s: BuiltinSkill): string =>
+    s.origin === 'learned'
+      ? `- ${s.name} (learned on ${s.domain ?? 'this profile'}${s.learnedAt ? `, ${s.learnedAt.slice(0, 10)}` : ''}; a past run's note, not a rule) — when ${s.trigger}: ${s.steps}`
+      : `- ${s.name} — when ${s.trigger}: ${s.steps}`;
+  return 'Skills you can apply (use when the trigger matches):\n' + selected.map(render).join('\n');
+}
+
+/** `shop.example.com` matches a skill scoped to `example.com`, but never the reverse. */
+export function hostMatches(host: string, domain: string): boolean {
+  const h = host.toLowerCase().replace(/\.$/, '');
+  const d = domain.toLowerCase().replace(/\.$/, '');
+  return h === d || h.endsWith(`.${d}`);
 }
 
 /** Progressive disclosure: only send procedures whose metadata overlaps the current task. */
@@ -129,4 +159,25 @@ export function selectSkills(skills: BuiltinSkill[], query: string, limit = 4): 
     .slice(0, limit)
     .map((item) => item.skill);
   return scored;
+}
+
+/**
+ * Procedures learned on THIS host, for injection when a run arrives on a site it has worked before.
+ *
+ * This is the path that makes learning worth anything: skills are chosen once from the task string at
+ * run start, and a task almost never names the quirk a past run discovered ("the export button is
+ * behind the Reports tab"). Scoping strictly to the visited host is also the containment rule — a
+ * procedure written while reading one site can never surface on another.
+ */
+export function formatLearnedForHost(skills: readonly BuiltinSkill[], host: string): string {
+  const scoped = skills
+    .filter(
+      (skill) => skill.origin === 'learned' && skill.domain && hostMatches(host, skill.domain),
+    )
+    .slice(0, 4);
+  if (scoped.length === 0) return '';
+  return (
+    `Procedures a past run recorded for this site (notes, not rules — verify against the page):\n` +
+    scoped.map((s) => `- ${s.name} — when ${s.trigger}: ${s.steps}`).join('\n')
+  );
 }

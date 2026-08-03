@@ -154,14 +154,18 @@ trusted Input.* / DOM command through CdpBrowserDriver ── observe again
 - **OpenClaw ideas:** progressive skill disclosure and strict separation between untrusted page content,
   trusted harness history, and local memory. Skills are short read-only procedures, never webpage-supplied
   executable code.
-- **Codex/Claude Code ideas:** least privilege, explicit consequential-action confirmation, bounded tools,
-  cancellation, recovery after invalid/repeated actions, and secrets that are not echoed into transcripts.
+- **Codex/Claude Code ideas:** least privilege, bounded tools, cancellation, recovery after invalid or
+  repeated actions, and secrets that are not echoed into transcripts. Consequential-action confirmation is
+  implemented but reached only in `confirm` autonomy (plus `upload`, which always confirms) — see the
+  confirmation note below.
 
 ### Trust boundaries and guarantees
 
 - Page text is delimited as untrusted data. URLs are limited to HTTP(S), private/local destinations are
-  blocked by default, an optional domain fence is enforced on explicit navigation and post-action drift,
-  and cross-domain moves default to human confirmation.
+  blocked by default, and an optional domain fence is enforced on explicit navigation and post-action
+  drift. Cross-domain handling follows the run's autonomy: `confirm` gates a cross-domain move on a human,
+  while `auto` — the shipped side-panel default — allows it, because `auto` means the run never pauses.
+  A domain fence is the mechanism for bounding an `auto` run, and the panel does not yet set one.
 - Password/OTP/payment/token fields expose only `filled` state. `ask {sensitive:true,targetId}` sends the
   reply directly from the UI to the measured field; it is never added to model history, UI action events,
   or run memory. CAPTCHA is a human handoff—there is intentionally no bypass service.
@@ -171,8 +175,16 @@ trusted Input.* / DOM command through CdpBrowserDriver ── observe again
 - File uploads are disabled unless absolute roots are explicitly configured; paths are canonicalized and
   checked after symlink resolution. Upload path strings are redacted from events and memory.
 - The action loop has hard step/token bounds, abortable provider calls with retry/backoff, repeated-action
-  detection, validation of every tool payload, high-impact action gates, and fail-closed provider/base-URL
-  selection. Managed LLM mode remains disabled until an authenticated metering proxy exists.
+  detection, validation of every tool payload, blocked-action escalation, context-overflow recovery, and
+  fail-closed provider/base-URL selection. Managed LLM mode is IMPLEMENTED and is what the side panel
+  uses: the sidecar talks to the backend `agent/llm` proxy, which holds the OpenRouter key server-side,
+  authenticates every call with a Bearer token (`AgentProxyGuard`), pins the model to an allowlist, caps
+  output tokens, and meters usage. The sidecar never sees a provider credential.
+- **Confirmation, precisely.** `upload` ALWAYS requires a human, in every mode — it is the one action that
+  sends local data off the machine. Everything else is gated only when `autonomy: 'confirm'`. In `auto`,
+  high-risk actions (purchases, sends, deletions, permission changes) are detected and reported to the
+  model as a harness note, but they are NOT blocked. Treat `auto` as "this profile may act unattended on
+  the sites the task implies", not as "nothing consequential can happen".
 
 ### Browser coverage
 

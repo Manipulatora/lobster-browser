@@ -187,14 +187,18 @@ const TASKS = [
     why: 'a real element-dense list page (30 stories, ~120 links)',
     task: 'Go to https://news.ycombinator.com/ and tell me the title of the very top story and how many points it has.',
     maxSteps: 12,
-    expect: /point/i,
+    // The front page changes constantly, so grade the SHAPE of a real reading: a score adjacent to the
+    // word points. `/point/i` alone passed on the word appearing anywhere, including in an apology.
+    expect: (text) => /\b\d{1,4}\s*points?\b/i.test(text),
   },
   {
     id: 'long-article',
     why: 'a very long article — find one specific fact inside it',
     task: 'Go to https://en.wikipedia.org/wiki/Web_scraping and tell me, in one sentence, what the "robots.txt" file is used for according to that page.',
     maxSteps: 12,
-    expect: /robot|crawl|exclusion|disallow/i,
+    // Require BOTH halves of the concept — who it addresses and what it controls — so a single
+    // incidental keyword cannot pass.
+    expect: (text) => /robot|crawl|bot|spider/i.test(text) && /allow|disallow|exclu|access|permission|polic|instruct/i.test(text),
   },
 ];
 
@@ -299,6 +303,11 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 try {
   const profileId = 'battery';
+  // ONE memory key and directory for the WHOLE battery. Minting a fresh key per task meant every run
+  // started with an unreadable store, so nothing the agent remembered could ever be recalled — the
+  // memory system was structurally untestable by its own test.
+  const memoryDir = join(root, 'agent');
+  const memoryKey = randomBytes(32).toString('base64');
   const started = await call('startProfile', {
     profileId,
     profileName: 'Battery',
@@ -317,8 +326,8 @@ try {
     const res = await call('agent.start', {
       profileId,
       task: taskText,
-      memoryDir: join(root, 'agent'),
-      memoryKey: randomBytes(32).toString('base64'),
+      memoryDir,
+      memoryKey,
       threadId: `battery-${t.id}`,
       llm: {
         provider: 'openrouter',
@@ -360,7 +369,7 @@ try {
     const ok =
       finished?.status === (wantSuccess ? 'done' : 'error') ||
       (!wantSuccess && finished?.status === 'stopped');
-    const matched = t.expect.test(text);
+    const matched = typeof t.expect === 'function' ? t.expect(text) : t.expect.test(text);
     const extra = t.assert?.(events) ?? '';
     const verdict = !finished ? 'TIMEOUT' : extra ? 'FAIL' : ok && matched ? 'PASS' : 'FAIL';
 

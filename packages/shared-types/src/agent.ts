@@ -18,7 +18,9 @@ export type AgentLlmProvider = 'anthropic' | 'openai' | 'google' | 'xai' | 'open
 
 /**
  * How one run reaches a model. BYOK (an `apiKey` present, `managed` false) goes client-direct from the
- * sidecar to the provider. `managed` is reserved and rejected until the backend proxy is implemented.
+ * sidecar to the provider. `managed` routes through the backend `agent/llm` proxy instead: the server
+ * holds the OpenRouter key, authenticates with a Bearer token, allowlists models and meters usage, so no
+ * provider credential ever reaches the sidecar. This is what the Lobee side panel uses.
  */
 export interface AgentLlmConfig {
   provider: AgentLlmProvider;
@@ -28,7 +30,7 @@ export interface AgentLlmConfig {
   apiKey?: string;
   /** Optional provider URL override; it must still match that provider's official HTTPS host. */
   baseUrl?: string;
-  /** Reserved for a future authenticated backend proxy. Currently rejected fail-closed. */
+  /** Route through the authenticated, metered backend proxy rather than a direct provider key. */
   managed?: boolean;
   /**
    * A cheaper model for routine navigation steps; the primary `model` handles planning / recovery.
@@ -206,6 +208,14 @@ export type AgentAction =
     }
   /** Persist a durable per-domain fact to this profile's memory (agent-authored learning). */
   | { kind: 'remember'; factKey: string; factValue: string; note?: string }
+  /**
+   * Propose a reusable PROCEDURE for this site, saved to the profile's encrypted memory and offered on
+   * later runs against the same host. Distinct from `remember`, which stores a fact: a skill is the
+   * sequence of steps that worked. The harness sets the domain from the page actually visited — the
+   * model cannot scope a skill to a site it did not operate on — and a skill is never derived from
+   * instructions found on a page.
+   */
+  | { kind: 'learn'; skillName: string; skillTrigger: string; skillSteps: string; note?: string }
   /**
    * Deep browser-configuration control (Agent mode). Runs against the browser via leak-free CDP /
    * profile preferences — never the page — so it adds no anti-detect tell. Fingerprint-identity and

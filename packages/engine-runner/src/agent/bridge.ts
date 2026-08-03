@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { AgentEvent, AgentLlmConfig } from '@lobster/shared-types';
+import { normalizeAllowedDomains } from '@lobster/agent';
 import type { AgentManager } from './manager.js';
 import { getBridgeOrigin, resolveBridgeToken, setBridgeOrigin } from './bridge-registry.js';
 
@@ -175,6 +176,28 @@ export class AgentBridge {
       return json(res, 400, { ok: false, error: 'invalid threadId' });
     }
 
+    // `confirm` is only meaningful while a panel is attached to answer; `auto` is the default.
+    const autonomy = body.autonomy === 'confirm' ? 'confirm' : undefined;
+    // A domain fence bounds an unattended run. Reject a malformed list rather than silently ignoring
+    // it — a caller that asked for a fence and did not get one is worse off than one that got an error.
+    const rawDomains = Array.isArray(body.allowedDomains) ? body.allowedDomains : [];
+    if (rawDomains.length > 50) {
+      return json(res, 400, { ok: false, error: 'at most 50 allowed domains' });
+    }
+    let allowedDomains: string[];
+    try {
+      allowedDomains = normalizeAllowedDomains(rawDomains.map(String));
+    } catch (error) {
+      return json(res, 400, {
+        ok: false,
+        error: error instanceof Error ? error.message : 'invalid allowedDomains',
+      });
+    }
+    const tokenBudget =
+      typeof body.tokenBudget === 'number' && Number.isSafeInteger(body.tokenBudget)
+        ? body.tokenBudget
+        : undefined;
+
     if (!entry.memoryDir || !entry.memoryKey) {
       return json(res, 409, { ok: false, error: 'this profile is not provisioned for Lobee runs' });
     }
@@ -209,6 +232,13 @@ export class AgentBridge {
         mode,
         visionFallback: true,
         allowedUploadRoots: await uploadRoots(entry.memoryDir),
+        // Run policy the panel MAY set. It could previously send none of this, so every side-panel run
+        // was pinned to the defaults — full autonomy, no domain fence, no spend ceiling — with no way
+        // to bound a run even when the caller wanted to. Each value is validated here because the panel
+        // is the least-trusted caller of the three (its page is chrome-owned, but its request is not).
+        ...(autonomy ? { autonomy } : {}),
+        ...(allowedDomains.length ? { allowedDomains } : {}),
+        ...(tokenBudget !== undefined ? { tokenBudget } : {}),
       },
     });
     return json(res, 200, { ok: true, ...result });

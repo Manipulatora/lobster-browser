@@ -610,6 +610,34 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         }
         continue;
       }
+      if (action.kind === 'learn') {
+        // The DOMAIN is set by the harness from the page actually visited — never by the model — so a
+        // skill cannot be scoped to a site the run never operated on. Steps are model-authored, so the
+        // store treats them as untrusted text: bounded, fenced on recall, and labelled as learned.
+        const domain = hostOf(raw.url);
+        if (!domain) {
+          history.push(`${step}. learn skipped: no page domain`);
+        } else {
+          try {
+            await memory.learnSkill({
+              name: action.skillName,
+              trigger: action.skillTrigger,
+              steps: action.skillSteps,
+              origin: 'learned',
+              domain,
+              learnedAt: now(),
+            });
+            const outcome = `learned procedure "${action.skillName}" for ${domain}`;
+            history.push(`${step}. ${outcome}`);
+            await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
+              memoryDegraded('step', r),
+            );
+          } catch (error) {
+            history.push(`${step}. could not learn: ${safeError(error)}`);
+          }
+        }
+        continue;
+      }
       if (action.kind === 'screenshot' && !config.visionFallback) {
         noteBlocked('visual fallback is disabled for this run');
         history.push(`${step}. blocked: visual fallback is disabled for this run`);

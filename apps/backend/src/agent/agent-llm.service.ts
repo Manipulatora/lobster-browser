@@ -84,8 +84,10 @@ interface OpenRouterUsage {
  * rails: a hard `max_tokens` cap and an optional model allowlist, so a misconfigured or hostile client
  * can't burn the balance on an expensive model or an unbounded response.
  *
- * Streaming is intentionally not supported: the agent loop uses ONE non-streaming completion per step,
- * so a plain request→response forward is the correct, simplest contract (and easiest to meter).
+ * Streaming IS supported, and is used by Ask mode: `chatCompletionStream` forwards the SSE body through
+ * `meterStreamedUsage`, so a streamed answer is metered exactly like a buffered one. Agent-mode steps
+ * stay non-streaming — a forced tool call produces one structured object with no prose to reveal
+ * progressively, so streaming it would add reassembly risk for no benefit.
  */
 @Injectable()
 export class AgentLlmService {

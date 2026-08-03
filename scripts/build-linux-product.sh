@@ -106,41 +106,14 @@ cp -a "$DIST/lobium-runtime/fonts" "$FONTS_DST"
 # Lobee: the first-party in-browser agent side-panel extension (React/TS/Tailwind, MV3), auto-loaded
 # into every profile. Rebuild it from source (packages/lobee-app → packages/lobee) so the shipped
 # bundle is always current, then stage the self-contained output.
-node "$ROOT/scripts/build-lobee.mjs"
-LOBEE_DST="$ROOT/apps/desktop/src-tauri/resources/lobee"
-rm -rf "$LOBEE_DST"
-cp -a "$ROOT/packages/lobee" "$LOBEE_DST"
-rm -rf "$LOBEE_DST/node_modules"
-[[ -f "$LOBEE_DST/manifest.json" ]] || { echo "error: Lobee manifest missing after stage" >&2; exit 1; }
-# ANTI-DETECT INVARIANT (P0): Lobee's ID is a fixed public constant, so a single web_accessible_resource
-# or externally_connectable match would turn chrome-extension://<id>/… into a universal fingerprinting
-# probe. Fail the build if either ever appears in the manifest.
-python3 - "$LOBEE_DST/manifest.json" <<'PY'
-import json, sys
-m = json.load(open(sys.argv[1]))
-bad = [k for k in ("web_accessible_resources", "externally_connectable") if k in m]
-if bad:
-    print(f"error: Lobee manifest must NOT declare {bad} (anti-detect: ID is public)", file=sys.stderr)
-    sys.exit(1)
-print("[lobee] anti-detect manifest guard: OK (no WAR / externally_connectable)")
-PY
+node "$ROOT/scripts/build-lobee.mjs"   # builds, stages into src-tauri/resources/lobee, and runs the anti-detect manifest guard
 
-echo "==> [4/6] Configure + build .deb"
-python3 - <<'PY'
-import json
-from pathlib import Path
-p = Path("apps/desktop/src-tauri/tauri.conf.json")
-cfg = json.loads(p.read_text())
-cfg.setdefault("bundle", {})["resources"] = {
-    "resources/sidecar": "sidecar",
-    "resources/node": "node",
-    "resources/fonts": "fonts",
-    "resources/lobee": "lobee",
-}
-cfg["bundle"]["targets"] = ["deb"]
-p.write_text(json.dumps(cfg, indent=2) + "\n")
-print("updated", p)
-PY
+echo "==> [4/6] Build .deb"
+# tauri.conf.json declares every resource (sidecar, node, fonts, lobee, engine-manifest.json) and is
+# NOT rewritten here. It used to be: this script overwrote the resource map with its own four-entry
+# dict, which silently dropped `engine-manifest.json` — the file `lib.rs` reads to resolve the
+# first-run engine download — so a packaged build could not provision an engine without env overrides.
+# The bundle target comes from `--bundles deb` on the command line below.
 
 cd "$ROOT/apps/desktop"
 npm run tauri -- build --bundles deb 2>&1 | tee "$DIST/tauri-build.log"

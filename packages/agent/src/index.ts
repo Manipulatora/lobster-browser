@@ -51,3 +51,4 @@ export type { MemoryStore, FactRecord, MemorySettings, RunRecord } from './memor
 
 export { runAgent, resolveConfig } from './loop.js';
 export type { AgentRunDeps, AgentRunParams } from './loop.js';
+export { normalizeAllowedDomains } from './policy.js';
