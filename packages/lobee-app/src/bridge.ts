@@ -441,3 +441,32 @@ export function __resetBridgeForTests(): void {
   streamBridgeKey = '';
   resolveStreamWaiters();
 }
+
+/**
+ * Re-read one conversation from the profile's ENCRYPTED memory.
+ *
+ * The panel no longer keeps its own plaintext copy of answers in `chrome.storage.local` — a second,
+ * weaker store of the same content, protected only by a couple of regexes that catch labelled secrets
+ * and nothing else. History is hydrated from here instead. Failure is not an error: the list still
+ * renders, the bodies are simply absent.
+ */
+export async function fetchThread(
+  threadId: string,
+): Promise<Array<{ role: string; content: string; status?: string }>> {
+  if (!threadId) return [];
+  try {
+    const res = await bridgeFetch(`/thread?id=${encodeURIComponent(threadId)}`);
+    const body = (await res.json()) as {
+      ok?: boolean;
+      messages?: Array<{ role?: string; content?: string; status?: string }>;
+    };
+    if (!body.ok || !Array.isArray(body.messages)) return [];
+    return body.messages.map((m) => ({
+      role: String(m.role ?? ''),
+      content: String(m.content ?? ''),
+      ...(m.status ? { status: String(m.status) } : {}),
+    }));
+  } catch {
+    return [];
+  }
+}

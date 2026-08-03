@@ -1065,3 +1065,91 @@ test('a malformed learn is rejected rather than stored', async () => {
   assert.equal(learned.length, 0, 'an invalid skill name must not be stored');
   assert.match(llm.requests.map(allText).join('\n'), /kebab-case/, 'and the model is told why');
 });
+
+test('a consequential action is put to the human even in auto mode', async () => {
+  // `auto` means "do not check in on progress", not "may spend money unattended". The gate must fire
+  // without the caller ever setting `confirm`, which no caller does.
+  const prompts: string[] = [];
+  const driver = new FakeDriver();
+  const memory = new FakeMemory();
+  const events: AgentEvent[] = [];
+  const llm = new ScriptedLlm([
+    { kind: 'browser_config', op: 'clear_all_cookies' }, // irreversible: erases stored data
+    { kind: 'done', success: true, summary: 'ok' },
+  ]);
+  let n = 0;
+  await runAgent(
+    {
+      sessionId: 's',
+      profileId: 'p',
+      task: 'clear everything',
+      runId: 's',
+      llmConfig: { provider: 'anthropic', model: 'm', apiKey: 'x' },
+      config: resolveConfig({ maxSteps: 4 }), // autonomy defaults to 'auto'
+    },
+    {
+      driver,
+      llm,
+      memory,
+      emit: (e) => events.push(e),
+      waitForInput: async (prompt) => {
+        prompts.push(prompt);
+        return 'reject';
+      },
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+
+  assert.equal(prompts.length, 1, 'auto must still gate an irreversible action');
+  assert.match(prompts[0]!, /erase stored data/i, 'and say why it is being asked');
+  assert.ok(
+    events.some((e) => e.type === 'run.needsInput' && e.kind === 'confirm'),
+    'the panel must be told to prompt',
+  );
+});
+
+test('a reversible action never pauses an auto run', async () => {
+  // The counterweight: gating everything `high` would stop on every coordinate click and every
+  // keystroke into an amount field, which would make auto mode unusable.
+  const prompts: string[] = [];
+  const { promise } = (() => {
+    const driver = new FakeDriver();
+    const memory = new FakeMemory();
+    const events: AgentEvent[] = [];
+    const llm = new ScriptedLlm([
+      { kind: 'type', id: 0, text: '250.00' }, // "Search" box, but exercise the type path
+      { kind: 'click', id: 1 },
+      { kind: 'done', success: true, summary: 'ok' },
+    ]);
+    let n = 0;
+    return {
+      promise: runAgent(
+        {
+          sessionId: 's',
+          profileId: 'p',
+          task: 'fill it in',
+          runId: 's',
+          llmConfig: { provider: 'anthropic', model: 'm', apiKey: 'x' },
+          config: resolveConfig({ maxSteps: 5 }),
+        },
+        {
+          driver,
+          llm,
+          memory,
+          emit: (e) => events.push(e),
+          waitForInput: async (prompt) => {
+            prompts.push(prompt);
+            return 'approve';
+          },
+          signal: new AbortController().signal,
+          now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+          sleep: async () => {},
+        },
+      ),
+    };
+  })();
+  await promise;
+  assert.deepEqual(prompts, [], 'ordinary typing and clicking must not pause an auto run');
+});

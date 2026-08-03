@@ -107,8 +107,13 @@ export interface AgentConfig {
   /** Hard ceiling on agent steps; the run stops with status `budget` if hit. Default 40. */
   maxSteps: number;
   /**
-   * `auto` acts within the fence; `confirm` pauses for human approval before each action (emits a
-   * `run.needsInput` of kind `confirm`). Default `auto`. Irreversible actions can still gate in `auto`.
+   * `auto` acts within the fence without pausing to check its progress; `confirm` pauses for human
+   * approval before EVERY mutating action. Default `auto`.
+   *
+   * In BOTH modes, actions classified consequential — irreversible or externally visible (uploads,
+   * purchases, sends, deletions, account creation, permission changes, data erasure) — emit a
+   * `run.needsInput` of kind `confirm` and wait. `auto` is "do not check in on progress", not
+   * "nothing consequential can happen".
    */
   autonomy: 'auto' | 'confirm';
   /**

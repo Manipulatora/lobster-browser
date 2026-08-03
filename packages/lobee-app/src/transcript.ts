@@ -9,9 +9,19 @@ export interface StoredStep {
 export interface StoredTurn {
   id: number;
   sessionId?: string;
+  /**
+   * The conversation this turn belongs to. Persisted so the panel can re-read the ANSWER from the
+   * profile's encrypted memory instead of keeping its own plaintext copy.
+   */
+  threadId?: string;
   task: string;
   status: StoredTurnStatus;
-  answer: string;
+  /**
+   * DEPRECATED as a storage field. Answers are no longer written here — they live in the encrypted
+   * per-profile memory and are hydrated over the bridge. The field remains so transcripts written by
+   * an older panel still load (and are re-saved without it).
+   */
+  answer?: string;
   startedAt?: string;
   /**
    * The step trail. Previously discarded on save, so reopening the panel reduced a twenty-step agent
@@ -27,7 +37,6 @@ const KEY = 'lobee.transcript.v1';
 const MAX_TURNS = 24;
 const MAX_TOTAL_CHARS = 240_000;
 const MAX_TASK_CHARS = 4_000;
-const MAX_ANSWER_CHARS = 40_000;
 const MAX_STEPS_PER_TURN = 60;
 const MAX_STEP_CHARS = 200;
 
@@ -76,7 +85,13 @@ function normalize(raw: unknown): StoredTurn[] {
       ...(steps.length ? { steps } : {}),
       ...(num(row.tokensIn) !== undefined ? { tokensIn: num(row.tokensIn) } : {}),
       ...(num(row.tokensOut) !== undefined ? { tokensOut: num(row.tokensOut) } : {}),
-      answer: redactTranscriptText(clipped(row.answer, MAX_ANSWER_CHARS)),
+      // The ANSWER is deliberately dropped, not redacted. It lives in the profile's encrypted memory
+      // and is hydrated over the bridge; keeping a second plaintext copy here defeated that store,
+      // because the regexes below only ever caught labelled secrets — never the ordinary confidential
+      // content an agent actually reads (an address, an order total, a private message).
+      ...(typeof row.threadId === 'string' && row.threadId
+        ? { threadId: row.threadId.slice(0, 128) }
+        : {}),
       ...(typeof row.sessionId === 'string' && row.sessionId
         ? { sessionId: row.sessionId.slice(0, 128) }
         : {}),
@@ -89,7 +104,7 @@ function normalize(raw: unknown): StoredTurn[] {
   let chars = 0;
   const capped: StoredTurn[] = [];
   for (const turn of valid.slice(-MAX_TURNS).reverse()) {
-    const size = turn.task.length + turn.answer.length;
+    const size = turn.task.length + (turn.answer?.length ?? 0);
     if (chars + size > MAX_TOTAL_CHARS) continue;
     chars += size;
     capped.push(turn);

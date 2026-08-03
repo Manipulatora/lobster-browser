@@ -729,16 +729,18 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         }
       }
 
-      // In `auto` the run NEVER pauses for approval — the user chose full autonomy, and risk
-      // heuristics only annotate the confirm prompt when `confirm` mode gates mutating actions.
       const risk = actionRisk(action, raw);
-      // `upload` ALWAYS asks, whatever the autonomy setting. Everything else the agent does happens
-      // inside the browser and is recoverable; sending a local file to a website is the one action
-      // that leaves the machine and cannot be taken back. `auto` was never meant to cover that — the
-      // config's own docs say irreversible actions can still gate — and because no caller ever sets
-      // `confirm`, the risk flag was being computed and then discarded on every run.
+      // CONSEQUENTIAL actions gate in EVERY mode, `auto` included: uploads, purchases, sends,
+      // deletions, account creation, permission changes, data erasure. `auto` means the agent does not
+      // stop to check its work — it never meant it may spend money or delete an account unattended.
+      // Everything else inside the browser is recoverable by re-reading the page, so it gates only in
+      // `confirm`.
+      //
+      // This is only safe because the pause can now END. `waitForInput` has a timeout, and a
+      // panel-origin run with no panel attached fails immediately rather than waiting for an answer
+      // nobody can give — without those, a gate here would have wedged the profile permanently.
       const needsConfirm =
-        action.kind === 'upload' ||
+        risk.consequential ||
         (config.autonomy === 'confirm' && (actionCapability(action.kind).mutating || risk.high));
       if (needsConfirm && !navigationApproved) {
         // The prompt must name the files and the destination. Redaction is right for the transcript,
@@ -755,11 +757,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         }
       }
 
-      // In `auto` the run never pauses, so a high-risk action proceeds — but the risk assessment was
-      // previously computed and then discarded on every shipped run, since no caller sets `confirm`.
-      // Surface it on the harness channel instead: the model gets one line of "you are about to do
-      // something consequential" before the NEXT step, and the user sees it in the transcript. This
-      // changes nothing about what is permitted.
+      // Risky but NOT consequential (a coordinate click, typing into an amount field). It proceeds, and
+      // the model is told to check the result — awareness without a pause.
       if (risk.high && risk.reason && !needsConfirm) {
         pendingCorrection = `You just took a consequential action (${risk.reason}). Verify from the next snapshot that it did what the task asked — and do not repeat it.`;
       }

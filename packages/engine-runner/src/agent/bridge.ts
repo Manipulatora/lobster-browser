@@ -3,7 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { AgentEvent, AgentLlmConfig } from '@lobster/shared-types';
-import { normalizeAllowedDomains } from '@lobster/agent';
+import { FileMemoryStore, normalizeAllowedDomains } from '@lobster/agent';
 import type { AgentManager } from './manager.js';
 import { getBridgeOrigin, resolveBridgeToken, setBridgeOrigin } from './bridge-registry.js';
 
@@ -101,6 +101,9 @@ export class AgentBridge {
       }
       if (req.method === 'GET' && url.pathname === '/models') {
         return await this.models(res);
+      }
+      if (req.method === 'GET' && url.pathname === '/thread') {
+        return await this.thread(res, entry, url.searchParams.get('id') ?? '');
       }
       if (req.method === 'GET' && url.pathname === '/status') {
         return json(res, 200, { ok: true, ...this.agents.status(profileId) });
@@ -242,6 +245,44 @@ export class AgentBridge {
       },
     });
     return json(res, 200, { ok: true, ...result });
+  }
+
+  /**
+   * Read one conversation out of the profile's ENCRYPTED memory.
+   *
+   * The panel used to keep its own copy of every task and answer in `chrome.storage.local`, redacted by
+   * a couple of regexes. That is a second, weaker store of the same content: a regex catches
+   * `password: x` and `Bearer …`, and nothing else — an address, an order total, a medical result or a
+   * private message the agent read stayed in plaintext beside an AES-256-GCM store built to hold
+   * exactly that. This endpoint makes the encrypted store the single source of truth, so the panel can
+   * show history without keeping its own copy of the bodies.
+   *
+   * Scoped by the same per-profile token as every other route, so a panel can only read its own
+   * profile's threads.
+   */
+  private async thread(
+    res: ServerResponse,
+    entry: NonNullable<ReturnType<typeof resolveBridgeToken>>,
+    threadId: string,
+  ): Promise<void> {
+    if (!threadId || !/^[a-zA-Z0-9_-]{1,128}$/.test(threadId)) {
+      return json(res, 400, { ok: false, error: 'invalid threadId' });
+    }
+    if (!entry.memoryDir || !entry.memoryKey) {
+      return json(res, 409, { ok: false, error: 'this profile is not provisioned for Lobee runs' });
+    }
+    const store = new FileMemoryStore(entry.memoryDir, { encryptionKey: entry.memoryKey });
+    try {
+      const messages = await store.loadThread(threadId);
+      return json(res, 200, { ok: true, messages });
+    } catch (error) {
+      // A thread that cannot be decrypted is not a crash — it is an empty history with a reason.
+      return json(res, 200, {
+        ok: false,
+        messages: [],
+        error: error instanceof Error ? error.message : 'could not read the conversation',
+      });
+    }
   }
 
   /** Proxy the backend's live model roster to the panel (the OpenRouter key stays on the server). */

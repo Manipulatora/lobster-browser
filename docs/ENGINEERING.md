@@ -164,8 +164,9 @@ trusted Input.* / DOM command through CdpBrowserDriver ── observe again
 - Page text is delimited as untrusted data. URLs are limited to HTTP(S), private/local destinations are
   blocked by default, and an optional domain fence is enforced on explicit navigation and post-action
   drift. Cross-domain handling follows the run's autonomy: `confirm` gates a cross-domain move on a human,
-  while `auto` — the shipped side-panel default — allows it, because `auto` means the run never pauses.
-  A domain fence is the mechanism for bounding an `auto` run, and the panel does not yet set one.
+  while `auto` allows it. A domain fence bounds an `auto` run; the panel can now send `allowedDomains`,
+  `autonomy` and `tokenBudget` through the bridge (all validated there), though it does not set them by
+  default.
 - Password/OTP/payment/token fields expose only `filled` state. `ask {sensitive:true,targetId}` sends the
   reply directly from the UI to the measured field; it is never added to model history, UI action events,
   or run memory. CAPTCHA is a human handoff—there is intentionally no bypass service.
@@ -180,11 +181,17 @@ trusted Input.* / DOM command through CdpBrowserDriver ── observe again
   uses: the sidecar talks to the backend `agent/llm` proxy, which holds the OpenRouter key server-side,
   authenticates every call with a Bearer token (`AgentProxyGuard`), pins the model to an allowlist, caps
   output tokens, and meters usage. The sidecar never sees a provider credential.
-- **Confirmation, precisely.** `upload` ALWAYS requires a human, in every mode — it is the one action that
-  sends local data off the machine. Everything else is gated only when `autonomy: 'confirm'`. In `auto`,
-  high-risk actions (purchases, sends, deletions, permission changes) are detected and reported to the
-  model as a harness note, but they are NOT blocked. Treat `auto` as "this profile may act unattended on
-  the sites the task implies", not as "nothing consequential can happen".
+- **Confirmation, precisely.** Actions classified CONSEQUENTIAL — irreversible or externally visible —
+  require a human in EVERY mode including `auto`: uploads, purchases, sends, deletions, account
+  creation, site-permission changes, and cookie/site-data erasure (`actionRisk` in `policy.ts`). `auto`
+  means the agent does not stop to check its progress; it never meant it may spend money or delete an
+  account unattended. Everything else inside the browser is recoverable by re-reading the page and gates
+  only under `autonomy: 'confirm'`.
+  The line is COMMIT, not COMPOSITION: typing into an amount field proceeds with a harness note, while
+  pressing the button that sends it is gated. Coordinate clicks are flagged but not blocked — they are
+  un-inspectable, not irreversible, and blocking them would stall the vision fallback on ordinary pages.
+  A gate is only safe because the pause can end: `waitForInput` has a timeout, and a panel-origin run
+  with no panel attached fails immediately rather than waiting for an answer nobody can give.
 
 ### Browser coverage
 

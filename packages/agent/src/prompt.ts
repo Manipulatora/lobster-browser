@@ -62,7 +62,7 @@ export function buildSystemPrompt(opts: {
   const confirm =
     config.autonomy === 'confirm'
       ? '\nA human approves each action before it runs — keep actions small and predictable.'
-      : '\nYou act FULLY autonomously: never ask for permission, approval, or confirmation, and never pause to check in. Use `ask` only when you are missing information you cannot proceed without (a captcha, credentials or a code the human must supply, or an ambiguous task-defining choice).';
+      : '\nYou act autonomously: do not ask for permission to read, navigate, type, or click your way through a task, and do not pause to check in on progress. Use `ask` only when you are missing information you cannot proceed without (a captcha, credentials or a code the human must supply, or an ambiguous task-defining choice). One exception is enforced by the harness, not by you: an action that spends money, sends something, deletes something, creates an account, or erases stored data is put to the human first. Take those actions normally when the task calls for them — the harness handles the approval.';
 
   return `You are Lobster Agent, an autonomous web agent operating a REAL browser profile on the user's behalf. You drive the actual page like a person — a real cursor and real typing — so act deliberately.
 

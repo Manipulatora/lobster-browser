@@ -2,7 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { ChevronDownIcon, MagnifyingGlassIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { brandIcon } from './icons';
 import { renderMarkdown } from './md';
-import { fetchModels, fetchStatus, resumeTask, runTask, sendInput, stopRun } from './bridge';
+import {
+  fetchModels,
+  fetchStatus,
+  fetchThread,
+  resumeTask,
+  runTask,
+  sendInput,
+  stopRun,
+} from './bridge';
 import {
   ALL_EFFORTS,
   EFFORT_LABEL,
@@ -38,6 +46,8 @@ interface AwaitPrompt {
 interface Turn {
   id: number;
   sessionId?: string;
+  /** Conversation this turn belongs to, so its answer can be re-read from encrypted memory. */
+  threadId?: string;
   startedAt?: string;
   task: string;
   status: '' | 'running' | 'done' | 'error' | 'stopped';
@@ -195,8 +205,11 @@ function storedToTurn(stored: StoredTurn): Turn {
         { label: step.label, ctx: step.ctx, thinking: false, done: true },
       ]),
     ),
-    answer: stored.status === 'done' ? stored.answer : '',
-    failure: stored.status === 'done' ? '' : stored.answer,
+    // Bodies are no longer persisted locally; they are hydrated from encrypted memory. A transcript
+    // written by an older panel may still carry one, so use it if present rather than blanking history.
+    answer: stored.status === 'done' ? (stored.answer ?? '') : '',
+    failure: stored.status === 'done' ? '' : (stored.answer ?? ''),
+    threadId: stored.threadId ?? '',
     streamed: false,
     tokensIn: stored.tokensIn ?? 0,
     cachedTokensIn: 0,
@@ -258,7 +271,8 @@ function toStoredTurn(turn: Turn): StoredTurn | null {
     ...(turn.startedAt ? { startedAt: turn.startedAt } : {}),
     task: turn.task,
     status: turn.status,
-    answer: turn.answer || turn.failure,
+    // Deliberately NOT persisted: see transcript.ts. The bodies live in encrypted memory.
+    ...(turn.threadId ? { threadId: turn.threadId } : {}),
     ...(turn.steps.size
       ? {
           steps: [...turn.steps.entries()]
@@ -734,6 +748,27 @@ export function App() {
         }
         if (snapshot.status === 'running' || snapshot.status === 'awaiting_input') {
           live = { id, sessionId: snapshot.sessionId };
+        }
+      }
+      // Fill the answers from encrypted memory. One request per distinct thread, and entirely
+      // best-effort: without the bridge (or on an older transcript) the history still lists what was
+      // asked and how it ended — only the bodies are missing.
+      const threads = [...new Set(hydrated.map((turn) => turn.threadId).filter(Boolean))];
+      if (threads.length > 0) {
+        const loaded = await Promise.all(
+          threads.map(async (id) => [id, await fetchThread(id as string)] as const),
+        );
+        if (!alive) return;
+        for (const [id, messages] of loaded) {
+          const answers = messages.filter((m) => m.role === 'assistant').map((m) => m.content);
+          let seen = 0;
+          for (const turn of hydrated) {
+            if (turn.threadId !== id) continue;
+            const body = answers[seen++];
+            if (!body) continue;
+            if (turn.status === 'done') turn.answer ||= body;
+            else turn.failure ||= body;
+          }
         }
       }
       nextId.current = Math.max(0, ...hydrated.map((turn) => turn.id)) + 1;

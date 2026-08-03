@@ -132,15 +132,33 @@ export function targetUrlForAction(
   return perception.elements.find((el) => el.index === action.id)?.href;
 }
 
-export function actionRisk(
-  action: AgentAction,
-  perception: RawPerception,
-): { high: boolean; reason?: string } {
+/**
+ * `high` means "worth telling the model about". `consequential` is the stricter, blocking class: the
+ * action leaves the machine or destroys something, so it cannot be taken back by re-reading the page.
+ *
+ * The distinction is what makes a confirm gate usable in `auto`. Blocking everything `high` would stop
+ * the run on every coordinate click — un-inspectable, but harmless and reversible — and on every
+ * keystroke into an amount field. Blocking the COMMIT and not the COMPOSITION is the line: typing an
+ * amount is not consequential, pressing "Send money" is.
+ */
+export interface ActionRisk {
+  high: boolean;
+  /** Irreversible or externally visible. Gated in EVERY autonomy mode, including `auto`. */
+  consequential: boolean;
+  reason?: string;
+}
+
+export function actionRisk(action: AgentAction, perception: RawPerception): ActionRisk {
   if (action.kind === 'upload') {
-    return { high: true, reason: 'upload local files to a website' };
+    return { high: true, consequential: true, reason: 'upload local files to a website' };
   }
   if (action.kind === 'click_at' || action.kind === 'type_at') {
-    return { high: true, reason: 'coordinate fallback has no inspectable DOM semantics' };
+    // Un-inspectable, but reversible: worth flagging, not worth stopping an unattended run for.
+    return {
+      high: true,
+      consequential: false,
+      reason: 'coordinate fallback has no inspectable DOM semantics',
+    };
   }
   if (action.kind === 'browser_config') {
     if (
@@ -150,26 +168,40 @@ export function actionRisk(
     ) {
       return {
         high: true,
+        consequential: true,
         reason: `erase stored data (${action.domain ?? action.origin ?? 'a site'})`,
       };
     }
     if (action.op === 'set_permission') {
-      return { high: true, reason: `change a site permission (${action.permission ?? '?'})` };
+      return {
+        high: true,
+        consequential: true,
+        reason: `change a site permission (${action.permission ?? '?'})`,
+      };
     }
-    return { high: false };
+    return { high: false, consequential: false };
   }
   const el = elementFor(action, perception);
   const words = `${el?.name ?? ''} ${'note' in action ? (action.note ?? '') : ''}`;
   if ((action.kind === 'click' || action.kind === 'key') && HIGH_RISK.test(words)) {
-    return { high: true, reason: `potentially consequential action: ${el?.name || action.kind}` };
+    return {
+      high: true,
+      consequential: true,
+      reason: `this looks irreversible or externally visible: ${el?.name || action.kind}`,
+    };
   }
   if (
     action.kind === 'type' &&
     /message|comment|post|recipient|amount|price/i.test(el?.name ?? '')
   ) {
-    return { high: true, reason: `enter data into consequential field: ${el?.name || el?.role}` };
+    // Composing is not committing — the submit that follows is what gets gated.
+    return {
+      high: true,
+      consequential: false,
+      reason: `enter data into consequential field: ${el?.name || el?.role}`,
+    };
   }
-  return { high: false };
+  return { high: false, consequential: false };
 }
 
 function elementFor(action: AgentAction, perception: RawPerception): PerceivedElement | undefined {
