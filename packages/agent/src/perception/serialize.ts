@@ -34,7 +34,14 @@ export function renderObservation(raw: RawPerception): string {
   if (raw.text) lines.push(`visible text: ${JSON.stringify(raw.text)}`);
 
   if (raw.elements.length === 0) {
-    lines.push('(no interactive elements visible — try scrolling, waiting, or navigating)');
+    // Do not prescribe scrolling at a browser that is not open. `perceive` already explains that the
+    // window opens on the first browser action, and following that advice with "try scrolling,
+    // waiting, or navigating" made step 1 of every run contradict itself.
+    lines.push(
+      raw.signals?.includes('browser-closed')
+        ? '(no page yet — the browser opens on your first browser action)'
+        : '(no interactive elements visible — try scrolling, waiting, or navigating)',
+    );
     return lines.join('\n');
   }
 
@@ -42,7 +49,13 @@ export function renderObservation(raw: RawPerception): string {
     lines.push(renderElement(el));
   }
   if (raw.truncated > 0) {
-    lines.push(`… ${raw.truncated} more element(s) not shown (scroll to narrow the view)`);
+    // Say how the cut was made. The list is ranked by likely relevance and the lowest-ranked are
+    // dropped, so "scroll to narrow the view" described a spatial rule that does not exist — a model
+    // hunting for a low-ranked control could scroll forever without changing its rank. Scrolling does
+    // change WHICH elements are in view, so it is still useful; it is just not the whole story.
+    lines.push(
+      `… ${raw.truncated} more element(s) not shown. This list is ranked by likely relevance, not page order, and the lowest-ranked were cut. If what you need is missing, scroll to bring a different part of the page into view, or use \`extract\` to read the page as text.`,
+    );
   }
   return lines.join('\n');
 }

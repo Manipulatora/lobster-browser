@@ -293,6 +293,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     let invalidActions = 0;
     /** True while a token-truncated response is being retried, so the retry cannot itself loop. */
     let truncatedRetry = false;
+    /** A context-overflow recovery is attempted at most once per run. */
+    let oversizeRetried = false;
     /**
      * A correction for the NEXT step, delivered through the ordinary nudge channel rather than as its
      * own message. A standalone user message would sit next to the step prompt (also a user message
@@ -375,10 +377,18 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         nudges.push(
           'RECOVERY: the last behavior repeated. Re-read the page and choose a materially different action.',
         );
-      if (step >= Math.ceil(config.maxSteps * 0.75))
+      // Escalate rather than repeat. The same "wrap up" line from 75% to 100% carried no new
+      // information after the first time, so the last quarter of a run read identically whether five
+      // steps remained or one.
+      if (step >= Math.ceil(config.maxSteps * 0.95)) {
+        nudges.push(
+          `BUDGET: step ${step} of ${config.maxSteps} — this is your LAST chance to answer. Call \`done\` NOW with whatever you have, and say plainly what is missing.`,
+        );
+      } else if (step >= Math.ceil(config.maxSteps * 0.75)) {
         nudges.push(
           `BUDGET: step ${step} of ${config.maxSteps}. Wrap up — consolidate what you already have and call \`done\`; do not start new exploration.`,
         );
+      }
       const stepText = buildStepPrompt({
         history: nudges,
         observation: rendered,
@@ -427,10 +437,14 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       emit({ type: 'step.thinking', ...base, step, ts: now() });
       const imageForStep = pendingImage;
       pendingImage = undefined;
-      const result = await llm.complete({
+      const buildRequest = (
+        overrides: { maxTokens?: number; messages?: LlmMessage[] } = {},
+      ): Parameters<typeof llm.complete>[0] => ({
         model: step === 1 || recovery ? llmConfig.model : (llmConfig.stepModel ?? llmConfig.model),
         system,
-        messages: imageForStep ? attachImageToLastTurn(conversation, imageForStep) : conversation,
+        messages:
+          overrides.messages ??
+          (imageForStep ? attachImageToLastTurn(conversation, imageForStep) : conversation),
         tools: [
           {
             name: ACT_TOOL.name,
@@ -439,12 +453,47 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           },
         ],
         forceTool: ACT_TOOL.name,
-        maxTokens,
+        maxTokens: overrides.maxTokens ?? maxTokens,
         cachePrefix: true,
         sessionId: runId,
         ...(llmConfig.effort ? { effort: llmConfig.effort } : {}),
+        // A silent retry is indistinguishable from a hang: three BYOK attempts plus backoff is minutes
+        // of a panel showing only "thinking", which invites killing a run that was recovering fine.
+        onRetry: ({ attempt, attempts, delayMs, reason }) =>
+          log(
+            'warn',
+            `The model provider did not respond (${reason}). Retrying in ${Math.round(delayMs / 1000)}s — attempt ${attempt} of ${attempts}.`,
+          ),
         signal,
       });
+      // A context-window 400 used to end the run outright: it is not in `retryableStatus`, so it
+      // propagated straight to the catch that calls `finish('error')`. Recover in the cheapest order —
+      // ask for fewer OUTPUT tokens first (the whole conversation survives), and only then start
+      // dropping history. `normalizeMessages` already repairs an arbitrarily head-dropped list, so the
+      // dangerous part of the second tier is already built.
+      let result: Awaited<ReturnType<typeof llm.complete>>;
+      try {
+        result = await llm.complete(buildRequest());
+      } catch (error) {
+        const headroom = contextOverflowHeadroom(error);
+        if (headroom === null || oversizeRetried) throw error;
+        oversizeRetried = true;
+        // Only take the cheap path when it actually CHANGES the request. A headroom at or above the
+        // current cap would re-send an identical body and burn a call to get the same 400.
+        if (headroom >= 512 && headroom < maxTokens) {
+          log('warn', `Context limit reached; retrying this step with a smaller output budget.`);
+          result = await llm.complete(buildRequest({ maxTokens: headroom }));
+        } else {
+          log('warn', 'Context limit reached; retrying this step with the conversation trimmed.');
+          priorTurns = [];
+          result = await llm.complete(
+            buildRequest({
+              messages: normalizeMessages(pruneObservations(stepMessages).slice(-4)),
+              maxTokens: Math.min(maxTokens, 1024),
+            }),
+          );
+        }
+      }
       recovery = false;
       addUsage(result.usage);
       emit({ type: 'usage', ...base, usage: { ...result.usage }, ts: now() });
@@ -1074,6 +1123,27 @@ function observationFingerprint(raw: RawPerception): string {
       element.state ?? '',
     ]),
   ]);
+}
+
+/**
+ * Headroom left for OUTPUT tokens when a provider rejects a request for exceeding its context window,
+ * or `null` when the error is something else entirely.
+ *
+ * Anthropic states the arithmetic verbatim — "input length and `max_tokens` exceed context limit:
+ * 190000 + 8000 > 200000" — and OpenRouter forwards the message, so the cheapest fix is usually just
+ * asking for fewer output tokens. `0` means "recognised as an overflow but the numbers were not
+ * stated", which tells the caller to fall back to trimming the conversation.
+ */
+export function contextOverflowHeadroom(error: unknown): number | null {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!/context (window|limit|length)|too long|max_tokens/i.test(message)) return null;
+  const m = /(\d[\d,]*)\s*\+\s*(\d[\d,]*)\s*>\s*(\d[\d,]*)/.exec(message);
+  if (!m) return 0;
+  const n = (v: string): number => Number(v.replace(/,/g, ''));
+  // Leave a margin: the reported input length is for the request that FAILED, and the retry's own
+  // prompt is not byte-identical.
+  const headroom = n(m[3]!) - n(m[1]!) - 1_000;
+  return headroom > 0 ? headroom : 0;
 }
 
 function estimateTokens(value: string): number {

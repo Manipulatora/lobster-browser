@@ -1,7 +1,22 @@
 export async function fetchWithRetry(
   url: string,
   init: RequestInit,
-  opts: { signal?: AbortSignal; timeoutMs?: number; attempts?: number } = {},
+  opts: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    attempts?: number;
+    /**
+     * Told about each backoff before it is slept. Retries were completely silent: on the BYOK path
+     * three attempts plus backoff is up to ~3.5 minutes during which the panel shows only "thinking",
+     * which is indistinguishable from a hang and invites the user to kill a run that was fine.
+     */
+    onRetry?: (info: {
+      attempt: number;
+      attempts: number;
+      delayMs: number;
+      reason: string;
+    }) => void;
+  } = {},
 ): Promise<Response> {
   const attempts = opts.attempts ?? 3;
   let lastError: unknown;
@@ -19,6 +34,7 @@ export async function fetchWithRetry(
       if (!retryableStatus(response.status) || attempt === attempts) return response;
       const delay = retryDelay(response, attempt);
       await response.body?.cancel().catch(() => {});
+      opts.onRetry?.({ attempt, attempts, delayMs: delay, reason: `HTTP ${response.status}` });
       await wait(delay, opts.signal);
     } catch (error) {
       if (opts.signal?.aborted) throw opts.signal.reason ?? error;
@@ -26,7 +42,14 @@ export async function fetchWithRetry(
       // A per-attempt timeout aborts this controller too. Retry it like any other transient
       // transport failure; only an abort from the caller should end the whole operation early.
       if (attempt === attempts) throw error;
-      await wait(backoff(attempt), opts.signal);
+      const delay = backoff(attempt);
+      opts.onRetry?.({
+        attempt,
+        attempts,
+        delayMs: delay,
+        reason: error instanceof Error ? error.message : 'network error',
+      });
+      await wait(delay, opts.signal);
     } finally {
       clearTimeout(timer);
       opts.signal?.removeEventListener('abort', onAbort);

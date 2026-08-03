@@ -1,5 +1,6 @@
 import type { LlmClient, LlmMessage, LlmRequest, LlmResult, LlmToolCall } from './types.js';
 import { fetchWithRetry } from './http.js';
+import { classifyProviderError } from './openai-compatible.js';
 
 export class GoogleClient implements LlmClient {
   readonly provider = 'google';
@@ -49,9 +50,14 @@ export class GoogleClient implements LlmClient {
         headers: { 'content-type': 'application/json', 'x-goog-api-key': this.apiKey },
         body: JSON.stringify(body),
       },
-      { ...(req.signal ? { signal: req.signal } : {}) },
+      {
+        ...(req.signal ? { signal: req.signal } : {}),
+        ...(req.onRetry ? { onRetry: req.onRetry } : {}),
+      },
     );
-    if (!response.ok) throw new Error(`google ${response.status}: ${await safeError(response)}`);
+    if (!response.ok) {
+      throw new Error(classifyProviderError('google', response.status, await safeError(response)));
+    }
     const json = (await response.json()) as GoogleResponse;
     const candidate = json.candidates?.[0];
     let toolCall: LlmToolCall | undefined;

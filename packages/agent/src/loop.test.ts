@@ -963,3 +963,64 @@ test('an extract longer than the ledger entry budget says how much it cut', asyn
   // And enough must survive that a value past the OLD 3,000-char limit is still readable.
   assert.match(ledger, /Record 4\d\d /, 'the entry budget must cover a realistically long page');
 });
+
+test('a context-window 400 is recovered from, not turned into a dead run', async () => {
+  // A context 400 is not in `retryableStatus`, so it used to propagate straight to `finish('error')`
+  // and end the run. The cheapest recovery keeps the whole conversation and asks for fewer OUTPUT
+  // tokens; only if the numbers are absent does history get trimmed.
+  const driver = new FakeDriver();
+  const memory = new FakeMemory();
+  const events: AgentEvent[] = [];
+  let call = 0;
+  const seen: number[] = [];
+  const llm: LlmClient = {
+    provider: 'fake',
+    complete: (req: LlmRequest) => {
+      call += 1;
+      seen.push(req.maxTokens);
+      if (call === 1) {
+        return Promise.reject(
+          new Error(
+            'the conversation grew past the model context window (managed 400: input length and `max_tokens` exceed context limit: 195000 + 8000 > 200000)',
+          ),
+        );
+      }
+      return Promise.resolve({
+        toolCall: {
+          id: `c${call}`,
+          name: 'act',
+          input: { kind: 'done', success: true, summary: 'recovered' },
+        },
+        stopReason: 'tool',
+        usage: { tokensIn: 5, tokensOut: 5 },
+      });
+    },
+  };
+  let n = 0;
+  await runAgent(
+    {
+      sessionId: 's',
+      profileId: 'p',
+      task: 'do a thing',
+      runId: 's',
+      llmConfig: { provider: 'anthropic', model: 'm', apiKey: 'x', effort: 'high' },
+      config: resolveConfig({ maxSteps: 4 }),
+    },
+    {
+      driver,
+      llm,
+      memory,
+      emit: (e) => events.push(e),
+      waitForInput: async () => 'ok',
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+
+  const finished = events.find((e) => e.type === 'run.finished');
+  assert.ok(finished && finished.type === 'run.finished');
+  assert.equal(finished.status, 'done', 'the run must survive a context 400');
+  assert.equal(finished.result, 'recovered');
+  assert.ok(seen[1]! < seen[0]!, `retry must ask for fewer output tokens (${seen.join(' -> ')})`);
+});

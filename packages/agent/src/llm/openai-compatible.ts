@@ -101,10 +101,14 @@ export class OpenAiCompatibleClient implements LlmClient {
         // The managed backend already owns the upstream deadline. Retrying its 504 would turn one
         // bounded 55s attempt into a multi-minute client hang that outlives the agent watchdog.
         ...(this.provider === 'managed' ? { attempts: 1 } : {}),
+        ...(req.onRetry ? { onRetry: req.onRetry } : {}),
       },
     );
-    if (!response.ok)
-      throw new Error(`${this.provider} ${response.status}: ${await safeError(response)}`);
+    if (!response.ok) {
+      throw new Error(
+        classifyProviderError(this.provider, response.status, await safeError(response)),
+      );
+    }
     if (wantsStream && response.body) {
       return readSseCompletion(response.body, req.onTextDelta!, req.signal);
     }
@@ -394,6 +398,34 @@ function normalizeStop(reason: string | undefined): string {
   if (reason === 'length') return 'length';
   if (reason === 'stop') return 'stop';
   return reason ?? 'unknown';
+}
+
+/**
+ * Turn a provider failure into something the user can act on.
+ *
+ * The panel renders this string directly. Raw upstream bodies are written for API consumers, not
+ * people — "managed 403: Key limit exceeded (total limit). Manage it using https://…/keys/55792472…"
+ * tells a user nothing about what THEY should do, and a 502 with an HTML body renders as markup. Keep
+ * the original detail on the end; it is what makes a bug report useful.
+ */
+export function classifyProviderError(provider: string, status: number, detail: string): string {
+  const cause =
+    status === 401 || status === 403
+      ? detail.toLowerCase().includes('limit')
+        ? 'the model account has run out of credit or hit its spend limit'
+        : 'the model credential was rejected'
+      : status === 429
+        ? 'the model provider is rate-limiting this key'
+        : status === 400 && /context|too long|max_tokens|token/i.test(detail)
+          ? 'the conversation grew past the model context window'
+          : status === 400
+            ? 'the model provider rejected the request'
+            : status === 408 || status === 504
+              ? 'the model provider timed out'
+              : status >= 500
+                ? 'the model provider is unavailable'
+                : `the model provider returned ${status}`;
+  return `${cause} (${provider} ${status}: ${detail})`;
 }
 
 async function safeError(response: Response): Promise<string> {

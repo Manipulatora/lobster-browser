@@ -82,25 +82,37 @@ export function redactUrl(value: string): string {
   }
 }
 
+/**
+ * Name an element, not just its index. `click element [3]` is the text a human is shown when asked to
+ * approve an action — an index is meaningless to them, so approving became a formality. The label is
+ * page-derived and therefore untrusted, so it is clipped and only ever used for display.
+ */
+function label(index: number | undefined, perception?: RawPerception): string {
+  if (index === undefined) return '';
+  const element = perception?.elements.find((el) => el.index === index);
+  const name = element?.name?.trim();
+  return name ? ` ${JSON.stringify(clip(name, 60))}` : '';
+}
+
 export function describeSafeAction(action: AgentAction, perception?: RawPerception): string {
   const safe = redactAction(action, perception);
   switch (safe.kind) {
     case 'click':
-      return `click element [${safe.id}]`;
+      return `click${label(safe.id, perception)} [${safe.id}]`;
     case 'click_at':
       return `click visual coordinate (${safe.x}, ${safe.y})`;
     case 'hover':
-      return `hover element [${safe.id}]`;
+      return `hover${label(safe.id, perception)} [${safe.id}]`;
     case 'type':
-      return `type ${safe.text === '[REDACTED]' ? 'sensitive text' : JSON.stringify(clip(safe.text, 40))} into [${safe.id}]`;
+      return `type ${safe.text === '[REDACTED]' ? 'sensitive text' : JSON.stringify(clip(safe.text, 40))} into${label(safe.id, perception)} [${safe.id}]`;
     case 'type_at':
       return `type ${safe.text === '[REDACTED]' ? 'redacted text' : JSON.stringify(clip(safe.text, 40))} at visual coordinate (${safe.x}, ${safe.y})`;
     case 'select':
-      return `select ${safe.values.join(', ')} in [${safe.id}]`;
+      return `select ${safe.values.join(', ')} in${label(safe.id, perception)} [${safe.id}]`;
     case 'drag':
       return `drag [${safe.fromId}] to [${safe.toId}]`;
     case 'upload':
-      return `upload ${safe.paths.length} local file(s) through [${safe.id}]`;
+      return `upload ${safe.paths.length} local file(s) through${label(safe.id, perception)} [${safe.id}]`;
     case 'navigate':
       return `navigate to ${safe.url}`;
     case 'tab':

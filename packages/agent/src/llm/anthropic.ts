@@ -1,5 +1,6 @@
 import type { LlmClient, LlmMessage, LlmRequest, LlmResult, LlmToolCall } from './types.js';
 import { fetchWithRetry } from './http.js';
+import { classifyProviderError } from './openai-compatible.js';
 
 /**
  * Anthropic Messages API adapter (BYOK), via raw fetch — no SDK. Raw HTTP is the deliberate choice
@@ -63,12 +64,15 @@ export class AnthropicClient implements LlmClient {
         },
         body: JSON.stringify(body),
       },
-      { ...(req.signal ? { signal: req.signal } : {}) },
+      {
+        ...(req.signal ? { signal: req.signal } : {}),
+        ...(req.onRetry ? { onRetry: req.onRetry } : {}),
+      },
     );
 
     if (!res.ok) {
       const detail = await safeErr(res);
-      throw new Error(`Anthropic ${res.status}: ${detail}`);
+      throw new Error(classifyProviderError('anthropic', res.status, detail));
     }
 
     const json = (await res.json()) as AnthropicResponse;

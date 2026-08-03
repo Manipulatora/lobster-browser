@@ -65,6 +65,11 @@ export interface LlmRequest {
   signal?: AbortSignal;
   /** Receive assistant text as it arrives. Adapters that stream call this; others never do. */
   onTextDelta?: (delta: string) => void;
+  /**
+   * Called before each transport retry. The loop turns it into a visible event, so a run waiting out
+   * a rate limit reads as "retrying in 8s" rather than as a hang the user is tempted to kill.
+   */
+  onRetry?: (info: { attempt: number; attempts: number; delayMs: number; reason: string }) => void;
 }
 
 /** A tool call the model returned. */

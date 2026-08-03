@@ -727,8 +727,13 @@ export class CdpBrowserDriver implements BrowserDriver {
     const newest = fresh.at(-1);
     if (!newest) return;
     const from = this.targetId;
+    // Move the agent's CDP session, but do NOT activate the target. `switchTo` is what makes the agent
+    // drive the new page; `Target.activateTarget` only brings it to the FOREGROUND — and this path runs
+    // on every settle for any target the agent has not seen before, including a tab the human opened
+    // while the model was thinking. Activating it yanked the user's browser to a page they did not ask
+    // for, mid-task. The agent drives a background target over CDP perfectly well; an explicit
+    // `tab switch` from the model still activates, because there the model means to move the view.
     await this.switchTo(newest);
-    await this.browser.send('Target.activateTarget', { targetId: newest.id }).catch(() => {});
     if (this.targetId !== from) this.adoptedPopup = newest.url || '(new tab)';
   }
 
