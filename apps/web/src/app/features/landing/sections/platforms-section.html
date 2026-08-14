@@ -1,0 +1,99 @@
+<!-- The mark at the centre of three static icon rings, equally spaced 15 apart — each one a fully
+     drawn, isolated violet circle, with icons in their own small violet-ringed badges sitting on
+     top. No motion, no randomness: see platforms-section.ts for the fixed 24-icon, brick-pattern
+     layout.
+     The strongest violet is the section's own background, which is what the area outside the
+     largest ring reads as.
+     lg:pb-40 — the outer ring hangs 131px below the arena at the lg breakpoint (10% of the 992px
+     arena, plus half a 64px badge), which is more than `.section`'s own 112px of bottom padding,
+     so `overflow-hidden` was slicing the bottom-most badge clean in half. Only lg needs it: the
+     badges shrink faster than the padding does at every smaller breakpoint. -->
+<section id="platforms" class="section relative overflow-hidden bg-brand-700 lg:pb-40">
+  <!-- The claw reaching in from the top-right. The source art points its pincers straight up with
+       the arm at the bottom, so it is turned 225°: that swings the pincers round to point
+       down-left into the section and carries the arm end up to the top-right, where centring the
+       image on the corner pushes it past the edge to be clipped — so the claw reads as entering
+       from off-canvas rather than sitting in the frame with a cut-off stump.
+       It sits before the content in the DOM and stays unpositioned in z, so the ring system and
+       every icon paint over it. -->
+  <img
+    src="/brand/claw.webp"
+    alt=""
+    aria-hidden="true"
+    width="700"
+    height="982"
+    class="pointer-events-none absolute right-0 top-0 w-[15rem] max-w-none -translate-y-[22%] translate-x-[24%] rotate-[215deg] select-none opacity-[0.12] sm:w-[26rem] sm:opacity-[0.16] lg:w-[42rem]"
+  />
+
+  <div class="container-page relative">
+    <!-- Top of the section, and kept clear of the ring system entirely. The outer ring's icons sit
+         10% of the arena's height above its top edge (radius 60, centred at 50) PLUS half their
+         own badge height (32px at the lg breakpoint) above that — 131px total at the arena's max
+         width (992px) — so mt-40 (160px) is what actually clears them, not the 112px an earlier
+         pass here landed on before accounting for the badge's own size. -->
+    <div class="relative z-10 mx-auto max-w-xl text-center">
+      <h2 class="section-title text-white">One Profile manager, every platform</h2>
+    </div>
+
+    <div class="relative mx-auto mt-40 aspect-square w-full max-w-[62rem]">
+      <!-- Each band is its own flat-coloured disc rather than a stop on one gradient: painted
+           largest first, each smaller disc covers the middle of the one before it, so what's left
+           of each is a hard-edged ring of solid colour. A gradient — even with doubled-up stops —
+           still blends across the DPR-fractional pixel at every boundary; discs give a genuinely
+           crisp edge that lands exactly on the ring borders drawn below.
+           Radii are the ring radii doubled (30/45/60 -> 60%/90%/120% of the arena's width). -->
+      <div
+        class="pointer-events-none absolute left-1/2 top-1/2 h-[120%] w-[120%] -translate-x-1/2 -translate-y-1/2 rounded-full bg-brand-500"
+      ></div>
+      <div
+        class="pointer-events-none absolute left-1/2 top-1/2 h-[90%] w-[90%] -translate-x-1/2 -translate-y-1/2 rounded-full bg-brand-300"
+      ></div>
+      <div
+        class="pointer-events-none absolute left-1/2 top-1/2 h-[60%] w-[60%] -translate-x-1/2 -translate-y-1/2 rounded-full bg-white"
+      ></div>
+      <video
+        class="absolute left-1/2 top-1/2 w-[30%] -translate-x-1/2 -translate-y-1/2"
+        src="/videos/lobster-mark.mp4"
+        autoplay
+        muted
+        loop
+        playsinline
+        disablepictureinpicture
+        preload="auto"
+        fetchpriority="high"
+        aria-hidden="true"
+      ></video>
+
+      @for (ring of rings; track ring.radius) {
+        <!-- The master ring line, sitting exactly on the seam between two bands: a deep violet
+             heavy enough to read as a drawn ring rather than a seam, against brand-300, -500 and
+             -700 alike. -->
+        <div
+          class="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border-[3px] border-brand-800"
+          [style.width.%]="ring.radius * 2"
+          [style.height.%]="ring.radius * 2"
+        ></div>
+
+        @for (icon of ring.icons; track icon.name + '-' + icon.x + '-' + icon.y) {
+          <!-- Fixed w-*/h-* here, not padding around an auto-sized box: a badge whose size comes
+               from shrink-to-fit content sizing collapses to zero width once its `left` percentage
+               lands past 100% (or below 0%) — which every outer ring's icons routinely do. Sizing
+               the box outright sidesteps that shrink-to-fit computation entirely. -->
+          <div
+            class="absolute flex h-8 w-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-[3px] border-brand-800 bg-surface sm:h-10 sm:w-10 lg:h-16 lg:w-16"
+            [style.left.%]="icon.x"
+            [style.top.%]="icon.y"
+          >
+            <img
+              [src]="icon.src"
+              [alt]="icon.name"
+              width="24"
+              height="24"
+              class="h-5 w-5 object-contain sm:h-6 sm:w-6 lg:h-10 lg:w-10"
+            />
+          </div>
+        }
+      }
+    </div>
+  </div>
+</section>

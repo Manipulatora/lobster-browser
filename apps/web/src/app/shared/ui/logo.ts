@@ -22,7 +22,7 @@ import { RouterLink } from '@angular/router';
           alt="Lobster Browser"
           width="760"
           height="149"
-          class="h-[26px] w-auto"
+          class="h-9 w-auto"
         />
       }
     </a>

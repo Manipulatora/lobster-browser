@@ -8,8 +8,6 @@ import {
 } from '@angular/core';
 import { DOCUMENT } from '@angular/common';
 import { RouterLink, RouterLinkActive } from '@angular/router';
-import { NgIcon, provideIcons } from '@ng-icons/core';
-import { heroBars3, heroXMark } from '@ng-icons/heroicons/outline';
 
 import { Logo } from '../../../shared/ui/logo';
 import { PRIMARY_NAV } from '../../../shared/data/site-nav';
@@ -21,8 +19,7 @@ import { HeaderTheme } from '../header-theme';
  */
 @Component({
   selector: 'app-site-header',
-  imports: [RouterLink, RouterLinkActive, NgIcon, Logo],
-  viewProviders: [provideIcons({ heroBars3, heroXMark })],
+  imports: [RouterLink, RouterLinkActive, Logo],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './site-header.html',
 })

@@ -8,7 +8,7 @@
    ========================================================================== */
 @theme {
   --font-sans:
-    'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial,
+    'Google Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial,
     sans-serif;
 
   /* Brand ramp — violet */
@@ -40,18 +40,35 @@
   --color-hairline: #ece9f5;
   --color-hairline-strong: #ded8ef;
 
-  /* Type weights — the whole site is deliberately light.
-     Small text never goes below 400: Inter at 200–300 under ~14px on a light
-     background loses too much contrast to stay comfortably readable. */
-  --weight-display: 200; /* large headings */
-  --weight-body: 300; /* default copy */
-  --weight-ui: 400; /* buttons, labels, chips, anything small */
+  /* Type weights. Google Sans ships 400/500/600/700 only — no light weights like Inter had —
+     so the display/body/ui scale shifts up a step to the lightest options actually available. */
+  --weight-display: 400; /* large headings */
+  --weight-body: 400; /* default copy */
+  --weight-ui: 500; /* buttons, labels, chips, anything small */
 
   --radius-card: 1rem;
   --radius-panel: 1.25rem;
 
   --shadow-soft: 0 1px 2px rgb(23 19 32 / 0.04), 0 8px 24px -12px rgb(23 19 32 / 0.08);
   --shadow-lift: 0 1px 2px rgb(23 19 32 / 0.04), 0 24px 48px -24px rgb(109 40 217 / 0.22);
+}
+
+/* Not a Tailwind design token (it doesn't map to a utility namespace like --color-*), so it lives
+   as a plain custom property rather than inside @theme. The one gradient behind every "hover
+   reveals a flowing rainbow" moment — the nav underlines and the primary CTA's ring — so the
+   palette only has to be tuned in one place. Seven stops, first and last identical, so a
+   `background-size: 200%` sweep loops with no visible seam. */
+:root {
+  --rainbow-gradient: linear-gradient(
+    90deg,
+    #ff3b30,
+    #ff9500,
+    #ffcc00,
+    #34c759,
+    #007aff,
+    #af52de,
+    #ff3b30
+  );
 }
 
 @layer base {
@@ -62,24 +79,38 @@
     border-color: var(--color-hairline);
   }
 
+  /* The native scrollbar is hidden outright, everywhere — Firefox's `scrollbar-width`/
+     `scrollbar-color` have no way to drop the up/down arrow buttons while keeping the thumb, and
+     that gap is exactly what kept showing up no matter how the old `::-webkit-scrollbar-button`
+     rules here were tuned. `app-custom-scrollbar` (mounted once in app.ts) draws the real thumb —
+     thin, transparent, no buttons, on every engine — instead of trying to talk each browser's
+     built-in one into it. */
   html {
     scroll-behavior: smooth;
     -webkit-text-size-adjust: 100%;
+    scrollbar-width: none;
+  }
+  html::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Keeps anchored sections clear of the 64px fixed header. This covers scrolls that go through
+     `scrollIntoView` — find-in-page, and any direct DOM call. It does NOT cover Angular's own
+     #fragment navigation, which uses `window.scrollTo` and so ignores `scroll-margin` completely;
+     that path is offset by `ViewportScroller.setOffset` in app.ts. Both are needed, and they can't
+     double up, because no single scroll goes through both mechanisms. */
+  section[id] {
+    scroll-margin-top: 5rem;
   }
 
   body {
     background-color: var(--color-canvas);
     color: var(--color-ink);
     font-family: var(--font-sans);
-    /* Inter Light globally — the typographic counterpart to the 0.5px rules and
-       hairline icon strokes. Weight tokens live in `--weight-*` above. */
+    /* Weight tokens live in `--weight-*` above. */
     font-weight: var(--weight-body);
-    /* Inter is served as a variable font with an optical-size axis; letting the
-       browser drive `opsz` keeps small text from looking spindly. */
-    font-optical-sizing: auto;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   }
 
   /* Headings inherit the display weight rather than the browser's bold default. */
@@ -121,6 +152,27 @@
   /* Page gutter — one source of truth for horizontal rhythm. */
   .container-page {
     @apply mx-auto w-full max-w-[76rem] px-6 sm:px-8;
+  }
+
+  /* Material Symbols (thin). Declared here rather than using Google's own
+     `.material-symbols-outlined` helper: that helper hard-codes `font-size: 24px`, and because it
+     arrives in a separate stylesheet its specificity fight with a Tailwind `text-*` utility comes
+     down to link order. Owning the class means size is always set at the call site.
+     The glyph is chosen by ligature, so the element's text content IS the icon name. */
+  .icon {
+    font-family: 'Material Symbols Outlined';
+    font-weight: normal;
+    font-style: normal;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    font-variation-settings: 'wght' 100;
+    font-feature-settings: 'liga';
+    -webkit-font-smoothing: antialiased;
+    @apply inline-block select-none;
   }
 
   /* Vertical section rhythm. */
@@ -211,6 +263,78 @@
   .field-error {
     @apply mt-1.5 flex items-center gap-1 text-xs text-rose-600;
   }
+
+  /* Plain text links whose only hover affordance is an underline that grows from its own centre —
+     the header's primary nav, its Log in link, and the hero's "View pricing" all carry no
+     background/pill of their own, so the animation is the whole effect. The bar is fixed at 30% of
+     the link's width and scales out from a zero-width point at its centre, so both ends extend at
+     once rather than drawing in from one side.
+     Two distinct states, not one: `.nav-link-active` (the current route/section) is a plain
+     `currentColor` bar — a location marker, always on, never animated. `:hover` is the interactive
+     flourish and gets the flowing rainbow instead; the two never fight because the active class
+     never coincides with the hover rule truly needing the plain bar underneath it (hover simply
+     paints its own gradient on top). */
+  .nav-link {
+    @apply relative inline-flex items-center px-1 py-2 text-black transition-colors duration-200;
+  }
+
+  .nav-link::after {
+    content: '';
+    @apply pointer-events-none absolute -bottom-0.5 left-1/2 h-[2px] w-[30%] bg-current;
+    transform: translateX(-50%) scaleX(0);
+    transition: transform 300ms ease-out;
+  }
+
+  .nav-link.nav-link-active::after {
+    transform: translateX(-50%) scaleX(1);
+  }
+
+  .nav-link:hover::after {
+    transform: translateX(-50%) scaleX(1);
+    background-color: transparent;
+    background-image: var(--rainbow-gradient);
+    background-size: 200% 100%;
+    animation: rainbow-flow 2.5s linear infinite;
+  }
+
+  /* The primary CTA — transparent, so the hero's own colour shows through it, with a plain black
+     ring at rest. Hovering swaps the ring for the same flowing rainbow as the nav underlines, via
+     a mask-composited pseudo-element so only the RING is painted, not a filled swatch (the
+     `content-box`/full-box mask XOR is what carves out the hollow middle). */
+  .btn-outline-rainbow {
+    @apply relative inline-flex min-h-12 items-center justify-center rounded-full border-[1.5px]
+      border-black bg-transparent px-8 text-base font-medium text-black
+      transition-colors duration-300;
+  }
+
+  .btn-outline-rainbow::before {
+    content: '';
+    @apply pointer-events-none absolute -inset-[1.5px] rounded-full opacity-0
+      transition-opacity duration-300;
+    padding: 1.5px;
+    background-image: var(--rainbow-gradient);
+    background-size: 200% 100%;
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+  }
+
+  .btn-outline-rainbow:hover {
+    @apply border-transparent;
+  }
+
+  .btn-outline-rainbow:hover::before {
+    @apply opacity-100;
+    animation: rainbow-flow 2.5s linear infinite;
+  }
+}
+
+@keyframes rainbow-flow {
+  to {
+    background-position: 200% 0;
+  }
 }
 
 @layer utilities {
@@ -256,6 +380,15 @@
       transparent 68%
     ),
     linear-gradient(180deg, #26375a 0%, #4a5f85 46%, #8fa2bd 62%, #b9c4d4 100%);
+}
+
+/* Still stand-in for the xylophone hero, sampled from the WebGL scene's own background gradient
+   (u_color and the mix in xylophone-bg.glsl.ts) — this IS the hero section's theme now, so the
+   fade-in, a lost context, and no-WebGL2 all still show the right colour, full-bleed. 315deg
+   points the gradient LINE toward the top-left, so 0% (violet) lands at the opposite corner —
+   bottom-right — and 100% (white) lands where the line points — top-left — matching the shader. */
+.bg-xylophone-fallback {
+  background-image: linear-gradient(315deg, #a391d3 0%, #cabfe8 55%, #ffffff 100%);
 }
 
 /* Header links sit directly on the hero scene, which has both near-black and near-white regions —

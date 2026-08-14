@@ -16,19 +16,20 @@
              it to black and invert flips it to solid white — the whole mark, wordmark included. -->
         <app-logo [class]="onDarkBackdrop() ? 'brightness-0 invert' : ''" />
 
-        <nav class="hidden items-center gap-1 lg:flex" aria-label="Primary">
+        <nav class="hidden items-center gap-6 lg:flex" aria-label="Primary">
           @for (link of nav; track link.label) {
             <a
               [routerLink]="link.path"
               [fragment]="link.fragment"
-              routerLinkActive="text-brand-700"
-              [routerLinkActiveOptions]="{ exact: true }"
-              class="rounded-full px-3 py-2 text-[0.875rem] transition-colors duration-200"
-              [class]="
-                onDarkBackdrop()
-                  ? 'on-scene text-white/90 hover:bg-white/10 hover:text-white'
-                  : 'text-ink-soft hover:bg-brand-50 hover:text-brand-700'
-              "
+              routerLinkActive="nav-link-active"
+              [routerLinkActiveOptions]="{
+                paths: 'exact',
+                queryParams: 'ignored',
+                matrixParams: 'ignored',
+                fragment: 'exact',
+              }"
+              class="nav-link text-[0.9375rem]"
+              [class]="onDarkBackdrop() ? 'on-scene text-white/90' : ''"
             >
               {{ link.label }}
             </a>
@@ -36,14 +37,13 @@
         </nav>
       </div>
 
-      <div class="hidden items-center gap-2 lg:flex">
+      <div class="hidden items-center lg:flex">
         <a
           routerLink="/auth/sign-in"
-          class="btn btn-sm"
-          [class]="onDarkBackdrop() ? 'on-scene text-white hover:bg-white/10' : 'btn-ghost'"
-          >Sign in</a
+          class="nav-link text-[0.9375rem]"
+          [class]="onDarkBackdrop() ? 'on-scene text-white' : ''"
+          >Log in</a
         >
-        <a routerLink="/auth/sign-up" class="btn btn-sm btn-primary">Start free</a>
       </div>
 
       <button
@@ -59,7 +59,7 @@
         [attr.aria-label]="menuOpen() ? 'Close menu' : 'Open menu'"
         (click)="toggleMenu()"
       >
-        <ng-icon [name]="menuOpen() ? 'heroXMark' : 'heroBars3'" size="20" />
+        <span class="icon text-[20px]">{{ menuOpen() ? 'close' : 'menu' }}</span>
       </button>
     </div>
   </div>
@@ -74,17 +74,14 @@
             [routerLink]="link.path"
             [fragment]="link.fragment"
             (click)="closeMenu()"
-            class="rounded-lg px-3 py-2.5 text-[0.9375rem] text-ink-soft transition-colors hover:bg-brand-50 hover:text-brand-700"
+            class="rounded-lg px-3 py-2.5 text-[0.9375rem] text-black transition-colors hover:bg-brand-50"
           >
             {{ link.label }}
           </a>
         }
         <div class="rule mt-3 flex flex-col gap-2 pt-4">
           <a routerLink="/auth/sign-in" (click)="closeMenu()" class="btn btn-md btn-secondary">
-            Sign in
-          </a>
-          <a routerLink="/auth/sign-up" (click)="closeMenu()" class="btn btn-md btn-primary">
-            Start free
+            Log in
           </a>
         </div>
       </nav>

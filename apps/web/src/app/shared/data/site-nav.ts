@@ -2,6 +2,11 @@
  * Single source of truth for site navigation.
  * Header, mobile menu, and footer all render from these lists — add a link once, it appears
  * everywhere it belongs.
+ *
+ * Every `fragment` below must match an `id` that actually exists on the landing page
+ * (`#devices`, `#platforms`, `#faq`). An earlier version pointed at `#features`, `#automation`,
+ * `#how-it-works` and `#security`, none of which were ever rendered, so nine links navigated to
+ * `/` and then sat still — looking broken rather than going anywhere.
  */
 export interface NavLink {
   readonly label: string;
@@ -16,35 +21,30 @@ export interface NavGroup {
 }
 
 export const PRIMARY_NAV: readonly NavLink[] = [
-  { label: 'Features', path: '/', fragment: 'features' },
-  { label: 'How it works', path: '/', fragment: 'how-it-works' },
-  { label: 'Automation', path: '/', fragment: 'automation' },
+  { label: 'Product', path: '/', fragment: 'devices' },
+  { label: 'Platforms', path: '/', fragment: 'platforms' },
   { label: 'Pricing', path: '/pricing' },
+  { label: 'FAQ', path: '/', fragment: 'faq' },
 ];
 
 export const FOOTER_NAV: readonly NavGroup[] = [
   {
     title: 'Product',
     links: [
-      { label: 'Features', path: '/', fragment: 'features' },
-      { label: 'How it works', path: '/', fragment: 'how-it-works' },
-      { label: 'Automation', path: '/', fragment: 'automation' },
+      { label: 'Overview', path: '/', fragment: 'devices' },
+      { label: 'Platforms', path: '/', fragment: 'platforms' },
       { label: 'Pricing', path: '/pricing' },
     ],
   },
   {
-    title: 'Developers',
+    title: 'Account',
     links: [
-      { label: 'Local API', path: '/', fragment: 'automation' },
-      { label: 'JS & Python SDK', path: '/', fragment: 'automation' },
-      { label: 'Documentation', path: '/', fragment: 'automation' },
+      { label: 'Sign in', path: '/auth/sign-in' },
+      { label: 'Create account', path: '/auth/sign-up' },
     ],
   },
   {
-    title: 'Company',
-    links: [
-      { label: 'Security', path: '/', fragment: 'security' },
-      { label: 'Contact sales', path: '/auth/sign-up' },
-    ],
+    title: 'Support',
+    links: [{ label: 'FAQ', path: '/', fragment: 'faq' }],
   },
 ];

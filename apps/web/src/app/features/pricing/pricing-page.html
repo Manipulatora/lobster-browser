@@ -1,0 +1,62 @@
+<!-- isolate: the cards' own rim (`.card__border`, z-index -10) is a negative-z child, so it shares
+     a stacking context with these background layers. Pinning them below -10 keeps the rim painting
+     above the background instead of being swallowed by it. -->
+<section class="section relative isolate overflow-hidden">
+  <!-- The site's existing ambient vocabulary — the same violet wash and masked grid the auth
+       screens use — plus a broad wash under the card row and two soft blooms, so the near-black
+       cards have something to lift off rather than floating on flat white. The magenta bloom
+       picks up the same hue the cards' own gradient ends on, tying the two together. -->
+  <div class="pointer-events-none absolute inset-0 z-[-30] bg-aurora"></div>
+  <div class="pointer-events-none absolute inset-0 z-[-30] bg-grid opacity-60"></div>
+  <div
+    class="pointer-events-none absolute inset-0 z-[-20] bg-[radial-gradient(70rem_34rem_at_50%_52%,var(--color-brand-200)_0%,transparent_68%)]"
+  ></div>
+  <div
+    class="pointer-events-none absolute -left-32 top-16 z-[-20] h-[30rem] w-[30rem] rounded-full bg-brand-300/40 blur-[110px]"
+  ></div>
+  <div
+    class="pointer-events-none absolute -right-32 bottom-0 z-[-20] h-[28rem] w-[28rem] rounded-full bg-fuchsia-300/30 blur-[120px]"
+  ></div>
+
+  <!-- Wider than `.container-page` (76rem): five cards in a row need the room, and the default
+       gutter left them stranded in the middle of the viewport. -->
+  <div class="mx-auto w-full max-w-[90rem] px-4 sm:px-6">
+    <h1 class="section-title text-center">Pricing</h1>
+
+    <!-- justify-items-center keeps a card centred in its column once the grid column is wider than
+         the card's own max-width. -->
+    <div
+      class="mt-14 grid justify-items-center gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5"
+    >
+      @for (plan of plans; track plan.name) {
+        <div class="card">
+          <div class="card__border"></div>
+
+          <div class="card_title__container">
+            <span class="card_title">{{ plan.name }}</span>
+            <p class="card_price">
+              {{ plan.price }}@if (plan.period) {
+                <span class="card_period">{{ plan.period }}</span>
+              }
+            </p>
+          </div>
+
+          <hr class="line" />
+
+          <ul class="card__list">
+            @for (feature of plan.features; track feature) {
+              <li class="card__list_item">
+                <span class="check">
+                  <span class="icon check_icon" aria-hidden="true">check</span>
+                </span>
+                <span class="list_text">{{ feature }}</span>
+              </li>
+            }
+          </ul>
+
+          <a class="button" [routerLink]="plan.link">{{ plan.cta }}</a>
+        </div>
+      }
+    </div>
+  </div>
+</section>

@@ -1,0 +1,59 @@
+<h1 class="text-2xl tracking-[-0.02em] text-ink">Create account</h1>
+
+<form [formGroup]="form" (ngSubmit)="submit()" class="mt-8" novalidate>
+  <div>
+    <label class="field-label" for="email">Email</label>
+    <input
+      id="email"
+      type="email"
+      class="field-input"
+      formControlName="email"
+      autocomplete="email"
+      [attr.aria-invalid]="invalid('email') ? 'true' : null"
+      [attr.aria-describedby]="invalid('email') ? 'email-error' : null"
+    />
+    @if (invalid('email')) {
+      <p id="email-error" class="field-error">Enter a valid email address.</p>
+    }
+  </div>
+
+  <div class="mt-5">
+    <label class="field-label" for="password">Password</label>
+    <div class="relative">
+      <input
+        id="password"
+        [type]="showPassword() ? 'text' : 'password'"
+        class="field-input pr-11"
+        formControlName="password"
+        autocomplete="new-password"
+        [attr.minlength]="minPassword"
+        [attr.aria-invalid]="invalid('password') ? 'true' : null"
+        aria-describedby="password-hint"
+      />
+      <button
+        type="button"
+        class="absolute inset-y-0 right-0 flex w-11 items-center justify-center rounded-r-xl text-muted transition-colors hover:text-ink"
+        [attr.aria-label]="showPassword() ? 'Hide password' : 'Show password'"
+        (click)="togglePassword()"
+      >
+        <span class="icon text-[20px]">{{ showPassword() ? 'visibility_off' : 'visibility' }}</span>
+      </button>
+    </div>
+    @if (invalid('password')) {
+      <p id="password-hint" class="field-error">At least {{ minPassword }} characters.</p>
+    } @else {
+      <p id="password-hint" class="mt-1.5 text-xs text-faint">
+        At least {{ minPassword }} characters.
+      </p>
+    }
+  </div>
+
+  <button type="submit" class="btn btn-md btn-primary mt-7 w-full">Create account</button>
+</form>
+
+<p class="mt-8 text-center text-[0.875rem] text-muted">
+  Already have an account?
+  <a routerLink="/auth/sign-in" class="text-brand-600 transition-colors hover:text-brand-700">
+    Sign in
+  </a>
+</p>

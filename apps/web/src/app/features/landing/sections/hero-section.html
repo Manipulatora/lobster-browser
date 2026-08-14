@@ -1,8 +1,9 @@
 <!-- -mt-16 cancels the shell's header offset so a backdrop can run to the very top of the page,
      behind the transparent nav; the padding below restores breathing room for the content.
 
-     Everything conditional here hangs off `backdrop` in hero-section.ts, which is currently false —
-     the section keeps its light treatment while the product film sits beside the copy. -->
+     Everything conditional here hangs off `backdrop` in hero-section.ts. The xylophone (false, the
+     default) washes the section in a LIGHT violet, so the copy is plain black throughout — the
+     `on-scene`/white treatment is for the older, genuinely dark night-sky shader (true) only. -->
 <section
   [appHeaderBackdropTint]="backdrop"
   class="relative isolate -mt-16 flex min-h-[42rem] items-center overflow-hidden lg:min-h-[46rem]"
@@ -14,84 +15,43 @@
 
     <!-- Layer 2: the animated shader canvas, fading in once it has a frame to show. -->
     <app-hero-backdrop class="absolute inset-0 -z-10" />
+  } @else {
+    <!-- The xylophone is the hero's own backdrop now, bounded by nothing but this section — full
+         bleed behind the copy, not a framed card beside it. -->
+    <app-xylophone-hero class="absolute inset-0 -z-10" />
   }
 
-  <div class="container-page relative w-full pb-24 pt-40 sm:pt-44">
-    <div
-      class="grid items-center gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(28rem,0.92fr)] lg:gap-6 xl:gap-10"
-    >
-      <div class="max-w-2xl">
-        <h1
-          class="text-balance text-4xl leading-[1.06] tracking-[-0.03em] sm:text-5xl lg:text-[3.6rem]"
-          [class]="backdrop ? 'on-scene text-white' : 'text-ink'"
-        >
-          Manage multiple accounts securely.
-          <span class="block" [class]="backdrop ? 'text-brand-200' : 'text-gradient-brand'">
-            Save time with intelligent agents.
-          </span>
-        </h1>
-
-        <p
-          class="mt-7 max-w-xl text-pretty text-base leading-relaxed sm:text-lg"
-          [class]="backdrop ? 'on-scene text-white/85' : 'text-muted'"
-        >
-          Create and manage browser profiles at scale—without operational friction, IP bans, or
-          unnecessary overhead.
-        </p>
-
-        <div class="mt-10 flex flex-wrap items-center gap-5">
-          <app-shiny-cta link="/auth/sign-up">Get started</app-shiny-cta>
-          <a
-            routerLink="/pricing"
-            class="text-[0.9375rem] underline-offset-4 transition-colors hover:underline"
-            [class]="
-              backdrop
-                ? 'on-scene text-white/85 hover:text-white'
-                : 'text-ink-soft hover:text-brand-700'
-            "
-          >
-            View pricing
-          </a>
-        </div>
-      </div>
-
-      <div
-        class="relative isolate mx-auto w-full max-w-[36rem] overflow-hidden lg:mx-0 lg:justify-self-end"
+  <!-- pointer-events-none: this wrapper is full-width (container-page), but only the text column
+       inside it has any content. Left auto, its empty box — everywhere to the right of the copy —
+       would sit over the canvas and swallow every hover/click before the xylophone ever saw it. -->
+  <div class="container-page pointer-events-none relative w-full pb-24 pt-40 sm:pt-44">
+    <div class="pointer-events-auto max-w-2xl">
+      <h1
+        class="text-balance text-5xl leading-[1.04] tracking-[-0.03em] sm:text-6xl lg:text-[4.5rem]"
+        [class]="backdrop ? 'on-scene text-white' : 'text-black'"
       >
-        <video
-          class="block aspect-square w-full object-contain motion-reduce:hidden"
-          autoplay
-          muted
-          loop
-          playsinline
-          preload="metadata"
-          poster="/video/lobster-hero-v3-poster.webp"
-          width="1300"
-          height="1300"
-          aria-hidden="true"
-          tabindex="-1"
-        >
-          <source src="/video/lobster-hero-v3.webm" type="video/webm" />
-        </video>
-        <img
-          class="hidden aspect-square w-full object-contain motion-reduce:block"
-          src="/video/lobster-hero-v3-poster.webp"
-          alt=""
-          width="900"
-          height="900"
-        />
-        <!-- The matte is drawn by the browser, so the outer area stays exact page-white even after
-             the film passes through a YUV video codec. Its aperture matches the compositor. -->
-        <span
-          class="pointer-events-none absolute inset-[6.615%] z-10 rounded-[10.46%]"
-          style="box-shadow: 0 0 0 100vmax #fff"
-          aria-hidden="true"
-        ></span>
-        <span class="sr-only">
-          A seamless lifestyle film showing people running their work with Lobster Browser, a violet
-          virtual lobster performing agentic tasks, and platform icons flowing into the Lobster
-          mark.
+        Manage accounts securely.
+        <span class="block" [class]="backdrop ? 'text-brand-200' : 'text-black'">
+          Save time with AI agents.
         </span>
+      </h1>
+
+      <p
+        class="mt-7 max-w-xl text-pretty text-base leading-relaxed sm:text-lg"
+        [class]="backdrop ? 'on-scene text-white/85' : 'text-black'"
+      >
+        Run secure browser profiles at scale—no bans, no busywork.
+      </p>
+
+      <div class="mt-10 flex flex-wrap items-center gap-5">
+        <app-shiny-cta link="/auth/sign-up">Get started</app-shiny-cta>
+        <a
+          routerLink="/pricing"
+          class="nav-link text-[0.9375rem]"
+          [class]="backdrop ? 'on-scene text-white/85' : ''"
+        >
+          View pricing
+        </a>
       </div>
     </div>
   </div>
