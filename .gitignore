@@ -78,3 +78,6 @@ __pycache__/
 .venv/
 venv/
 ci/validation/reports/*.png
+
+# Local GitHub token handed over for a one-off push — never commit.
+ghtoken.txt
