@@ -24,6 +24,8 @@ export class LazyBrowserDriver implements BrowserDriver {
   constructor(
     /** Asks the host for a CDP endpoint (emitting `run.needsBrowser` + awaiting the launch). */
     private readonly requestWs: () => Promise<string>,
+    /** Async egress check for explicit HTTP(S) navigations; injected by the manager for testability. */
+    private readonly preflightNavigation: (url: string) => Promise<void> = async () => {},
   ) {}
 
   ready(): boolean {
@@ -95,7 +97,12 @@ export class LazyBrowserDriver implements BrowserDriver {
     return (await this.ensure()).uploadFiles(point, paths);
   }
   async navigate(url: string): Promise<void> {
-    return (await this.ensure()).navigate(url);
+    // Attach first: a lazy run may cause the desktop core to launch the profile here, and only that
+    // launch tells us whether DNS happens locally or at an upstream proxy. The blank browser is safe;
+    // no destination request is dispatched until preflight succeeds.
+    const real = await this.ensure();
+    await this.preflightNavigation(url);
+    return real.navigate(url);
   }
   async goBack(): Promise<void> {
     return (await this.ensure()).goBack();
@@ -104,13 +111,26 @@ export class LazyBrowserDriver implements BrowserDriver {
     return (await this.ensure()).listTabs();
   }
   async newTab(url?: string, opts?: { background?: boolean }): Promise<void> {
-    return (await this.ensure()).newTab(url, opts);
+    const real = await this.ensure();
+    if (url !== undefined) await this.preflightNavigation(url);
+    return real.newTab(url, opts);
   }
   async switchTab(index: number): Promise<void> {
     return (await this.ensure()).switchTab(index);
   }
   async closeTab(index: number): Promise<void> {
     return (await this.ensure()).closeTab(index);
+  }
+  // Id addressing is not a nicety the wrapper may skip: the tool schema tells the model to address
+  // tabs by the `tabId` from `tab list` and the printed list carries no positions at all, so a driver
+  // without these leaves the model with nothing to aim at. Worse, the positional fallback indexes the
+  // UNFILTERED target array while the printed list hides policy-denied tabs, so a model counting rows
+  // switches to or closes a tab it never saw.
+  async switchTabById(id: string): Promise<void> {
+    return (await this.ensure()).switchTabById(id);
+  }
+  async closeTabById(id: string): Promise<void> {
+    return (await this.ensure()).closeTabById(id);
   }
   async screenshot(): Promise<string> {
     return (await this.ensure()).screenshot();
@@ -123,6 +143,16 @@ export class LazyBrowserDriver implements BrowserDriver {
   }
   async waitForSettle(timeoutMs?: number): Promise<void> {
     if (this.real) return this.real.waitForSettle(timeoutMs);
+  }
+  /**
+   * Adoption happens on the real driver whether or not anyone asks about it — `waitForSettle` moves the
+   * page session to any unseen target, including one the human opened. Dropping this forwarder does not
+   * stop the switch, it only stops the model being TOLD, which leaves it clicking coordinates measured
+   * on a page it is no longer on. Synchronous and attach-free on purpose: a browser that does not exist
+   * has adopted nothing, so `undefined` is the truthful answer and no launch is worth provoking for it.
+   */
+  takeAdoptedPopup(): string | undefined {
+    return this.real?.takeAdoptedPopup();
   }
 
   close(): void {

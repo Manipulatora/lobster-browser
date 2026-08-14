@@ -1,11 +1,15 @@
 import { open, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, relative, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { isAbsolute, parse, relative, sep } from 'node:path';
 import type { AgentAction, AgentConfig } from '@lobster/shared-types';
+import { normalizeActionKey } from './actions.js';
 import { assessBrowserConfig } from './browser-config-guard.js';
 import type { BrowserConfigCommand, BrowserDriver } from './driver.js';
 import { MAX_SCREENSHOT_BASE64_CHARS } from './driver.js';
-import { assessNavigation } from './policy.js';
+import { NAME_ROLE_HELPERS } from './perception/extract-script.js';
+import { assessCurrentPage, assessNavigation, isTextEntryElement } from './policy.js';
 import { isSensitiveElement, redactUrl } from './security.js';
+import { redactCredentialLikeText } from './sensitive-text.js';
 import type { PerceivedElement, RawPerception } from './types.js';
 
 export type Sleep = (ms: number) => Promise<void>;
@@ -29,6 +33,11 @@ export interface ExecOptions {
   signal?: AbortSignal;
   /** The loop already obtained a human confirmation for a cross-domain destination. */
   navigationApproved?: boolean;
+  /**
+   * Durable write barrier installed by the run loop. Mutating actions call this only after every
+   * deterministic preflight has passed and immediately before the first browser-side effect.
+   */
+  beforeEffect?: () => Promise<void>;
 }
 
 /**
@@ -180,26 +189,25 @@ const EXTRACT_TEXT = `(() => {
  * Deliberately conservative: it only refuses when it can positively identify a DIFFERENT labelled
  * control. An unreadable point, a driver that cannot evaluate, or an ambiguous match all proceed, so
  * this can cost a wrong click but never blocks a correct one.
+ *
+ * The identification MUST use the same accessible-name derivation perception used to produce
+ * `element.name` ({@link NAME_ROLE_HELPERS}). A second, independent heuristic here does not merely
+ * risk a missed drift — it manufactures drift that never happened: naming a control by `value`
+ * reported an untouched consent checkbox as `input "yes"`, a labelled `<select>` as its option list,
+ * and a field the agent had just filled as its own typed text, so ticking a box, choosing from a
+ * select, and correcting a typo were all permanently refused as "the page moved".
  */
 async function pointStillMatches(
   driver: BrowserDriver,
   element: PerceivedElement,
 ): Promise<{ ok: true } | { ok: false; found: string }> {
   const script = `(() => {
-    const el = document.elementFromPoint(${Math.round(element.x)}, ${Math.round(element.y)});
+${NAME_ROLE_HELPERS}
+    const el = deepElementFromPoint(${Math.round(element.x)}, ${Math.round(element.y)});
     if (!el) return null;
     const target = el.closest('a,button,input,textarea,select,summary,label,[role],[onclick],[tabindex],[contenteditable]') || el;
-    const name = (
-      target.getAttribute('aria-label') ||
-      target.getAttribute('placeholder') ||
-      target.getAttribute('title') ||
-      target.getAttribute('alt') ||
-      target.value ||
-      target.innerText ||
-      target.textContent ||
-      ''
-    ).replace(/\\s+/g, ' ').trim().slice(0, 120);
-    return { name: name, role: (target.getAttribute('role') || target.tagName || '').toLowerCase() };
+    const tag = target.tagName.toLowerCase();
+    return { name: nameOf(target, tag), role: roleOf(target, tag) };
   })()`;
   let seen: { name?: string; role?: string } | null = null;
   try {
@@ -230,6 +238,7 @@ export async function executeAction(
 ): Promise<ExecOutcome> {
   const sleep = opts.sleep ?? realSleep;
   const maxWaitMs = opts.maxWaitMs ?? 8000;
+  const beforeEffect = opts.beforeEffect ?? (async () => {});
   try {
     assertNotAborted(opts.signal);
     switch (action.kind) {
@@ -238,6 +247,7 @@ export async function executeAction(
         if (!el) return missing(action.id, perception);
         const fresh = await pointStillMatches(driver, el);
         if (!fresh.ok) return staleTarget(action.id, el, fresh.found);
+        await beforeEffect();
         await driver.click(point(el), {
           ...(action.button ? { button: action.button } : {}),
           ...(action.count ? { count: action.count } : {}),
@@ -248,6 +258,7 @@ export async function executeAction(
       case 'click_at': {
         if (!inViewport(action.x, action.y, perception))
           return { outcome: 'blocked: click coordinates are outside the current viewport' };
+        await beforeEffect();
         await driver.click(
           { x: action.x, y: action.y },
           {
@@ -268,8 +279,14 @@ export async function executeAction(
       case 'type': {
         const el = findElement(perception, action.id);
         if (!el) return missing(action.id, perception);
+        if (!isTextEntryElement(el)) {
+          return {
+            outcome: `blocked: [${action.id}] is ${el.role} ${JSON.stringify(el.name)}, not a text-entry control`,
+          };
+        }
         const stillThere = await pointStillMatches(driver, el);
         if (!stillThere.ok) return staleTarget(action.id, el, stillThere.found);
+        await beforeEffect();
         await driver.click(point(el));
         if (action.clear) await driver.selectAll();
         await driver.type(action.text);
@@ -287,6 +304,7 @@ export async function executeAction(
       case 'type_at': {
         if (!inViewport(action.x, action.y, perception))
           return { outcome: 'blocked: type coordinates are outside the current viewport' };
+        await beforeEffect();
         await driver.click({ x: action.x, y: action.y });
         if (action.clear) await driver.selectAll();
         await driver.type(action.text);
@@ -301,6 +319,7 @@ export async function executeAction(
       case 'select': {
         const el = findElement(perception, action.id);
         if (!el) return missing(action.id, perception);
+        await beforeEffect();
         await driver.select(point(el), action.values);
         await driver.waitForSettle(3000);
         return {
@@ -308,11 +327,15 @@ export async function executeAction(
         };
       }
       case 'key': {
-        if (!isSafeKey(action.key))
-          return { outcome: `blocked: unsupported key ${JSON.stringify(action.key)}` };
-        await driver.pressKey(action.key);
+        // Resolve BEFORE the durable barrier: an unpressable key is a deterministic refusal, and a
+        // refusal recorded after `beforeEffect()` is indistinguishable from an effect that may have
+        // landed, which blocks every subsequent run on the profile.
+        const key = normalizeActionKey(action.key);
+        if (!key) return { outcome: `blocked: unsupported key ${JSON.stringify(action.key)}` };
+        await beforeEffect();
+        await driver.pressKey(key);
         await driver.waitForSettle(3000);
-        return { outcome: `pressed ${action.key}` };
+        return { outcome: `pressed ${key}` };
       }
       case 'scroll': {
         if (action.id !== undefined) {
@@ -335,6 +358,7 @@ export async function executeAction(
         const to = findElement(perception, action.toId);
         if (!from) return missing(action.fromId, perception);
         if (!to) return missing(action.toId, perception);
+        await beforeEffect();
         await driver.drag(point(from), point(to));
         await driver.waitForSettle(3000);
         return { outcome: `dragged [${action.fromId}] to [${action.toId}]` };
@@ -350,6 +374,7 @@ export async function executeAction(
         const stillThere = await pointStillMatches(driver, el);
         if (!stillThere.ok) return staleTarget(action.id, el, stillThere.found);
         const paths = await validateUploadPaths(action.paths, roots);
+        await beforeEffect();
         await driver.uploadFiles(point(el), paths);
         await driver.waitForSettle(3000);
         return {
@@ -367,19 +392,34 @@ export async function executeAction(
             return { outcome: `blocked: ${decision.reason}` };
           }
         }
+        await beforeEffect();
         await driver.navigate(action.url);
         await driver.waitForSettle();
         return { outcome: `navigated to ${redactUrl(action.url)}` };
       }
       case 'back':
+        await beforeEffect();
         await driver.goBack();
         await driver.waitForSettle();
         return { outcome: 'went back' };
       case 'tab': {
         if (action.operation === 'list') {
           const tabs = await driver.listTabs();
+          const tabPolicy = opts.config ?? { maxSteps: 1, autonomy: 'auto' as const };
+          const visible = tabs.filter(
+            (tab) => assessCurrentPage(tab.url, tabPolicy).verdict !== 'deny',
+          );
+          const hidden = tabs.length - visible.length;
           return {
-            outcome: `tabs: ${tabs.map((tab) => `${tab.active ? '*' : ''}tabId=${tab.id} ${JSON.stringify(tab.title)} ${redactUrl(tab.url)}`).join(' | ') || '(none)'}`,
+            outcome: `tabs: ${
+              visible
+                .map((tab) => {
+                  const title = redactCredentialLikeText(tab.title).text;
+                  const url = redactCredentialLikeText(redactUrl(tab.url)).text;
+                  return `${tab.active ? '*' : ''}tabId=${tab.id} ${JSON.stringify(title)} ${url}`;
+                })
+                .join(' | ') || '(none)'
+            }${hidden ? ` | ${hidden} tab(s) hidden by run policy` : ''}`,
           };
         }
         if (action.operation === 'new') {
@@ -392,6 +432,7 @@ export async function executeAction(
               return { outcome: `blocked: ${decision.reason}` };
             }
           }
+          await beforeEffect();
           await driver.newTab(action.url);
           await driver.waitForSettle();
           return { outcome: `opened a new tab${action.url ? ` at ${redactUrl(action.url)}` : ''}` };
@@ -400,6 +441,7 @@ export async function executeAction(
           // Stable addressing: unaffected by other tabs opening or closing between list and act.
           const byId = action.operation === 'switch' ? driver.switchTabById : driver.closeTabById;
           if (!byId) return { outcome: 'error: this driver cannot address tabs by id' };
+          await beforeEffect();
           await byId.call(driver, action.tabId);
           if (action.operation === 'switch') await driver.waitForSettle();
           return {
@@ -409,10 +451,12 @@ export async function executeAction(
         if (action.index === undefined)
           return { outcome: `error: tab ${action.operation} needs a tabId or index` };
         if (action.operation === 'switch') {
+          await beforeEffect();
           await driver.switchTab(action.index);
           await driver.waitForSettle();
           return { outcome: `switched to tab [${action.index}]` };
         }
+        await beforeEffect();
         await driver.closeTab(action.index);
         return { outcome: `closed tab [${action.index}]` };
       }
@@ -468,6 +512,7 @@ export async function executeAction(
           // the panel. The agent drives the background tab's controls over CDP; Chromium applies the
           // change live. When done, the agent should CLOSE this tab (tab close) to leave the user where
           // they were. The guard already screened the URL; this stays leak-free (Page.navigate only).
+          await beforeEffect();
           await driver.newTab(assessment.settingsUrl, { background: true });
           await driver.waitForSettle();
           const hint = action.value
@@ -488,6 +533,7 @@ export async function executeAction(
           ...(action.setting ? { setting: action.setting } : {}),
           ...(action.behavior ? { behavior: action.behavior } : {}),
         };
+        await beforeEffect();
         const result = await driver.browserConfig(command);
         return { outcome: result };
       }
@@ -559,13 +605,6 @@ function clip(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-function isSafeKey(key: string): boolean {
-  if (/^[A-Za-z0-9 ]$/.test(key)) return true;
-  return /^(Enter|Tab|Backspace|Escape|Delete|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Space|Control\+A|Meta\+A)$/i.test(
-    key,
-  );
-}
-
 /** Absolute cap on an attached file. Chrome would happily stream 10GB to an attacker's server. */
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
@@ -594,9 +633,19 @@ const SECRET_NAME =
 async function validateUploadPaths(paths: string[], roots: string[]): Promise<string[]> {
   const denied = new Error('upload path is not permitted');
   const canonicalRoots: string[] = [];
+  let canonicalHome = homedir();
+  try {
+    canonicalHome = await realpath(canonicalHome);
+  } catch {
+    // A missing/unreadable home cannot broaden access; retain the lexical value as a deny target.
+  }
   for (const root of roots) {
     try {
-      canonicalRoots.push(await realpath(root));
+      const canonical = await realpath(root);
+      // Configuration validation catches literal root/home paths. Repeat the decision after realpath
+      // so `/tmp/..`, `$HOME/.`, and symlinks cannot turn a narrow-looking entry into broad access.
+      if (canonical === parse(canonical).root || canonical === canonicalHome) continue;
+      canonicalRoots.push(canonical);
     } catch {
       continue; // a configured root that does not exist simply grants nothing
     }
@@ -628,9 +677,18 @@ async function validateUploadPaths(paths: string[], roots: string[]): Promise<st
     try {
       const handle = await open(canonical, 'r');
       try {
-        const head = Buffer.alloc(4096);
-        const { bytesRead } = await handle.read(head, 0, head.length, 0);
-        if (SECRET_CONTENT.test(head.subarray(0, bytesRead).toString('latin1'))) throw denied;
+        const chunk = Buffer.alloc(64 * 1024);
+        let offset = 0;
+        let carry = '';
+        while (offset < info.size) {
+          const { bytesRead } = await handle.read(chunk, 0, chunk.length, offset);
+          if (bytesRead === 0) break;
+          offset += bytesRead;
+          const text = carry + chunk.subarray(0, bytesRead).toString('latin1');
+          if (SECRET_CONTENT.test(text) || redactCredentialLikeText(text).sensitive) throw denied;
+          // Preserve enough overlap for a credential/private-key marker split across read boundaries.
+          carry = text.slice(-512);
+        }
       } finally {
         await handle.close();
       }

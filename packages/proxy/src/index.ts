@@ -13,6 +13,7 @@ export {
   validateProxyConfig,
   validateProxyRotationUrl,
 } from './parse.js';
+export { proxyDispatcher, proxyDispatcherForUrl } from './dispatcher.js';
 export type { GeoProvider, DeriveGeoOptions } from './geo.js';
 export {
   StaticGeoProvider,

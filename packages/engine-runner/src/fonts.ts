@@ -83,6 +83,40 @@ function preferredFamily(
 }
 
 /**
+ * Families the pack can imitate at the level a fingerprinting probe actually measures.
+ *
+ * A font probe compares ADVANCE WIDTHS, so "same class" is not the bar — metric compatibility is.
+ * Liberation Sans/Serif/Mono are exact metric clones of Arial/Times New Roman/Courier New, and the
+ * pack also carries Carlito and Caladea, which are exact clones of Calibri and Cambria. Those two
+ * were shipped and then never used: the class heuristic sent Calibri to Liberation Sans and Cambria
+ * to Liberation Serif, so a persona claiming Calibri measured as Arial — an inconsistency any width
+ * probe reads directly, on a font every Windows install has.
+ *
+ * Everything not listed here still falls back to its class face, which is a real and measurable tell:
+ * ~358 of a Windows persona's 435 claimed families land on Liberation Sans and so share one advance-
+ * width vector. Reporting them absent instead would leave a Windows persona exposing a few dozen
+ * families where a real install exposes hundreds, which is no better. Closing it needs more
+ * metric-compatible faces in the pack, not another rule here. Recorded in docs/ENGINEERING.md §2.
+ */
+const METRIC_CLONES: Record<string, string> = {
+  Arial: 'Liberation Sans',
+  Helvetica: 'Liberation Sans',
+  'Arial Narrow': 'Liberation Sans Narrow',
+  'Times New Roman': 'Liberation Serif',
+  Times: 'Liberation Serif',
+  'Courier New': 'Liberation Mono',
+  Courier: 'Liberation Mono',
+  Calibri: 'Carlito',
+  Cambria: 'Caladea',
+};
+
+/** The metric clone for `name` when the pack physically carries it. */
+function metricClone(name: string, physicalFamilies: readonly string[]): string | undefined {
+  const clone = METRIC_CLONES[name];
+  return clone && physicalFamilies.includes(clone) ? clone : undefined;
+}
+
+/**
  * Classify an arbitrary font-family name into a serif/sans/mono bucket by its name, so a claimed
  * family with no bundled face still resolves to a metric-class-appropriate open face.
  */
@@ -137,10 +171,11 @@ function cjkLanguageRules(physicalFamilies: readonly string[]): string {
  * Build the private fontconfig XML.
  *
  * The bundled open pack (`physicalFamilies`) is the ONLY physical source. On top of that we alias
- * every family the persona CLAIMS but the pack does not physically carry onto the bundled face of the
- * same serif/sans/mono class, so a CSS width-probe / `src:local()` request for e.g. `Arial` or
- * `Segoe UI` resolves (with metric-compatible-ish geometry) instead of falling back to an arbitrary
- * default. This never adds physical faces (so `queryLocalFonts()` still enumerates only the pack —
+ * every family the persona CLAIMS but the pack does not physically carry onto its metric clone where
+ * one exists and onto the bundled face of the same serif/sans/mono class otherwise, so a CSS
+ * width-probe / `src:local()` request for e.g. `Arial` or `Segoe UI` resolves instead of falling back
+ * to an arbitrary default. Only the clones match real advance widths; the class fallback does not,
+ * and that gap is documented in docs/ENGINEERING.md §2. This never adds physical faces (so `queryLocalFonts()` still enumerates only the pack —
  * full enumeration fidelity needs licensed bundles + a native hook), and it never fails the launch.
  */
 export function buildFontConfig(
@@ -235,7 +270,11 @@ export function buildFontConfig(
   for (const family of claimedFamilies) {
     if (skip.has(family)) continue;
     skip.add(family);
-    lines.push(alias(family, preferByClass[familyClass(family)]));
+    // A metric clone first: matching advance widths is what a font probe actually measures, and the
+    // class fallback is only an approximation of it.
+    lines.push(
+      alias(family, metricClone(family, physicalFamilies) ?? preferByClass[familyClass(family)]),
+    );
   }
   const cjkRules = cjkLanguageRules(physicalFamilies);
   return `<?xml version="1.0"?>

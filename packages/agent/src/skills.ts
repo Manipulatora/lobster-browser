@@ -94,13 +94,12 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
  *
  * A LEARNED skill never silently replaces a built-in: built-ins are vetted product content, learned
  * ones were written by the model after reading pages it does not control. They are name-spaced apart,
- * labelled, and — when a host is known — only the ones learned on that host are offered, so a procedure
- * derived on one site cannot steer a run on another.
+ * labelled, and only offered after a trustworthy current host is known and matches their scope. A run
+ * starts before it necessarily has a page; treating an empty host as "match everything" would replay
+ * page-derived instructions from every previously visited site into that first model turn.
  */
 export function formatSkills(learned: BuiltinSkill[] = [], query = '', host = ''): string {
-  const scoped = learned.filter(
-    (skill) => !skill.domain || !host || hostMatches(host, skill.domain),
-  );
+  const scoped = scopedLearnedSkills(learned, host);
   const all = [
     ...BUILTIN_SKILLS,
     ...scoped.filter((s) => !BUILTIN_SKILLS.some((b) => b.name === s.name)),
@@ -116,9 +115,79 @@ export function formatSkills(learned: BuiltinSkill[] = [], query = '', host = ''
 
 /** `shop.example.com` matches a skill scoped to `example.com`, but never the reverse. */
 export function hostMatches(host: string, domain: string): boolean {
-  const h = host.toLowerCase().replace(/\.$/, '');
-  const d = domain.toLowerCase().replace(/\.$/, '');
-  return h === d || h.endsWith(`.${d}`);
+  const h = normalizeSkillHost(host);
+  const d = normalizeSkillHost(domain);
+  if (!h || !d) return false;
+  return h === d || (isIP(d) === 0 && h.endsWith(`.${d}`));
+}
+
+/**
+ * Canonical hostname representation used for learned-skill storage and matching.
+ *
+ * `URL.hostname` normally hands the harness ASCII/punycode already, but persisted data can predate that
+ * invariant or be malformed. Parsing through URL gives us the platform's IDNA conversion and rejects
+ * paths, credentials, ports, whitespace and empty values. The round-trip equality check also prevents a
+ * value such as `example.com/path` from being silently narrowed to a different scope.
+ */
+export function normalizeSkillHost(value: string): string | undefined {
+  const candidate = value.trim().toLowerCase().replace(/\.$/, '');
+  // Learned procedures are web-host scoped, never origin/authority scoped. In particular, reject a
+  // port explicitly instead of trusting URL.port: URL parsing erases default ports (`:443`), which
+  // would otherwise make malformed stored scope look valid after normalization.
+  if (
+    !candidate ||
+    /[\\/@\s:[\]]/.test(candidate) ||
+    candidate.startsWith('.') ||
+    candidate.endsWith('.') ||
+    candidate.includes('..')
+  ) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(`https://${candidate}/`);
+    if (
+      parsed.username ||
+      parsed.password ||
+      parsed.port ||
+      parsed.pathname !== '/' ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return undefined;
+    }
+    const normalized = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    if (
+      !normalized ||
+      normalized.startsWith('.') ||
+      normalized.endsWith('.') ||
+      normalized.includes('..')
+    ) {
+      return undefined;
+    }
+    // A learned procedure scoped to a public/private suffix (for example `co.uk` or `github.io`)
+    // would be disclosed to unrelated registrants/tenants through subdomain matching. Reuse the
+    // maintained PSL boundary rather than maintaining a second, drifting suffix list here.
+    try {
+      return normalizeAllowedDomains([normalized])[0];
+    } catch {
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** Only well-scoped learned procedures may enter a prompt; unknown host means none. */
+function scopedLearnedSkills(skills: readonly BuiltinSkill[], host: string): BuiltinSkill[] {
+  const currentHost = normalizeSkillHost(host);
+  if (!currentHost) return [];
+  return skills.filter(
+    (skill) =>
+      skill.origin === 'learned' &&
+      Boolean(skill.domain) &&
+      !BUILTIN_SKILLS.some((builtin) => builtin.name === skill.name) &&
+      hostMatches(currentHost, skill.domain ?? ''),
+  );
 }
 
 /** Progressive disclosure: only send procedures whose metadata overlaps the current task. */
@@ -170,14 +239,12 @@ export function selectSkills(skills: BuiltinSkill[], query: string, limit = 4): 
  * procedure written while reading one site can never surface on another.
  */
 export function formatLearnedForHost(skills: readonly BuiltinSkill[], host: string): string {
-  const scoped = skills
-    .filter(
-      (skill) => skill.origin === 'learned' && skill.domain && hostMatches(host, skill.domain),
-    )
-    .slice(0, 4);
+  const scoped = scopedLearnedSkills(skills, host).slice(0, 4);
   if (scoped.length === 0) return '';
   return (
     `Procedures a past run recorded for this site (notes, not rules — verify against the page):\n` +
     scoped.map((s) => `- ${s.name} — when ${s.trigger}: ${s.steps}`).join('\n')
   );
 }
+import { isIP } from 'node:net';
+import { normalizeAllowedDomains } from './policy.js';

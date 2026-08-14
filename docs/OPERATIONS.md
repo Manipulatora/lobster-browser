@@ -1,6 +1,6 @@
 # Lobium Operations — Build, Install, Validate, Contracts
 
-Everything needed to build the engine, ship the product, run the gates, and integrate. Updated 2026-07-21.
+Everything needed to build the engine, ship the product, run the gates, and integrate. Updated 2026-08-10.
 
 ## 1. Build the Lobium engine
 
@@ -66,18 +66,47 @@ headless/Xvfb hosts; without it, cookies become undecryptable on the next launch
 ## 3. Validation gates
 
 ```bash
-# Software gate (runs anywhere; no GPU/proxy needed)
-node ci/validation/battle-test.mjs        # offline coherence incl. cross-context worker
-node ci/validation/deep-probe-50.mjs      # 50 personas: surface application + tells + distinctness
-node ci/validation/regression-gate.mjs    # orchestrates software checks vs committed baselines
+# Software gate (runs anywhere; no GPU, proxy, or engine binary needed)
+node ci/validation/regression-gate.mjs    # in-process coherence/diversity floors + fingerprint units
 
-# Real-GPU gate (release blocker; needs a real-GPU host — see docs/ENGINEERING.md §4/§6)
-LOBSTER_GPU=gpu node ci/validation/gate.mjs
+# Real-browser agent fixtures (needs an engine; no model, no credentials, no network)
+node ci/validation/e2e/agent-browser-e2e.mjs             # interim Chromium: browser-integration evidence
+LOBSTER_LOBIUM_BIN=/path/to/chrome \
+  node ci/validation/e2e/agent-browser-e2e.mjs           # shipping engine: Gate B evidence
+
+# Engine gate (needs the native Lobium binary; a REAL GPU for a release-valid verdict)
+LOBSTER_LOBIUM_BIN=/path/to/chrome node ci/validation/battle-test.mjs   # per-persona surface application
+LOBSTER_LOBIUM_BIN=/path/to/chrome node ci/validation/deep-probe-50.mjs # 50 personas: tells + distinctness
+LOBSTER_GPU=gpu node ci/validation/gate.mjs                             # release blocker, real-GPU only
+
+# Deterministic Lobee gates
+npm test --workspace @lobster/agent
+npm test --workspace @lobster/engine-runner
+npm test --workspace @lobster/lobee-app
+node --test ci/validation/agent-battery.test.mjs
+npm run typecheck --workspaces --if-present
+npm run build --workspace @lobster/lobee-app
+npx prettier --check "packages/**/*.{ts,tsx,js,json}"
 ```
 
-`.github/workflows/ci.yml` runs the software gate; `.github/workflows/real-gpu-gate.yml` runs the release
-gate on a self-hosted `real-gpu` runner. The evidence policy in `detector-matrix.json` forbids software
+`battle-test.mjs` and `deep-probe-50.mjs` are **not** part of the "runs anywhere" tier: both launch the
+native binary, and `battle-test.mjs` reports a host-GPU tell on a software renderer, so only a real-GPU
+host produces a release-valid verdict from them. They were listed as offline/software checks and are
+not.
+
+`regression-gate.mjs` is an in-process coherence and diversity floor plus the fingerprint unit suite. It
+reads **no committed baseline**, launches **no browser**, and runs **no automation-tell probe**; earlier
+wording here and in `docs/ENGINEERING.md` claimed all three.
+
+`.github/workflows/ci.yml` runs the software gate, the deterministic Lobee suites, and the real-browser
+agent fixtures on an interim Chromium; `.github/workflows/real-gpu-gate.yml` runs the release gate on a
+self-hosted `real-gpu` runner. The evidence policy in `detector-matrix.json` forbids software
 renderers, so a genuine detection pass requires real hardware.
+
+The Lobee paid/live capability battery is a separate protected workflow. It requires an explicit Lobium
+binary and managed-proxy credential pair, gives every attempt the validated configured token budget, and
+returns non-zero `BLOCKED` when its environment is incomplete. Deterministic grader success is not a live
+model/browser pass; no paid live pass was run during the 2026-08-10 hardening work.
 
 ## 4. Runtime contracts
 
@@ -97,11 +126,48 @@ provider credential and per-profile memory key, then the sidecar streams session
 notifications. Never log or persist the raw `agent.start` params because they contain the in-memory provider
 credential during that call.
 
+The panel's loopback HTTP bridge is bound to one profile token. Authentication uses the
+`x-lobee-token` header, including for the event stream; do not put the token in a URL, query string, log,
+or telemetry. The panel attaches a random request id to `/run` and `/input`; the sidecar binds that id to
+the request body and deduplicates a bounded retry after response loss. Reusing an id with different input
+is rejected. The deduplication window is process-local: a full sidecar restart also destroys its prior
+in-memory `AgentManager`, so clients reconcile the new bridge identity instead of assuming an old run
+survived. The extension token and memory-directory locator are staged while the profile's extension snapshot
+is prepared so the launched panel can read `bridge.json`; the memory key and direct/remote-proxy route are
+committed only after launch succeeds. A successful owned profile stop revokes the registry entry. An
+out-of-band browser crash/close can leave it present until a later successful relaunch-and-stop or sidecar
+restart.
+
 Agent state lives at:
 
 - `profiles.sqlite / agent_secrets` — provider credentials and memory keys, each AES-GCM encrypted;
 - `profiles/<id>/agent/memory.json` — authenticated per-profile facts/settings;
-- `profiles/<id>/agent/runs/*.json` — authenticated run records with secret actions redacted.
+- `profiles/<id>/agent/runs/*.json` — authenticated run records with secret actions redacted;
+- `profiles/<id>/agent/journals/*.journal` — AES-GCM encrypted, path-authenticated safety journals with
+  non-executable action digests and durable dispatch boundaries;
+- `profiles/<id>/agent/.lobee-agent.lock` — an exclusive per-profile manager lease containing only
+  process ownership metadata, not task/action content;
+- extension `chrome.storage.local` (or standalone `localStorage`) — a bounded, heuristically redacted
+  plaintext task/result/step fallback used only while encrypted thread history cannot be verified. It is
+  not safe storage for arbitrary PII or private business content and is retired only after exact encrypted-
+  thread verification; if no counterpart is ever written, it can remain until manually cleared.
+
+Before admitting a new run, the sidecar authenticates every unfinished journal. It closes clean,
+not-yet-dispatched, and read-only checkpoints without replaying them. A corrupt journal, an interrupted
+sensitive handoff, failed navigation reconciliation, or an action whose write/consequential effect may
+already have happened fails closed. The manager acquires the profile lease before admission and holds it
+through the run. It automatically replaces a lease only when its process owner is provably dead; a live,
+corrupt, or unverifiable lease is treated as active.
+
+The executor records dispatch only after deterministic preflight and immediately before its first effect.
+After a mutating browser driver call, a fresh readable observation with matching full-URL identity is
+required before the journal records success. This does not prove action-specific business success; for a
+purchase, send, deletion, or similar operation, inspect an independent receipt or current service state.
+
+The current desktop panel does not yet expose the explicit operator-resolution workflow. Preserve the
+journal and verify the live browser/external service state rather than repeatedly restarting or deleting
+the record. Do not delete `.lobee-agent.lock` merely to bypass an active/corrupt owner check. The recovery
+UI/RPC workflow is tracked as a release item in `docs/LOBEE_AGENT_ROADMAP.md`.
 
 CAPTCHA and sensitive-field prompts pause the session. The user completes a CAPTCHA in the visible window,
 or enters a password/OTP in the masked desktop prompt; the latter is typed directly into its target and is
@@ -128,3 +194,6 @@ Client SDK + snippets (Playwright/Puppeteer/Selenium, JS + Python) live in `pack
   (no completion signal). Run the blocking command directly as the background job.
 - Native `-Werror`: a `return;` before code triggers `-Wunreachable-code`; an unused local triggers
   `-Wunused-variable`. Keep engine edits warning-clean.
+- Agent URL/DNS preflight covers explicit top-level navigation only; it is not a browser-wide private-
+  network egress sandbox. Perception also uses main-world DOM APIs that a hostile page can monkeypatch.
+  Keep both limitations visible when assessing a deployment; see `docs/LOBEE_AGENT_ROADMAP.md` §10.

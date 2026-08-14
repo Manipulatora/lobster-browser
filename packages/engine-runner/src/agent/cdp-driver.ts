@@ -1,5 +1,8 @@
 import {
+  normalizeActionKey,
   normalizeBrowserPermission,
+  normalizeBrowserPermissionOrigin,
+  normalizeCookieDomain,
   type BrowserConfigCommand,
   type BrowserDriver,
   type BrowserTab,
@@ -12,6 +15,19 @@ import type { CdpTarget, PersistentCdpSession } from './persistent-cdp.js';
 
 const CTRL = 2;
 const META = 4;
+/**
+ * How long a real command may be slow before the cheap liveness question is worth asking.
+ *
+ * Short on purpose. Asking early costs one tiny CDP message on a page that is merely busy — and the
+ * answer to that message restores the original command's full budget, so nothing is cut short. What
+ * it buys is that a blocked renderer is recognised in seconds instead of at the session-wide command
+ * timeout, on every call, for as long as the dialog is open.
+ */
+const RENDERER_LIVENESS_PROBE_DELAY_MS = 1_500;
+/** How long that trivial question may take before the renderer counts as blocked. */
+const RENDERER_LIVENESS_TIMEOUT_MS = 3_000;
+/** Budget for the small "where am I / is it ready yet" reads that must never stall a whole step. */
+const LOCATION_PROBE_TIMEOUT_MS = 3_000;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class CdpBrowserDriver implements BrowserDriver {
@@ -65,9 +81,51 @@ export class CdpBrowserDriver implements BrowserDriver {
     }
   }
 
+  /**
+   * Is the renderer answering anything at all?
+   *
+   * A blocked main thread is only ever discovered by waiting out a command timeout, which made the
+   * default 30s deadline the detection cost of an `alert()`. One trivial expression needs no page
+   * state and returns in about a millisecond on a healthy renderer, so failing to answer it within a
+   * few seconds is strong evidence the thread is blocked rather than merely busy. The probe is only
+   * issued once a real command has already been slow, so a healthy page pays nothing for it.
+   */
+  private async rendererResponds(): Promise<boolean> {
+    return await this.page
+      .send(
+        'Runtime.evaluate',
+        { expression: '0', returnByValue: true },
+        { timeoutMs: RENDERER_LIVENESS_TIMEOUT_MS },
+      )
+      .then(
+        () => true,
+        () => false,
+      );
+  }
+
   async evaluate<T>(expression: string): Promise<T> {
     try {
-      return await cdpEvaluate<T>(this.page, expression);
+      let settled = false;
+      const main = cdpEvaluate<T>(this.page, expression).then(
+        (value) => {
+          settled = true;
+          return value;
+        },
+        (error: unknown) => {
+          settled = true;
+          throw error;
+        },
+      );
+      // A slow page and a blocked page are indistinguishable until one of them answers. Give the real
+      // command a head start, then ask the cheap question: if even `0` cannot be evaluated, stop
+      // waiting out the full command timeout and report it now. If the renderer IS alive, the page is
+      // just slow and the original command keeps its whole budget.
+      const blockedRenderer = (async (): Promise<T> => {
+        await sleep(RENDERER_LIVENESS_PROBE_DELAY_MS);
+        if (settled || (await this.rendererResponds())) return await main;
+        throw new Error('CDP Runtime.evaluate timed out (the renderer is not responding)');
+      })();
+      return await Promise.race([main, blockedRenderer]);
     } catch (error) {
       // A native alert()/confirm()/beforeunload blocks the renderer, so every Runtime.evaluate hangs
       // until the CDP command timeout. Perception then returned an empty page with no explanation and
@@ -220,6 +278,7 @@ export class CdpBrowserDriver implements BrowserDriver {
     return cdpEvaluate<boolean>(
       this.page,
       `[...document.querySelectorAll('input[type=file]')].some((i) => i.files && i.files.length > 0)`,
+      { timeoutMs: LOCATION_PROBE_TIMEOUT_MS },
     ).catch(() => false);
   }
 
@@ -318,7 +377,9 @@ export class CdpBrowserDriver implements BrowserDriver {
   }
 
   async navigate(url: string): Promise<void> {
-    const before = await cdpEvaluate<string>(this.page, 'location.href').catch(() => '');
+    const before = await cdpEvaluate<string>(this.page, 'location.href', {
+      timeoutMs: LOCATION_PROBE_TIMEOUT_MS,
+    }).catch(() => '');
     await this.page.send('Page.navigate', { url });
     // `Page.navigate` resolves when navigation STARTS, not when the new document exists. The settle
     // poll then samples the OLD page, and if the server's TTFB exceeds ~450ms it sees a stable,
@@ -327,7 +388,9 @@ export class CdpBrowserDriver implements BrowserDriver {
     if (!before) return;
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
-      const current = await cdpEvaluate<string>(this.page, 'location.href').catch(() => '');
+      const current = await cdpEvaluate<string>(this.page, 'location.href', {
+        timeoutMs: LOCATION_PROBE_TIMEOUT_MS,
+      }).catch(() => '');
       // Any change counts, including a redirect to somewhere other than the requested URL.
       if (current && current !== before) return;
       await sleep(100);
@@ -422,7 +485,12 @@ export class CdpBrowserDriver implements BrowserDriver {
   }
 
   currentUrl(): Promise<string> {
-    return cdpEvaluate<string>(this.page, 'location.href');
+    // Reading the location is the cheapest question there is; if it does not come back quickly the
+    // renderer is blocked, and every caller (perception, the post-action drift check, navigation)
+    // would otherwise stall for the full session-wide command timeout on each one.
+    return cdpEvaluate<string>(this.page, 'location.href', {
+      timeoutMs: LOCATION_PROBE_TIMEOUT_MS,
+    });
   }
 
   async waitForSettle(timeoutMs = 8000): Promise<void> {
@@ -434,9 +502,14 @@ export class CdpBrowserDriver implements BrowserDriver {
     while (Date.now() < deadline) {
       let signature = '';
       try {
+        // Bound each probe by what is LEFT of this call's own budget. Without it a renderer blocked
+        // by a native dialog held the first probe for the session-wide command timeout, so
+        // `waitForSettle(8000)` returned after 30 seconds — a caller-supplied deadline that the
+        // implementation quietly ignored, on every navigation, click and key press.
         signature = await cdpEvaluate<string>(
           this.page,
           `location.href + '|' + document.readyState + '|' + (document.body?.innerText?.length || 0) + '|' + document.getElementsByTagName('*').length`,
+          { timeoutMs: Math.max(250, deadline - Date.now()) },
         );
       } catch {
         await sleep(120);
@@ -474,8 +547,12 @@ export class CdpBrowserDriver implements BrowserDriver {
   async browserConfig(command: BrowserConfigCommand): Promise<string> {
     switch (command.op) {
       case 'clear_cookies': {
-        const domain = normalizeDomain(command.domain);
-        if (!domain) throw new Error('clear_cookies needs a domain');
+        const domain = normalizeCookieDomain(command.domain);
+        if (!domain) {
+          throw new Error(
+            'clear_cookies needs a specific site domain, not a public/private suffix',
+          );
+        }
         // Enumerate the full cookie store on the browser target, then delete only the domain's cookies
         // (and its subdomains) one-by-one on the page target — siblings for other sites are preserved.
         const { cookies = [] } = (await this.browser.send('Storage.getCookies')) as {
@@ -522,13 +599,14 @@ export class CdpBrowserDriver implements BrowserDriver {
         const name = normalizeBrowserPermission(command.permission);
         if (!name) throw new Error('set_permission needs a permission name');
         const setting = command.setting ?? 'prompt';
-        const origin = originOf(command);
+        const origin = normalizeBrowserPermissionOrigin(command.origin, command.domain);
+        if (!origin) throw new Error('set_permission needs a valid non-empty HTTP(S) origin');
         await this.browser.send('Browser.setPermission', {
           permission: { name },
           setting,
-          ...(origin ? { origin } : {}),
+          origin,
         });
-        return `${setting} "${name}"${origin ? ` for ${origin}` : ' for all origins'}`;
+        return `${setting} "${name}" for ${origin}`;
       }
       case 'set_downloads': {
         const behavior =
@@ -637,6 +715,7 @@ export class CdpBrowserDriver implements BrowserDriver {
         const ready = await cdpEvaluate<boolean>(
           session,
           `typeof chrome !== 'undefined' && !!chrome.settingsPrivate`,
+          { timeoutMs: LOCATION_PROBE_TIMEOUT_MS },
         ).catch(() => false);
         if (ready) break;
         await sleep(100);
@@ -792,24 +871,16 @@ function controllableTargets(targets: readonly CdpTarget[]): CdpTarget[] {
   );
 }
 
+/**
+ * Canonicalize against the action schema's vocabulary, not a second copy of it.
+ *
+ * The list here and the allowlist in the agent's executor drifted apart once already — the executor
+ * admitted a bare `" "` that this table has no entry for — and because the disagreement only
+ * surfaced after the run had crossed its durable dispatch barrier, the result was a profile that
+ * could never start another run. One list, imported.
+ */
 function normalizeKey(raw: string): string {
-  const match = [
-    'Enter',
-    'Tab',
-    'Backspace',
-    'Escape',
-    'Delete',
-    'ArrowUp',
-    'ArrowDown',
-    'ArrowLeft',
-    'ArrowRight',
-    'Home',
-    'End',
-    'PageUp',
-    'PageDown',
-    'Space',
-  ].find((value) => value.toLowerCase() === raw.toLowerCase());
-  return match ?? raw;
+  return normalizeActionKey(raw) ?? raw;
 }
 
 function keyInfo(key: string): { code: string; vk: number; text?: string } {

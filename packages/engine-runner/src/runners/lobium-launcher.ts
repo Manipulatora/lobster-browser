@@ -33,6 +33,7 @@ import {
   assertUpstreamReachable,
   needsLocalProxyAdapter,
   startLocalProxyAdapter,
+  upstreamProxyUrl,
   type LocalProxyAdapter,
 } from '../proxy-auth-adapter.js';
 import { resolveGpuMode } from '../gpu.js';
@@ -282,11 +283,13 @@ export async function buildNativeLobiumProcessArgs(
   const dynamicArgs = opts.extraArgsFor
     ? await opts.extraArgsFor(ctx)
     : await buildLobiumLaunchArgs(ctx);
-  const extensionPaths = await prepareProfileExtensions(
-    ctx.extensions,
-    ctx.options.userDataDir,
-    opts.extensions,
-  );
+  const extensionPaths = await prepareProfileExtensions(ctx.extensions, ctx.options.userDataDir, {
+    ...opts.extensions,
+    // A web-store install is a network request made on this profile's behalf, so it belongs on this
+    // profile's route. Passing the proxy is what makes the download refuse rather than fall back to
+    // the host's own address.
+    ...(ctx.options.proxy ? { proxyUrl: upstreamProxyUrl(ctx.options.proxy) } : {}),
+  });
   // Lobee (the first-party in-browser agent side panel) is auto-loaded into every profile, ahead of
   // any user extensions. It injects no content scripts, so a page can't see it; its actions run in
   // this sidecar over leak-free CDP. Absent (dev/CI without the bundle) → simply not added.

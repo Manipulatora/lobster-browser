@@ -44,6 +44,11 @@ export interface Persisted {
   mode: string;
   model: string;
   effort: Effort;
+  /** Panel-owned run policy. These values are copied into every new run request. */
+  autonomy: 'auto' | 'confirm';
+  allowedDomains: string[];
+  /** `null` is the persisted representation of an intentionally unlimited run. */
+  tokenBudget: number | null;
   /**
    * The conversation the composer is currently writing into. Persisted so closing and reopening the
    * panel continues the SAME conversation rather than silently starting a new one — the sidecar
@@ -55,8 +60,126 @@ const DEFAULTS: Persisted = {
   mode: 'agent',
   model: 'anthropic/claude-opus-4.8',
   effort: 'medium',
+  // A new install is deliberately review-first and bounded. Users may opt into uninterrupted runs;
+  // unconditional consequential-action gates still apply in either mode.
+  autonomy: 'confirm',
+  allowedDomains: [],
+  tokenBudget: 100_000,
   threadId: '',
 };
+
+export type AllowedDomainsResult = { ok: true; domains: string[] } | { ok: false; error: string };
+
+// This is deliberately a compact fail-closed guard, not a bundled Public Suffix List. These are the
+// common entries most likely to be pasted as a dangerously broad fence. The sidecar applies the same
+// authoritative check again; keeping this list aligned lets the panel show the error before Run.
+const PUBLIC_SUFFIX_LIKE = new Set([
+  'com',
+  'org',
+  'net',
+  'edu',
+  'gov',
+  'mil',
+  'int',
+  'app',
+  'dev',
+  'info',
+  'biz',
+  'name',
+  'pro',
+  'xyz',
+  'online',
+  'site',
+  'store',
+  'tech',
+  'cloud',
+  'example',
+  'invalid',
+  'test',
+  'co.uk',
+  'org.uk',
+  'ac.uk',
+  'gov.uk',
+  'com.au',
+  'net.au',
+  'org.au',
+  'co.jp',
+  'co.nz',
+  'co.in',
+  'com.br',
+  'com.cn',
+  'com.sg',
+]);
+
+/** Turn the compact policy input into the exact domain array accepted by the sidecar. */
+export function parseAllowedDomains(value: string): AllowedDomainsResult {
+  const entries = value
+    .split(/[\s,]+/)
+    .map((entry) => entry.trim().toLowerCase().replace(/^\*\./, '').replace(/\.$/, ''))
+    .filter(Boolean);
+  if (entries.length > 50) {
+    return { ok: false, error: 'Use at most 50 allowed domains.' };
+  }
+  const domains: string[] = [];
+  for (const domain of entries) {
+    if (
+      domain.length > 253 ||
+      !domain.includes('.') ||
+      PUBLIC_SUFFIX_LIKE.has(domain) ||
+      /^[a-z]{2}$/.test(domain)
+    ) {
+      return {
+        ok: false,
+        error: `${domain || 'This value'} is too broad; enter a complete site domain (for example, example.com).`,
+      };
+    }
+    const labels = domain.split('.');
+    if (
+      labels.some(
+        (label) =>
+          !label ||
+          label.length > 63 ||
+          !/^[a-z0-9-]+$/.test(label) ||
+          label.startsWith('-') ||
+          label.endsWith('-'),
+      )
+    ) {
+      return { ok: false, error: `${domain} is not a valid domain.` };
+    }
+    if (!domains.includes(domain)) domains.push(domain);
+  }
+  return { ok: true, domains };
+}
+
+function normalizePersisted(raw: Partial<Persisted>): Persisted {
+  const tokenBudget =
+    raw.tokenBudget === null
+      ? null
+      : typeof raw.tokenBudget === 'number' &&
+          Number.isSafeInteger(raw.tokenBudget) &&
+          raw.tokenBudget >= 1_000 &&
+          raw.tokenBudget <= 10_000_000
+        ? raw.tokenBudget
+        : DEFAULTS.tokenBudget;
+  const storedDomains = Array.isArray(raw.allowedDomains)
+    ? raw.allowedDomains.filter((item) => typeof item === 'string')
+    : DEFAULTS.allowedDomains;
+  const parsedDomains = parseAllowedDomains(storedDomains.join(','));
+  return {
+    mode: raw.mode === 'ask' ? 'ask' : 'agent',
+    model: typeof raw.model === 'string' && raw.model ? raw.model : DEFAULTS.model,
+    effort: ALL_EFFORTS.includes(raw.effort as Effort) ? (raw.effort as Effort) : DEFAULTS.effort,
+    autonomy: raw.autonomy === 'auto' ? 'auto' : 'confirm',
+    // Preserve an invalid/corrupt stored fence so the editor shows its validation error and blocks a
+    // run. Replacing it with [] would silently turn a requested fence into unrestricted browsing.
+    allowedDomains: parsedDomains.ok ? parsedDomains.domains : storedDomains,
+    tokenBudget,
+    threadId:
+      typeof raw.threadId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(raw.threadId)
+        ? raw.threadId
+        : '',
+  };
+}
 
 /** A fresh conversation id. Constrained to the charset the sidecar accepts for a memory filename. */
 export function newThreadId(): string {
@@ -69,7 +192,7 @@ export const store = {
   async get(): Promise<Persisted> {
     try {
       const local = window.chrome?.storage?.local;
-      if (local) return { ...DEFAULTS, ...(await local.get(DEFAULTS)) } as Persisted;
+      if (local) return normalizePersisted(await local.get(DEFAULTS));
     } catch {
       /* fall through */
     }
@@ -83,7 +206,7 @@ export const store = {
           /* ignore */
         }
     }
-    return out;
+    return normalizePersisted(out);
   },
   set(obj: Partial<Persisted>): void {
     try {

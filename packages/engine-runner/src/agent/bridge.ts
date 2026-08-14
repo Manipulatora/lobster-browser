@@ -1,3 +1,4 @@
+import { createHash, createHmac } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -6,6 +7,28 @@ import type { AgentEvent, AgentLlmConfig } from '@lobster/shared-types';
 import { FileMemoryStore, normalizeAllowedDomains } from '@lobster/agent';
 import type { AgentManager } from './manager.js';
 import { getBridgeOrigin, resolveBridgeToken, setBridgeOrigin } from './bridge-registry.js';
+
+const PANEL_DEFAULT_TOKEN_BUDGET = 100_000;
+const MUTATION_DEDUP_TTL_MS = 15 * 60_000;
+const MUTATION_DEDUP_LIMIT = 2_048;
+
+interface BridgeReply {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+interface MutationRequest {
+  fingerprint: string;
+  promise: Promise<BridgeReply>;
+  settledAt?: number;
+}
+
+/**
+ * Process-wide so an AgentBridge listener restart cannot forget a request whose HTTP response was
+ * lost. A full sidecar-process restart also terminates its in-memory AgentManager, so there is no old
+ * run left to duplicate in that case.
+ */
+const mutationRequests = new Map<string, MutationRequest>();
 
 /**
  * Loopback HTTP bridge that lets the in-browser Lobee side panel drive its own profile's agent.
@@ -74,9 +97,9 @@ export class AgentBridge {
     res.setHeader('vary', 'origin');
   }
 
-  private auth(req: IncomingMessage, url: URL): ReturnType<typeof resolveBridgeToken> {
-    const token =
-      (req.headers['x-lobee-token'] as string | undefined) ?? url.searchParams.get('token') ?? '';
+  private auth(req: IncomingMessage): ReturnType<typeof resolveBridgeToken> {
+    const raw = req.headers['x-lobee-token'];
+    const token = Array.isArray(raw) ? '' : (raw ?? '');
     return token ? resolveBridgeToken(token) : undefined;
   }
 
@@ -91,7 +114,7 @@ export class AgentBridge {
       return json(res, 200, { ok: true });
     }
 
-    const entry = this.auth(req, url);
+    const entry = this.auth(req);
     if (!entry) return json(res, 401, { ok: false, error: 'unauthorized' });
     const { profileId } = entry;
 
@@ -110,13 +133,17 @@ export class AgentBridge {
       }
       if (req.method === 'POST' && url.pathname === '/run') {
         const body = await readJson(req);
-        return await this.run(res, entry, body);
+        const result = await deduplicateMutation('run', profileId, body, () =>
+          this.run(entry, body),
+        );
+        return json(res, result.status, result.body);
       }
       if (req.method === 'POST' && url.pathname === '/input') {
         const body = await readJson(req);
-        const text = typeof body.text === 'string' ? body.text : '';
-        const r = this.agents.sendInput(profileId, text);
-        return json(res, 200, { ok: true, ...r });
+        const result = await deduplicateMutation('input', profileId, body, () =>
+          this.input(profileId, body),
+        );
+        return json(res, result.status, result.body);
       }
       if (req.method === 'POST' && url.pathname === '/stop') {
         const r = this.agents.stop(profileId);
@@ -159,55 +186,97 @@ export class AgentBridge {
   }
 
   private async run(
-    res: ServerResponse,
     entry: NonNullable<ReturnType<typeof resolveBridgeToken>>,
     body: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<BridgeReply> {
     const task = typeof body.task === 'string' ? body.task.trim() : '';
-    if (!task) return json(res, 400, { ok: false, error: 'task is required' });
-    const mode = body.mode === 'ask' ? 'ask' : 'agent';
+    if (!task) return reply(400, { ok: false, error: 'task is required' });
+    if (body.mode !== undefined && body.mode !== 'ask' && body.mode !== 'agent') {
+      return reply(400, { ok: false, error: 'mode must be ask or agent' });
+    }
+    const mode = (body.mode ?? 'agent') as 'ask' | 'agent';
     const model = typeof body.model === 'string' && body.model ? body.model : undefined;
-    if (!model) return json(res, 400, { ok: false, error: 'model is required' });
-    const effort = ['low', 'medium', 'high'].includes(body.effort as string)
-      ? (body.effort as 'low' | 'medium' | 'high')
-      : undefined;
+    if (!model) return reply(400, { ok: false, error: 'model is required' });
+    if (
+      body.effort !== undefined &&
+      (typeof body.effort !== 'string' || !['low', 'medium', 'high'].includes(body.effort))
+    ) {
+      return reply(400, { ok: false, error: 'effort must be low, medium, or high' });
+    }
+    const effort = body.effort as 'low' | 'medium' | 'high' | undefined;
     // The panel owns conversation identity: it sends the thread the message belongs to, and mints a new
     // id for "New chat". An id that fails this shape is rejected outright rather than coerced, since it
     // names a file in the profile's encrypted memory directory.
-    const threadId = typeof body.threadId === 'string' ? body.threadId : '';
-    if (threadId && !/^[a-zA-Z0-9_-]{1,128}$/.test(threadId)) {
-      return json(res, 400, { ok: false, error: 'invalid threadId' });
+    if (
+      body.threadId !== undefined &&
+      (typeof body.threadId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(body.threadId))
+    ) {
+      return reply(400, { ok: false, error: 'invalid threadId' });
     }
+    const threadId = body.threadId as string | undefined;
 
-    // `confirm` is only meaningful while a panel is attached to answer; `auto` is the default.
-    const autonomy = body.autonomy === 'confirm' ? 'confirm' : undefined;
+    // The panel may deliberately choose either mode. Reject malformed values instead of silently
+    // falling back to `auto`: losing an explicitly requested confirmation policy is a safety bug.
+    if (body.autonomy !== undefined && body.autonomy !== 'auto' && body.autonomy !== 'confirm') {
+      return reply(400, { ok: false, error: 'autonomy must be auto or confirm' });
+    }
+    const autonomy = (body.autonomy ?? 'confirm') as 'auto' | 'confirm';
     // A domain fence bounds an unattended run. Reject a malformed list rather than silently ignoring
     // it — a caller that asked for a fence and did not get one is worse off than one that got an error.
+    if (body.allowedDomains !== undefined && !Array.isArray(body.allowedDomains)) {
+      return reply(400, { ok: false, error: 'allowedDomains must be an array' });
+    }
     const rawDomains = Array.isArray(body.allowedDomains) ? body.allowedDomains : [];
     if (rawDomains.length > 50) {
-      return json(res, 400, { ok: false, error: 'at most 50 allowed domains' });
+      return reply(400, { ok: false, error: 'at most 50 allowed domains' });
+    }
+    if (rawDomains.some((domain) => typeof domain !== 'string')) {
+      return reply(400, { ok: false, error: 'allowedDomains entries must be strings' });
     }
     let allowedDomains: string[];
     try {
-      allowedDomains = normalizeAllowedDomains(rawDomains.map(String));
+      allowedDomains = normalizeAllowedDomains(rawDomains as string[]);
+      if (allowedDomains.some((domain) => !domain.includes('.'))) {
+        return reply(400, {
+          ok: false,
+          error: 'allowedDomains entries must be complete domains (for example, example.com)',
+        });
+      }
     } catch (error) {
-      return json(res, 400, {
+      return reply(400, {
         ok: false,
         error: error instanceof Error ? error.message : 'invalid allowedDomains',
       });
     }
+    if (
+      body.tokenBudget !== undefined &&
+      body.tokenBudget !== null &&
+      (typeof body.tokenBudget !== 'number' ||
+        !Number.isSafeInteger(body.tokenBudget) ||
+        body.tokenBudget < 1_000 ||
+        body.tokenBudget > 10_000_000)
+    ) {
+      return reply(400, {
+        ok: false,
+        error: 'tokenBudget must be an integer between 1000 and 10000000',
+      });
+    }
+    // `null` is the explicit wire representation of an unlimited run. Omission means the
+    // server-owned bounded default; it must never silently turn into unlimited operation.
     const tokenBudget =
-      typeof body.tokenBudget === 'number' && Number.isSafeInteger(body.tokenBudget)
-        ? body.tokenBudget
-        : undefined;
+      body.tokenBudget === null
+        ? undefined
+        : body.tokenBudget === undefined
+          ? PANEL_DEFAULT_TOKEN_BUDGET
+          : (body.tokenBudget as number);
 
     if (!entry.memoryDir || !entry.memoryKey) {
-      return json(res, 409, { ok: false, error: 'this profile is not provisioned for Lobee runs' });
+      return reply(409, { ok: false, error: 'this profile is not provisioned for Lobee runs' });
     }
     const proxyUrl = process.env.LOBSTER_AGENT_PROXY_URL;
     const proxyToken = process.env.LOBSTER_AGENT_PROXY_TOKEN;
     if (!proxyUrl || !proxyToken) {
-      return json(res, 503, { ok: false, error: 'managed LLM proxy is not configured' });
+      return reply(503, { ok: false, error: 'managed LLM proxy is not configured' });
     }
 
     const llm: AgentLlmConfig = {
@@ -235,27 +304,42 @@ export class AgentBridge {
         mode,
         visionFallback: true,
         allowedUploadRoots: await uploadRoots(entry.memoryDir),
-        // Run policy the panel MAY set. It could previously send none of this, so every side-panel run
-        // was pinned to the defaults — full autonomy, no domain fence, no spend ceiling — with no way
-        // to bound a run even when the caller wanted to. Each value is validated here because the panel
-        // is the least-trusted caller of the three (its page is chrome-owned, but its request is not).
+        // Omission is fail-safe at this boundary: review-first autonomy and a bounded token budget.
+        // The panel must explicitly send `auto` or `null` to opt out of either guard. An empty domain
+        // list intentionally means unrestricted browsing. Every value is validated here because the
+        // panel is the least-trusted caller of the three (chrome-owned page, untrusted request data).
         ...(autonomy ? { autonomy } : {}),
         ...(allowedDomains.length ? { allowedDomains } : {}),
         ...(tokenBudget !== undefined ? { tokenBudget } : {}),
       },
     });
-    return json(res, 200, { ok: true, ...result });
+    return reply(200, { ok: true, ...result, requestId: body.requestId });
+  }
+
+  private input(profileId: string, body: Record<string, unknown>): BridgeReply {
+    if (typeof body.sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(body.sessionId)) {
+      return reply(400, { ok: false, error: 'invalid sessionId' });
+    }
+    if (typeof body.text !== 'string') {
+      return reply(400, { ok: false, error: 'text is required' });
+    }
+    const session = this.agents
+      .status(profileId)
+      .runs.find((candidate) => candidate.sessionId === body.sessionId);
+    if (!session || session.status !== 'awaiting_input') {
+      return reply(200, { ok: true, delivered: false, requestId: body.requestId });
+    }
+    const result = this.agents.sendInput(profileId, body.text);
+    return reply(200, { ok: true, ...result, requestId: body.requestId });
   }
 
   /**
    * Read one conversation out of the profile's ENCRYPTED memory.
    *
-   * The panel used to keep its own copy of every task and answer in `chrome.storage.local`, redacted by
-   * a couple of regexes. That is a second, weaker store of the same content: a regex catches
-   * `password: x` and `Bearer …`, and nothing else — an address, an order total, a medical result or a
-   * private message the agent read stayed in plaintext beside an AES-256-GCM store built to hold
-   * exactly that. This endpoint makes the encrypted store the single source of truth, so the panel can
-   * show history without keeping its own copy of the bodies.
+   * Encrypted memory is the authoritative source. The panel normally persists only correlation metadata,
+   * but it can retain a bounded, heuristically redacted plaintext availability/migration fallback until an
+   * exact encrypted counterpart is verified. This endpoint is what lets the panel retire that weaker copy;
+   * its redaction is defense in depth, not an arbitrary-PII confidentiality boundary.
    *
    * Scoped by the same per-profile token as every other route, so a panel can only read its own
    * profile's threads.
@@ -273,10 +357,15 @@ export class AgentBridge {
     }
     const store = new FileMemoryStore(entry.memoryDir, { encryptionKey: entry.memoryKey });
     try {
-      const messages = await store.loadThread(threadId);
-      return json(res, 200, { ok: true, messages });
+      // Strict read is essential here: a wrong key/corrupt file must not be reported as a valid empty
+      // thread, because the panel uses success as authorization to retire its legacy plaintext copy.
+      const messages = await store.loadThreadStrict(threadId);
+      return json(res, 200, {
+        ok: true,
+        messages: addStableTurnIds(messages, threadId, entry.memoryKey),
+      });
     } catch (error) {
-      // A thread that cannot be decrypted is not a crash — it is an empty history with a reason.
+      // A thread that cannot be decrypted is a recoverable, discriminated history failure.
       return json(res, 200, {
         ok: false,
         messages: [],
@@ -314,6 +403,113 @@ export class AgentBridge {
     this.nextEventId.clear();
     await new Promise<void>((resolve) => this.server?.close(() => resolve()));
   }
+}
+
+/**
+ * Give each encrypted exchange a stable, opaque identity without changing the memory schema. The
+ * HMAC is reproducible after a sidecar restart, but a panel cannot use it to dictionary-attack task
+ * text because the per-profile memory key never leaves this process.
+ */
+function addStableTurnIds<
+  T extends { role: string; content: string; status?: string; ts?: string },
+>(messages: readonly T[], threadId: string, memoryKey: string): Array<T & { turnId?: string }> {
+  const output: Array<T & { turnId?: string }> = messages.map((message) => ({ ...message }));
+  const key = Buffer.from(memoryKey, 'base64');
+  for (let index = 0; index + 1 < output.length; index += 1) {
+    const user = output[index]!;
+    const assistant = output[index + 1]!;
+    if (user.role !== 'user' || assistant.role !== 'assistant') continue;
+    const identity = createHmac('sha256', key)
+      .update(
+        JSON.stringify([
+          'lobee-thread-turn-v1',
+          threadId,
+          user.content,
+          assistant.content,
+          assistant.status ?? 'done',
+          user.ts ?? '',
+          assistant.ts ?? '',
+        ]),
+      )
+      .digest('base64url');
+    output[index] = { ...user, turnId: identity };
+    output[index + 1] = { ...assistant, turnId: identity };
+    index += 1;
+  }
+  return output;
+}
+
+async function deduplicateMutation(
+  kind: 'run' | 'input',
+  profileId: string,
+  body: Record<string, unknown>,
+  execute: () => Promise<BridgeReply> | BridgeReply,
+): Promise<BridgeReply> {
+  const requestId = body.requestId;
+  if (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{22,128}$/.test(requestId)) {
+    return reply(400, { ok: false, error: 'invalid requestId' });
+  }
+
+  pruneMutationRequests();
+  const payload = { ...body };
+  delete payload.requestId;
+  const fingerprint = createHash('sha256').update(canonicalJson(payload)).digest('base64url');
+  const key = `${profileId}\0${kind}\0${requestId}`;
+  const existing = mutationRequests.get(key);
+  if (existing) {
+    if (existing.fingerprint !== fingerprint) {
+      return reply(409, {
+        ok: false,
+        error: 'requestId was already used with a different request body',
+      });
+    }
+    return existing.promise;
+  }
+  if (mutationRequests.size >= MUTATION_DEDUP_LIMIT) {
+    return reply(503, { ok: false, error: 'request deduplication capacity is temporarily full' });
+  }
+
+  const record: MutationRequest = {
+    fingerprint,
+    promise: Promise.resolve()
+      .then(execute)
+      .catch((error: unknown) =>
+        reply(400, { ok: false, error: error instanceof Error ? error.message : String(error) }),
+      ),
+  };
+  mutationRequests.set(key, record);
+  void record.promise.then(() => {
+    record.settledAt = Date.now();
+  });
+  return record.promise;
+}
+
+function pruneMutationRequests(): void {
+  const expiredBefore = Date.now() - MUTATION_DEDUP_TTL_MS;
+  for (const [key, record] of mutationRequests) {
+    if (record.settledAt !== undefined && record.settledAt < expiredBefore) {
+      mutationRequests.delete(key);
+    }
+  }
+  if (mutationRequests.size < MUTATION_DEDUP_LIMIT) return;
+  for (const [key, record] of mutationRequests) {
+    if (record.settledAt !== undefined) mutationRequests.delete(key);
+    if (mutationRequests.size < MUTATION_DEDUP_LIMIT) return;
+  }
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+    .join(',')}}`;
+}
+
+function reply(status: number, body: Record<string, unknown>): BridgeReply {
+  return { status, body };
 }
 
 function sseFrame(id: number, event: AgentEvent): string {

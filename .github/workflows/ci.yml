@@ -120,6 +120,20 @@ jobs:
       # launch integration test runs for real here (it skips where no browser is installed).
       - run: npx patchright install --with-deps chromium
       - run: npm test --workspace @lobster/engine-runner
+      # The real-browser agent fixtures (docs/LOBEE_AGENT_ROADMAP.md §7.2). Everything below the model
+      # is production code: the loop, the policy gates, the journal, and the CDP driver, against a real
+      # browser and a real HTTP origin. Without this job the entire browser half of the agent is covered
+      # only by fake CDP sessions that assert which commands are SENT, never what a browser does with
+      # them — which is how a form that could not be filled at all shipped with a green suite.
+      #
+      # This runner has no Lobium binary, so the harness selects the interim Chromium and labels the
+      # result browser-integration evidence rather than a Gate B pass. It must FAIL, never skip: exit 2
+      # (no engine at all) is a blocked gate, not a green one.
+      - name: Real-browser agent fixtures
+        run: |
+          npx tsc -b packages/shared-types packages/proxy packages/fingerprint packages/agent \
+            packages/engine-runner
+          node ci/validation/e2e/agent-browser-e2e.mjs --keep-going
 
   # The SOFTWARE tier of docs/OPERATIONS.md (§3): catalog diversity, coherence over 6000 personas, and
   # the derivation/coherence unit contracts. Runs anywhere — no GPU, no proxy, no browser.
@@ -156,40 +170,8 @@ jobs:
       # than in the opt-in job: a grader that a model can satisfy blind turns a capability test into a
       # trivia quiz, and that regression must be caught on every PR.
       - run: node --test ci/validation/agent-battery.test.mjs
-
-  # LIVE agent capability battery. Opt-in, because it needs a built Lobium binary AND provider credit,
-  # neither of which a github-hosted runner has. Enable by setting the `agent-battery` environment with
-  # LOBSTER_LOBIUM_BIN + LOBSTER_AGENT_PROXY_URL/TOKEN on a self-hosted runner.
-  #
-  # The harness distinguishes three outcomes and CI must honour them: 0 = pass, 1 = a real agent
-  # regression, 2 = could not run (no binary, no proxy, or provider capacity exhausted mid-run). Only
-  # exit 1 is a failure — treating "the wallet is empty" as a red build trains people to ignore it.
-  agent-battery:
-    name: Agent capability battery (live, opt-in)
-    runs-on: ubuntu-latest
-    if: ${{ vars.LOBSTER_ENABLE_AGENT_BATTERY == 'true' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - run: npm install --no-audit --no-fund
-      - run: npm run build --workspaces --if-present
-      - name: Run the battery
-        env:
-          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
-          LOBSTER_AGENT_PROXY_URL: ${{ vars.LOBSTER_AGENT_PROXY_URL }}
-          LOBSTER_AGENT_PROXY_TOKEN: ${{ secrets.LOBSTER_AGENT_PROXY_TOKEN }}
-          # Every task is repeated; a stochastic system that passes once has proved very little.
-          AGENT_BATTERY_REPEAT: '3'
-        run: |
-          set +e
-          node ci/validation/agent-battery.mjs --repeat=$AGENT_BATTERY_REPEAT
-          code=$?
-          set -e
-          if [ "$code" = "2" ]; then
-            echo "::notice::agent battery could not run (no engine/proxy, or provider capacity) — not a regression"
-            exit 0
-          fi
-          exit $code
+      # The validation harnesses' own tests. Each of these pins a grader or a contract that decides
+      # whether a later gate can be trusted, and every one of them was executed by no workflow — so a
+      # regression in the detector-matrix grader or the native-policy contract reached main green.
+      - run: node ci/validation/detector-matrix.mjs --check
+      - run: node --test ci/validation/detector-matrix.test.mjs ci/validation/antibot-exam.test.mjs ci/validation/native-policy-contract.test.mjs

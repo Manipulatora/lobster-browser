@@ -1,4 +1,5 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
+import { proxyDispatcherForUrl } from '@lobster/proxy';
 import {
   copyFile,
   lstat,
@@ -32,6 +33,11 @@ export interface PrepareExtensionsOptions {
   maxCrxBytes?: number;
   timeoutMs?: number;
   webStoreDownloadUrl?: (id: string) => string;
+  /**
+   * The profile's upstream proxy URL. Supplying it is not optional for a proxied profile — see
+   * {@link downloadChromeWebStoreCrx}, which refuses to download rather than egress directly.
+   */
+  proxyUrl?: string;
 }
 
 interface ProtoField {
@@ -223,6 +229,23 @@ export async function downloadChromeWebStoreCrx(
   options: PrepareExtensionsOptions = {},
 ): Promise<Buffer> {
   if (!EXTENSION_ID.test(id)) throw new Error(`invalid Chrome Web Store extension id "${id}"`);
+  // This runs inside the launch path, seconds before a proxied session opens for the same profile.
+  // A bare fetch puts an HTTPS GET for a named extension id on the wire from the machine's real IP,
+  // with a distinctive installer user-agent — host IP → extension id → timestamp, joinable to the
+  // proxied session that follows by timing alone. It is a per-machine cache, so it happens once per
+  // extension and is almost impossible to notice, which is why it has to be structurally impossible
+  // rather than remembered. Fail closed: a profile that has a proxy has it because its traffic must
+  // not come from this host, so a route that cannot be built refuses the install.
+  let dispatcher: unknown;
+  if (options.proxyUrl) {
+    try {
+      dispatcher = proxyDispatcherForUrl(options.proxyUrl);
+    } catch (error) {
+      throw new Error(
+        `refusing to download extension ${id} directly: this profile's proxy route could not be built (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+  }
   const request = options.fetch ?? globalThis.fetch;
   const timeoutMs = options.timeoutMs ?? EXTENSION_DOWNLOAD_TIMEOUT_MS;
   const maxBytes = options.maxCrxBytes ?? MAX_CRX_BYTES;
@@ -243,6 +266,8 @@ export async function downloadChromeWebStoreCrx(
         redirect: 'manual',
         signal: controller.signal,
         headers: { 'user-agent': 'Lobster Browser extension installer' },
+        // undici reads `dispatcher` off the init object; a caller-supplied `fetch` (tests) ignores it.
+        ...(dispatcher ? ({ dispatcher } as Record<string, unknown>) : {}),
       });
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location');

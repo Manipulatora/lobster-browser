@@ -13,6 +13,8 @@ export {
   assessBrowserConfig,
   assessUiSettingsIntent,
   normalizeBrowserPermission,
+  normalizeBrowserPermissionOrigin,
+  normalizeCookieDomain,
 } from './browser-config-guard.js';
 export type { ConfigAssessment } from './browser-config-guard.js';
 export type {
@@ -27,7 +29,13 @@ export { perceive } from './perception/perceive.js';
 export { renderObservation, sameElements } from './perception/serialize.js';
 export { EXTRACT_SCRIPT, MAX_ELEMENTS, MAX_NAME } from './perception/extract-script.js';
 
-export { ACT_TOOL, buildActionReference, parseAction } from './actions.js';
+export {
+  ACT_TOOL,
+  buildActionReference,
+  NAMED_KEYS,
+  normalizeActionKey,
+  parseAction,
+} from './actions.js';
 export type { RawActionInput, ParseActionResult } from './actions.js';
 export { executeAction } from './executor.js';
 export type { ExecOutcome, ExecOptions, Sleep } from './executor.js';
@@ -49,6 +57,18 @@ export type {
 export { FileMemoryStore } from './memory/index.js';
 export type { MemoryStore, FactRecord, MemorySettings, RunRecord } from './memory/index.js';
 
+// Narrow production recovery surface. Journal crypto/schema internals remain package-private; the
+// sidecar only needs the authenticated store and the non-replayable recovery projection.
+export { projectRunRecovery, RunJournalStore } from './journal/index.js';
+export type { RunJournalSnapshot } from './journal/index.js';
+
 export { runAgent, resolveConfig } from './loop.js';
 export type { AgentRunDeps, AgentRunParams } from './loop.js';
-export { normalizeAllowedDomains } from './policy.js';
+export {
+  actionCommitIntent,
+  actionRisk,
+  assessCurrentPage,
+  isTextEntryElement,
+  normalizeAllowedDomains,
+} from './policy.js';
+export type { ActionRisk, CommitIntent } from './policy.js';

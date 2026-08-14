@@ -1,0 +1,69 @@
+name: Agent Capability Battery
+
+# This workflow can receive provider secrets and execute on a persistent self-hosted runner. Keep it
+# structurally separate from pull_request CI so untrusted PR code can never enter that environment.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: agent-battery-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  agent-battery:
+    name: Agent capability battery (live, protected)
+    runs-on: [self-hosted, agent-battery]
+    environment: agent-battery
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Validate protected battery configuration
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_AGENT_PROXY_URL: ${{ vars.LOBSTER_AGENT_PROXY_URL }}
+          LOBSTER_AGENT_PROXY_TOKEN: ${{ secrets.LOBSTER_AGENT_PROXY_TOKEN }}
+        run: |
+          if [ -z "$LOBSTER_LOBIUM_BIN" ]; then
+            echo "::error::LOBSTER_LOBIUM_BIN is not configured in the agent-battery environment"
+            exit 2
+          fi
+          if [ -z "$LOBSTER_AGENT_PROXY_URL" ]; then
+            echo "::error::LOBSTER_AGENT_PROXY_URL is not configured in the agent-battery environment"
+            exit 2
+          fi
+          if [ -z "$LOBSTER_AGENT_PROXY_TOKEN" ]; then
+            echo "::error::LOBSTER_AGENT_PROXY_TOKEN is not configured in the agent-battery environment"
+            exit 2
+          fi
+      - run: npm install --no-audit --no-fund
+      - run: npm run build --workspaces --if-present
+      - name: Run the battery
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_AGENT_PROXY_URL: ${{ vars.LOBSTER_AGENT_PROXY_URL }}
+          LOBSTER_AGENT_PROXY_TOKEN: ${{ secrets.LOBSTER_AGENT_PROXY_TOKEN }}
+          # A stochastic system must pass every repetition; one lucky run is not evidence.
+          AGENT_BATTERY_REPEAT: '3'
+          AGENT_BATTERY_TOKEN_BUDGET: '250000'
+          AGENT_BATTERY_REPORT_JSON: ${{ runner.temp }}/agent-battery.json
+        # Exit 2 means the gate was incomplete. It deliberately remains non-zero so a protected
+        # release cannot turn missing engine/provider capacity into a green capability result.
+        run: node ci/validation/agent-battery.mjs --repeat=$AGENT_BATTERY_REPEAT
+      - name: Upload battery report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-battery-report
+          path: ${{ runner.temp }}/agent-battery.json
+          if-no-files-found: warn

@@ -1,10 +1,11 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { chmod, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { AgentUsage } from '@lobster/shared-types';
 import type { BuiltinSkill } from '../skills.js';
-import { formatLearnedForHost, formatSkills } from '../skills.js';
+import { formatLearnedForHost, formatSkills, hostMatches, normalizeSkillHost } from '../skills.js';
 import { redactUrl } from '../security.js';
+import { REDACTED_SENSITIVE, redactCredentialLikeText } from '../sensitive-text.js';
 import type { StepRecord } from '../types.js';
 import type {
   FactRecord,
@@ -62,23 +63,48 @@ const THREAD_VERBATIM_TURNS = 12;
 const MAX_THREAD_CHARS = 120_000;
 const MAX_THREAD_FILES = 200;
 const SECRET_FACT = /(password|passcode|otp|token|secret|api.?key|private.?key|seed|cvv|cvc)/i;
-const REDACTED_SENSITIVE = '[REDACTED: credential-like content]';
+/** Marks the point after which a prefix-less record in this profile is a forgery, not an M1 leftover. */
+const MIGRATED_MARKER = '.migrated-v1';
 
 /**
  * Authenticated, per-profile file memory. Every document is AES-256-GCM encrypted with the profile
  * key supplied by the trusted desktop core, and written temp+rename with mode 0600. Existing M1
- * plaintext files are accepted once and immediately migrated in place.
+ * plaintext files are migrated in place, but only while the migration window is open: the first
+ * encrypted write this profile performs drops a {@link MIGRATED_MARKER} marker, and from then on a
+ * prefix-less file is refused exactly like a forged authentication tag.
  */
 export class FileMemoryStore implements MemoryStore {
   private readonly runsDir: string;
   private readonly threadsDir: string;
   private readonly docPath: string;
+  private readonly markerPath: string;
   private readonly key: Buffer;
+  /** Resolved once per store: which unauthenticated records existed before this store opened. */
+  private legacyCohort: Set<string> | undefined;
+  private readonly allowLegacyPlaintext: boolean;
 
-  constructor(memoryDir: string, opts: { encryptionKey: string }) {
+  constructor(
+    memoryDir: string,
+    opts: {
+      encryptionKey: string;
+      /**
+       * Permit reading unauthenticated pre-encryption records so they can be migrated.
+       *
+       * OFF unless the trusted desktop core says otherwise, because whether a profile predates
+       * encryption is something the core KNOWS from its own schema version — it is not something this
+       * store can infer from the filesystem. Every filesystem signal available here (a marker file, a
+       * record's mtime) is writable by exactly the adversary the authentication exists to stop, and
+       * both were demonstrably enough to reopen the window: `unlink('.migrated-v1')` on a profile
+       * whose only record is the one being replaced leaves no evidence that it was ever encrypted.
+       */
+      allowLegacyPlaintext?: boolean;
+    },
+  ) {
     this.runsDir = join(memoryDir, 'runs');
     this.threadsDir = join(memoryDir, 'threads');
     this.docPath = join(memoryDir, 'memory.json');
+    this.markerPath = join(memoryDir, MIGRATED_MARKER);
+    this.allowLegacyPlaintext = opts.allowLegacyPlaintext === true;
     this.key = Buffer.from(opts.encryptionKey, 'base64');
     if (this.key.length !== 32) {
       throw new Error('agent memory encryption key must be 32 bytes (base64 encoded)');
@@ -90,12 +116,31 @@ export class FileMemoryStore implements MemoryStore {
     return record?.messages ?? [];
   }
 
+  /**
+   * Read a thread for a user-visible migration boundary. Unlike `loadThread`, this distinguishes a
+   * genuinely missing thread from an existing file that failed authentication or validation, so a
+   * caller cannot mistake corruption/a wrong key for a verified empty conversation.
+   */
+  async loadThreadStrict(threadId: string): Promise<ThreadMessage[]> {
+    const loaded = await this.readJson<ThreadRecord>(this.threadPath(threadId));
+    if (!loaded) return [];
+    const raw: unknown = loaded.value;
+    if (!isValidThreadRecord(raw, threadId)) {
+      throw new Error(`agent memory thread is corrupt: ${threadId}`);
+    }
+    const changed = scrubPersistedThread(raw);
+    if (loaded.legacy || changed) await this.writeJson(this.threadPath(threadId), raw);
+    return raw.messages;
+  }
+
   async appendThreadTurn(
     threadId: string,
     turn: { user: string; assistant: string; status: 'done' | 'error' | 'stopped' },
   ): Promise<void> {
     const now = new Date().toISOString();
-    const record: ThreadRecord = (await this.readThread(threadId)) ?? {
+    // Writes fail closed on an existing corrupt/wrong-key record. A fail-soft recall is safe; treating
+    // unreadable history as verified absence and overwriting it is silent data loss.
+    const record: ThreadRecord = (await this.readThread(threadId, true)) ?? {
       id: threadId,
       createdAt: now,
       updatedAt: now,
@@ -139,8 +184,11 @@ export class FileMemoryStore implements MemoryStore {
       try {
         const loaded = await this.readJson<ThreadRecord>(join(this.threadsDir, name));
         if (!loaded) continue;
-        const record = loaded.value;
-        if (!Array.isArray(record.messages)) continue;
+        const record: unknown = loaded.value;
+        const expectedId = name.slice(0, -'.json'.length);
+        if (!isValidThreadRecord(record, expectedId)) continue;
+        const changed = scrubPersistedThread(record);
+        if (loaded.legacy || changed) await this.writeJson(join(this.threadsDir, name), record);
         summaries.push({
           id: record.id,
           title: record.title ?? deriveThreadTitle(record.messages[0]?.content ?? ''),
@@ -160,14 +208,20 @@ export class FileMemoryStore implements MemoryStore {
     return join(this.threadsDir, `${threadId.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`);
   }
 
-  private async readThread(threadId: string): Promise<ThreadRecord | null> {
+  private async readThread(threadId: string, failClosed = false): Promise<ThreadRecord | null> {
     try {
       const loaded = await this.readJson<ThreadRecord>(this.threadPath(threadId));
       if (!loaded) return null;
-      const record = loaded.value;
-      if (!Array.isArray(record.messages)) return null;
+      const record: unknown = loaded.value;
+      if (!isValidThreadRecord(record, threadId)) {
+        if (failClosed) throw new Error(`agent memory thread is corrupt: ${threadId}`);
+        return null;
+      }
+      const changed = scrubPersistedThread(record);
+      if (loaded.legacy || changed) await this.writeJson(this.threadPath(threadId), record);
       return record;
-    } catch {
+    } catch (error) {
+      if (failClosed) throw error;
       // A corrupt or wrong-key thread degrades to "no history", never an error that kills the run.
       return null;
     }
@@ -175,13 +229,11 @@ export class FileMemoryStore implements MemoryStore {
 
   async loadContext(domain?: string, task = ''): Promise<string> {
     const doc = await this.readDoc();
-    const host = (domain ?? '').toLowerCase().replace(/\.$/, '');
+    const host = normalizeSkillHost(domain ?? '') ?? '';
     // A run that has not reached a page yet has no trustworthy site scope. Do not inject facts from
     // every previously visited domain into that first model turn; doing so leaks cross-site context
     // and gives stale page-authored data unnecessary influence over navigation.
-    const relevant = host
-      ? doc.facts.filter((fact) => host === fact.domain || host.endsWith(`.${fact.domain}`))
-      : [];
+    const relevant = host ? doc.facts.filter((fact) => hostMatches(host, fact.domain)) : [];
     const usable = [...relevant]
       .filter((fact) => !SECRET_FACT.test(fact.key))
       .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
@@ -281,20 +333,16 @@ export class FileMemoryStore implements MemoryStore {
   }
 
   async rememberFact(fact: Omit<FactRecord, 'updatedAt'> & { updatedAt?: string }): Promise<void> {
-    const safeValue = redactCredentialLikeText(fact.value);
-    if (SECRET_FACT.test(fact.key) || safeValue.sensitive) {
+    const safeFact = redactCredentialLikeText(`${fact.key}: ${fact.value}`);
+    const domain = normalizeSkillHost(fact.domain);
+    if (SECRET_FACT.test(fact.key) || safeFact.sensitive) {
       throw new Error('secrets must not be saved as agent memory facts');
     }
-    if (
-      !/^[a-z0-9.-]{1,253}$/i.test(fact.domain) ||
-      fact.key.length > 100 ||
-      fact.value.length > 1000
-    ) {
-      throw new Error('agent memory fact exceeds its domain/key/value bounds');
+    if (!domain || fact.key.length > 100 || fact.value.length > 1000) {
+      throw new Error('agent memory fact requires a valid site scope and bounded key/value');
     }
     const doc = await this.readDoc();
     const updatedAt = fact.updatedAt ?? new Date().toISOString();
-    const domain = fact.domain.toLowerCase().replace(/\.$/, '');
     const idx = doc.facts.findIndex((item) => item.domain === domain && item.key === fact.key);
     const next: FactRecord = {
       domain,
@@ -313,21 +361,42 @@ export class FileMemoryStore implements MemoryStore {
   }
 
   async learnSkill(skill: BuiltinSkill): Promise<void> {
+    const domain = skill.domain ? normalizeSkillHost(skill.domain) : undefined;
+    const safeName = redactCredentialLikeText(skill.name);
+    const safeTrigger = redactCredentialLikeText(skill.trigger);
+    const safeSteps = redactCredentialLikeText(skill.steps);
     if (
+      skill.origin !== 'learned' ||
+      !domain ||
       !/^[a-z0-9][a-z0-9-]{0,79}$/i.test(skill.name) ||
       !skill.trigger ||
       skill.trigger.length > 240 ||
       !skill.steps ||
       skill.steps.length > 2000
     ) {
-      throw new Error('learned skill exceeds its name/trigger/steps bounds');
+      throw new Error(
+        'learned skill requires a valid origin/domain and bounded name/trigger/steps',
+      );
     }
+    if (safeName.sensitive || safeTrigger.sensitive || safeSteps.sensitive) {
+      throw new Error('secrets must not be saved in learned agent procedures');
+    }
+    // Persist the canonical ASCII/IDNA form so equivalent Unicode and punycode hosts cannot create two
+    // scopes with different spellings. Prompt routing still validates old records again on every read.
+    const normalized: BuiltinSkill = { ...skill, domain };
     const doc = await this.readDoc();
-    const idx = doc.skills.findIndex((item) => item.name === skill.name);
-    if (idx >= 0) doc.skills[idx] = skill;
+    // Names are unique only within one site scope. A procedure learned on one tenant must not erase
+    // an equally named procedure belonging to another tenant in the same browser profile.
+    const idx = doc.skills.findIndex(
+      (item) =>
+        item.name === normalized.name &&
+        item.origin === 'learned' &&
+        normalizeSkillHost(item.domain ?? '') === domain,
+    );
+    if (idx >= 0) doc.skills[idx] = normalized;
     else {
       if (doc.skills.length >= 50) throw new Error('learned skill limit reached');
-      doc.skills.push(skill);
+      doc.skills.push(normalized);
     }
     await this.writeDoc(doc);
   }
@@ -350,13 +419,8 @@ export class FileMemoryStore implements MemoryStore {
   private async readDoc(): Promise<MemoryDoc> {
     const loaded = await this.readJson<Partial<MemoryDoc>>(this.docPath);
     if (!loaded) return { ...EMPTY_DOC, facts: [], skills: [], settings: {} };
-    const doc: MemoryDoc = {
-      version: 1,
-      facts: Array.isArray(loaded.value.facts) ? loaded.value.facts.slice(-500) : [],
-      skills: Array.isArray(loaded.value.skills) ? loaded.value.skills.slice(-50) : [],
-      settings: loaded.value.settings ?? {},
-    };
-    if (loaded.legacy) await this.writeDoc(doc);
+    const { doc, changed } = sanitizeMemoryDoc(loaded.value);
+    if (loaded.legacy || changed) await this.writeDoc(doc);
     return doc;
   }
 
@@ -434,6 +498,7 @@ export class FileMemoryStore implements MemoryStore {
       throw error;
     }
     const legacy = !raw.startsWith(PREFIX);
+    if (legacy) await this.assertWithinMigrationWindow(path);
     const plaintext = legacy ? raw : this.decrypt(raw, path);
     try {
       return { value: JSON.parse(plaintext) as T, legacy };
@@ -442,7 +507,106 @@ export class FileMemoryStore implements MemoryStore {
     }
   }
 
+  /**
+   * Gate the plaintext migration window, which must be one-way.
+   *
+   * A prefix-less file is unauthenticated. AES-256-GCM gives this store confidentiality AND integrity,
+   * and reading plaintext silently discards the second half: anything able to write into the profile
+   * directory (malware, a restored snapshot, another local process) could otherwise plant facts and
+   * learned procedures with no key, which the very next write re-encrypts into records that thereafter
+   * look authentic.
+   *
+   * So plaintext is refused unless the caller opened the window (`allowLegacyPlaintext`), and even
+   * then only for records that were already present when this store opened. Neither half is optional.
+   * A marker file alone was not enough, and neither was comparing a candidate's mtime against it —
+   * both are writable by the exact adversary this defends against, and `unlink('.migrated-v1')` or
+   * `utimes(memory.json, marker.mtime - 1)` each re-opened the window and got the forgery accepted.
+   *
+   * The verdict is resolved once per store and cached, so a legitimate M1 profile still migrates all of
+   * its plaintext records: the first encrypted write during that migration must not slam the door on
+   * the files still queued behind it.
+   */
+  private async assertWithinMigrationWindow(path: string): Promise<void> {
+    if (await this.migrationEligible(path)) return;
+    // Deliberately the failure a forged GCM tag produces: from every caller's side these are the same
+    // event — a record in this profile that no holder of the profile key ever wrote.
+    throw new Error(`agent memory authentication failed: ${basename(path)}`);
+  }
+
+  private async migrationEligible(path: string): Promise<boolean> {
+    if (!this.allowLegacyPlaintext) return false;
+    this.legacyCohort ??= await this.probeLegacyCohort();
+    return this.legacyCohort.has(resolve(path));
+  }
+
+  /**
+   * The exact set of unauthenticated records this profile already held when the store opened.
+   *
+   * A boolean "window" is too coarse in both directions. Kept open for the store's lifetime it would
+   * admit a file planted DURING a run; slammed shut by the first migrating write it would strand the
+   * records still queued behind it. Naming the cohort does both jobs: every pre-existing plaintext
+   * record migrates, and a path that was not there at open is never eligible, whatever its timestamp
+   * says. An empty cohort is also the answer for a profile that already holds authenticated records or
+   * a completion marker, so no separate check is needed.
+   */
+  private async probeLegacyCohort(): Promise<Set<string>> {
+    try {
+      await stat(this.markerPath);
+      return new Set();
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+    const cohort = new Set<string>();
+    for (const candidate of await this.durableRecordPaths()) {
+      let contents: string;
+      try {
+        contents = await readFile(candidate, 'utf8');
+      } catch {
+        continue;
+      }
+      // Any authenticated record proves this profile is past M1: nothing here is a leftover.
+      if (contents.startsWith(PREFIX)) return new Set();
+      cohort.add(resolve(candidate));
+    }
+    return cohort;
+  }
+
+  private async durableRecordPaths(): Promise<string[]> {
+    const paths = [this.docPath];
+    for (const dir of [this.threadsDir, this.runsDir]) {
+      try {
+        for (const name of await readdir(dir)) {
+          if (name.endsWith('.json')) paths.push(join(dir, name));
+        }
+      } catch {
+        // A missing subdirectory contributes no evidence either way.
+      }
+    }
+    return paths;
+  }
+
+  /**
+   * Close the migration window. Every durable write does this, not only a migration: a successful
+   * encrypted write proves this profile has a key-holding writer, and a profile created after M1 has no
+   * legacy record to migrate — without marking those, they would accept a planted plaintext file
+   * forever. Creation is exclusive, so a concurrent store may have won the race; its marker is the
+   * boundary for both. Done before the record so a profile can never end up with durable encrypted
+   * state and the window still open.
+   */
+  private async markMigrated(): Promise<void> {
+    await mkdir(dirname(this.markerPath), { recursive: true, mode: 0o700 });
+    try {
+      await writeFile(this.markerPath, `${new Date().toISOString()}\n`, {
+        mode: 0o600,
+        flag: 'wx',
+      });
+    } catch (error) {
+      if (!hasErrorCode(error, 'EEXIST')) throw error;
+    }
+  }
+
   private async writeJson(path: string, value: unknown): Promise<void> {
+    await this.markMigrated();
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const encrypted = this.encrypt(JSON.stringify(value, null, 2), path);
     const temp = join(dirname(path), `.${basename(path)}.${randomBytes(8).toString('hex')}.tmp`);
@@ -482,8 +646,151 @@ export class FileMemoryStore implements MemoryStore {
   }
 }
 
+function isValidThreadRecord(value: unknown, threadId: string): value is ThreadRecord {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Partial<ThreadRecord>;
+  return (
+    record.id === threadId &&
+    typeof record.createdAt === 'string' &&
+    typeof record.updatedAt === 'string' &&
+    (record.title === undefined || typeof record.title === 'string') &&
+    Array.isArray(record.messages) &&
+    record.messages.every(
+      (message) =>
+        message &&
+        typeof message === 'object' &&
+        (message.role === 'user' ||
+          message.role === 'assistant' ||
+          message.role === 'compaction') &&
+        typeof message.content === 'string' &&
+        typeof message.ts === 'string' &&
+        (message.status === undefined ||
+          message.status === 'done' ||
+          message.status === 'error' ||
+          message.status === 'stopped') &&
+        (message.clipped === undefined || typeof message.clipped === 'boolean'),
+    )
+  );
+}
+
+function scrubPersistedThread(record: ThreadRecord): boolean {
+  let changed = false;
+  for (const message of record.messages) {
+    const safe = redactCredentialLikeText(message.content);
+    if (safe.sensitive && message.content !== REDACTED_SENSITIVE) {
+      message.content = REDACTED_SENSITIVE;
+      message.clipped = false;
+      changed = true;
+    }
+  }
+  if (record.title !== undefined) {
+    const safeTitle = redactCredentialLikeText(record.title);
+    if (safeTitle.sensitive && record.title !== REDACTED_SENSITIVE) {
+      record.title = REDACTED_SENSITIVE;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function sanitizeMemoryDoc(value: Partial<MemoryDoc>): { doc: MemoryDoc; changed: boolean } {
+  const facts: FactRecord[] = [];
+  for (const candidate of Array.isArray(value.facts) ? value.facts.slice(-500) : []) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const raw = candidate as Partial<FactRecord>;
+    if (
+      typeof raw.domain !== 'string' ||
+      typeof raw.key !== 'string' ||
+      typeof raw.value !== 'string' ||
+      typeof raw.updatedAt !== 'string'
+    ) {
+      continue;
+    }
+    const domain = normalizeSkillHost(raw.domain);
+    const safe = redactCredentialLikeText(`${raw.key}: ${raw.value}`);
+    if (
+      !domain ||
+      SECRET_FACT.test(raw.key) ||
+      safe.sensitive ||
+      raw.key.length > 100 ||
+      raw.value.length > 1_000 ||
+      (raw.confidence !== undefined &&
+        (typeof raw.confidence !== 'number' || !Number.isFinite(raw.confidence)))
+    ) {
+      continue;
+    }
+    facts.push({
+      domain,
+      key: raw.key,
+      value: raw.value,
+      updatedAt: raw.updatedAt,
+      ...(raw.confidence !== undefined ? { confidence: raw.confidence } : {}),
+    });
+  }
+
+  const skills: BuiltinSkill[] = [];
+  for (const candidate of Array.isArray(value.skills) ? value.skills.slice(-50) : []) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const raw = candidate as Partial<BuiltinSkill>;
+    const domain = typeof raw.domain === 'string' ? normalizeSkillHost(raw.domain) : undefined;
+    if (
+      raw.origin !== 'learned' ||
+      !domain ||
+      typeof raw.name !== 'string' ||
+      !/^[a-z0-9][a-z0-9-]{0,79}$/i.test(raw.name) ||
+      typeof raw.trigger !== 'string' ||
+      !raw.trigger ||
+      raw.trigger.length > 240 ||
+      typeof raw.steps !== 'string' ||
+      !raw.steps ||
+      raw.steps.length > 2_000 ||
+      redactCredentialLikeText(`${raw.name}\n${raw.trigger}\n${raw.steps}`).sensitive
+    ) {
+      continue;
+    }
+    skills.push({
+      name: raw.name,
+      trigger: raw.trigger,
+      steps: raw.steps,
+      origin: 'learned',
+      domain,
+      ...(typeof raw.learnedAt === 'string' ? { learnedAt: raw.learnedAt } : {}),
+    });
+  }
+
+  const settings: MemorySettings = {};
+  const rawSettings =
+    value.settings && typeof value.settings === 'object' && !Array.isArray(value.settings)
+      ? value.settings
+      : {};
+  if (
+    typeof rawSettings.provider === 'string' &&
+    rawSettings.provider.length <= 100 &&
+    !redactCredentialLikeText(rawSettings.provider).sensitive
+  ) {
+    settings.provider = rawSettings.provider;
+  }
+  if (
+    typeof rawSettings.model === 'string' &&
+    rawSettings.model.length <= 300 &&
+    !redactCredentialLikeText(rawSettings.model).sensitive
+  ) {
+    settings.model = rawSettings.model;
+  }
+  if (rawSettings.autonomy === 'auto' || rawSettings.autonomy === 'confirm') {
+    settings.autonomy = rawSettings.autonomy;
+  }
+
+  const doc: MemoryDoc = { version: 1, facts, skills, settings };
+  return { doc, changed: JSON.stringify(value) !== JSON.stringify(doc) };
+}
+
 function isMissing(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT');
+  return hasErrorCode(error, 'ENOENT');
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === code);
 }
 
 /**
@@ -638,24 +945,4 @@ function scrubPersistedRun(run: RunRecord): boolean {
     changed = true;
   }
   return changed;
-}
-
-/**
- * Credentials must not become durable chat history even though the envelope is encrypted. We keep
- * ordinary requests such as "open the password settings" intact, but if a task/output contains an
- * actual credential-shaped value we replace the whole field and mark the run ineligible for recall.
- */
-function redactCredentialLikeText(value: string): { text: string; sensitive: boolean } {
-  const sensitive =
-    /-----BEGIN [A-Z ]*PRIVATE KEY-----/i.test(value) ||
-    /\bBearer\s+[A-Za-z0-9._~+/-]{12,}/i.test(value) ||
-    /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/.test(value) ||
-    /\b(?:sk|pk|rk|api)[-_][A-Za-z0-9_-]{12,}\b/i.test(value) ||
-    /\b(?:password|passcode|otp|one[- ]?time code|verification code|token|api[-_ ]?key|secret|cvv|cvc)\b\s*(?:is|=|:)\s*[^\s,;]{4,}/i.test(
-      value,
-    ) ||
-    /https?:\/\/[^/\s:@]+:[^/\s@]+@/i.test(value);
-  return sensitive
-    ? { text: REDACTED_SENSITIVE, sensitive: true }
-    : { text: value, sensitive: false };
 }

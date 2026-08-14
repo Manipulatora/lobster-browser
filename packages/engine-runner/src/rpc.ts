@@ -12,7 +12,7 @@ import type {
   StatusParams,
   StopParams,
 } from '@lobster/shared-types';
-import { provisionProfile } from './agent/bridge-registry.js';
+import { forgetProfile, provisionProfile } from './agent/bridge-registry.js';
 import { listModels } from '@lobster/agent';
 import type { EngineRunner } from './runner.js';
 import type { AgentManager } from './agent/manager.js';
@@ -42,32 +42,44 @@ export async function dispatch(
         return { id: req.id, ok: true, result: { pong: true } };
       case 'startProfile': {
         const params = req.params as StartProfileParams;
-        // Provision this profile's Lobee bridge with its encrypted-memory key, so a task started from
-        // the in-browser side panel can run without a round-trip to the desktop core for the secret.
-        if (typeof params.agentMemoryKey === 'string' && params.agentMemoryKey) {
-          provisionProfile(params.profileId, { memoryKey: params.agentMemoryKey });
-        }
+        let result;
         if (params.os === 'android') {
           // Default: emulated native mobile Chrome (real window, no hardware). 'adb' opts into the
           // real-device/APK runner instead.
-          const result =
+          result =
             params.androidTransport === 'adb'
               ? await startAndroidProfile(params)
               : await startAndroidEmulatedProfile(runner, params);
-          return { id: req.id, ok: true, result };
+        } else {
+          result = await startProfile(runner, params);
         }
-        return {
-          id: req.id,
-          ok: true,
-          result: await startProfile(runner, params),
-        };
+        // Commit the DNS route only after launch succeeds. A duplicate or failed proxied launch must
+        // not relabel an already-running direct profile and bypass its local-DNS egress checks.
+        provisionProfile(params.profileId, {
+          // Commit run secrets together with the route only after launch succeeds. A failed duplicate
+          // launch must not rotate or partially mutate the live profile's bridge entry.
+          ...(typeof params.agentMemoryKey === 'string' && params.agentMemoryKey
+            ? { memoryKey: params.agentMemoryKey }
+            : {}),
+          networkRoute: params.proxy ? 'remote-proxy' : 'direct',
+        });
+        return { id: req.id, ok: true, result };
       }
-      case 'launch':
-        return { id: req.id, ok: true, result: await runner.launch(req.params as LaunchParams) };
+      case 'launch': {
+        const params = req.params as LaunchParams;
+        const result = await runner.launch(params);
+        provisionProfile(params.profileId, {
+          networkRoute: params.proxy ? 'remote-proxy' : 'direct',
+        });
+        return { id: req.id, ok: true, result };
+      }
       case 'stop': {
         const params = req.params as StopParams;
-        if (await stopAndroidProfile(params.profileId)) return { id: req.id, ok: true };
-        await runner.stop(req.params as StopParams);
+        if (!(await stopAndroidProfile(params.profileId))) {
+          await runner.stop(req.params as StopParams);
+        }
+        deps.agents?.stop(params.profileId);
+        forgetProfile(params.profileId);
         return { id: req.id, ok: true };
       }
       case 'status': {

@@ -11,6 +11,7 @@ import { SeededRandom } from './prng.js';
 import { languagesToAcceptLanguage } from './coherence.js';
 import { ENGINE_CHROME, chromeVersionForms, DEVICE_TEMPLATES } from './pools.js';
 import { deriveCoherentDevice } from './device-tiers.js';
+import { defaultFontsForOs } from './defaults.js';
 
 export interface DeriveOptions {
   os: OsFamily;
@@ -147,7 +148,15 @@ export function deriveFromPools(
       locale: primaryLocale,
       acceptLanguage: languagesToAcceptLanguage(languages),
     },
-    fonts: [...tpl.fonts],
+    // NOT `tpl.fonts`. The pools carry raw catalog rows, and a persona built from them claimed
+    // things no machine has: macOS advertised 2,565 "families" including documentation artefacts
+    // like `Academy Engraved LET Plain:1.0 16.0d1e1` and a bare `Accessories`, Windows advertised
+    // 506 entries of which ~300 were style faces (`Angsana New Bold Italic`) rather than families,
+    // and Linux advertised 7. A page enumerating fonts is doing exactly this measurement, so a hit
+    // on `Accessories` is not a small inaccuracy — it is a globally unique marker that no real
+    // machine produces. `defaultFontsForOs` is the curated per-OS set and was already correct; it
+    // simply was not what derivation used.
+    fonts: defaultFontsForOs(os),
   };
 }
 

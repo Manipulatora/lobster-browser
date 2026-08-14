@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { link, mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { executeAction } from './executor.js';
@@ -130,6 +130,24 @@ test('a private key is refused even when it sits inside an approved root', async
   }
 });
 
+test('credential content beyond the first read chunk is still refused', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'up-'));
+  try {
+    const root = join(dir, 'uploads');
+    await mkdir(root);
+    const planted = join(root, 'notes.txt');
+    await writeFile(
+      planted,
+      `${'ordinary notes\n'.repeat(6_000)}api key: ghp_testOnlyLateCredential12345678901234567890\n`,
+    );
+    const { outcome, uploaded } = await attempt([planted], [root]);
+    assert.match(outcome, /not permitted/);
+    assert.deepEqual(uploaded, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('every refusal is the same message, so the action is not a filesystem oracle', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'up-'));
   try {
@@ -159,6 +177,21 @@ test('a root that would defeat the allowlist is rejected at config time', () => 
     /filesystem root or the home directory/,
   );
   assert.throws(() => resolveConfig({ allowedUploadRoots: ['relative/path'] }), /absolute/);
+});
+
+test('canonical root and home aliases are refused after realpath', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'up-root-alias-'));
+  try {
+    const homeAlias = join(dir, 'narrow-looking-home');
+    await symlink(homedir(), homeAlias);
+    for (const root of [`${tmpdir()}/..`, homeAlias]) {
+      const { outcome, uploaded } = await attempt([join(dir, 'irrelevant.txt')], [root]);
+      assert.match(outcome, /not permitted/);
+      assert.deepEqual(uploaded, []);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('uploads are disabled when no root is configured', async () => {

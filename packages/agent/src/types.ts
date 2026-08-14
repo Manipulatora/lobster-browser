@@ -16,6 +16,12 @@ export interface PerceivedElement {
   name: string;
   /** `<input>`/`<button>` type attribute, when present. */
   type?: string;
+  /** Effective HTML form semantics: activating this control submits its owning form. */
+  submitsForm?: boolean;
+  /** The element held DOM focus when this observation was captured. */
+  focused?: boolean;
+  /** Browser-verified `contenteditable` state for non-native text controls. */
+  editable?: boolean;
   /** Current field value for inputs/textareas/selects (truncated). */
   value?: string;
   /** Whether the field has content without exposing sensitive content. */
@@ -40,6 +46,8 @@ export interface PerceivedElement {
 /** Page-level context captured alongside the element list. */
 export interface PageMeta {
   url: string;
+  /** Ephemeral SHA-256 identity of the unredacted URL; never rendered, emitted, or persisted. */
+  urlIdentity?: string;
   title: string;
   scrollY: number;
   viewportH: number;

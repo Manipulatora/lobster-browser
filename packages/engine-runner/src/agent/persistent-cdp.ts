@@ -15,6 +15,19 @@ export interface PersistentCdpSession extends CdpSession {
   /** Resolves if the socket closes out-of-band (tab/window closed, browser exit). */
   readonly closed: Promise<void>;
   close(): void;
+  /**
+   * Send with a caller-chosen deadline.
+   *
+   * One session-wide timeout cannot serve every command. A renderer blocked by a native dialog
+   * answers nothing, so a caller that only wants to know whether the page is alive, or that has its
+   * own shorter budget to honour, must be able to give up in seconds instead of waiting out the
+   * default half-minute.
+   */
+  send(
+    method: string,
+    params?: Record<string, unknown>,
+    opts?: { timeoutMs?: number },
+  ): Promise<unknown>;
 }
 
 export async function openPersistentCdpSession(
@@ -90,14 +103,21 @@ export async function openPersistentCdpSession(
     });
   });
 
-  const send = (method: string, params?: Record<string, unknown>): Promise<unknown> => {
+  const send = (
+    method: string,
+    params?: Record<string, unknown>,
+    opts?: { timeoutMs?: number },
+  ): Promise<unknown> => {
     if (isClosed) return Promise.reject(new Error('CDP session is closed'));
     return new Promise<unknown>((resolve, reject) => {
       const id = nextId++;
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(new Error(`CDP ${method} timed out`));
-      }, commandTimeoutMs);
+      const timer = setTimeout(
+        () => {
+          pending.delete(id);
+          reject(new Error(`CDP ${method} timed out`));
+        },
+        Math.max(1, opts?.timeoutMs ?? commandTimeoutMs),
+      );
       pending.set(id, { resolve, reject, timer });
       ws.send(JSON.stringify({ id, method, params }));
     });

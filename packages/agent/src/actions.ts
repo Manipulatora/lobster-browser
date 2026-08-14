@@ -1,5 +1,10 @@
 import type { AgentAction } from '@lobster/shared-types';
-import { normalizeBrowserPermission } from './browser-config-guard.js';
+import {
+  normalizeBrowserPermission,
+  normalizeBrowserPermissionOrigin,
+  normalizeCookieDomain,
+} from './browser-config-guard.js';
+import { redactCredentialLikeText, requestsSensitiveInput } from './sensitive-text.js';
 
 const KINDS = [
   'click',
@@ -89,8 +94,10 @@ export const ACTION_CAPABILITIES: Record<AgentAction['kind'], ActionCapability> 
   wait: READ_ONLY,
   extract: READ_ONLY,
   collect: READ_ONLY,
-  remember: READ_ONLY,
-  learn: READ_ONLY,
+  // These do not touch the page, but they DO mutate durable profile state that is injected into
+  // future runs. Treating them as reads let model/page-influenced memory bypass confirm mode.
+  remember: cap(),
+  learn: cap(),
   browser_config: cap(),
   ask: READ_ONLY,
   screenshot: { ...READ_ONLY, requiresVision: true },
@@ -115,6 +122,54 @@ const BROWSER_CONFIG_OPS = [
   'set_privacy',
   'set_content_default',
 ] as const;
+
+/**
+ * The complete key vocabulary, canonicalized.
+ *
+ * This is the ONE list. It used to live twice: an allowlist here that admitted a bare `" "` (its
+ * character class was `[A-Za-z0-9 ]`), and the driver's own table, which knows `Space` and has no
+ * entry for a literal space. A `{kind:'key', key:' '}` therefore passed validation, crossed the
+ * durable dispatch barrier, and only then threw inside the driver — before a single byte reached the
+ * browser. Nothing had happened, but the journal had already recorded a dispatch it could not prove
+ * was effect-free, so the run ended `recovery_required` and every later run on that profile was
+ * refused admission. A deterministic, effect-free rejection must be reachable only on the preflight
+ * side of that barrier, which means both layers have to agree on what is pressable.
+ */
+export const NAMED_KEYS = [
+  'Enter',
+  'Tab',
+  'Backspace',
+  'Escape',
+  'Delete',
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'Home',
+  'End',
+  'PageUp',
+  'PageDown',
+  'Space',
+] as const;
+
+const MODIFIER_COMBOS = ['Control+A', 'Meta+A'];
+
+/**
+ * Canonicalize a model-supplied key, or return undefined when nothing can press it.
+ *
+ * Canonicalizing at parse time is what keeps the two layers honest: a bare space becomes `Space`
+ * here, so the approval prompt, the history line, the journal digest, and the driver all name the
+ * same keystroke.
+ */
+export function normalizeActionKey(raw: string): string | undefined {
+  const value = raw.trim() === '' ? raw : raw.trim();
+  if (value === ' ') return 'Space';
+  const named = NAMED_KEYS.find((key) => key.toLowerCase() === value.toLowerCase());
+  if (named) return named;
+  const combo = MODIFIER_COMBOS.find((key) => key.toLowerCase() === value.toLowerCase());
+  if (combo) return combo;
+  return /^[A-Za-z0-9]$/.test(value) ? value : undefined;
+}
 
 export const ACT_TOOL = {
   name: 'act',
@@ -256,6 +311,7 @@ export function buildActionReference(opts: {
   const lines = [
     'Actions (one per tool call):',
     '- click {id, button?, count?}; hover {id}; type {id,text,clear?,submit?}; select {id,values}',
+    '- `type` targets text-entry controls only. Keep Enter/Tab out of `text`: use submit:true or a separate key action so the harness can classify the commit boundary.',
     '- key {key}; scroll {direction,amount?,id?} — `amount` is in PIXELS, so omit it to move a whole screenful; drag {fromId,toId}',
     '- navigate {url}; back {}; wait {ms?}; tab {operation,tabId?,url?}: list/new/switch/close. Address tabs by the `tabId` from `tab list`, not by position — positions shift whenever any tab opens or closes.',
     '- extract {description}: read the current page as structured text (tables keep their rows, lists their items). Use it when the answer is longer than the element list shows.',
@@ -264,7 +320,7 @@ export function buildActionReference(opts: {
   if (opts.vision) {
     lines.push(
       '- screenshot {description?}: capture the page visually. Use it when the element list is empty or the content is a canvas/image/custom widget you cannot otherwise read.',
-      '- after a screenshot ONLY, in that same next step: click_at {x,y,...} or type_at {x,y,text,...} using CSS viewport coordinates from the image.',
+      '- after a screenshot ONLY, in that same next step: click_at {x,y,...} or type_at {x,y,text,...} using CSS viewport coordinates from the image. Coordinate actions require human approval and an unchanged fresh screenshot before execution.',
     );
   }
   if (opts.uploads) {
@@ -444,8 +500,8 @@ export function parseAction(raw: RawActionInput): ParseActionResult {
       return ok({ kind, id: elementId, values, ...note(raw) });
     }
     case 'key': {
-      const key = str(raw.key, 80);
-      return key ? ok({ kind, key, ...note(raw) }) : bad('key requires a non-empty "key"');
+      const key = normalizeActionKey(str(raw.key, 80) ?? '');
+      return key ? ok({ kind, key, ...note(raw) }) : bad('key requires a supported "key"');
     }
     case 'scroll': {
       if (raw.direction !== 'up' && raw.direction !== 'down')
@@ -578,11 +634,24 @@ export function parseAction(raw: RawActionInput): ParseActionResult {
         return bad('set_downloads requires behavior allow/deny/default');
       if (op === 'open_settings' && !value)
         return bad('open_settings requires a "value" naming the settings area (e.g. "privacy")');
+      const cookieDomain = op === 'clear_cookies' ? normalizeCookieDomain(domain) : undefined;
+      if (op === 'clear_cookies' && !cookieDomain) {
+        return bad('clear_cookies requires a specific site domain, not a public/private suffix');
+      }
+      const permissionOrigin =
+        op === 'set_permission' ? normalizeBrowserPermissionOrigin(origin, domain) : undefined;
+      if (op === 'set_permission' && !permissionOrigin) {
+        return bad('set_permission requires a valid non-empty HTTP(S) origin');
+      }
       return ok({
         kind,
         op: op as (typeof BROWSER_CONFIG_OPS)[number],
-        ...(domain ? { domain } : {}),
-        ...(origin ? { origin } : {}),
+        ...(cookieDomain
+          ? { domain: cookieDomain }
+          : op !== 'set_permission' && domain
+            ? { domain }
+            : {}),
+        ...(permissionOrigin ? { origin: permissionOrigin } : origin ? { origin } : {}),
         ...(permission ? { permission: normalizeBrowserPermission(permission) } : {}),
         ...(setting ? { setting } : {}),
         ...(behavior ? { behavior } : {}),
@@ -597,6 +666,12 @@ export function parseAction(raw: RawActionInput): ParseActionResult {
       const targetX = coordinate(raw, 'targetX');
       const targetY = coordinate(raw, 'targetY');
       const sensitive = bool(raw.sensitive);
+      if ('sensitive' in raw && sensitive === undefined)
+        return bad('ask sensitive must be true or false');
+      if (redactCredentialLikeText(question).sensitive)
+        return bad('ask question must not contain a credential value');
+      if (sensitive !== true && requestsSensitiveInput(question))
+        return bad('questions requesting credentials require sensitive:true');
       if (
         (targetId !== undefined || targetX !== undefined || targetY !== undefined) &&
         sensitive !== true

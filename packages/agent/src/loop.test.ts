@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { readFile, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import type { AgentEvent, AgentUsage } from '@lobster/shared-types';
 import type { BrowserDriver, Point } from './driver.js';
 import type { LlmClient, LlmRequest, LlmResult } from './llm/index.js';
 import type { MemoryStore, ThreadMessage } from './memory/index.js';
+import { RunJournalStore } from './journal/index.js';
 import { EXTRACT_SCRIPT } from './perception/extract-script.js';
 import { resolveConfig, runAgent } from './loop.js';
+import type { AgentRunDeps } from './loop.js';
+import type { RawPerception } from './types.js';
 
 /** A page the fake extraction script "sees": one search box, one button. */
 const PAGE = {
@@ -38,6 +45,9 @@ const PAGE = {
 class FakeDriver implements BrowserDriver {
   clicks: Point[] = [];
   typed: string[] = [];
+  pressedKeys: string[] = [];
+  selections: Array<{ point: Point; values: string[] }> = [];
+  drags: Array<{ from: Point; to: Point }> = [];
   navigations: string[] = [];
   async evaluate<T>(expression: string): Promise<T> {
     // Check the full extract script FIRST — it embeds `location.href`/`document.readyState`, so an
@@ -51,14 +61,20 @@ class FakeDriver implements BrowserDriver {
     this.clicks.push(p);
   }
   async hover(): Promise<void> {}
-  async drag(): Promise<void> {}
+  async drag(from: Point, to: Point): Promise<void> {
+    this.drags.push({ from, to });
+  }
   async type(t: string): Promise<void> {
     this.typed.push(t);
   }
-  async pressKey(): Promise<void> {}
+  async pressKey(key: string): Promise<void> {
+    this.pressedKeys.push(key);
+  }
   async selectAll(): Promise<void> {}
   async scrollBy(): Promise<void> {}
-  async select(): Promise<void> {}
+  async select(point: Point, values: string[]): Promise<void> {
+    this.selections.push({ point, values });
+  }
   async uploadFiles(): Promise<void> {}
   async navigate(url: string): Promise<void> {
     this.navigations.push(url);
@@ -74,6 +90,43 @@ class FakeDriver implements BrowserDriver {
   async newTab(): Promise<void> {}
   async switchTab(): Promise<void> {}
   async closeTab(): Promise<void> {}
+  async screenshot(): Promise<string> {
+    return 'dGVzdA==';
+  }
+}
+
+class SequencedPerceptionDriver extends FakeDriver {
+  private read = 0;
+  private current: RawPerception;
+
+  constructor(private readonly pages: RawPerception[]) {
+    super();
+    this.current = pages[0] ?? (PAGE as RawPerception);
+  }
+
+  override async evaluate<T>(expression: string): Promise<T> {
+    if (expression === EXTRACT_SCRIPT) {
+      this.current = this.pages[Math.min(this.read, this.pages.length - 1)] ?? this.current;
+      this.read += 1;
+      return this.current as T;
+    }
+    if (expression === 'location.href') return this.current.url as T;
+    if (expression === 'document.readyState') return 'complete' as T;
+    return '' as T;
+  }
+
+  override async currentUrl(): Promise<string> {
+    return this.current.url;
+  }
+}
+
+class ChangingScreenshotDriver extends FakeDriver {
+  private captures = 0;
+
+  override async screenshot(): Promise<string> {
+    this.captures += 1;
+    return this.captures === 1 ? 'c2NyZWVuLWJlZm9yZQ==' : 'c2NyZWVuLWFmdGVy';
+  }
 }
 
 /** Replays a fixed script of tool calls, one per step. */
@@ -164,7 +217,7 @@ class FakeMemory implements MemoryStore {
   async finishRun(_id: string, o: { status: string; summary: string }): Promise<void> {
     this.finished = { status: o.status, summary: o.summary };
   }
-  async rememberFact(): Promise<void> {}
+  async rememberFact(_fact: unknown): Promise<void> {}
   async learnSkill(_skill: unknown): Promise<void> {}
   async getSettings(): Promise<Record<string, never>> {
     return {};
@@ -172,8 +225,16 @@ class FakeMemory implements MemoryStore {
   async setSettings(): Promise<void> {}
 }
 
-function run(script: ScriptedStep[], humanInput = 'ok', maxSteps = 6) {
-  const driver = new FakeDriver();
+function run(
+  script: ScriptedStep[],
+  humanInput:
+    string | ((prompt: string, kind: 'ask' | 'confirm') => string | Promise<string>) = 'ok',
+  maxSteps = 6,
+  driver: FakeDriver = new FakeDriver(),
+  config: Parameters<typeof resolveConfig>[0] = {},
+  journal?: AgentRunDeps['journal'],
+  task = 'search for shoes',
+) {
   const memory = new FakeMemory();
   const events: AgentEvent[] = [];
   const abort = new AbortController();
@@ -189,20 +250,22 @@ function run(script: ScriptedStep[], humanInput = 'ok', maxSteps = 6) {
         sessionId: 's1',
         threadId: 'thread1',
         profileId: 'p1',
-        task: 'search for shoes',
+        task,
         runId: 's1',
         llmConfig: { provider: 'anthropic', model: 'claude-opus-4-8', apiKey: 'x' },
-        config: resolveConfig({ maxSteps }),
+        config: resolveConfig({ ...config, maxSteps }),
       },
       {
         driver,
         llm,
         memory,
         emit: (e) => events.push(e),
-        waitForInput: async () => humanInput,
+        waitForInput: async (prompt, kind) =>
+          typeof humanInput === 'function' ? await humanInput(prompt, kind) : humanInput,
         signal: abort.signal,
         now,
         sleep: async () => {},
+        ...(journal ? { journal } : {}),
       },
     ),
     abort,
@@ -232,6 +295,421 @@ test('runs a type+submit then finishes done, emitting the expected event arc', a
   assert.equal(finished.status, 'done');
   assert.equal(finished.result, 'searched for shoes');
   assert.equal(memory.finished?.status, 'done');
+});
+
+test('credential-bearing tasks stop before any model request and are redacted from events/history', async () => {
+  const secret = 'api key: sk-testOnlyTaskCredential123456789';
+  const { promise, llm, events, memory, driver } = run(
+    [],
+    'ok',
+    2,
+    new FakeDriver(),
+    { mode: 'ask' },
+    undefined,
+    `Use ${secret} to open my account`,
+  );
+  await promise;
+
+  assert.equal(llm.requests.length, 0);
+  assert.deepEqual(driver.typed, []);
+  assert.doesNotMatch(JSON.stringify(events), /testOnlyTaskCredential/);
+  assert.doesNotMatch(JSON.stringify(memory.appendedTurns), /testOnlyTaskCredential/);
+  const finished = events.find((event) => event.type === 'run.finished');
+  assert.ok(finished?.type === 'run.finished');
+  assert.equal(finished.status, 'error');
+  assert.match(finished.error ?? '', /secure input prompt/);
+});
+
+test('credential-like text cannot use ordinary typing and never enters action events', async () => {
+  const secret = 'password: testOnlyTypedCredential123456789';
+  const { promise, llm, events, driver } = run([
+    { kind: 'type', id: 0, text: secret },
+    { kind: 'done', success: true, summary: 'asked for secure input instead' },
+  ]);
+  await promise;
+
+  assert.deepEqual(driver.typed, []);
+  assert.doesNotMatch(JSON.stringify(events), /testOnlyTypedCredential/);
+  assert.match(allText(llm.requests[1]!), /secure human-input channel|sensitive:true/);
+});
+
+test('credential-like model summaries never enter action or terminal events', async () => {
+  const secret = 'api key: sk-testOnlyTerminalCredential123456789';
+  const { promise, events } = run([{ kind: 'done', success: true, summary: secret }]);
+  await promise;
+
+  assert.doesNotMatch(JSON.stringify(events), /testOnlyTerminalCredential/);
+  assert.match(JSON.stringify(events), /REDACTED/);
+});
+
+test('the runtime journal records a non-executable digest and never stores typed secrets', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-journal-'));
+  const typedText = 'quarterly report';
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    const { driver, promise } = run(
+      [
+        { kind: 'type', id: 0, text: typedText },
+        { kind: 'done', success: true, summary: 'finished without echoing the value' },
+      ],
+      'approve',
+      4,
+      new FakeDriver(),
+      {},
+      journal,
+    );
+    await promise;
+
+    assert.deepEqual(driver.typed, [typedText]);
+    const snapshot = await journal.load('s1');
+    assert.ok(snapshot);
+    assert.equal(snapshot.state.phase, 'completed');
+    const serialized = JSON.stringify(snapshot.journal);
+    assert.equal(serialized.includes(typedText), false);
+    const proposal = snapshot.journal.events.find(
+      (event) => event.type === 'action.proposed' && event.actionKind === 'type',
+    );
+    assert.deepEqual(proposal, {
+      type: 'action.proposed',
+      seq: 2,
+      at: proposal?.at,
+      actionId: 'action-1',
+      actionKind: 'type',
+      effect: 'write',
+      summary: 'Proposed type action',
+      host: 'example.test',
+    });
+    assert.equal('args' in (proposal ?? {}), false);
+    assert.equal('selector' in (proposal ?? {}), false);
+    assert.equal('coordinates' in (proposal ?? {}), false);
+    const encrypted = await readFile(join(dir, 's1.journal'), 'utf8');
+    assert.match(encrypted, /^lobee-run-journal-v1:/);
+    assert.equal(encrypted.includes(typedText), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('approval requested/resolved and dispatch boundaries use one action id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-approval-journal-'));
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    const { driver, promise } = run(
+      [
+        { kind: 'click', id: 1 },
+        { kind: 'done', success: true, summary: 'clicked' },
+      ],
+      'approve',
+      4,
+      new FakeDriver(),
+      {},
+      journal,
+    );
+    await promise;
+    assert.equal(driver.clicks.length, 1);
+    const snapshot = await journal.load('s1');
+    assert.ok(snapshot);
+    const clickEvents = snapshot.journal.events.filter(
+      (event) => 'actionId' in event && event.actionId === 'action-1',
+    );
+    assert.deepEqual(
+      clickEvents.map((event) => event.type),
+      [
+        'action.proposed',
+        'approval.requested',
+        'approval.resolved',
+        'action.dispatching',
+        'action.observed',
+      ],
+    );
+    const resolution = clickEvents.find((event) => event.type === 'approval.resolved');
+    assert.ok(resolution?.type === 'approval.resolved');
+    assert.equal(resolution.decision, 'approved');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a journal failure before the dispatch marker prevents a write action', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-journal-fail-closed-'));
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    const failingJournal: NonNullable<AgentRunDeps['journal']> = {
+      create: (input) => journal.create(input),
+      append: (runId, event, revision) => {
+        if (event.type === 'action.dispatching') {
+          return Promise.reject(new Error('injected pre-dispatch journal failure'));
+        }
+        return journal.append(runId, event, revision);
+      },
+    };
+    const driver = new FakeDriver();
+    const { promise } = run(
+      [{ kind: 'type', id: 0, text: 'must-not-be-typed' }],
+      'approve',
+      2,
+      driver,
+      {},
+      failingJournal,
+    );
+    await promise;
+    assert.deepEqual(driver.typed, []);
+    const snapshot = await journal.load('s1');
+    assert.ok(snapshot);
+    assert.equal(snapshot.state.phase, 'failed');
+    assert.equal(
+      snapshot.journal.events.some((event) => event.type === 'action.dispatching'),
+      false,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a journal failure before the dispatch marker also prevents a consequential click', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-journal-consequential-fail-closed-'));
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    const failingJournal: NonNullable<AgentRunDeps['journal']> = {
+      create: (input) => journal.create(input),
+      append: (runId, event, revision) => {
+        if (event.type === 'action.dispatching') {
+          return Promise.reject(new Error('injected consequential dispatch journal failure'));
+        }
+        return journal.append(runId, event, revision);
+      },
+    };
+    const driver = new FakeDriver();
+    const { promise } = run([{ kind: 'click', id: 1 }], 'approve', 2, driver, {}, failingJournal);
+    await promise;
+    assert.deepEqual(driver.clicks, []);
+    const snapshot = await journal.load('s1');
+    assert.ok(snapshot);
+    assert.equal(snapshot.state.phase, 'failed');
+    const proposal = snapshot.journal.events.find((event) => event.type === 'action.proposed');
+    assert.ok(proposal?.type === 'action.proposed');
+    assert.equal(proposal.effect, 'consequential');
+    assert.equal(
+      snapshot.journal.events.some((event) => event.type === 'action.dispatching'),
+      false,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('deterministic write preflight failures cancel cleanly without requiring recovery', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-journal-preflight-'));
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    const driver = new FakeDriver();
+    const { promise } = run(
+      [
+        { kind: 'type', id: 99, text: 'never dispatched' },
+        { kind: 'done', success: true, summary: 'replanned safely' },
+      ],
+      'approve',
+      4,
+      driver,
+      {},
+      journal,
+    );
+    await promise;
+
+    assert.deepEqual(driver.typed, []);
+    const snapshot = await journal.load('s1');
+    assert.ok(snapshot);
+    assert.equal(snapshot.state.phase, 'completed');
+    const rejected = snapshot.journal.events.filter(
+      (event) => 'actionId' in event && event.actionId === 'action-1',
+    );
+    assert.deepEqual(
+      rejected.map((event) => event.type),
+      ['action.proposed', 'action.cancelled'],
+    );
+    assert.equal(
+      rejected.some((event) => event.type === 'action.dispatching'),
+      false,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a crash after a dispatched write leaves an unterminated ambiguous journal', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-journal-crash-'));
+  const secret = 'typed-after-dispatch-secret';
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    const crashingJournal: NonNullable<AgentRunDeps['journal']> = {
+      create: (input) => journal.create(input),
+      append: (runId, event, revision) => {
+        if (event.type === 'action.observed') {
+          return Promise.reject(new Error('injected crash before observed checkpoint'));
+        }
+        return journal.append(runId, event, revision);
+      },
+    };
+    const driver = new FakeDriver();
+    const { promise } = run(
+      [{ kind: 'type', id: 0, text: secret }],
+      'approve',
+      2,
+      driver,
+      {},
+      crashingJournal,
+    );
+    await assert.rejects(promise, /injected crash before observed checkpoint/);
+    assert.deepEqual(driver.typed, [secret]);
+    const snapshot = await journal.load('s1');
+    assert.ok(snapshot);
+    assert.equal(snapshot.state.phase, 'dispatching');
+    assert.equal(snapshot.state.activeAction?.effect, 'write');
+    assert.equal(
+      snapshot.journal.events.some(
+        (event) =>
+          event.type === 'run.completed' ||
+          event.type === 'run.failed' ||
+          event.type === 'run.stopped',
+      ),
+      false,
+    );
+    assert.equal((await readFile(join(dir, 's1.journal'), 'utf8')).includes(secret), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a delivered effect with unreadable post-action state remains recovery-required', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-journal-post-effect-'));
+  class UnreadableAfterClickDriver extends FakeDriver {
+    delivered = false;
+    override async click(point: Point): Promise<void> {
+      await super.click(point);
+      this.delivered = true;
+    }
+    override async evaluate<T>(expression: string): Promise<T> {
+      if (this.delivered && expression === EXTRACT_SCRIPT) {
+        throw new Error('target detached after click');
+      }
+      return super.evaluate<T>(expression);
+    }
+  }
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    const driver = new UnreadableAfterClickDriver();
+    const { promise } = run([{ kind: 'click', id: 1 }], 'approve', 2, driver, {}, journal);
+    await assert.rejects(promise, /post-action browser state is ambiguous/);
+    assert.equal(driver.clicks.length, 1);
+    const snapshot = await journal.load('s1');
+    assert.ok(snapshot);
+    assert.equal(snapshot.state.phase, 'recovery_required');
+    assert.equal(snapshot.state.activeAction?.effect, 'consequential');
+    assert.equal(
+      snapshot.journal.events.some(
+        (event) =>
+          event.type === 'run.completed' ||
+          event.type === 'run.failed' ||
+          event.type === 'run.stopped',
+      ),
+      false,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('sensitive handoffs, uploads, and images are marked before their action can dispatch', async () => {
+  const scenarios: Array<{
+    name: string;
+    action: ScriptedStep;
+    input: string;
+    config: Parameters<typeof resolveConfig>[0];
+    reason: 'credential' | 'upload_path' | 'image_payload';
+  }> = [
+    {
+      name: 'handoff',
+      action: { kind: 'ask', question: 'Password?', sensitive: true, targetId: 2 },
+      input: 'handoff-secret',
+      config: {},
+      reason: 'credential',
+    },
+    {
+      name: 'upload',
+      action: { kind: 'upload', id: 1, paths: ['/tmp/private-upload.txt'] },
+      input: 'reject',
+      config: { allowedUploadRoots: ['/tmp/lobee-approved-uploads'] },
+      reason: 'upload_path',
+    },
+    {
+      name: 'image',
+      action: { kind: 'screenshot', description: 'inspect canvas' },
+      input: 'approve',
+      config: { visionFallback: true },
+      reason: 'image_payload',
+    },
+  ];
+  for (const scenario of scenarios) {
+    const dir = await mkdtemp(join(tmpdir(), `lobee-loop-sensitive-${scenario.name}-`));
+    try {
+      const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+      const { promise } = run(
+        [scenario.action, { kind: 'done', success: true, summary: 'finished' }],
+        scenario.input,
+        4,
+        new FakeDriver(),
+        scenario.config,
+        journal,
+      );
+      await promise;
+      const snapshot = await journal.load('s1');
+      assert.ok(snapshot);
+      const sensitiveIndex = snapshot.journal.events.findIndex(
+        (event) => event.type === 'run.sensitive' && event.reason === scenario.reason,
+      );
+      const dispatchIndex = snapshot.journal.events.findIndex(
+        (event) => event.type === 'action.dispatching',
+      );
+      assert.ok(sensitiveIndex >= 0, `${scenario.name} was not marked sensitive`);
+      assert.ok(
+        dispatchIndex < 0 || sensitiveIndex < dispatchIndex,
+        `${scenario.name} was marked only after dispatch`,
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('known secret-memory validation happens before a durable write is proposed', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-secret-memory-journal-'));
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    const { promise } = run(
+      [
+        { kind: 'remember', factKey: 'apiKey', factValue: 'sk-test-secret-1234567890' },
+        { kind: 'done', success: true, summary: 'did not save the credential' },
+      ],
+      'approve',
+      4,
+      new FakeDriver(),
+      {},
+      journal,
+    );
+    await promise;
+    const snapshot = await journal.load('s1');
+    assert.ok(snapshot);
+    assert.equal(snapshot.state.phase, 'completed');
+    assert.equal(
+      snapshot.journal.events.some(
+        (event) => event.type === 'action.proposed' && event.actionKind === 'remember',
+      ),
+      false,
+    );
+    assert.equal(JSON.stringify(snapshot.journal).includes('sk-test-secret-1234567890'), false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('Ask mode injects bounded prior conversation and persists run metadata', async () => {
@@ -270,7 +748,7 @@ test('Ask mode injects bounded prior conversation and persists run metadata', as
       llm,
       memory,
       emit: (event) => events.push(event),
-      waitForInput: async () => '',
+      waitForInput: async (_prompt, kind) => (kind === 'confirm' ? 'approve' : ''),
       signal: new AbortController().signal,
       now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
     },
@@ -300,6 +778,95 @@ test('Ask mode injects bounded prior conversation and persists run metadata', as
   assert.ok(finished && finished.type === 'run.finished' && finished.status === 'done');
 });
 
+test('Ask mode enforces the configured token budget before calling the model', async () => {
+  const { promise, llm, events } = run(
+    [{ __prose: 'this must never be requested' }],
+    'ok',
+    6,
+    new FakeDriver(),
+    { mode: 'ask', tokenBudget: 1_000 },
+  );
+  await promise;
+
+  assert.equal(llm.requests.length, 0);
+  const finished = events.find((event) => event.type === 'run.finished');
+  assert.ok(finished?.type === 'run.finished');
+  assert.equal(finished.status, 'stopped');
+  assert.match(finished.result ?? '', /Token budget \(1000\)/);
+});
+
+test('Ask mode turns the remaining token allowance into the request maxTokens cap', async () => {
+  const { promise, llm, events } = run(
+    [{ __prose: 'A bounded answer.' }],
+    'ok',
+    6,
+    new FakeDriver(),
+    { mode: 'ask', tokenBudget: 2_000 },
+  );
+  await promise;
+
+  assert.equal(llm.requests.length, 1);
+  assert.ok(
+    llm.requests[0]!.maxTokens >= 256 && llm.requests[0]!.maxTokens < 2_048,
+    `expected a useful dynamically reduced output cap, got ${llm.requests[0]!.maxTokens}`,
+  );
+  const finished = events.find((event) => event.type === 'run.finished');
+  assert.ok(finished?.type === 'run.finished');
+  assert.equal(finished.status, 'done');
+});
+
+test('Agent mode does not execute a returned action after provider usage exceeds the budget', async () => {
+  const driver = new FakeDriver();
+  const memory = new FakeMemory();
+  const events: AgentEvent[] = [];
+  const requests: LlmRequest[] = [];
+  let approvalPrompts = 0;
+  const llm: LlmClient = {
+    provider: 'over-budget',
+    async complete(request): Promise<LlmResult> {
+      requests.push(request);
+      return {
+        toolCall: { id: 'overage', name: 'act', input: { kind: 'click', id: 1 } },
+        stopReason: 'tool',
+        usage: { tokensIn: 100_001, tokensOut: 1 },
+      };
+    },
+  };
+  let n = 0;
+  await runAgent(
+    {
+      sessionId: 'budget-agent',
+      profileId: 'p1',
+      task: 'click Go',
+      runId: 'budget-agent',
+      llmConfig: { provider: 'anthropic', model: 'm', apiKey: 'x' },
+      config: resolveConfig({ tokenBudget: 100_000, maxSteps: 4 }),
+    },
+    {
+      driver,
+      llm,
+      memory,
+      emit: (event) => events.push(event),
+      waitForInput: async () => {
+        approvalPrompts += 1;
+        return 'approve';
+      },
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+
+  assert.equal(requests.length, 1, 'the over-budget response must end the loop');
+  assert.equal(driver.clicks.length, 0, 'the returned action must stay quarantined');
+  assert.equal(approvalPrompts, 0, 'an over-budget action must not even reach confirmation');
+  assert.equal(memory.steps.length, 0, 'an unexecuted proposal must not be recorded as a step');
+  const finished = events.find((event) => event.type === 'run.finished');
+  assert.ok(finished?.type === 'run.finished');
+  assert.equal(finished.status, 'stopped');
+  assert.match(finished.result ?? '', /no action was executed/i);
+});
+
 test('a bad element index does not crash — it is fed back and the run continues', async () => {
   const { events, promise } = run([
     { kind: 'click', id: 99 }, // no such element
@@ -324,6 +891,184 @@ test('Agent mode receives prior conversation and refreshes site-scoped memory', 
   assert.match(allText(llm.requests[0]!), /I like violet/);
   assert.match(allText(llm.requests[0]!), /site preference for example\.test/);
   assert.deepEqual(memory.siteContexts, ['example.test']);
+});
+
+test('a relative start URL is canonicalized once before navigation', async () => {
+  const driver = new FakeDriver();
+  const { promise } = run(
+    [{ kind: 'done', success: true, summary: 'opened the requested page' }],
+    'approve',
+    3,
+    driver,
+    { startUrl: '/reports/latest' },
+  );
+  await promise;
+  assert.deepEqual(driver.navigations, ['https://example.test/reports/latest']);
+});
+
+test('start navigation approval expires when the source page changes', async () => {
+  class StartDriftDriver extends FakeDriver {
+    current = PAGE.url;
+    override async currentUrl(): Promise<string> {
+      return this.current;
+    }
+  }
+  const driver = new StartDriftDriver();
+  const { promise, events } = run(
+    [{ kind: 'done', success: true, summary: 'must not run' }],
+    async () => {
+      driver.current = 'file:///tmp/private-after-prompt';
+      return 'approve';
+    },
+    3,
+    driver,
+    { startUrl: 'https://outside.test/landing', crossDomainNavigation: 'confirm' },
+  );
+  await promise;
+
+  assert.deepEqual(driver.navigations, []);
+  const finished = events.find((event) => event.type === 'run.finished');
+  assert.ok(finished?.type === 'run.finished');
+  assert.equal(finished.status, 'error');
+  assert.match(finished.error ?? '', /current page changed.*blocked file:/i);
+});
+
+test('the allowed-domain fence rejects an already-open outside page before model or action', async () => {
+  const outside: RawPerception = { ...PAGE, url: 'https://outside.test/' };
+  const driver = new SequencedPerceptionDriver([outside]);
+  const { promise, llm, events } = run([{ kind: 'click', id: 1 }], 'ok', 4, driver, {
+    allowedDomains: ['example.test'],
+  });
+  await promise;
+
+  assert.equal(llm.requests.length, 0, 'the outside page must never reach the model');
+  assert.deepEqual(driver.clicks, [], 'the outside page must never receive an action');
+  const finished = events.find((event) => event.type === 'run.finished');
+  assert.ok(finished?.type === 'run.finished');
+  assert.equal(finished.status, 'error');
+  assert.match(finished.error ?? '', /outside the allowed-domain fence/);
+});
+
+test('opaque and local pages are rejected before their contents reach the model', async () => {
+  for (const url of [
+    'file:///etc/passwd',
+    'data:text/html,private',
+    'blob:https://example.test/9af0f476-8d1b-4b71-8bd2-e4039de2334f',
+  ]) {
+    const page: RawPerception = { ...PAGE, url, text: 'must never leave this page' };
+    const driver = new SequencedPerceptionDriver([page]);
+    const { promise, llm, events } = run([{ kind: 'click', id: 1 }], 'ok', 4, driver, {
+      allowedDomains: ['example.test'],
+    });
+    await promise;
+
+    assert.equal(llm.requests.length, 0, `${url} reached the model`);
+    assert.deepEqual(driver.clicks, [], `${url} received an action`);
+    const finished = events.find((event) => event.type === 'run.finished');
+    assert.ok(finished?.type === 'run.finished');
+    assert.equal(finished.status, 'error');
+    assert.match(finished.error ?? '', /blocked .* URL scheme/);
+  }
+});
+
+test('the current-page fence is rechecked after the model round trip before dispatch', async () => {
+  class MidStepDriftDriver extends FakeDriver {
+    override async currentUrl(): Promise<string> {
+      return 'https://outside.test/after-model';
+    }
+  }
+
+  const driver = new MidStepDriftDriver();
+  const { promise, llm, memory } = run([{ kind: 'click', id: 1 }], 'ok', 3, driver, {
+    allowedDomains: ['example.test'],
+  });
+  await promise;
+
+  assert.equal(
+    llm.requests.length > 0,
+    true,
+    'the drift happens after the observation was modeled',
+  );
+  assert.deepEqual(driver.clicks, []);
+  assert.match(JSON.stringify(memory.steps), /outside the allowed-domain fence/);
+});
+
+test('post-model drift to an opaque page is blocked before action dispatch', async () => {
+  class OpaqueMidStepDriftDriver extends FakeDriver {
+    drifted = false;
+
+    override async evaluate<T>(expression: string): Promise<T> {
+      if (this.drifted && expression === EXTRACT_SCRIPT) {
+        return {
+          ...PAGE,
+          url: 'data:text/html,the-page-changed',
+          text: 'must not reach the model',
+        } as unknown as T;
+      }
+      return super.evaluate<T>(expression);
+    }
+
+    override async currentUrl(): Promise<string> {
+      this.drifted = true;
+      return 'data:text/html,the-page-changed';
+    }
+  }
+
+  const driver = new OpaqueMidStepDriftDriver();
+  const { promise, llm, memory } = run([{ kind: 'click', id: 1 }], 'ok', 3, driver, {
+    allowedDomains: ['example.test'],
+  });
+  await promise;
+
+  assert.equal(llm.requests.length, 1, 'the drift occurs after the initial page was modeled');
+  assert.deepEqual(driver.clicks, []);
+  assert.match(JSON.stringify(memory.steps), /blocked data: URL scheme/);
+});
+
+test('an explicitly enabled localhost page remains usable inside its exact domain fence', async () => {
+  const local: RawPerception = { ...PAGE, url: 'http://localhost:3000/' };
+  const driver = new SequencedPerceptionDriver([local]);
+  const { promise, llm, events } = run(
+    [{ kind: 'done', success: true, summary: 'local fixture read' }],
+    'ok',
+    4,
+    driver,
+    { allowedDomains: ['localhost'], allowPrivateNetwork: true },
+  );
+  await promise;
+
+  assert.equal(llm.requests.length, 1);
+  const finished = events.find((event) => event.type === 'run.finished');
+  assert.ok(finished?.type === 'run.finished');
+  assert.equal(finished.status, 'done');
+});
+
+test('current-page enforcement does not open a lazy browser for a browser-free answer', async () => {
+  class ClosedLazyDriver extends FakeDriver {
+    currentUrlCalls = 0;
+    ready(): boolean {
+      return false;
+    }
+    override async currentUrl(): Promise<string> {
+      this.currentUrlCalls += 1;
+      throw new Error('currentUrl would launch the lazy browser');
+    }
+  }
+
+  const driver = new ClosedLazyDriver();
+  const { promise, events } = run(
+    [{ kind: 'done', success: true, summary: 'answered without browsing' }],
+    'ok',
+    3,
+    driver,
+    { allowedDomains: ['example.test'] },
+  );
+  await promise;
+
+  assert.equal(driver.currentUrlCalls, 0);
+  const finished = events.find((event) => event.type === 'run.finished');
+  assert.ok(finished?.type === 'run.finished');
+  assert.equal(finished.status, 'done');
 });
 
 test('done with success=false is an error, not a green successful completion', async () => {
@@ -380,7 +1125,7 @@ test('multi-page extracts remain in a bounded evidence ledger after clicking Nex
       llm,
       memory,
       emit: () => {},
-      waitForInput: async () => '',
+      waitForInput: async (_prompt, kind) => (kind === 'confirm' ? 'approve' : ''),
       signal: new AbortController().signal,
       now: () => new Date().toISOString(),
       sleep: async () => {},
@@ -534,6 +1279,7 @@ test('browser_config clears every cookie through the native driver operation', a
 test('normal interactions may stay within vetted settings pages but unsafe internal drift is blocked', async () => {
   class SettingsInteractionDriver extends FakeDriver {
     url = PAGE.url;
+    priorUrl = PAGE.url;
     driftTo = 'chrome://settings/appearance?search=theme';
     override async evaluate<T>(expression: string): Promise<T> {
       if (expression === EXTRACT_SCRIPT) {
@@ -550,7 +1296,11 @@ test('normal interactions may stay within vetted settings pages but unsafe inter
     }
     override async type(text: string): Promise<void> {
       await super.type(text);
+      this.priorUrl = this.url;
       this.url = this.driftTo;
+    }
+    override async goBack(): Promise<void> {
+      this.url = this.priorUrl;
     }
   }
 
@@ -833,6 +1583,30 @@ test('a memory failure is reported on its own channel, and never kills the run',
   assert.equal(finished.status, 'done', 'memory is best-effort: the run still succeeds');
 });
 
+test('profile and site recall failures degrade to empty context without stopping the run', async () => {
+  const { promise, memory, events, llm } = run([
+    { kind: 'done', success: true, summary: 'completed without recall' },
+  ]);
+  memory.loadContext = async () => {
+    throw new Error('memory authentication failed');
+  };
+  await promise;
+
+  assert.equal(
+    llm.requests.length,
+    1,
+    'the model still receives a request with empty memory context',
+  );
+  const finished = events.find((event) => event.type === 'run.finished');
+  assert.ok(finished && finished.type === 'run.finished');
+  assert.equal(finished.status, 'done');
+  const scopes = events
+    .filter((event) => event.type === 'memory.degraded')
+    .map((event) => (event.type === 'memory.degraded' ? event.scope : ''));
+  assert.ok(scopes.includes('run'), 'profile recall degradation must be visible');
+  assert.ok(scopes.includes('step'), 'site recall degradation must be visible');
+});
+
 test('every untrusted fence stays balanced after pruning and stripping', async () => {
   // An orphaned BEGIN without its END would leave page text in the prompt stripped of the framing
   // that tells the model it is data, not instructions — the exact failure the fences exist to prevent.
@@ -1066,6 +1840,39 @@ test('a malformed learn is rejected rather than stored', async () => {
   assert.match(llm.requests.map(allText).join('\n'), /kebab-case/, 'and the model is told why');
 });
 
+test('rejected durable memory proposals never change future-run state', async () => {
+  const remembered: unknown[] = [];
+  const learned: unknown[] = [];
+  const { promise, memory, events } = run(
+    [
+      { kind: 'remember', factKey: 'account-layout', factValue: 'compact' },
+      {
+        kind: 'learn',
+        skillName: 'open-report',
+        skillTrigger: 'open a report',
+        skillSteps: 'Use the Reports link.',
+      },
+      { kind: 'done', success: true, summary: 'left memory unchanged' },
+    ],
+    'reject',
+    5,
+  );
+  memory.rememberFact = async (fact: unknown) => {
+    remembered.push(fact);
+  };
+  memory.learnSkill = async (skill: unknown) => {
+    learned.push(skill);
+  };
+  await promise;
+
+  assert.deepEqual(remembered, []);
+  assert.deepEqual(learned, []);
+  assert.equal(
+    events.filter((event) => event.type === 'run.needsInput' && event.kind === 'confirm').length,
+    2,
+  );
+});
+
 test('a consequential action is put to the human even in auto mode', async () => {
   // `auto` means "do not check in on progress", not "may spend money unattended". The gate must fire
   // without the caller ever setting `confirm`, which no caller does.
@@ -1110,8 +1917,524 @@ test('a consequential action is put to the human even in auto mode', async () =>
   );
 });
 
-test('a reversible action never pauses an auto run', async () => {
-  // The counterweight: gating everything `high` would stop on every coordinate click and every
+const commitGateCases: Array<{ name: string; script: ScriptedStep[]; vision?: boolean }> = [
+  {
+    name: 'type submit',
+    script: [{ kind: 'type', id: 0, text: 'send this', submit: true }],
+  },
+  { name: 'Enter key', script: [{ kind: 'key', key: 'Enter' }] },
+  { name: 'Space key', script: [{ kind: 'key', key: 'Space' }] },
+  { name: 'literal Space key', script: [{ kind: 'key', key: ' ' }] },
+  { name: 'Delete shortcut outside text entry', script: [{ kind: 'key', key: 'Delete' }] },
+  { name: 'Backspace shortcut outside text entry', script: [{ kind: 'key', key: 'Backspace' }] },
+  { name: 'Tab blur handler', script: [{ kind: 'key', key: 'Tab' }] },
+  { name: 'ArrowDown change handler', script: [{ kind: 'key', key: 'ArrowDown' }] },
+  {
+    name: 'embedded Enter in typed text',
+    script: [{ kind: 'type', id: 0, text: 'send this\n' }],
+  },
+  {
+    name: 'typing aimed at a button',
+    script: [{ kind: 'type', id: 1, text: ' ' }],
+  },
+  { name: 'selection change', script: [{ kind: 'select', id: 0, values: ['pro'] }] },
+  { name: 'generic drag/drop handler', script: [{ kind: 'drag', fromId: 0, toId: 1 }] },
+  {
+    name: 'dangerous direct same-domain URL',
+    script: [{ kind: 'navigate', url: 'https://example.test/account/delete-account?confirm=1' }],
+  },
+  {
+    name: 'semantic commit click',
+    script: [{ kind: 'click', id: 1, note: 'Place order' }],
+  },
+  {
+    name: 'generic JavaScript button click',
+    script: [{ kind: 'click', id: 1 }],
+  },
+  {
+    name: 'right-click context handler',
+    script: [{ kind: 'click', id: 1, button: 'right' }],
+  },
+  {
+    name: 'durable remembered fact',
+    script: [{ kind: 'remember', factKey: 'layout', factValue: 'compact' }],
+  },
+  {
+    name: 'durable learned procedure',
+    script: [
+      {
+        kind: 'learn',
+        skillName: 'open-report',
+        skillTrigger: 'open the report',
+        skillSteps: 'Use the Reports link.',
+      },
+    ],
+  },
+  {
+    name: 'persistent browser setting',
+    script: [{ kind: 'browser_config', op: 'set_theme', value: 'dark' }],
+  },
+  {
+    name: 'coordinate click',
+    script: [{ kind: 'screenshot' }, { kind: 'click_at', x: 320, y: 40 }],
+    vision: true,
+  },
+  {
+    name: 'coordinate type submit',
+    script: [
+      { kind: 'screenshot' },
+      { kind: 'type_at', x: 100, y: 40, text: 'send this', submit: true },
+    ],
+    vision: true,
+  },
+  {
+    name: 'coordinate type focus click',
+    script: [{ kind: 'screenshot' }, { kind: 'type_at', x: 100, y: 40, text: 'draft' }],
+    vision: true,
+  },
+];
+
+for (const scenario of commitGateCases) {
+  test(`auto mode rejects ${scenario.name} before the driver can execute it`, async () => {
+    const { promise, driver, events } = run(
+      [...scenario.script, { kind: 'done', success: true, summary: 'continued safely' }],
+      'reject',
+      5,
+      new FakeDriver(),
+      { visionFallback: scenario.vision === true },
+    );
+    await promise;
+
+    assert.equal(
+      events.filter((event) => event.type === 'run.needsInput' && event.kind === 'confirm').length,
+      1,
+      `${scenario.name} must request exactly one confirmation`,
+    );
+    assert.deepEqual(driver.clicks, [], `${scenario.name} must not click before approval`);
+    assert.deepEqual(driver.typed, [], `${scenario.name} must not type before approval`);
+    assert.deepEqual(
+      driver.pressedKeys,
+      [],
+      `${scenario.name} must not press a key before approval`,
+    );
+    assert.deepEqual(driver.selections, [], `${scenario.name} must not select before approval`);
+    assert.deepEqual(driver.drags, [], `${scenario.name} must not drag before approval`);
+    assert.deepEqual(driver.navigations, [], `${scenario.name} must not navigate before approval`);
+  });
+}
+
+test('native and custom ARIA role spoofing cannot smuggle a focus click through type', async () => {
+  const spoofPage: RawPerception = {
+    ...PAGE,
+    elements: [
+      { index: 0, tag: 'button', role: 'textbox', name: 'Continue', x: 20, y: 20, w: 80, h: 30 },
+      {
+        index: 1,
+        tag: 'div',
+        role: 'textbox',
+        name: 'Spoofed editor',
+        x: 20,
+        y: 70,
+        w: 80,
+        h: 30,
+      },
+    ],
+  };
+
+  for (const id of [0, 1]) {
+    const driver = new SequencedPerceptionDriver([spoofPage, spoofPage]);
+    const { promise, events } = run(
+      [
+        { kind: 'type', id, text: 'draft' },
+        { kind: 'done', success: true, summary: 'continued safely' },
+      ],
+      'reject',
+      4,
+      driver,
+    );
+    await promise;
+    assert.deepEqual(driver.clicks, [], `spoofed target [${id}] must not receive the focus click`);
+    assert.equal(
+      events.filter((event) => event.type === 'run.needsInput' && event.kind === 'confirm').length,
+      1,
+    );
+  }
+});
+
+test('one cross-domain commit approval explains both the destination and consequential effect', async () => {
+  const commitPage: RawPerception = {
+    ...PAGE,
+    elements: PAGE.elements.map((element) =>
+      element.index === 1
+        ? {
+            ...element,
+            name: 'Continue',
+            href: 'https://payments.example/charge',
+            submitsForm: true,
+          }
+        : element,
+    ),
+  };
+  const driver = new SequencedPerceptionDriver([commitPage]);
+  const prompts: string[] = [];
+  const { promise } = run(
+    [
+      { kind: 'click', id: 1 },
+      { kind: 'done', success: true, summary: 'stopped safely' },
+    ],
+    async (prompt) => {
+      prompts.push(prompt);
+      return 'reject';
+    },
+    4,
+    driver,
+    { crossDomainNavigation: 'confirm' },
+  );
+  await promise;
+
+  assert.equal(prompts.length, 1, 'one informed approval is sufficient; do not double-prompt');
+  assert.match(prompts[0]!, /leave example\.test for payments\.example/);
+  assert.match(prompts[0]!, /form submit control/);
+  assert.deepEqual(driver.clicks, []);
+});
+
+test('a navigation approval is scoped to its destination and expires across another redirect', async () => {
+  class RedirectingDriver extends FakeDriver {
+    current = PAGE.url;
+    rollbacks = 0;
+
+    override async evaluate<T>(expression: string): Promise<T> {
+      if (expression === EXTRACT_SCRIPT) {
+        return {
+          ...PAGE,
+          url: this.current,
+          elements: PAGE.elements.map((element) =>
+            element.index === 1
+              ? { ...element, name: 'Learn more', href: 'https://approved.example/start' }
+              : element,
+          ),
+        } as T;
+      }
+      if (expression === 'location.href') return this.current as T;
+      if (expression === 'document.readyState') return 'complete' as T;
+      return '' as T;
+    }
+
+    override async currentUrl(): Promise<string> {
+      return this.current;
+    }
+
+    override async click(point: Point): Promise<void> {
+      await super.click(point);
+      this.current = 'https://redirected.example/landing';
+    }
+
+    override async goBack(): Promise<void> {
+      this.rollbacks += 1;
+      this.current = PAGE.url;
+    }
+  }
+
+  const driver = new RedirectingDriver();
+  const prompts: string[] = [];
+  const { promise, events } = run(
+    [
+      { kind: 'click', id: 1 },
+      { kind: 'done', success: true, summary: 'redirect handled safely' },
+    ],
+    async (prompt) => {
+      prompts.push(prompt);
+      if (prompts.length === 2) {
+        // The second prompt names redirected.example. Change again while the human is deciding: that
+        // answer must not become approval for this third, never-presented destination.
+        driver.current = 'https://changed.example/final';
+      }
+      return 'approve';
+    },
+    4,
+    driver,
+    { crossDomainNavigation: 'confirm' },
+  );
+  await promise;
+
+  assert.equal(prompts.length, 2, 'the approved target must not cover a redirect to another host');
+  assert.match(prompts[0]!, /approved\.example/);
+  assert.match(prompts[1]!, /redirected\.example/);
+  assert.equal(driver.rollbacks, 1, 'the approval must expire when the destination changes again');
+  assert.equal(driver.current, PAGE.url);
+  const finished = events.find((event) => event.type === 'run.finished');
+  assert.ok(finished?.type === 'run.finished');
+});
+
+test('an unlabelled HTML submit control is gated from observed form semantics', async () => {
+  const formPage: RawPerception = {
+    ...PAGE,
+    elements: PAGE.elements.map((element) =>
+      element.index === 1 ? { ...element, name: 'Continue', submitsForm: true } : element,
+    ),
+  };
+  const driver = new SequencedPerceptionDriver([formPage, formPage]);
+  const { promise, events } = run(
+    [
+      { kind: 'click', id: 1 },
+      { kind: 'done', success: true, summary: 'continued safely' },
+    ],
+    'reject',
+    4,
+    driver,
+  );
+  await promise;
+
+  assert.deepEqual(driver.clicks, []);
+  const prompt = events.find(
+    (event) => event.type === 'run.needsInput' && event.kind === 'confirm',
+  );
+  assert.ok(prompt && prompt.type === 'run.needsInput');
+  assert.match(prompt.prompt, /form submit control/i);
+});
+
+test('even after approval, type cannot focus-click a non-text control', async () => {
+  const { promise, driver, memory } = run(
+    [
+      { kind: 'type', id: 1, text: ' ' },
+      { kind: 'done', success: true, summary: 'used a valid action instead' },
+    ],
+    'approve',
+    4,
+  );
+  await promise;
+
+  assert.deepEqual(driver.clicks, [], 'typing must never use a button click as a focus operation');
+  assert.match(JSON.stringify(memory.steps), /not a text-entry control/);
+});
+
+test('a coordinate approval is invalidated when only the screenshot changes', async () => {
+  const driver = new ChangingScreenshotDriver();
+  const { promise, memory } = run(
+    [
+      { kind: 'screenshot' },
+      { kind: 'click_at', x: 320, y: 40 },
+      { kind: 'done', success: true, summary: 'noticed the visual change' },
+    ],
+    'approve',
+    5,
+    driver,
+    { visionFallback: true },
+  );
+  await promise;
+
+  assert.deepEqual(driver.clicks, [], 'an approval for the old visual frame must not click');
+  assert.match(JSON.stringify(memory.steps), /visual page changed while confirmation was pending/);
+});
+
+test('sensitive coordinate handoff is also invalidated by visual-only drift', async () => {
+  const driver = new ChangingScreenshotDriver();
+  const { promise, llm } = run(
+    [
+      { kind: 'screenshot' },
+      {
+        kind: 'ask',
+        question: 'Enter the one-time code',
+        sensitive: true,
+        targetX: 100,
+        targetY: 90,
+      },
+      { kind: 'done', success: true, summary: 'asked again against a fresh page' },
+    ],
+    // Approve the coordinate activation, so what this test measures is the visual-drift check that
+    // runs immediately before dispatch rather than the approval gate ahead of it.
+    (_prompt, kind) => (kind === 'confirm' ? 'approve' : '123456'),
+    5,
+    driver,
+    { visionFallback: true },
+  );
+  await promise;
+
+  assert.deepEqual(driver.clicks, [], 'the stale coordinate must not receive focus');
+  assert.deepEqual(driver.typed, [], 'the secret must not be typed into a changed visual target');
+  assert.match(
+    llm.requests.map(allText).join('\n'),
+    /visual page changed while sensitive coordinate input was pending/,
+  );
+});
+
+test('a sensitive coordinate handoff is a coordinate activation and needs its own approval', async () => {
+  const driver = new FakeDriver();
+  const asked: Array<{ prompt: string; kind: string }> = [];
+  const { promise, llm } = run(
+    [
+      { kind: 'screenshot' },
+      {
+        kind: 'ask',
+        question: 'Enter the one-time code',
+        sensitive: true,
+        targetX: 100,
+        targetY: 90,
+      },
+      { kind: 'done', success: true, summary: 'stopped after the rejection' },
+    ],
+    (prompt, kind) => {
+      asked.push({ prompt, kind });
+      return kind === 'confirm' ? 'no' : '123456';
+    },
+    5,
+    driver,
+    { visionFallback: true },
+  );
+  await promise;
+
+  assert.ok(
+    asked.some((entry) => entry.kind === 'confirm' && /coordinate \(100, 90\)/.test(entry.prompt)),
+    'the human must be asked to approve the pixel that will be clicked, not only the question',
+  );
+  assert.deepEqual(driver.clicks, [], 'a rejected coordinate activation must not click');
+  assert.deepEqual(driver.typed, [], 'a rejected coordinate activation must not type the secret');
+  assert.match(llm.requests.map(allText).join('\n'), /coordinate handoff was rejected/);
+});
+
+test('a sensitive coordinate handoff refuses a point perception can see is not a secret field', async () => {
+  const driver = new FakeDriver();
+  // (320, 40) is the "Go" button in the fixture page — an ordinary control whose value any page
+  // script can read. The targetId branch already refuses this; the coordinate branch must too.
+  const { promise, llm } = run(
+    [
+      { kind: 'screenshot' },
+      {
+        kind: 'ask',
+        question: 'Enter the one-time code',
+        sensitive: true,
+        targetX: 320,
+        targetY: 40,
+      },
+      { kind: 'done', success: true, summary: 'stopped after the refusal' },
+    ],
+    (_prompt, kind) => (kind === 'confirm' ? 'approve' : '123456'),
+    5,
+    driver,
+    { visionFallback: true },
+  );
+  await promise;
+
+  assert.deepEqual(driver.typed, [], 'the secret must never reach an ordinary control');
+  assert.match(
+    llm.requests.map(allText).join('\n'),
+    /refused sensitive handoff to button/,
+    'the refusal must name what was actually under the coordinate',
+  );
+});
+
+test('an approved sensitive coordinate handoff still reaches a secret-bearing field', async () => {
+  const driver = new FakeDriver();
+  const { promise } = run(
+    [
+      { kind: 'screenshot' },
+      {
+        kind: 'ask',
+        question: 'Enter the one-time code',
+        sensitive: true,
+        targetX: 100,
+        targetY: 90,
+      },
+      { kind: 'done', success: true, summary: 'code delivered' },
+    ],
+    (_prompt, kind) => (kind === 'confirm' ? 'approve' : '123456'),
+    5,
+    driver,
+    { visionFallback: true },
+  );
+  await promise;
+
+  assert.deepEqual(driver.typed, ['123456'], 'the approved handoff must still work');
+});
+
+test('approval is invalidated when the page changes before execution', async () => {
+  const before: RawPerception = {
+    ...PAGE,
+    text: 'Order total: $100',
+    elements: PAGE.elements.map((element) =>
+      element.index === 1 ? { ...element, name: 'Place order' } : element,
+    ),
+  };
+  const after: RawPerception = {
+    ...before,
+    text: 'Order total: $200',
+  };
+  const driver = new SequencedPerceptionDriver([before, after, after]);
+  const { promise, memory, events } = run(
+    [
+      { kind: 'click', id: 1 },
+      { kind: 'done', success: true, summary: 'noticed the changed total' },
+    ],
+    'approve',
+    4,
+    driver,
+  );
+  await promise;
+
+  assert.deepEqual(driver.clicks, [], 'an approval for the old total must not dispatch the click');
+  assert.equal(
+    events.filter((event) => event.type === 'run.needsInput' && event.kind === 'confirm').length,
+    1,
+  );
+  assert.match(
+    JSON.stringify(memory.steps),
+    /changed while confirmation was pending/,
+    'the rejected stale approval must be recorded as a blocked step',
+  );
+});
+
+test('approval is invalidated when only a redacted URL credential changes', async () => {
+  const before: RawPerception = {
+    ...PAGE,
+    url: 'https://example.test/checkout?code=first-secret-code',
+    elements: PAGE.elements.map((element) =>
+      element.index === 1 ? { ...element, name: 'Place order' } : element,
+    ),
+  };
+  const after: RawPerception = {
+    ...before,
+    url: 'https://example.test/checkout?code=second-secret-code',
+  };
+  const driver = new SequencedPerceptionDriver([before, after, after]);
+  const { promise, memory } = run(
+    [
+      { kind: 'click', id: 1 },
+      { kind: 'done', success: true, summary: 'requested a fresh approval' },
+    ],
+    'approve',
+    4,
+    driver,
+  );
+  await promise;
+
+  assert.deepEqual(driver.clicks, []);
+  assert.match(JSON.stringify(memory.steps), /changed while confirmation was pending/);
+  assert.doesNotMatch(JSON.stringify(memory.steps), /first-secret-code|second-secret-code/);
+});
+
+test('observation events scrub credential-shaped URL and title content', async () => {
+  const secret = 'tsk_testOnlyObservationCredential123456789';
+  const page: RawPerception = {
+    ...PAGE,
+    url: `https://example.test/search?q=${secret}`,
+    title: `Results for api key: ${secret}`,
+  };
+  const driver = new SequencedPerceptionDriver([page]);
+  const { promise, events } = run(
+    [{ kind: 'done', success: true, summary: 'finished safely' }],
+    'ok',
+    3,
+    driver,
+  );
+  await promise;
+
+  const observation = events.find((event) => event.type === 'step.observation');
+  assert.ok(observation?.type === 'step.observation');
+  assert.doesNotMatch(JSON.stringify(observation), /testOnlyObservationCredential/);
+});
+
+test('verified text composition remains uninterrupted in auto mode', async () => {
+  // The counterweight: gating everything `high` would stop on ordinary composition and every
   // keystroke into an amount field, which would make auto mode unusable.
   const prompts: string[] = [];
   const { promise } = (() => {
@@ -1120,7 +2443,6 @@ test('a reversible action never pauses an auto run', async () => {
     const events: AgentEvent[] = [];
     const llm = new ScriptedLlm([
       { kind: 'type', id: 0, text: '250.00' }, // "Search" box, but exercise the type path
-      { kind: 'click', id: 1 },
       { kind: 'done', success: true, summary: 'ok' },
     ]);
     let n = 0;
@@ -1151,5 +2473,136 @@ test('a reversible action never pauses an auto run', async () => {
     };
   })();
   await promise;
-  assert.deepEqual(prompts, [], 'ordinary typing and clicking must not pause an auto run');
+  assert.deepEqual(prompts, [], 'verified text composition must not pause an auto run');
+});
+
+test('a page that settles after a cosmetic URL rewrite is observed, not left ambiguous', async () => {
+  // A consent/analytics script stripping `?utm_source=` between the two post-action reads is not a
+  // lost side effect. Reporting it as one leaves the journal recovery-required, which blocks every
+  // later run on the profile — a permanent outage caused by a query string.
+  // The rewrite must happen AFTER the click: before it, a disagreement between the perceived URL and
+  // the live one is caught by the pre-dispatch guard instead, and the action never runs at all.
+  let clicked = false;
+  let postReads = 0;
+  const driver = new (class extends FakeDriver {
+    override async click(point: Point): Promise<void> {
+      await super.click(point);
+      clicked = true;
+    }
+    override async currentUrl(): Promise<string> {
+      if (!clicked) return 'https://example.test/';
+      postReads += 1;
+      // The first post-action read catches the page mid-rewrite; it has settled by the next.
+      return postReads === 1 ? 'https://example.test/?utm_source=nl' : 'https://example.test/';
+    }
+  })();
+
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-settle-'));
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    const { promise, events } = run(
+      [
+        { kind: 'click', id: 1 },
+        { kind: 'done', success: true, summary: 'clicked through' },
+      ],
+      'approve',
+      5,
+      driver,
+      {},
+      journal,
+    );
+    await promise;
+
+    const finished = events.find((e) => e.type === 'run.finished');
+    assert.ok(finished && finished.type === 'run.finished');
+    assert.equal(finished.status, 'done', `run should not be ambiguous: ${finished.error ?? ''}`);
+    assert.equal(driver.clicks.length, 1, 'the click itself still happened exactly once');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a page that never stops moving stays ambiguous', async () => {
+  let clicked = false;
+  let postReads = 0;
+  const driver = new (class extends FakeDriver {
+    override async click(point: Point): Promise<void> {
+      await super.click(point);
+      clicked = true;
+    }
+    override async currentUrl(): Promise<string> {
+      if (!clicked) return 'https://example.test/';
+      postReads += 1;
+      // Every post-action read disagrees with the perception beside it: the page is still turning
+      // over, so it cannot testify about what the click did.
+      return `https://example.test/?n=${postReads}`;
+    }
+  })();
+
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-unsettled-'));
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    const { promise } = run(
+      [
+        { kind: 'click', id: 1 },
+        { kind: 'done', success: true, summary: 'unreachable' },
+      ],
+      'approve',
+      5,
+      driver,
+      {},
+      journal,
+    );
+    await assert.rejects(promise, /ambiguous/i);
+    const snapshot = await journal.load('s1');
+    assert.equal(snapshot?.state.phase, 'recovery_required');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable destination stops the run without poisoning the profile', async () => {
+  // A page that opens `alert()` blocks its renderer, so nothing on it can be read. Navigating there
+  // commits nothing outside the browser and repeating it is idempotent, so it must not be journaled
+  // as a write that may or may not have landed — that state refuses admission for every later run.
+  const driver = new (class extends FakeDriver {
+    private navigated = false;
+    override async navigate(url: string): Promise<void> {
+      await super.navigate(url);
+      this.navigated = true;
+    }
+    override async evaluate<T>(expression: string): Promise<T> {
+      if (this.navigated) throw new Error('the page is not responding');
+      return await super.evaluate<T>(expression);
+    }
+  })();
+
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-blocked-page-'));
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    const { promise, events } = run(
+      [
+        { kind: 'navigate', url: 'https://example.test/dialog' },
+        { kind: 'done', success: false, summary: 'a dialog is blocking the page' },
+      ],
+      'approve',
+      5,
+      driver,
+      {},
+      journal,
+    );
+    await promise;
+
+    const finished = events.find((e) => e.type === 'run.finished');
+    assert.ok(finished && finished.type === 'run.finished');
+    assert.doesNotMatch(String(finished.error ?? ''), /ambiguous/i);
+    const snapshot = await journal.load('s1');
+    assert.notEqual(
+      snapshot?.state.phase,
+      'recovery_required',
+      'an unreadable page is a page condition, not an unresolved external effect',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

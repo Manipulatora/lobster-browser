@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ChevronDownIcon, MagnifyingGlassIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { brandIcon } from './icons';
+import { findSnapshotForThread, matchThreadHistory, threadExchanges } from './history';
 import { renderMarkdown } from './md';
 import {
   fetchModels,
@@ -10,6 +11,7 @@ import {
   runTask,
   sendInput,
   stopRun,
+  type EncryptedThreadMessage,
 } from './bridge';
 import {
   ALL_EFFORTS,
@@ -18,6 +20,7 @@ import {
   brandTitle,
   mapRoster,
   newThreadId,
+  parseAllowedDomains,
   store,
 } from './models';
 import {
@@ -48,6 +51,12 @@ interface Turn {
   sessionId?: string;
   /** Conversation this turn belongs to, so its answer can be re-read from encrypted memory. */
   threadId?: string;
+  /** Stable opaque identity returned by the authenticated encrypted-thread endpoint. */
+  turnKey?: string;
+  /** Whether this turn owns a row in the local metadata/migration index. */
+  localRecord: boolean;
+  /** A legacy or availability-fallback body retained until exact encrypted verification succeeds. */
+  needsSecureMigration: boolean;
   startedAt?: string;
   task: string;
   status: '' | 'running' | 'done' | 'error' | 'stopped';
@@ -195,7 +204,10 @@ function storedToTurn(stored: StoredTurn): Turn {
     id: stored.id,
     ...(stored.sessionId ? { sessionId: stored.sessionId } : {}),
     ...(stored.startedAt ? { startedAt: stored.startedAt } : {}),
-    task: stored.task,
+    ...(stored.turnKey ? { turnKey: stored.turnKey } : {}),
+    localRecord: true,
+    needsSecureMigration: stored.needsSecureMigration === true,
+    task: stored.task ?? '',
     status: stored.status,
     statusText:
       stored.status === 'done' ? 'Done' : stored.status === 'error' ? 'Failed' : 'Stopped',
@@ -221,7 +233,7 @@ function storedToTurn(stored: StoredTurn): Turn {
   };
 }
 
-function snapshotToTurn(snapshot: AgentRunSnapshot, id: number): Turn {
+function snapshotToTurn(snapshot: AgentRunSnapshot, id: number, threadId: string): Turn {
   return {
     id,
     sessionId: snapshot.sessionId,
@@ -245,6 +257,11 @@ function snapshotToTurn(snapshot: AgentRunSnapshot, id: number): Turn {
       snapshot.status === 'error' || snapshot.status === 'stopped'
         ? snapshot.error || snapshot.result || ''
         : '',
+    threadId,
+    localRecord: true,
+    // Keep the locally-redacted body only until an exact encrypted thread counterpart is observed.
+    // Startup rejection or thread-write degradation can otherwise leave a permanent body-less row.
+    needsSecureMigration: true,
     streamed: false,
     tokensIn: 0,
     tokensOut: 0,
@@ -264,25 +281,116 @@ function snapshotToTurn(snapshot: AgentRunSnapshot, id: number): Turn {
 }
 
 function toStoredTurn(turn: Turn): StoredTurn | null {
-  if (turn.status !== 'done' && turn.status !== 'error' && turn.status !== 'stopped') return null;
+  if (
+    !turn.localRecord ||
+    (turn.status !== 'done' && turn.status !== 'error' && turn.status !== 'stopped')
+  )
+    return null;
   return {
     id: turn.id,
     ...(turn.sessionId ? { sessionId: turn.sessionId } : {}),
     ...(turn.startedAt ? { startedAt: turn.startedAt } : {}),
-    task: turn.task,
     status: turn.status,
-    // Deliberately NOT persisted: see transcript.ts. The bodies live in encrypted memory.
+    // Normally not persisted: task, answer/failure, and page-derived steps live in the encrypted store.
+    // An explicitly marked availability/migration fallback below is the bounded exception.
     ...(turn.threadId ? { threadId: turn.threadId } : {}),
-    ...(turn.steps.size
+    ...(turn.turnKey ? { turnKey: turn.turnKey } : {}),
+    ...(turn.needsSecureMigration
       ? {
-          steps: [...turn.steps.entries()]
-            .sort((a, b) => a[0] - b[0])
-            .map(([, step]) => ({ label: step.label, ctx: step.ctx })),
+          task: turn.task,
+          answer: turn.status === 'done' ? turn.answer : turn.failure,
+          needsSecureMigration: true,
+          ...(turn.steps.size
+            ? {
+                steps: [...turn.steps.entries()]
+                  .sort((left, right) => left[0] - right[0])
+                  .map(([, step]) => ({ label: step.label, ctx: step.ctx })),
+              }
+            : {}),
         }
       : {}),
     ...(turn.tokensIn ? { tokensIn: turn.tokensIn } : {}),
     ...(turn.tokensOut ? { tokensOut: turn.tokensOut } : {}),
   };
+}
+
+/** Reconstruct terminal turns from the encrypted thread, which is the source of truth for bodies. */
+function turnsFromThread(messages: readonly EncryptedThreadMessage[], threadId: string): Turn[] {
+  return threadExchanges(messages).map((exchange, index) => {
+    const { status } = exchange;
+    return {
+      id: index + 1,
+      threadId,
+      ...(exchange.startedAt ? { startedAt: exchange.startedAt } : {}),
+      ...(exchange.turnId ? { turnKey: exchange.turnId } : {}),
+      localRecord: false,
+      needsSecureMigration: false,
+      task: exchange.task,
+      status,
+      statusText: status === 'done' ? 'Done' : status === 'error' ? 'Failed' : 'Stopped',
+      steps: new Map(),
+      answer: status === 'done' ? exchange.response : '',
+      failure: status === 'done' ? '' : exchange.response,
+      streamed: false,
+      tokensIn: 0,
+      tokensOut: 0,
+      cachedTokensIn: 0,
+      memoryWarning: '',
+      await: null,
+      inputError: '',
+      animateAnswer: false,
+    };
+  });
+}
+
+/** Overlay local metadata only when a stable id or complete legacy body verifies the exact turn. */
+function mergeStoredMetadata(encrypted: Turn[], stored: Turn[]): Turn[] {
+  const result = matchThreadHistory(
+    encrypted.map((turn) => ({
+      ...(turn.turnKey ? { turnId: turn.turnKey } : {}),
+      task: turn.task,
+      response: turn.status === 'done' ? turn.answer : turn.failure,
+      status: turn.status as 'done' | 'error' | 'stopped',
+    })),
+    stored.map((turn) => ({
+      ...(turn.turnKey ? { turnId: turn.turnKey } : {}),
+      ...(turn.task
+        ? {
+            task: turn.task,
+            response: turn.status === 'done' ? turn.answer : turn.failure,
+          }
+        : {}),
+      status: turn.status as 'done' | 'error' | 'stopped',
+    })),
+  );
+  const matchedByExchange = new Map(
+    result.matches.map(({ exchangeIndex, metadataIndex }) => [exchangeIndex, metadataIndex]),
+  );
+  const merged = encrypted.map((body, exchangeIndex) => {
+    const metadataIndex = matchedByExchange.get(exchangeIndex);
+    if (metadataIndex === undefined) return body;
+    const metadata = stored[metadataIndex]!;
+    return {
+      ...body,
+      id: metadata.id,
+      localRecord: true,
+      // Exact content or an opaque stable id verified that the encrypted copy exists. Only now may a
+      // legacy/availability plaintext body be retired from local storage.
+      needsSecureMigration: false,
+      ...(metadata.sessionId ? { sessionId: metadata.sessionId } : {}),
+      ...(metadata.startedAt ? { startedAt: metadata.startedAt } : {}),
+      tokensIn: metadata.tokensIn,
+      tokensOut: metadata.tokensOut,
+      cachedTokensIn: metadata.cachedTokensIn,
+      memoryWarning: metadata.memoryWarning,
+      // A legacy row may still carry the activity trail for this one in-memory migration. Never save
+      // it again; toStoredTurn intentionally emits no step content.
+      steps: metadata.steps.size ? metadata.steps : body.steps,
+    };
+  });
+  // Fail closed: body-less or ambiguous metadata is kept as its own local row. It is never shifted
+  // onto a neighboring encrypted turn merely because counts happen to line up.
+  return [...merged, ...result.unmatchedMetadataIndices.map((index) => stored[index]!)];
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -591,14 +699,24 @@ export function App() {
   const [mode, setMode] = useState<Mode>('agent');
   const [model, setModel] = useState('anthropic/claude-opus-4.8');
   const [effort, setEffort] = useState<Effort>('medium');
+  const [autonomy, setAutonomy] = useState<'auto' | 'confirm'>('confirm');
+  const [allowedDomainsText, setAllowedDomainsText] = useState('');
+  const [tokenBudget, setTokenBudget] = useState<number | null>(100_000);
   const [models, setModels] = useState<ModelInfo[]>(FALLBACK_MODELS);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const [transcriptReady, setTranscriptReady] = useState(false);
-  const [menu, setMenu] = useState<'mode' | 'model' | 'effort' | null>(null);
+  const [historyError, setHistoryError] = useState('');
+  const [historyRetry, setHistoryRetry] = useState(0);
+  const [menu, setMenu] = useState<'mode' | 'model' | 'effort' | 'policy' | null>(null);
   const [query, setQuery] = useState('');
   /** Conversation the composer writes into; hydrated from storage, replaced by "New chat". */
   const [threadId, setThreadId] = useState('');
+  // Both mount effects may read storage concurrently. Reusing one fallback prevents them from minting
+  // two conversation ids and making the first submitted turn impossible to hydrate later.
+  const initialThreadId = useRef(newThreadId());
+  /** Rows owned by other chats, retained so New chat never destroys an unverified legacy migration. */
+  const retainedOtherThreads = useRef<StoredTurn[]>([]);
 
   /**
    * Begin a fresh conversation. The old thread stays on disk — this mints a new id rather than
@@ -607,11 +725,13 @@ export function App() {
    */
   const startNewChat = useCallback(() => {
     const id = newThreadId();
+    const currentRows = turns.map(toStoredTurn).filter((turn): turn is StoredTurn => turn !== null);
+    retainedOtherThreads.current = [...retainedOtherThreads.current, ...currentRows];
+    void saveTranscript(retainedOtherThreads.current);
     store.set({ threadId: id });
     setThreadId(id);
     setTurns([]);
-    void saveTranscript([]);
-  }, []);
+  }, [turns]);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
@@ -622,6 +742,10 @@ export function App() {
   const current = useMemo(() => models.find((m) => m.id === model), [models, model]);
   const currentSelectable = Boolean(current?.available && (mode === 'ask' || current.agentCapable));
   const efforts = current?.efforts ?? ALL_EFFORTS;
+  const allowedDomains = useMemo(
+    () => parseAllowedDomains(allowedDomainsText),
+    [allowedDomainsText],
+  );
 
   // Load persisted settings + sync the live roster on mount.
   useEffect(() => {
@@ -632,9 +756,12 @@ export function App() {
       setMode(p.mode === 'ask' ? 'ask' : 'agent');
       setModel(p.model);
       setEffort(ALL_EFFORTS.includes(p.effort) ? p.effort : 'medium');
+      setAutonomy(p.autonomy);
+      setAllowedDomainsText(p.allowedDomains.join(', '));
+      setTokenBudget(p.tokenBudget);
       // First ever open (or storage cleared) starts a conversation rather than running thread-less,
       // which would silently disable memory.
-      const resolvedThread = p.threadId || newThreadId();
+      const resolvedThread = p.threadId || initialThreadId.current;
       if (!p.threadId) store.set({ threadId: resolvedThread });
       setThreadId(resolvedThread);
       const res = await fetchModels();
@@ -727,48 +854,93 @@ export function App() {
   // sessions are reattached to the replayable event stream so closing/reopening the panel is harmless.
   useEffect(() => {
     let alive = true;
+    setTranscriptReady(false);
     void (async () => {
-      const [stored, snapshots] = await Promise.all([loadTranscript(), fetchStatus()]);
+      const [stored, snapshots, preferences] = await Promise.all([
+        loadTranscript(),
+        fetchStatus(),
+        store.get(),
+      ]);
       if (!alive) return;
-      const hydrated = stored.map(storedToTurn);
-      const snapshot = snapshots?.[0];
+      const resolvedThread = preferences.threadId || initialThreadId.current;
+      if (!preferences.threadId) store.set({ threadId: resolvedThread });
+      setThreadId(resolvedThread);
+
+      // Builds before the encrypted-history handoff omitted `threadId` from every local row even
+      // though their runs were already written to the current encrypted thread. Associate those rows
+      // with the persisted conversation once, then let the encrypted copy supply their bodies.
+      const resolvedRows = stored.map((row) =>
+        row.threadId ? row : { ...row, threadId: resolvedThread },
+      );
+      retainedOtherThreads.current = resolvedRows.filter((row) => row.threadId !== resolvedThread);
+      const indexed = resolvedRows
+        .map(storedToTurn)
+        .filter((turn) => turn.threadId === resolvedThread);
+      const loadedThread = await fetchThread(resolvedThread);
+      if (!alive) return;
+      if (!loadedThread.ok) {
+        // Keep legacy bodies exactly as loaded and, crucially, leave transcriptReady false so the
+        // persistence effect cannot erase/migrate anything based on a transient bridge failure.
+        setTurns(indexed);
+        setHistoryError(loadedThread.error);
+        return;
+      }
+      setHistoryError('');
+
+      let hydrated = mergeStoredMetadata(
+        turnsFromThread(loadedThread.messages, resolvedThread),
+        indexed,
+      ).map((turn, index) => ({ ...turn, id: index + 1 }));
+
+      // A retained snapshot belongs to exactly one conversation. A terminal snapshot from a previous
+      // chat must not reappear after New chat, and a running old-thread run must never attach here.
+      const snapshot = findSnapshotForThread(snapshots, resolvedThread);
       let live: { id: number; sessionId: string } | null = null;
       if (snapshot) {
-        const existing = hydrated.findIndex((turn) => turn.sessionId === snapshot.sessionId);
+        let existing = hydrated.findIndex((turn) => turn.sessionId === snapshot.sessionId);
+        // A terminal run is appended to encrypted memory before its finish event. On a fresh panel
+        // that turn has no local session metadata yet, so match the newest identical exchange instead
+        // of rendering a duplicate snapshot beside it.
+        if (existing < 0 && snapshot.status !== 'running' && snapshot.status !== 'awaiting_input') {
+          const status =
+            snapshot.status === 'done' ? 'done' : snapshot.status === 'error' ? 'error' : 'stopped';
+          const response =
+            status === 'done'
+              ? snapshot.result || ''
+              : snapshot.error || snapshot.result || 'The run ended without a result.';
+          const candidates = hydrated.flatMap((turn, index) =>
+            turn.threadId === resolvedThread &&
+            turn.task === snapshot.task &&
+            turn.status === status &&
+            (status === 'done' ? turn.answer : turn.failure) === response
+              ? [index]
+              : [],
+          );
+          if (candidates.length === 1) existing = candidates[0]!;
+        }
         const id =
           existing >= 0
             ? hydrated[existing]!.id
             : Math.max(0, ...hydrated.map((turn) => turn.id)) + 1;
-        const reconciled = snapshotToTurn(snapshot, id);
+        const reconciled = snapshotToTurn(snapshot, id, snapshot.threadId!);
         if (existing >= 0) {
           const prior = hydrated[existing]!;
-          hydrated[existing] = { ...reconciled, answer: reconciled.answer || prior.answer };
+          hydrated[existing] = {
+            ...reconciled,
+            threadId: prior.threadId || snapshot.threadId,
+            ...(prior.turnKey ? { turnKey: prior.turnKey } : {}),
+            answer: reconciled.answer || prior.answer,
+            failure: reconciled.failure || prior.failure,
+            steps: prior.steps.size ? prior.steps : reconciled.steps,
+            tokensIn: prior.tokensIn,
+            tokensOut: prior.tokensOut,
+            cachedTokensIn: prior.cachedTokensIn,
+          };
         } else {
           hydrated.push(reconciled);
         }
         if (snapshot.status === 'running' || snapshot.status === 'awaiting_input') {
           live = { id, sessionId: snapshot.sessionId };
-        }
-      }
-      // Fill the answers from encrypted memory. One request per distinct thread, and entirely
-      // best-effort: without the bridge (or on an older transcript) the history still lists what was
-      // asked and how it ended — only the bodies are missing.
-      const threads = [...new Set(hydrated.map((turn) => turn.threadId).filter(Boolean))];
-      if (threads.length > 0) {
-        const loaded = await Promise.all(
-          threads.map(async (id) => [id, await fetchThread(id as string)] as const),
-        );
-        if (!alive) return;
-        for (const [id, messages] of loaded) {
-          const answers = messages.filter((m) => m.role === 'assistant').map((m) => m.content);
-          let seen = 0;
-          for (const turn of hydrated) {
-            if (turn.threadId !== id) continue;
-            const body = answers[seen++];
-            if (!body) continue;
-            if (turn.status === 'done') turn.answer ||= body;
-            else turn.failure ||= body;
-          }
         }
       }
       nextId.current = Math.max(0, ...hydrated.map((turn) => turn.id)) + 1;
@@ -785,16 +957,88 @@ export function App() {
     return () => {
       alive = false;
     };
-  }, [patchTurn]);
+  }, [patchTurn, historyRetry]);
 
   useEffect(() => {
     if (!transcriptReady) return;
+    let cancelled = false;
     const timer = setTimeout(() => {
-      const terminal = turns.map(toStoredTurn).filter((turn): turn is StoredTurn => turn !== null);
-      void saveTranscript(terminal);
+      void (async () => {
+        const loaded = await fetchThread(threadId);
+        if (cancelled) return;
+        if (!loaded.ok) {
+          // Do not discard the only copy of a newly-finished turn until its encrypted counterpart is
+          // verified. The existing migration format keeps a bounded, redacted fallback body; a later
+          // successful fetch clears it through exact/stable-id matching.
+          const fallback = turns
+            .map(toStoredTurn)
+            .filter((turn): turn is StoredTurn => turn !== null);
+          await saveTranscript([...retainedOtherThreads.current, ...fallback]);
+          if (cancelled) return;
+          setHistoryError(loaded.error);
+          // A history read can fail while the current run is still producing events. Keep the
+          // persistence effect armed until that run reaches a terminal state; otherwise its final
+          // fallback is never written. Once terminal, freeze new submissions until Retry has
+          // re-established the encrypted source of truth.
+          if (!turns.some((turn) => turn.status === 'running')) setTranscriptReady(false);
+          return;
+        }
+        const local = turns.filter(
+          (turn) =>
+            turn.localRecord &&
+            (turn.status === 'done' || turn.status === 'error' || turn.status === 'stopped'),
+        );
+        const secured = mergeStoredMetadata(turnsFromThread(loaded.messages, threadId), local);
+        const terminal = secured
+          .map(toStoredTurn)
+          .filter((turn): turn is StoredTurn => turn !== null);
+        await saveTranscript([...retainedOtherThreads.current, ...terminal]);
+        if (cancelled) return;
+
+        setHistoryError('');
+        // Persisting the body-less metadata is only half of the migration. Reflect the exact matches
+        // in memory as well, or New chat can serialize the stale `needsSecureMigration` turn and
+        // reintroduce plaintext that was already verified in encrypted storage.
+        const verified = new Map<number, Turn>();
+        for (const candidate of secured) {
+          if (
+            candidate.localRecord &&
+            !candidate.needsSecureMigration &&
+            local.some((turn) => turn.id === candidate.id && turn.needsSecureMigration)
+          ) {
+            verified.set(candidate.id, candidate);
+          }
+        }
+        if (verified.size) {
+          setTurns((current) => {
+            let changed = false;
+            const next = current.map((turn) => {
+              const exact = verified.get(turn.id);
+              if (
+                !exact ||
+                !turn.needsSecureMigration ||
+                turn.threadId !== threadId ||
+                (turn.status !== 'done' && turn.status !== 'error' && turn.status !== 'stopped')
+              ) {
+                return turn;
+              }
+              changed = true;
+              return {
+                ...turn,
+                needsSecureMigration: false,
+                ...(exact.turnKey ? { turnKey: exact.turnKey } : {}),
+              };
+            });
+            return changed ? next : current;
+          });
+        }
+      })();
     }, 200);
-    return () => clearTimeout(timer);
-  }, [transcriptReady, turns]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [transcriptReady, threadId, turns]);
 
   const onReply = useCallback(async (turn: Turn, text: string): Promise<boolean> => {
     try {
@@ -850,6 +1094,10 @@ export function App() {
     const el = inputRef.current;
     const task = (el?.value ?? '').trim();
     if (!task || busy || !transcriptReady || !currentSelectable) return;
+    if (!allowedDomains.ok) {
+      setMenu('policy');
+      return;
+    }
     if (el) {
       el.value = '';
       autogrow();
@@ -857,6 +1105,10 @@ export function App() {
     const id = nextId.current++;
     const turn: Turn = {
       id,
+      threadId,
+      localRecord: true,
+      // Cleared only after mergeStoredMetadata verifies the encrypted thread copy.
+      needsSecureMigration: true,
       task,
       startedAt: new Date().toISOString(),
       status: 'running',
@@ -877,7 +1129,15 @@ export function App() {
     setBusy(true);
     const start = await runTask(
       task,
-      { mode, model, effort: efforts.length ? effort : undefined, threadId },
+      {
+        mode,
+        model,
+        effort: efforts.length ? effort : undefined,
+        threadId,
+        autonomy,
+        allowedDomains: allowedDomains.domains,
+        tokenBudget,
+      },
       {
         onEvent: (ev) => patchTurn(id, ev),
       },
@@ -890,7 +1150,21 @@ export function App() {
       autogrow();
       el.focus();
     }
-  }, [busy, transcriptReady, currentSelectable, mode, model, effort, efforts, autogrow, patchTurn]);
+  }, [
+    busy,
+    transcriptReady,
+    currentSelectable,
+    mode,
+    model,
+    effort,
+    efforts,
+    threadId,
+    autonomy,
+    allowedDomains,
+    tokenBudget,
+    autogrow,
+    patchTurn,
+  ]);
 
   return (
     <div className="flex h-screen flex-col bg-white">
@@ -911,7 +1185,7 @@ export function App() {
           <button
             type="button"
             onClick={startNewChat}
-            disabled={turns.length === 0}
+            disabled={turns.length === 0 || !transcriptReady}
             title="Start a new conversation"
             className="rounded-lg px-2 py-1 text-[0.75rem] text-ink-soft transition-colors hover:bg-violet-50 hover:text-violet-700 disabled:pointer-events-none disabled:opacity-40"
           >
@@ -928,9 +1202,28 @@ export function App() {
         }}
       >
         <div ref={contentRef} role="log" aria-live="off" className="flex flex-col gap-2.5">
-          {turns.map((t) => (
-            <TurnView key={t.id} turn={t} onReply={onReply} onRegenerate={regenerate} />
-          ))}
+          {historyError && (
+            <div
+              role="alert"
+              className="flex items-start justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-[12px] text-amber-900"
+            >
+              <span>
+                Encrypted conversation is unavailable. Nothing local was migrated or erased.
+              </span>
+              <button
+                type="button"
+                className="shrink-0 font-semibold text-violet-700"
+                onClick={() => setHistoryRetry((value) => value + 1)}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {turns
+            .filter((turn) => turn.task || turn.status === 'running')
+            .map((turn) => (
+              <TurnView key={turn.id} turn={turn} onReply={onReply} onRegenerate={regenerate} />
+            ))}
         </div>
       </main>
 
@@ -947,13 +1240,15 @@ export function App() {
           disabled={!transcriptReady || !currentSelectable}
           rows={1}
           placeholder={
-            !transcriptReady
-              ? 'Loading conversation…'
-              : currentSelectable
-                ? 'Message Lobee…'
-                : mode === 'agent'
-                  ? 'No Agent-compatible model is available'
-                  : 'No chat model is available'
+            historyError
+              ? 'Reconnect to load encrypted conversation…'
+              : !transcriptReady
+                ? 'Loading conversation…'
+                : currentSelectable
+                  ? 'Message Lobee…'
+                  : mode === 'agent'
+                    ? 'No Agent-compatible model is available'
+                    : 'No chat model is available'
           }
           onInput={autogrow}
           onKeyDown={(e) => {
@@ -1031,9 +1326,104 @@ export function App() {
             )}
           </div>
 
+          {/* Run policy */}
+          <div className="relative ml-auto min-w-0">
+            <Trigger
+              open={menu === 'policy'}
+              onToggle={() => setMenu(menu === 'policy' ? null : 'policy')}
+            >
+              <span>{autonomy === 'confirm' ? 'Review' : 'Auto'}</span>
+            </Trigger>
+            {menu === 'policy' && (
+              <div
+                className={`${menuCls} right-0 w-[280px] p-3`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-ink-soft">
+                  Run policy
+                </div>
+                <div className="grid grid-cols-2 gap-1 rounded-lg bg-violet-50 p-1">
+                  {(
+                    [
+                      ['confirm', 'Review changes'],
+                      ['auto', 'Run automatically'],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={`rounded-md px-2 py-1.5 text-[11.5px] font-semibold ${
+                        autonomy === value
+                          ? 'bg-white text-violet-700 shadow-sm'
+                          : 'text-ink-soft hover:text-ink'
+                      }`}
+                      onClick={() => {
+                        setAutonomy(value);
+                        store.set({ autonomy: value });
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-1.5 text-[10.5px] leading-4 text-ink-soft">
+                  Review pauses before every browser change. Critical actions always ask in either
+                  mode.
+                </p>
+
+                <label className="mt-3 block text-[11.5px] font-semibold text-ink">
+                  Allowed domains
+                  <input
+                    type="text"
+                    value={allowedDomainsText}
+                    placeholder="Any domain (unrestricted)"
+                    onChange={(event) => setAllowedDomainsText(event.target.value)}
+                    onBlur={(event) => {
+                      const result = parseAllowedDomains(event.target.value);
+                      if (!result.ok) return;
+                      setAllowedDomainsText(result.domains.join(', '));
+                      store.set({ allowedDomains: result.domains });
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') event.preventDefault();
+                    }}
+                    className="mt-1 w-full rounded-lg border border-line-strong bg-white px-2.5 py-2 text-[12px] font-normal outline-none focus:border-violet-600"
+                  />
+                </label>
+                <p className="mt-1 text-[10.5px] leading-4 text-ink-soft">
+                  Comma-separated. Empty means unrestricted browsing.
+                </p>
+                {!allowedDomains.ok && (
+                  <p role="alert" className="mt-1 text-[10.5px] leading-4 text-red-600">
+                    {allowedDomains.error}
+                  </p>
+                )}
+
+                <label className="mt-3 block text-[11.5px] font-semibold text-ink">
+                  Token budget
+                  <select
+                    value={tokenBudget ?? ''}
+                    onChange={(event) => {
+                      const value = event.target.value ? Number(event.target.value) : null;
+                      setTokenBudget(value);
+                      store.set({ tokenBudget: value });
+                    }}
+                    className="mt-1 w-full rounded-lg border border-line-strong bg-white px-2.5 py-2 text-[12px] font-normal outline-none focus:border-violet-600"
+                  >
+                    <option value="25000">25,000 tokens</option>
+                    <option value="50000">50,000 tokens</option>
+                    <option value="100000">100,000 tokens</option>
+                    <option value="250000">250,000 tokens</option>
+                    <option value="">Unlimited</option>
+                  </select>
+                </label>
+              </div>
+            )}
+          </div>
+
           {/* Effort (hidden for non-reasoning models) */}
           {efforts.length > 0 && (
-            <div className="relative ml-auto min-w-0">
+            <div className="relative min-w-0">
               <Trigger
                 open={menu === 'effort'}
                 onToggle={() => setMenu(menu === 'effort' ? null : 'effort')}

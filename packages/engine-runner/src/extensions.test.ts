@@ -155,6 +155,37 @@ test('Chrome Web Store downloader enforces redirect host and byte limits', async
   );
 });
 
+test('a proxied profile never downloads an extension from the host address', async () => {
+  // The install runs inside the launch path, seconds before a proxied session opens for the same
+  // profile: an unrouted GET here links the host IP to a named extension id at a known time, which
+  // is precisely the correlation the product exists to prevent. It is cached per machine, so the
+  // leak is once-per-extension and effectively invisible.
+  const id = 'abcdefghijklmnopabcdefghijklmnop';
+  const seen: Array<Record<string, unknown>> = [];
+  await downloadChromeWebStoreCrx(id, {
+    proxyUrl: 'http://user:pass@proxy.example:8080',
+    fetch: async (_url, init) => {
+      seen.push(init as Record<string, unknown>);
+      return new Response('crx', { status: 200 });
+    },
+  });
+  assert.equal(seen.length, 1);
+  assert.ok(
+    seen[0]?.dispatcher,
+    'the request must carry a proxy dispatcher, not the default route',
+  );
+
+  // Fail closed: an unusable proxy route refuses the install rather than reaching for the direct one.
+  await assert.rejects(
+    () =>
+      downloadChromeWebStoreCrx(id, {
+        proxyUrl: 'not-a-proxy-url',
+        fetch: async () => new Response('crx', { status: 200 }),
+      }),
+    /refusing to download extension/,
+  );
+});
+
 test('verifyCrx3 verifies public-key-derived id and archive signature', () => {
   const { crx, id } = signedCrxFixture();
   const verified = verifyCrx3(crx, id);

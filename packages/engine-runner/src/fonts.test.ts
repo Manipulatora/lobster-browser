@@ -249,3 +249,40 @@ test('writeFontConfig fails clearly for absent packs/files', async () => {
     await rm(udd, { recursive: true, force: true });
   }
 });
+
+test('a claimed family resolves to its metric clone when the pack carries one', () => {
+  // A font probe compares advance widths, so "same class" is not the bar. Carlito and Caladea are
+  // exact metric clones of Calibri and Cambria and ship in the pack; before this they were never
+  // used as alias targets, so a Windows persona claiming Calibri measured identically to Arial —
+  // an inconsistency a width probe reads directly, on a font every Windows install has.
+  const physical = ['Liberation Sans', 'Liberation Serif', 'Liberation Mono', 'Carlito', 'Caladea'];
+  const xml = buildFontConfig('windows', '/profile/fonts', '/profile/cache', physical, [
+    'Arial',
+    'Times New Roman',
+    'Courier New',
+    'Calibri',
+    'Cambria',
+  ]);
+  const aliasFor = (family: string): string | undefined =>
+    new RegExp(`<alias><family>${family}</family><prefer><family>([^<]+)</family>`).exec(xml)?.[1];
+
+  assert.equal(aliasFor('Calibri'), 'Carlito');
+  assert.equal(aliasFor('Cambria'), 'Caladea');
+  // The mappings that were already metric-correct must not regress.
+  assert.equal(aliasFor('Arial'), 'Liberation Sans');
+  assert.equal(aliasFor('Times New Roman'), 'Liberation Serif');
+  assert.equal(aliasFor('Courier New'), 'Liberation Mono');
+});
+
+test('a metric clone that the pack does not carry falls back to its class face', () => {
+  // The table is a claim about the PACK, not a wish list: mapping Calibri onto a Carlito that is not
+  // installed would resolve to fontconfig's own last-resort pick instead of a chosen face.
+  const xml = buildFontConfig(
+    'windows',
+    '/profile/fonts',
+    '/profile/cache',
+    ['Liberation Sans', 'Liberation Serif', 'Liberation Mono'],
+    ['Calibri'],
+  );
+  assert.match(xml, /<alias><family>Calibri<\/family><prefer><family>Liberation Sans<\/family>/);
+});

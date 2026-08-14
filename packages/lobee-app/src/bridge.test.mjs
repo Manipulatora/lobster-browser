@@ -76,6 +76,8 @@ test('events arriving before POST /run returns are correlated and delivered', as
       return json({ origin: 'http://127.0.0.1:40102', token: 'token-two', profileId: 'p1' });
     }
     if (target.includes('/events?')) {
+      assert.equal(new URL(target).searchParams.has('token'), false);
+      assert.equal(init.headers['x-lobee-token'], 'token-two');
       return eventsResponse(init.signal, [`id: 1\ndata: ${JSON.stringify(started)}\n\n`], false);
     }
     if (target.endsWith('/run')) {
@@ -95,6 +97,113 @@ test('events arriving before POST /run returns are correlated and delivered', as
   assert.deepEqual(received, [started]);
 });
 
+test('run policy and conversation identity are propagated to the sidecar', async () => {
+  let posted;
+  globalThis.fetch = async (url, init = {}) => {
+    const target = String(url);
+    if (target.startsWith('chrome-extension://')) {
+      return json({ origin: 'http://127.0.0.1:40112', token: 'token-policy', profileId: 'p1' });
+    }
+    if (target.includes('/events?')) return eventsResponse(init.signal);
+    if (target.endsWith('/run')) {
+      posted = JSON.parse(String(init.body));
+      return json({ ok: true, sessionId: 'session-policy' });
+    }
+    if (target.endsWith('/status')) return json({ runs: [] });
+    throw new Error(`unexpected request: ${target}`);
+  };
+
+  assert.equal(
+    await bridge.runTask(
+      'work safely',
+      {
+        mode: 'agent',
+        model: 'test/model',
+        effort: 'high',
+        threadId: 'thread_policy',
+        autonomy: 'confirm',
+        allowedDomains: ['example.com', 'accounts.example.com'],
+        tokenBudget: 50_000,
+      },
+      { onEvent: () => {} },
+    ),
+    'started',
+  );
+  assert.match(posted.requestId, /^[0-9a-f-]{36}$/);
+  const { requestId: _requestId, ...postedPolicy } = posted;
+  assert.deepEqual(postedPolicy, {
+    task: 'work safely',
+    mode: 'agent',
+    model: 'test/model',
+    effort: 'high',
+    threadId: 'thread_policy',
+    autonomy: 'confirm',
+    allowedDomains: ['example.com', 'accounts.example.com'],
+    tokenBudget: 50_000,
+  });
+});
+
+test('explicit unlimited token policy is represented as null on the wire', async () => {
+  let posted;
+  globalThis.fetch = async (url, init = {}) => {
+    const target = String(url);
+    if (target.startsWith('chrome-extension://')) {
+      return json({ origin: 'http://127.0.0.1:40113', token: 'token-unlimited', profileId: 'p1' });
+    }
+    if (target.includes('/events?')) return eventsResponse(init.signal);
+    if (target.endsWith('/run')) {
+      posted = JSON.parse(String(init.body));
+      return json({ ok: true, sessionId: 'session-unlimited' });
+    }
+    if (target.endsWith('/status')) return json({ runs: [] });
+    throw new Error(`unexpected request: ${target}`);
+  };
+
+  assert.equal(
+    await bridge.runTask(
+      'unbounded by explicit choice',
+      { mode: 'ask', model: 'test/model', tokenBudget: null },
+      { onEvent: () => {} },
+    ),
+    'started',
+  );
+  assert.equal(posted.tokenBudget, null);
+});
+
+test('encrypted thread loading distinguishes an empty thread from a transient failure', async () => {
+  let fail = true;
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.startsWith('chrome-extension://')) {
+      return json({ origin: 'http://127.0.0.1:40114', token: 'token-thread', profileId: 'p1' });
+    }
+    if (target.includes('/thread?')) {
+      if (fail) return json({ ok: false, error: 'memory temporarily unavailable' }, 503);
+      return json({
+        ok: true,
+        messages: [
+          { role: 'user', content: 'task' },
+          { role: 'assistant', content: 'answer', status: 'done', turnId: 'stable-turn-id' },
+        ],
+      });
+    }
+    throw new Error(`unexpected request: ${target}`);
+  };
+
+  assert.deepEqual(await bridge.fetchThread('thread-a'), {
+    ok: false,
+    error: 'memory temporarily unavailable',
+  });
+  fail = false;
+  assert.deepEqual(await bridge.fetchThread('thread-a'), {
+    ok: true,
+    messages: [
+      { role: 'user', content: 'task' },
+      { role: 'assistant', content: 'answer', status: 'done', turnId: 'stable-turn-id' },
+    ],
+  });
+});
+
 test('event stream refreshes rotated bridge credentials and terminates the stale run truthfully', async () => {
   const received = [];
   let configReads = 0;
@@ -105,7 +214,10 @@ test('event stream refreshes rotated bridge credentials and terminates the stale
       return json(
         configReads === 1
           ? { origin: 'http://127.0.0.1:40103', token: 'old-token', profileId: 'p1' }
-          : { origin: 'http://127.0.0.1:40104', token: 'new-token', profileId: 'p1' },
+          : configReads === 2
+            ? {}
+            : { origin: 'http://127.0.0.1:40104', token: 'new-token', profileId: 'p1' },
+        configReads === 2 ? 404 : 200,
       );
     }
     if (target.startsWith('http://127.0.0.1:40103/events?')) {
@@ -132,9 +244,178 @@ test('event stream refreshes rotated bridge credentials and terminates the stale
     ),
     'started',
   );
-  await new Promise((resolve) => setTimeout(resolve, 1_000));
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
   const terminal = received.find((event) => event.type === 'run.finished');
   assert.equal(terminal?.status, 'error');
   assert.match(terminal?.error ?? '', /service restarted/i);
-  assert.ok(configReads >= 2);
+  assert.ok(configReads >= 3);
 });
+
+test('a lost run response is retried with one stable request ID', async () => {
+  const posted = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const target = String(url);
+    if (target.startsWith('chrome-extension://')) {
+      return json({ origin: 'http://127.0.0.1:40115', token: 'token-retry', profileId: 'p1' });
+    }
+    if (target.includes('/events?')) return eventsResponse(init.signal);
+    if (target.endsWith('/run')) {
+      posted.push(JSON.parse(String(init.body)));
+      if (posted.length === 1) throw new TypeError('response connection reset');
+      return json({ ok: true, sessionId: 'session-retried' });
+    }
+    if (target.endsWith('/status')) return json({ runs: [] });
+    throw new Error(`unexpected request: ${target}`);
+  };
+
+  assert.equal(
+    await bridge.runTask(
+      'retry safely',
+      { mode: 'agent', model: 'test/model' },
+      { onEvent: () => {} },
+    ),
+    'started',
+  );
+  assert.equal(posted.length, 2);
+  assert.match(posted[0].requestId, /^[0-9a-f-]{36}$/);
+  assert.equal(posted[1].requestId, posted[0].requestId);
+  assert.deepEqual(posted[1], posted[0]);
+});
+
+test('two lost run responses reattach through status without emitting a false terminal event', async () => {
+  const received = [];
+  let runAttempts = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const target = String(url);
+    if (target.startsWith('chrome-extension://')) {
+      return json({ origin: 'http://127.0.0.1:40117', token: 'token-reconcile', profileId: 'p1' });
+    }
+    if (target.includes('/events?')) return eventsResponse(init.signal);
+    if (target.endsWith('/run')) {
+      runAttempts += 1;
+      throw new TypeError('response connection reset');
+    }
+    if (target.endsWith('/status')) {
+      return json({
+        runs: [
+          {
+            sessionId: 'session-reconciled',
+            profileId: 'p1',
+            threadId: 'thread_reconcile',
+            task: 'reconcile me',
+            status: 'running',
+            step: 1,
+            startedAt: new Date().toISOString(),
+            usage: { tokensIn: 0, tokensOut: 0 },
+          },
+        ],
+      });
+    }
+    throw new Error(`unexpected request: ${target}`);
+  };
+
+  assert.equal(
+    await bridge.runTask(
+      '  reconcile me  ',
+      { mode: 'agent', model: 'test/model', threadId: 'thread_reconcile' },
+      { onEvent: (event) => received.push(event) },
+    ),
+    'started',
+  );
+  assert.equal(runAttempts, 2);
+  assert.equal(
+    received.some((event) => event.type === 'run.finished'),
+    false,
+  );
+});
+
+test('an unconfirmed start retries in the background with the same request ID', async () => {
+  const received = [];
+  const requests = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const target = String(url);
+    if (target.startsWith('chrome-extension://')) {
+      return json({ origin: 'http://127.0.0.1:40118', token: 'token-background', profileId: 'p1' });
+    }
+    if (target.includes('/events?')) return eventsResponse(init.signal);
+    if (target.endsWith('/run')) {
+      requests.push(JSON.parse(String(init.body)));
+      if (requests.length <= 2) throw new TypeError('response connection reset');
+      return json({ ok: true, sessionId: 'session-background-recovered' });
+    }
+    if (target.endsWith('/status')) return json({ ok: false }, 503);
+    throw new Error(`unexpected request: ${target}`);
+  };
+
+  assert.equal(
+    await bridge.runTask(
+      'recover in background',
+      { mode: 'agent', model: 'test/model' },
+      { onEvent: (event) => received.push(event) },
+    ),
+    'started',
+  );
+  await waitUntil(() => requests.length === 3);
+  assert.equal(new Set(requests.map((request) => request.requestId)).size, 1);
+  assert.equal(
+    received.some((event) => event.type === 'run.finished'),
+    false,
+  );
+});
+
+test('lost input responses reconcile authoritative status instead of leaving a stale approval', async () => {
+  let inputAttempts = 0;
+  let requestId = '';
+  globalThis.fetch = async (url, init = {}) => {
+    const target = String(url);
+    if (target.startsWith('chrome-extension://')) {
+      return json({ origin: 'http://127.0.0.1:40116', token: 'token-input', profileId: 'p1' });
+    }
+    if (target.includes('/events?')) return eventsResponse(init.signal);
+    if (target.endsWith('/run')) return json({ ok: true, sessionId: 'session-input' });
+    if (target.endsWith('/input')) {
+      inputAttempts += 1;
+      const posted = JSON.parse(String(init.body));
+      if (!requestId) requestId = posted.requestId;
+      assert.equal(posted.requestId, requestId);
+      assert.equal(posted.sessionId, 'session-input');
+      throw new TypeError('response connection reset');
+    }
+    if (target.endsWith('/status')) {
+      return json({
+        runs: [
+          {
+            sessionId: 'session-input',
+            profileId: 'p1',
+            task: 'approve safely',
+            status: 'running',
+            step: 1,
+            startedAt: new Date(0).toISOString(),
+            usage: { tokensIn: 0, tokensOut: 0 },
+          },
+        ],
+      });
+    }
+    throw new Error(`unexpected request: ${target}`);
+  };
+
+  assert.equal(
+    await bridge.runTask(
+      'approve safely',
+      { mode: 'agent', model: 'test/model' },
+      { onEvent: () => {} },
+    ),
+    'started',
+  );
+  await bridge.sendInput('approve');
+  assert.equal(inputAttempts, 2);
+  assert.match(requestId, /^[0-9a-f-]{36}$/);
+});
+
+async function waitUntil(predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for bridge recovery');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}

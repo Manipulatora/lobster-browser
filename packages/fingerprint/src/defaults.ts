@@ -146,13 +146,48 @@ function uniquePreserveOrder(values: readonly string[]): string[] {
   return out;
 }
 
-/** Strip trailing Apple Support version tokens like `13.0d2e27` from family labels. */
+/**
+ * Reduce a macOS catalog row to the family name a page can actually query.
+ *
+ * The catalog is scraped from Apple's font documentation, whose rows carry the shipped version of
+ * each face. `document.fonts.check('12px "X"')` and every width-probe library ask for a FAMILY, so
+ * a persona advertising `Arial 5.01.2x`, `PingFang SC Light 18.d1` or `Noto Sans Mongolian 1.04 uh`
+ * is not slightly wrong — no macOS in the world answers to those strings, and a probe that finds one
+ * has found a marker unique to this product. The version forms are inconsistent in the source
+ * (spaced, glued, letter-suffixed, two-token), so each is stripped explicitly rather than by one
+ * loose pattern that would also eat real names like `Hiragino Sans W3`.
+ */
 export function normalizeMacFontFamily(name: string): string {
   return name
-    .replace(/\s+\d+(?:\.\d+)*d\d+e\d+\s*$/i, '')
+    .replace(/\s*\(\d+(?:\.\d+)*\)\s*$/, '')
+    .replace(/\s*\d+(?:\.\d+)*d\d+e\d+\s*$/i, '')
+    .replace(/:\d+(?:\.\d+)*\s*$/, '')
+    .replace(/\s+\d+(?:\.\d+)*\s+[a-z]{1,3}\s*$/i, '')
+    .replace(/\s+\d+\.d\d+\s*$/i, '')
+    .replace(/\s+\d+(?:\.\d+)+[a-z]*\s*$/i, '')
     .replace(/\s+\d+(?:\.\d+){1,3}\s*$/i, '')
+    .replace(/\s+Version$/i, '')
     .trim();
 }
+
+/**
+ * Rows the macOS catalog inherited from the page it was scraped from, not from any font.
+ *
+ * Apple's font documentation carries the site's own navigation — `Mac`, `Store`, `Support`,
+ * `Watch`, `Vision`, `Entertainment`, `Accessories` — and those landed in the catalog as if they
+ * were families. A persona claiming them is not merely wrong: `document.fonts.check('12px
+ * "Accessories"')` returning true is a string no macOS in the world answers to, so the single probe
+ * that tries it identifies the product outright.
+ */
+const MACOS_CATALOG_NAVIGATION_ROWS = new Set([
+  'Accessories',
+  'Entertainment',
+  'Mac',
+  'Store',
+  'Support',
+  'Vision',
+  'Watch',
+]);
 
 function fillToTarget(
   priority: readonly string[],
@@ -180,7 +215,9 @@ export function defaultMacosFonts(
   catalog: readonly string[] = MACOS_FONT_NAMES,
   target = DEFAULT_FONT_SELECTION_TARGET,
 ): string[] {
-  const collapsed = uniquePreserveOrder(catalog.map(normalizeMacFontFamily));
+  const collapsed = uniquePreserveOrder(
+    catalog.map(normalizeMacFontFamily).filter((name) => !MACOS_CATALOG_NAVIGATION_ROWS.has(name)),
+  );
   const priority = MACOS_PRIORITY_STEMS.filter((stem) =>
     collapsed.some((font) => font === stem || font.startsWith(`${stem} `)),
   ).flatMap((stem) => collapsed.filter((font) => font === stem || font.startsWith(`${stem} `)));

@@ -22,6 +22,7 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
-    "@lobster/shared-types": "*"
+    "@lobster/shared-types": "*",
+    "tldts": "^7.4.10"
   }
 }

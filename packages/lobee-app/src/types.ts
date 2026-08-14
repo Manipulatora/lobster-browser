@@ -43,6 +43,7 @@ export interface AgentEvent {
 export interface AgentRunSnapshot {
   sessionId: string;
   profileId: string;
+  threadId?: string;
   task: string;
   status: 'running' | 'awaiting_input' | 'done' | 'error' | 'stopped';
   step: number;

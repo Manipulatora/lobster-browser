@@ -41,6 +41,8 @@ test('capability defaults are pessimistic: mutating, and barred from privileged 
     'navigate',
     'back',
     'tab',
+    'remember',
+    'learn',
     'browser_config',
   ] as const) {
     assert.equal(ACTION_CAPABILITIES[kind]?.mutating, true, `${kind} must be mutating`);
@@ -76,4 +78,57 @@ test('an over-long summary or note is clamped rather than dropped', () => {
   const clicked = parseAction({ kind: 'click', id: 1, note: long });
   assert.ok(clicked.ok && clicked.action.kind === 'click');
   assert.ok((clicked.action.note ?? '').length <= 160);
+});
+
+test('credential questions require an explicit boolean sensitive channel', () => {
+  for (const input of [
+    { kind: 'ask', question: 'Enter your one-time code' },
+    { kind: 'ask', question: 'What is your password?', sensitive: false },
+    { kind: 'ask', question: 'Provide your API key', sensitive: 'true' },
+  ]) {
+    const parsed = parseAction(input);
+    assert.equal(parsed.ok, false);
+    if (!parsed.ok) assert.match(parsed.error, /sensitive|true or false/i);
+  }
+
+  const secure = parseAction({
+    kind: 'ask',
+    question: 'Enter your one-time code',
+    sensitive: true,
+  });
+  assert.ok(secure.ok && secure.action.kind === 'ask' && secure.action.sensitive === true);
+
+  const harmless = parseAction({ kind: 'ask', question: 'Open password settings?' });
+  assert.ok(harmless.ok && harmless.action.kind === 'ask');
+});
+
+test('credential values are forbidden even inside a sensitive question', () => {
+  const parsed = parseAction({
+    kind: 'ask',
+    question: 'Is api key: sk-testOnlyQuestionCredential123456789 correct?',
+    sensitive: true,
+  });
+  assert.equal(parsed.ok, false);
+  if (!parsed.ok) assert.match(parsed.error, /must not contain a credential value/);
+});
+
+test('key parsing canonicalizes to the one vocabulary the driver can press', () => {
+  // A bare space used to parse as itself and then be unpressable, and the failure only surfaced past
+  // the point where the run could still call it effect-free.
+  const space = parseAction({ kind: 'key', key: ' ' });
+  assert.ok(space.ok && space.action.kind === 'key');
+  assert.equal(space.action.key, 'Space');
+
+  const named = parseAction({ kind: 'key', key: 'enter' });
+  assert.ok(named.ok && named.action.kind === 'key');
+  assert.equal(
+    named.action.key,
+    'Enter',
+    'a named key is canonicalized, not passed through as typed',
+  );
+
+  for (const key of ['F13', 'Ctrl', '', '  ', 'ab', 'Meta+C']) {
+    const parsed = parseAction({ kind: 'key', key });
+    assert.equal(parsed.ok, false, `${JSON.stringify(key)} must not parse as a pressable key`);
+  }
 });

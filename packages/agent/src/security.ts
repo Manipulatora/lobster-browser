@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import type { AgentAction } from '@lobster/shared-types';
+import { REDACTED_SENSITIVE, redactCredentialLikeText } from './sensitive-text.js';
 import type { PerceivedElement, RawPerception } from './types.js';
 
 const SECRET_LABEL =
@@ -23,20 +25,69 @@ export function elementForAction(
 
 /** A copy safe for UI events, logs, model history, and disk. Execution must use the original. */
 export function redactAction(action: AgentAction, perception?: RawPerception): AgentAction {
+  // Scrub every free-text field first. Branches below add stronger channel-specific treatment, but a
+  // new note, summary, dataset cell, or description must not silently become an unredacted event field
+  // merely because it belongs to a different action variant.
+  const safe = scrubCredentialStrings(action) as AgentAction;
+  const typedCredential =
+    (action.kind === 'type' || action.kind === 'type_at') &&
+    redactCredentialLikeText(action.text).sensitive;
   if (
-    action.kind === 'type' &&
-    isSensitiveElement(elementForAction(action, perception ?? empty()))
+    safe.kind === 'type' &&
+    (typedCredential || isSensitiveElement(elementForAction(safe, perception ?? empty())))
   ) {
-    return { ...action, text: '[REDACTED]', ...(action.note ? { note: '[redacted]' } : {}) };
+    return { ...safe, text: '[REDACTED]' };
   }
-  if (action.kind === 'type_at')
-    return { ...action, text: '[REDACTED]', ...(action.note ? { note: '[redacted]' } : {}) };
-  if (action.kind === 'upload') {
-    return { ...action, paths: action.paths.map(() => '[LOCAL FILE]') };
+  if (safe.kind === 'type_at') return { ...safe, text: '[REDACTED]' };
+  if (safe.kind === 'upload') {
+    return { ...safe, paths: safe.paths.map(() => '[LOCAL FILE]') };
   }
-  if (action.kind === 'navigate') return { ...action, url: redactUrl(action.url) };
-  if (action.kind === 'tab' && action.url) return { ...action, url: redactUrl(action.url) };
-  return action;
+  if (safe.kind === 'navigate') {
+    const originalUrl = action.kind === 'navigate' ? action.url : safe.url;
+    return { ...safe, url: redactUrl(originalUrl) };
+  }
+  if (safe.kind === 'tab' && safe.url) {
+    const originalUrl = action.kind === 'tab' ? action.url : safe.url;
+    return { ...safe, url: redactUrl(originalUrl ?? safe.url) };
+  }
+  if (safe.kind === 'remember') {
+    const key = redactCredentialLikeText(safe.factKey);
+    const value = redactCredentialLikeText(safe.factValue);
+    const labelledValue = redactCredentialLikeText(`${safe.factKey}: ${safe.factValue}`);
+    return key.sensitive || value.sensitive || labelledValue.sensitive
+      ? {
+          ...safe,
+          ...(key.sensitive ? { factKey: REDACTED_SENSITIVE } : {}),
+          ...(value.sensitive || labelledValue.sensitive ? { factValue: REDACTED_SENSITIVE } : {}),
+        }
+      : safe;
+  }
+  if (safe.kind === 'learn') {
+    const name = redactCredentialLikeText(safe.skillName);
+    const trigger = redactCredentialLikeText(safe.skillTrigger);
+    const steps = redactCredentialLikeText(safe.skillSteps);
+    return name.sensitive || trigger.sensitive || steps.sensitive
+      ? {
+          ...safe,
+          ...(name.sensitive ? { skillName: REDACTED_SENSITIVE } : {}),
+          ...(trigger.sensitive ? { skillTrigger: REDACTED_SENSITIVE } : {}),
+          ...(steps.sensitive ? { skillSteps: REDACTED_SENSITIVE } : {}),
+        }
+      : safe;
+  }
+  return safe;
+}
+
+function scrubCredentialStrings(value: unknown): unknown {
+  if (typeof value === 'string') return redactCredentialLikeText(value).text;
+  if (Array.isArray(value)) return value.map(scrubCredentialStrings);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
+      key,
+      scrubCredentialStrings(nested),
+    ]),
+  );
 }
 
 /**
@@ -52,7 +103,15 @@ export function redactRawActionInput(raw: unknown): Record<string, unknown> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (key === 'text' || key === 'factValue') out[key] = '[REDACTED]';
+    if (
+      key === 'text' ||
+      key === 'factKey' ||
+      key === 'factValue' ||
+      key === 'skillName' ||
+      key === 'skillTrigger' ||
+      key === 'skillSteps'
+    )
+      out[key] = '[REDACTED]';
     else if (key === 'paths') out[key] = '[LOCAL FILE]';
     else if (key === 'url' && typeof value === 'string') out[key] = redactUrl(value);
     else if (typeof value === 'string' && value.length > 200) out[key] = `${value.slice(0, 199)}…`;
@@ -64,22 +123,45 @@ export function redactRawActionInput(raw: unknown): Record<string, unknown> {
 export function redactUrl(value: string): string {
   try {
     const url = new URL(value);
-    for (const key of [...url.searchParams.keys()]) {
-      if (/(token|code|key|secret|pass|session|auth|signature|credential|assertion)/i.test(key)) {
+    for (const [key, queryValue] of [...url.searchParams.entries()]) {
+      if (
+        /(token|code|key|secret|pass|session|auth|signature|credential|assertion)/i.test(key) ||
+        redactCredentialLikeText(queryValue).sensitive
+      ) {
         url.searchParams.set(key, '[REDACTED]');
       }
     }
-    if (/(access_token|id_token|token|code|secret|session)/i.test(url.hash))
+    let decodedPath = url.pathname;
+    try {
+      decodedPath = decodeURIComponent(url.pathname);
+    } catch {
+      // The encoded spelling is still checked below.
+    }
+    if (redactCredentialLikeText(decodedPath).sensitive) url.pathname = '/[REDACTED]';
+    if (
+      /(access_token|id_token|token|code|secret|session)/i.test(url.hash) ||
+      redactCredentialLikeText(url.hash).sensitive
+    )
       url.hash = '#[REDACTED]';
     url.username = '';
     url.password = '';
     return url.toString();
   } catch {
-    return value.replace(
+    const structurallyRedacted = value.replace(
       /([?&#](?:token|code|key|secret|pass|session|auth|signature)=)[^&#]*/gi,
       '$1[REDACTED]',
     );
+    return redactCredentialLikeText(structurallyRedacted).text;
   }
+}
+
+/**
+ * Opaque, in-memory identity for a full browser URL. The model and event surfaces receive only the
+ * redacted URL, but approval freshness must still notice a query, fragment, credential, or userinfo
+ * change that redaction deliberately hides.
+ */
+export function urlIdentity(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 /**
@@ -97,31 +179,39 @@ function label(index: number | undefined, perception?: RawPerception): string {
 export function describeSafeAction(action: AgentAction, perception?: RawPerception): string {
   const safe = redactAction(action, perception);
   switch (safe.kind) {
-    case 'click':
-      return `click${label(safe.id, perception)} [${safe.id}]`;
-    case 'click_at':
-      return `click visual coordinate (${safe.x}, ${safe.y})`;
+    case 'click': {
+      const gesture = `${safe.count === 2 ? 'double-' : ''}${safe.button === 'right' ? 'right-click' : 'click'}`;
+      return `${gesture}${label(safe.id, perception)} [${safe.id}]`;
+    }
+    case 'click_at': {
+      const gesture = `${safe.count === 2 ? 'double-' : ''}${safe.button === 'right' ? 'right-click' : 'click'}`;
+      return `${gesture} visual coordinate (${safe.x}, ${safe.y})`;
+    }
     case 'hover':
       return `hover${label(safe.id, perception)} [${safe.id}]`;
     case 'type':
-      return `type ${safe.text === '[REDACTED]' ? 'sensitive text' : JSON.stringify(clip(safe.text, 40))} into${label(safe.id, perception)} [${safe.id}]`;
+      return `type ${safe.text === '[REDACTED]' ? 'sensitive text' : JSON.stringify(clip(safe.text, 40))} into${label(safe.id, perception)} [${safe.id}]${safe.submit ? ' and press Enter' : ''}`;
     case 'type_at':
-      return `type ${safe.text === '[REDACTED]' ? 'redacted text' : JSON.stringify(clip(safe.text, 40))} at visual coordinate (${safe.x}, ${safe.y})`;
+      return `type ${safe.text === '[REDACTED]' ? 'redacted text' : JSON.stringify(clip(safe.text, 40))} at visual coordinate (${safe.x}, ${safe.y})${safe.submit ? ' and press Enter' : ''}`;
     case 'select':
-      return `select ${safe.values.join(', ')} in${label(safe.id, perception)} [${safe.id}]`;
+      return `select ${safe.values.map((value) => JSON.stringify(clip(value, 60))).join(', ')} in${label(safe.id, perception)} [${safe.id}]`;
+    case 'key':
+      return `press ${safe.key === ' ' ? 'Space' : JSON.stringify(safe.key)}`;
     case 'drag':
-      return `drag [${safe.fromId}] to [${safe.toId}]`;
+      return `drag${label(safe.fromId, perception)} [${safe.fromId}] to${label(safe.toId, perception)} [${safe.toId}]`;
     case 'upload':
       return `upload ${safe.paths.length} local file(s) through${label(safe.id, perception)} [${safe.id}]`;
     case 'navigate':
       return `navigate to ${safe.url}`;
     case 'tab':
-      return `${safe.operation} tab${safe.index === undefined ? '' : ` ${safe.index}`}`;
+      return safe.operation === 'new' && safe.url
+        ? `open a new tab at ${safe.url}`
+        : `${safe.operation} tab${safe.tabId ? ` ${safe.tabId}` : safe.index === undefined ? '' : ` ${safe.index}`}`;
     case 'browser_config': {
       const where = safe.origin ?? safe.domain;
       const detail =
         safe.op === 'set_permission'
-          ? ` ${safe.permission ?? ''} → ${safe.setting ?? 'prompt'}`
+          ? ` ${safe.permission ?? ''} → ${safe.setting ?? 'prompt'}${where ? ` for ${where}` : ''}`
           : safe.op === 'set_downloads'
             ? ` → ${safe.behavior ?? 'default'}`
             : where
@@ -129,6 +219,10 @@ export function describeSafeAction(action: AgentAction, perception?: RawPercepti
               : '';
       return `browser setting: ${safe.op.replace(/_/g, ' ')}${detail}`.trim();
     }
+    case 'remember':
+      return `remember ${JSON.stringify(clip(safe.factKey, 80))} = ${JSON.stringify(clip(safe.factValue, 120))}`;
+    case 'learn':
+      return `save learned procedure ${JSON.stringify(clip(safe.skillName, 60))} for ${JSON.stringify(clip(safe.skillTrigger, 100))}: ${JSON.stringify(clip(safe.skillSteps, 160))}`;
     default:
       return safe.kind;
   }

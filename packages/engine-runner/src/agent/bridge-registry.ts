@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import type { ProfileNetworkRoute } from './navigation-egress.js';
 
 /**
  * Process-singleton registry that lets the in-browser Lobee side panel drive its own profile's agent
@@ -15,6 +16,8 @@ interface ProfileEntry {
   token: string;
   memoryDir?: string;
   memoryKey?: string;
+  /** Whether hostname resolution happens on this machine or at the configured upstream proxy. */
+  networkRoute?: Exclude<ProfileNetworkRoute, 'unknown'>;
 }
 
 const byProfile = new Map<string, ProfileEntry>();
@@ -48,11 +51,23 @@ export function issueBridgeToken(profileId: string): string {
 /** Provision the per-profile run secrets (memory dir + key). Upserts; safe to call before/after token issue. */
 export function provisionProfile(
   profileId: string,
-  secrets: { memoryDir?: string; memoryKey?: string },
+  secrets: {
+    memoryDir?: string;
+    memoryKey?: string;
+    networkRoute?: Exclude<ProfileNetworkRoute, 'unknown'>;
+  },
 ): void {
   const entry = ensure(profileId);
   if (secrets.memoryDir !== undefined) entry.memoryDir = secrets.memoryDir;
   if (secrets.memoryKey !== undefined) entry.memoryKey = secrets.memoryKey;
+  if (secrets.networkRoute !== undefined) entry.networkRoute = secrets.networkRoute;
+}
+
+/** Resolve the live profile's DNS route without exposing its bridge token or memory secret. */
+export function resolveProfileNetworkRoute(
+  profileId: string,
+): Exclude<ProfileNetworkRoute, 'unknown'> | undefined {
+  return byProfile.get(profileId)?.networkRoute;
 }
 
 /** Resolve a bridge token to its profile + secrets, or `undefined` when the token is unknown. */

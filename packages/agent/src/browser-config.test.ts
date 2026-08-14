@@ -7,8 +7,11 @@ import {
   assessUiSettingsIntent,
   isVettedBrowserConfigUrl,
   normalizeBrowserPermission,
+  normalizeBrowserPermissionOrigin,
+  normalizeCookieDomain,
 } from './browser-config-guard.js';
 import { actionRisk } from './policy.js';
+import { describeSafeAction } from './security.js';
 import type { AgentAction } from '@lobster/shared-types';
 import type { RawPerception } from './types.js';
 
@@ -122,6 +125,128 @@ test('permission aliases normalize once and remain allowed by the safety guard',
     assert.equal(action.permission, canonical);
     assert.equal(assessBrowserConfig(action).verdict, 'allow');
   }
+});
+
+test('set_permission requires and stores one canonical HTTP(S) origin', () => {
+  for (const origin of [':', 'file:///tmp/page.html', 'data:text/html,hello', 'https://', '']) {
+    assert.equal(
+      parseAction({
+        kind: 'browser_config',
+        op: 'set_permission',
+        origin,
+        permission: 'camera',
+        setting: 'granted',
+      }).ok,
+      false,
+      origin,
+    );
+  }
+  assert.equal(normalizeBrowserPermissionOrigin('https://user:pass@example.com/'), '');
+  assert.equal(
+    normalizeBrowserPermissionOrigin('HTTPS://ExAmPlE.COM.:443/a?q=1#x'),
+    'https://example.com',
+  );
+  assert.equal(
+    normalizeBrowserPermissionOrigin(undefined, 'BÜCHER.example.'),
+    'https://xn--bcher-kva.example',
+  );
+
+  assert.deepEqual(
+    parseAction({
+      kind: 'browser_config',
+      op: 'set_permission',
+      origin: 'HTTPS://ExAmPlE.COM.:443/path?ignored=1',
+      permission: 'camera',
+      setting: 'granted',
+    }),
+    {
+      ok: true,
+      action: {
+        kind: 'browser_config',
+        op: 'set_permission',
+        origin: 'https://example.com',
+        permission: 'camera',
+        setting: 'granted',
+      },
+    },
+  );
+  assert.deepEqual(
+    parseAction({
+      kind: 'browser_config',
+      op: 'set_permission',
+      domain: 'Example.COM.',
+      permission: 'camera',
+      setting: 'denied',
+    }),
+    {
+      ok: true,
+      action: {
+        kind: 'browser_config',
+        op: 'set_permission',
+        origin: 'https://example.com',
+        permission: 'camera',
+        setting: 'denied',
+      },
+    },
+  );
+
+  const directMalformed = {
+    kind: 'browser_config',
+    op: 'set_permission',
+    origin: ':',
+    permission: 'camera',
+    setting: 'granted',
+  } as BrowserConfigAction;
+  assert.equal(assessBrowserConfig(directMalformed).verdict, 'block');
+  assert.match(
+    describeSafeAction(
+      cfg({
+        op: 'set_permission',
+        origin: 'https://example.com',
+        permission: 'camera',
+        setting: 'granted',
+      }),
+    ),
+    /camera → granted for https:\/\/example\.com/,
+  );
+});
+
+test('clear_cookies rejects public/private suffixes and canonicalizes a specific site', () => {
+  for (const domain of ['com', 'co.uk', 'github.io', 'pages.dev', 'local', '*.example.com']) {
+    assert.equal(
+      parseAction({ kind: 'browser_config', op: 'clear_cookies', domain }).ok,
+      false,
+      domain,
+    );
+    assert.equal(normalizeCookieDomain(domain), '', domain);
+  }
+  for (const domain of [
+    'example.com',
+    'shop.example.com',
+    'tenant.github.io',
+    'localhost',
+    'intranet',
+  ]) {
+    assert.notEqual(normalizeCookieDomain(domain), '', domain);
+  }
+  assert.deepEqual(
+    parseAction({ kind: 'browser_config', op: 'clear_cookies', domain: '.BÜCHER.example.' }),
+    {
+      ok: true,
+      action: {
+        kind: 'browser_config',
+        op: 'clear_cookies',
+        domain: 'xn--bcher-kva.example',
+      },
+    },
+  );
+
+  const directBroad = {
+    kind: 'browser_config',
+    op: 'clear_cookies',
+    domain: 'github.io',
+  } as BrowserConfigAction;
+  assert.equal(assessBrowserConfig(directBroad).verdict, 'block');
 });
 
 test('guard HARD-BLOCKS fingerprint/proxy tells on the settings surfaces (no override)', () => {

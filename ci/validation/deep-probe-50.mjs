@@ -18,7 +18,10 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const LOBIUM = resolveLobiumBinary();
 const GPU_MODE = resolveGpuMode();
-const PROBE_HTML = await readFile('/tmp/claude-1001/-home-ivyhfx-browser/852bab08-84ea-4f91-82e1-dfdb3a94db06/scratchpad/fp-probe/probe.html', 'utf8');
+// Resolved against this file, never an absolute developer path: the probe used to be read from a
+// scratch directory that existed on exactly one machine, so this script threw ENOENT at module load
+// everywhere else while the docs listed it as part of the gate that "runs anywhere".
+const PROBE_HTML = await readFile(join(here, 'fixtures', 'fp-probe.html'), 'utf8');
 
 const GEOS = {
   US: { ip: '0.0.0.0', countryCode: 'US', timezone: 'America/New_York', latitude: 40.71, longitude: -74.0 },

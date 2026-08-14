@@ -1,12 +1,13 @@
 import type { BrowserDriver } from '../driver.js';
 import type { PerceivedElement, RawPerception } from '../types.js';
-import { EXTRACT_SCRIPT } from './extract-script.js';
-import { redactUrl } from '../security.js';
+import { EXTRACT_SCRIPT, type ExtractResult } from './extract-script.js';
+import { redactUrl, urlIdentity } from '../security.js';
 
 /** A defensive default when a page yields nothing (about:blank, mid-navigation, hostile CSP). */
-function emptyPerception(url: string): RawPerception {
+function emptyPerception(url: string, identity?: string): RawPerception {
   return {
     url,
+    ...(identity ? { urlIdentity: identity } : {}),
     title: '',
     scrollY: 0,
     viewportH: 0,
@@ -36,27 +37,51 @@ export async function perceive(driver: BrowserDriver): Promise<RawPerception> {
       signals: ['browser-closed'],
     };
   }
-  let raw: Partial<RawPerception> | null = null;
+  let raw: ExtractResult | null = null;
   let failure = '';
   try {
-    raw = await driver.evaluate<Partial<RawPerception>>(EXTRACT_SCRIPT);
+    raw = await driver.evaluate<ExtractResult>(EXTRACT_SCRIPT);
+    // The script runs in the page's own main world, where a page-defined global or a patched prototype
+    // can make the walk throw; its top-level catch reports that through `error`. An in-page exception is
+    // as complete a failure to read the page as a rejected evaluate, so it takes the same branch — the
+    // only difference is which side of the CDP boundary produced the message.
+    const reported = raw?.error;
+    if (typeof reported === 'string' && reported.trim()) failure = reported;
   } catch (error) {
     raw = null;
     failure = error instanceof Error ? error.message : String(error);
   }
-  if (!raw || !Array.isArray(raw.elements)) {
-    const url = raw?.url ?? (await safeUrl(driver));
+  if (!raw || !Array.isArray(raw.elements) || failure) {
+    const fullUrl = text(raw?.url ?? (await safeUrl(driver)), 8192);
+    const url = redactUrl(fullUrl);
     // Do NOT present a failed read as a blank page. "(no interactive elements visible)" is a claim
     // about the page; when the read itself failed it is a false one, and the model would respond by
     // scrolling or waiting forever instead of recovering or handing off. Say what went wrong.
-    const empty = emptyPerception(url);
-    return failure
-      ? {
-          ...empty,
-          signals: [...(empty.signals ?? []), 'page-unreadable'],
-          text: `The page could not be read: ${failure}`,
-        }
-      : empty;
+    //
+    // Every arrival here is a read that produced no page, whether the script threw, the evaluate was
+    // rejected, or the value came back in no recognisable shape. `page-unreadable` is unconditional
+    // because it is load-bearing twice over: it is the model's documented cue to stop, and it is the
+    // ONLY thing post-action verification checks before certifying an irreversible action as observed.
+    const empty = emptyPerception(url, urlIdentity(fullUrl));
+    return {
+      ...empty,
+      signals: [...(empty.signals ?? []), 'page-unreadable'],
+      text: `The page could not be read: ${redactUrl(text(failure || 'the page returned no readable content', 500))}`,
+    };
+  }
+  const fullPageUrl = text(raw.url, 8192);
+  const pageUrl = redactUrl(fullPageUrl);
+  const pageUrlIdentity = urlIdentity(fullPageUrl);
+  // `about:blank` can inherit its opener's effective origin and be populated with arbitrary DOM. Its
+  // location string does not reveal that origin, so forwarding content/elements would let a file:/
+  // data:/extension opener hide behind an innocuous URL. Treat it as a synthetic empty page: the model
+  // may navigate away or manage tabs, but it receives none of the inherited document.
+  if (isAboutBlank(pageUrl)) {
+    return {
+      ...emptyPerception('about:blank', pageUrlIdentity),
+      title: 'Blank page',
+      signals: ['blank-page'],
+    };
   }
   // Re-index defensively so indices are always a dense 0..n-1 the model can trust, even if the script
   // ever skips one. Coordinates/fields are taken verbatim from the in-page measurement.
@@ -66,7 +91,8 @@ export async function perceive(driver: BrowserDriver): Promise<RawPerception> {
     .filter((element): element is PerceivedElement => element !== null)
     .map((element, index) => ({ ...element, index }));
   return {
-    url: redactUrl(text(raw.url, 8192)),
+    url: pageUrl,
+    urlIdentity: pageUrlIdentity,
     title: text(raw.title, 300),
     scrollY: number(raw.scrollY),
     viewportH: number(raw.viewportH),
@@ -84,6 +110,15 @@ export async function perceive(driver: BrowserDriver): Promise<RawPerception> {
     elements,
     truncated: Math.max(0, number(raw.truncated)),
   };
+}
+
+function isAboutBlank(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'about:' && url.pathname === 'blank';
+  } catch {
+    return false;
+  }
 }
 
 function normalizeElement(candidate: unknown, index: number): PerceivedElement | null {
@@ -105,6 +140,9 @@ function normalizeElement(candidate: unknown, index: number): PerceivedElement |
     w,
     h,
     ...(typeof raw.type === 'string' ? { type: text(raw.type, 30).toLowerCase() } : {}),
+    ...(raw.submitsForm === true ? { submitsForm: true } : {}),
+    ...(raw.focused === true ? { focused: true } : {}),
+    ...(raw.editable === true ? { editable: true } : {}),
     ...(typeof raw.value === 'string' && !sensitive ? { value: text(raw.value, 90) } : {}),
     ...(raw.filled === true ? { filled: true } : {}),
     ...(sensitive ? { sensitive: true } : {}),

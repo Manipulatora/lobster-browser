@@ -53,8 +53,15 @@ export function renderObservation(raw: RawPerception): string {
     // dropped, so "scroll to narrow the view" described a spatial rule that does not exist — a model
     // hunting for a low-ranked control could scroll forever without changing its rank. Scrolling does
     // change WHICH elements are in view, so it is still useful; it is just not the whole story.
+    // Two different cuts, and telling the model the wrong one sends it hunting the wrong way. The
+    // ranked cut drops the least relevant, so scrolling to change WHAT is in view helps. The candidate
+    // cap is hit during collection, before anything is ranked, so what it dropped is arbitrary — and
+    // saying "lowest-ranked were cut" there is simply false.
+    const arbitraryCut = raw.signals?.includes('too-many-candidates');
     lines.push(
-      `… ${raw.truncated} more element(s) not shown. This list is ranked by likely relevance, not page order, and the lowest-ranked were cut. If what you need is missing, scroll to bring a different part of the page into view, or use \`extract\` to read the page as text.`,
+      arbitraryCut
+        ? `… ${raw.truncated} more element(s) not shown. This page has more controls than can be collected, so the ones omitted were NOT chosen by relevance and something you need may be missing entirely. Use \`extract\` to read the page as text, or scroll to collect a different part of it.`
+        : `… ${raw.truncated} more element(s) not shown. This list is ranked by likely relevance, not page order, and the lowest-ranked were cut. If what you need is missing, scroll to bring a different part of the page into view, or use \`extract\` to read the page as text.`,
     );
   }
   return lines.join('\n');
@@ -65,6 +72,9 @@ function renderElement(el: PerceivedElement): string {
   const label = el.role === 'generic' ? el.tag : el.role;
   let line = `[${el.index}] ${label} ${JSON.stringify(el.name)}`;
   if (el.type && el.type !== el.role && el.tag === 'input') line += ` type=${el.type}`;
+  if (el.submitsForm) line += ' submits-form';
+  if (el.focused) line += ' focused';
+  if (el.editable) line += ' contenteditable';
   if (el.sensitive) line += el.filled ? ' = <sensitive:filled>' : ' = <sensitive:empty>';
   else if (el.value !== undefined) line += ` = ${JSON.stringify(el.value)}`;
   else if (el.filled) line += ' = <filled>';
@@ -94,6 +104,9 @@ export function sameElements(a: RawPerception, b: RawPerception): boolean {
       x.name !== y.name ||
       x.value !== y.value ||
       x.filled !== y.filled ||
+      x.submitsForm !== y.submitsForm ||
+      x.focused !== y.focused ||
+      x.editable !== y.editable ||
       x.state !== y.state ||
       x.href !== y.href
     ) {

@@ -95,7 +95,12 @@ export class AnthropicClient implements LlmClient {
       ...(text ? { text } : {}),
       stopReason: normalizeStop(json.stop_reason),
       usage: {
-        tokensIn: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+        // Anthropic reports cache reads separately from ordinary/cache-creation input. They still
+        // consumed context and must count against Lobee's per-run safety budget.
+        tokensIn:
+          (u.input_tokens ?? 0) +
+          (u.cache_creation_input_tokens ?? 0) +
+          (u.cache_read_input_tokens ?? 0),
         tokensOut: u.output_tokens ?? 0,
         ...(u.cache_read_input_tokens !== undefined
           ? { cachedTokensIn: u.cache_read_input_tokens }

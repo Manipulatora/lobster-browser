@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { homedir } from 'node:os';
 import { basename, isAbsolute } from 'node:path';
 import type {
@@ -20,15 +21,25 @@ import { executeAction } from './executor.js';
 import type { Sleep } from './executor.js';
 import type { LlmClient } from './llm/index.js';
 import { usesAutomaticToolChoice } from './llm/index.js';
-import type { LlmMessage } from './llm/types.js';
+import type { LlmMessage, LlmTool } from './llm/types.js';
 import { normalizeMessages } from './llm/types.js';
+import type {
+  AppendRunJournalEventV1,
+  JournalActionEffect,
+  RunJournalSnapshot,
+} from './journal/index.js';
+import type { RunJournalStore } from './journal/index.js';
 import type { MemoryStore, ThreadMessage } from './memory/index.js';
 import {
+  actionCommitIntent,
   actionRisk,
+  assessCurrentPage,
   assessNavigation,
+  assessNavigationDrift,
   normalizeAllowedDomains,
   targetUrlForAction,
 } from './policy.js';
+import type { PolicyDecision } from './policy.js';
 import { perceive } from './perception/perceive.js';
 import { renderObservation, sameElements } from './perception/serialize.js';
 import {
@@ -45,8 +56,11 @@ import {
   redactAction,
   redactRawActionInput,
   redactUrl,
+  urlIdentity,
 } from './security.js';
-import type { RawPerception } from './types.js';
+import { redactCredentialLikeText } from './sensitive-text.js';
+import { normalizeSkillHost } from './skills.js';
+import type { PerceivedElement, RawPerception } from './types.js';
 
 export interface AgentRunDeps {
   driver: BrowserDriver;
@@ -57,6 +71,11 @@ export interface AgentRunDeps {
   signal: AbortSignal;
   now: () => string;
   sleep?: Sleep;
+  /**
+   * Durable safety journal. Optional only so focused loop tests and embedders can use an in-memory
+   * harness; the production manager always supplies the encrypted per-profile implementation.
+   */
+  journal?: Pick<RunJournalStore, 'create' | 'append'>;
 }
 
 export interface AgentRunParams {
@@ -74,6 +93,13 @@ export interface AgentRunParams {
   config: AgentConfig;
 }
 
+/**
+ * A response smaller than this is not a useful budget for either a chat answer or a structured agent
+ * action. Stopping before the request is safer than asking a provider for a handful of tokens, paying
+ * for the full prompt, and receiving a truncated/non-executable result.
+ */
+const MIN_USEFUL_OUTPUT_TOKENS = 256;
+
 export function resolveConfig(partial: Partial<AgentConfig> | undefined): AgentConfig {
   const maxSteps = boundedInteger(partial?.maxSteps, 40, 1, 200, 'maxSteps');
   const tokenBudget =
@@ -85,8 +111,8 @@ export function resolveConfig(partial: Partial<AgentConfig> | undefined): AgentC
   const autonomy = partial?.autonomy ?? 'auto';
   if (autonomy !== 'auto' && autonomy !== 'confirm')
     throw new Error('autonomy must be auto or confirm');
-  // Autonomy is THE approval switch: `auto` runs end-to-end with zero approval pauses (hard denials
-  // still apply), so cross-domain navigation defaults to allow there; `confirm` gates it.
+  // Autonomy controls approval for ordinary mutations. Consequential/commit actions are still gated
+  // in every mode. Cross-domain navigation defaults to allow in `auto`; `confirm` gates it.
   const crossDomainNavigation =
     partial?.crossDomainNavigation ?? (autonomy === 'auto' ? 'allow' : 'confirm');
   if (!['allow', 'confirm', 'deny'].includes(crossDomainNavigation)) {
@@ -126,17 +152,204 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
   const usage: AgentUsage = { tokensIn: 0, tokensOut: 0 };
   const history: string[] = [];
   const base = { sessionId, profileId };
+  const safeTask = redactCredentialLikeText(task);
   let memoryStarted = false;
+  let journalSnapshot: RunJournalSnapshot | undefined;
+  let journalActionSequence = 0;
+
+  // The journal is a safety dependency, unlike recall memory. Create it before emitting lifecycle
+  // events, consulting the model, opening a URL, or touching durable profile state. A production
+  // storage failure therefore rejects the run before it can do work.
+  if (deps.journal) {
+    journalSnapshot = await deps.journal.create({
+      runId,
+      // Tasks can contain credentials or private business data. Recovery needs lifecycle/effect
+      // state, not a second copy of the prompt, so persist a deliberately content-free label.
+      task: 'Agent task',
+      mode: config.mode ?? 'agent',
+    });
+  }
+
+  const appendJournal = async (event: AppendRunJournalEventV1): Promise<void> => {
+    if (!deps.journal || !journalSnapshot) return;
+    journalSnapshot = await deps.journal.append(runId, event, journalSnapshot.journal.revision);
+  };
+  const markJournalSensitive = async (
+    reason: 'credential' | 'upload_path' | 'provider_configuration' | 'image_payload' | 'unknown',
+  ): Promise<void> => {
+    if (!journalSnapshot || journalSnapshot.journal.sensitive) return;
+    await appendJournal({ type: 'run.sensitive', reason });
+  };
+  const proposeJournalAction = async (
+    kind: AgentAction['kind'] | 'navigation_reconcile',
+    effect: JournalActionEffect,
+    host?: string,
+  ): Promise<string> => {
+    const actionId = `action-${++journalActionSequence}`;
+    await appendJournal({
+      type: 'action.proposed',
+      actionId,
+      actionKind: kind,
+      effect,
+      // Never derive this from the live arguments or page label. That would turn an encrypted safety
+      // checkpoint into a second store of selectors, values, paths, URLs, or attacker text.
+      summary: `Proposed ${kind.replaceAll('_', ' ')} action`,
+      ...(host ? { host } : {}),
+    });
+    return actionId;
+  };
+  const confirmJournaled = async (
+    prompt: string,
+    action: AgentAction,
+    actionId: string,
+  ): Promise<boolean> => {
+    await appendJournal({ type: 'approval.requested', actionId });
+    let approved = false;
+    try {
+      approved = await confirm(prompt, action, base, deps);
+    } catch (error) {
+      // Timeout/abort is rejection, never an unresolved approval that a terminal marker may silently
+      // erase. Callers that already have browser drift can now journal and verify their rollback.
+      await appendJournal({ type: 'approval.resolved', actionId, decision: 'rejected' });
+      throw error;
+    }
+    await appendJournal({
+      type: 'approval.resolved',
+      actionId,
+      decision: approved ? 'approved' : 'rejected',
+    });
+    return approved;
+  };
+  const dispatchJournaled = async <T>(
+    actionId: string,
+    effect: JournalActionEffect,
+    operation: (beginEffect: () => Promise<void>) => Promise<T>,
+    outcomeOf: (value: T) => string,
+    verifyAfterEffect?: (value: T) => Promise<void>,
+  ): Promise<T> => {
+    if (!journalSnapshot) return operation(async () => {});
+    let effectBegan = false;
+    const beginEffect = async (): Promise<void> => {
+      if (effectBegan) return;
+      // RunJournalStore fsyncs this append before returning. Nothing with effects crosses the driver /
+      // memory boundary unless that durability barrier succeeds. The executor invokes this only after
+      // deterministic target, policy, path and capability validation has passed.
+      await appendJournal({ type: 'action.dispatching', actionId });
+      effectBegan = true;
+    };
+    // Reads do not need preflight/effect separation and are safe to close during startup recovery.
+    if (effect === 'read') await beginEffect();
+    let value: T;
+    try {
+      value = await operation(beginEffect);
+    } catch (error) {
+      if (!effectBegan) {
+        await appendJournal({
+          type: 'action.cancelled',
+          actionId,
+          summary: 'The action failed before dispatch',
+        });
+      }
+      throw error;
+    }
+    const outcome = outcomeOf(value);
+    const reportedFailure = /^(?:error|blocked|refused|missing|stale|could not)\b/i.test(outcome);
+    if (!effectBegan) {
+      // A structured missing dispatch marker proves the executor returned during deterministic
+      // preflight. It is safe to retry from a fresh observation and must not poison the profile as an
+      // ambiguous write merely because the human-readable outcome starts with "blocked" or "error".
+      await appendJournal({
+        type: 'action.cancelled',
+        actionId,
+        summary: reportedFailure
+          ? 'The action was rejected before dispatch'
+          : 'The action completed without a browser-side effect',
+      });
+      return value;
+    }
+    if (reportedFailure && effect !== 'read') {
+      // Driver methods can fail after an input event was delivered (for example, wait-for-settle after
+      // a click). A returned error therefore does not prove a write was absent. Preserve that ambiguity
+      // and stop; a later run must never hide or replay the possible side effect.
+      await appendJournal({
+        type: 'action.observed',
+        actionId,
+        outcome: 'unknown',
+        summary: 'The action effect could not be verified',
+      });
+      throw new Error(
+        'action outcome is ambiguous; manual recovery is required before another run',
+      );
+    }
+    if (!reportedFailure && effect !== 'read' && verifyAfterEffect) {
+      try {
+        await verifyAfterEffect(value);
+      } catch {
+        await appendJournal({
+          type: 'action.observed',
+          actionId,
+          outcome: 'unknown',
+          summary: 'The browser effect was delivered but fresh state could not be verified',
+        });
+        throw new Error(
+          'action delivery completed but post-action browser state is ambiguous; manual recovery is required before another run',
+        );
+      }
+    }
+    await appendJournal({
+      type: 'action.observed',
+      actionId,
+      outcome: reportedFailure ? 'failed' : 'succeeded',
+      summary: reportedFailure
+        ? 'The action was observed to fail'
+        : verifyAfterEffect
+          ? 'The driver completed and fresh browser state was observed'
+          : 'The action effect was acknowledged by its durable subsystem',
+    });
+    return value;
+  };
+  const restoreNavigationJournaled = async (
+    priorUrl: string,
+    currentUrl: string,
+    actionId: string,
+  ): Promise<void> => {
+    await dispatchJournaled(
+      actionId,
+      'write',
+      async (beginEffect) => {
+        await beginEffect();
+        await rollbackNavigation(driver, priorUrl);
+        return 'navigation restored and verified';
+      },
+      (value) => value,
+    );
+    log(
+      'info',
+      `Restored the prior page after refusing unexpected navigation from ${redactUrl(currentUrl)}.`,
+    );
+  };
 
   const log = (level: 'debug' | 'info' | 'warn' | 'error', message: string): void =>
-    emit({ type: 'log', ...base, level, message, ts: now() });
+    emit({
+      type: 'log',
+      ...base,
+      level,
+      message: redactCredentialLikeText(message).text,
+      ts: now(),
+    });
   /**
    * Report a memory degradation on its own typed channel as well as the log. Memory failing is
    * survivable but must never be INVISIBLE: a profile that has silently stopped remembering anything
    * looked exactly like one that was working.
    */
   const memoryDegraded = (scope: 'run' | 'thread' | 'step', reason: string): void => {
-    emit({ type: 'memory.degraded', ...base, scope, reason, ts: now() });
+    emit({
+      type: 'memory.degraded',
+      ...base,
+      scope,
+      reason: redactCredentialLikeText(reason).text,
+      ts: now(),
+    });
   };
   const addUsage = (value: AgentUsage): void => {
     usage.tokensIn += value.tokensIn;
@@ -150,11 +363,22 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     result: string,
     error?: string,
   ): Promise<void> => {
+    // Terminal text is model-/page-derived and crosses the UI plus thread-memory boundaries. A model
+    // echoing a token it saw must not turn `run.finished` into a credential exfiltration event.
+    const safeResult = redactCredentialLikeText(result).text;
+    const safeFinishError = error === undefined ? undefined : redactCredentialLikeText(error).text;
+    await appendJournal({
+      type: status === 'done' ? 'run.completed' : status === 'error' ? 'run.failed' : 'run.stopped',
+      // Result text may contain extracted/private page data. The encrypted journal only needs a
+      // terminal lifecycle marker; the encrypted conversation memory owns user-visible content.
+      summary:
+        status === 'done' ? 'Run completed' : status === 'error' ? 'Run failed' : 'Run stopped',
+    });
     if (memoryStarted) {
       try {
         await memory.finishRun(runId, {
           status,
-          summary: result || error || '',
+          summary: safeResult || safeFinishError || '',
           usage,
           endedAt: now(),
         });
@@ -169,8 +393,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     if (threadId) {
       try {
         await memory.appendThreadTurn(threadId, {
-          user: task,
-          assistant: result || error || '',
+          user: safeTask.text,
+          assistant: safeResult || safeFinishError || '',
           status,
         });
       } catch (threadError) {
@@ -182,14 +406,21 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       type: 'run.finished',
       ...base,
       status,
-      ...(result ? { result } : {}),
-      ...(error ? { error } : {}),
+      ...(safeResult ? { result: safeResult } : {}),
+      ...(safeFinishError ? { error: safeFinishError } : {}),
       usage,
       ts: now(),
     });
   };
 
-  emit({ type: 'run.started', ...base, task, ts: now() });
+  emit({ type: 'run.started', ...base, task: safeTask.text, ts: now() });
+  if (safeTask.sensitive) {
+    return await finish(
+      'error',
+      '',
+      'The task contains credential-like content. Remove the secret and let Lobee request it through the secure input prompt when needed.',
+    );
+  }
   // Memory is BEST-EFFORT context, never a hard dependency: a broken, rotated, or corrupt store must
   // never stop the agent from doing the user's task. Persistence and recall each degrade to "off" on
   // failure instead of erroring the run (which is exactly what made a single bad file kill everything).
@@ -199,8 +430,11 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       model: llmConfig.model,
     });
     memoryStarted = true;
-  } catch {
-    // Could not record this run — it just won't be persisted or recalled later. Continue.
+  } catch (error) {
+    // Could not record this run — it just won't be persisted or recalled later. Continue, but keep the
+    // degradation visible so an operator can distinguish memory-off from an empty profile.
+    log('warn', `Could not start encrypted run memory: ${safeError(error)}`);
+    memoryDegraded('run', safeError(error));
   }
 
   // Prior turns of THIS conversation, as real messages. Scoped to the thread, so an unrelated task on
@@ -209,8 +443,10 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
   if (threadId) {
     try {
       priorTurns = capPriorTurns(threadToMessages(await memory.loadThread(threadId)));
-    } catch {
+    } catch (error) {
       priorTurns = []; // recall unavailable this turn — proceed with none
+      log('warn', `Could not load encrypted conversation history: ${safeError(error)}`);
+      memoryDegraded('thread', safeError(error));
     }
   }
 
@@ -218,13 +454,31 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
   // knowledge in Markdown. The browser never opens (the lazy driver is never touched).
   if (config.mode === 'ask') {
     try {
+      const system = buildAskPrompt();
+      const messages = normalizeMessages([...priorTurns, { role: 'user' as const, content: task }]);
+      const tools: LlmTool[] = [];
+      const desiredMaxTokens = llmConfig.effort ? 8000 : 2048;
+      const maxTokens = budgetedMaxTokens({
+        desiredMaxTokens,
+        tokenBudget: config.tokenBudget,
+        usage,
+        system,
+        messages,
+        tools,
+      });
+      if (maxTokens === 0) {
+        return await finish(
+          'stopped',
+          `Token budget (${config.tokenBudget}) leaves too little room for a useful chat response.`,
+        );
+      }
       const result = await llm.complete({
         model: llmConfig.model,
-        system: buildAskPrompt(),
-        messages: normalizeMessages([...priorTurns, { role: 'user', content: task }]),
-        tools: [],
+        system,
+        messages,
+        tools,
         forceTool: '',
-        maxTokens: llmConfig.effort ? 8000 : 2048,
+        maxTokens,
         cachePrefix: true,
         // Chat is where the wait is felt, so this is where streaming earns its keep. Adapters that
         // cannot stream ignore the callback and the answer simply arrives whole, as before.
@@ -234,6 +488,12 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       });
       addUsage(result.usage);
       emit({ type: 'usage', ...base, usage: { ...result.usage }, ts: now() });
+      if (tokenBudgetExceeded(config.tokenBudget, usage)) {
+        return await finish(
+          'stopped',
+          `Token budget (${config.tokenBudget}) was exceeded by the model response.`,
+        );
+      }
       const answer = (result.text ?? '').trim();
       return await finish(
         answer ? 'done' : 'error',
@@ -248,26 +508,100 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
   try {
     if (config.startUrl) {
-      const current = await safe(() => driver.currentUrl(), '');
-      const decision = assessNavigation(config.startUrl, current, config);
-      if (decision.verdict === 'deny')
-        return await finish('error', '', `Start URL blocked: ${decision.reason}`);
-      if (decision.verdict === 'confirm') {
-        const approved = await confirm(
-          `Approve opening ${config.startUrl}? (${decision.reason})`,
-          { kind: 'navigate', url: config.startUrl },
-          base,
-          deps,
-        );
-        if (!approved) return await finish('stopped', 'The start navigation was rejected.');
+      let current = await safe(() => driver.currentUrl(), '');
+      const destination = canonicalNavigationUrl(config.startUrl, current);
+      if (!destination) {
+        return await finish('error', '', 'Start URL blocked: the destination is not a valid URL');
       }
-      await driver.navigate(config.startUrl);
-      await driver.waitForSettle();
+
+      // Bind a possibly-relative start URL to the page that was actually observed, then re-check both
+      // source and absolute destination immediately before dispatch. A page may self-navigate while a
+      // human reads the prompt; the original relative string must never be re-based onto that new page.
+      let readyToNavigate = false;
+      let startNavigationActionId: string | undefined;
+      for (let attempt = 0; attempt < 3 && !readyToNavigate; attempt += 1) {
+        const currentDecision = assessCurrentPage(current, config);
+        if (currentDecision.verdict === 'deny') {
+          return await finish(
+            'error',
+            '',
+            `Start URL blocked because the current page changed: ${currentDecision.reason}`,
+          );
+        }
+        const decision = assessNavigation(destination, current, config);
+        if (decision.verdict === 'deny') {
+          return await finish('error', '', `Start URL blocked: ${decision.reason}`);
+        }
+        const actionId = await proposeJournalAction(
+          'navigate',
+          'write',
+          journalHostOf(destination),
+        );
+        if (decision.verdict === 'confirm') {
+          const safeDestination = redactUrl(destination);
+          const approved = await confirmJournaled(
+            `Approve opening ${safeDestination}? (${decision.reason})`,
+            { kind: 'navigate', url: safeDestination },
+            actionId,
+          );
+          if (!approved) return await finish('stopped', 'The start navigation was rejected.');
+        }
+        const liveCurrent = await safe(() => driver.currentUrl(), '');
+        if (liveCurrent !== current) {
+          await appendJournal({
+            type: 'action.cancelled',
+            actionId,
+            summary: 'The source page changed before navigation',
+          });
+          current = liveCurrent;
+          continue;
+        }
+        // The canonical destination is immutable, but policy may have changed with configuration only
+        // through code, not during a run. Reassess anyway so this line stays the dispatch boundary.
+        const finalDecision = assessNavigation(destination, liveCurrent, config);
+        if (finalDecision.verdict === 'deny') {
+          await appendJournal({
+            type: 'action.cancelled',
+            actionId,
+            summary: 'Navigation was cancelled by policy',
+          });
+          return await finish('error', '', `Start URL blocked: ${finalDecision.reason}`);
+        }
+        readyToNavigate = true;
+        startNavigationActionId = actionId;
+      }
+      if (!readyToNavigate) {
+        return await finish(
+          'error',
+          '',
+          'Start URL blocked because the current page kept changing during confirmation.',
+        );
+      }
+      await dispatchJournaled(
+        startNavigationActionId!,
+        'write',
+        async (beginEffect) => {
+          await beginEffect();
+          await driver.navigate(destination);
+          await driver.waitForSettle();
+          return 'navigation finished';
+        },
+        (outcome) => outcome,
+        () => verifyBrowserStateObserved(driver),
+      );
     }
 
     // Skills are task-scoped and stable, so they stay in the cacheable system prefix. Site facts are
     // loaded separately after each navigation and remain user-level untrusted data.
-    const memoryContext = await memory.loadContext(undefined, task);
+    let memoryContext = '';
+    try {
+      memoryContext = await memory.loadContext(undefined, task);
+    } catch (error) {
+      // Recall is advisory. A rotated key, corrupt legacy record, or unavailable disk must not gain the
+      // authority to stop an otherwise safe browser run.
+      log('warn', `Could not load encrypted profile memory: ${safeError(error)}`);
+      memoryDegraded('run', safeError(error));
+    }
     const system = buildSystemPrompt({
       task,
       config,
@@ -289,6 +623,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     let pendingImage: string | undefined;
     let lastFingerprint = '';
     let repeatCount = 0;
+    /** Same action AND an unchanged page: the genuine no-progress signal. */
+    let lastStateFingerprint = '';
+    let stuckCount = 0;
     let recovery = false;
     let invalidActions = 0;
     /** True while a token-truncated response is being retried, so the retry cannot itself loop. */
@@ -319,7 +656,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       lastBlockReason = reason;
       if (consecutiveBlocks >= 3) {
         recovery = true;
-        pendingCorrection = `${consecutiveBlocks} actions in a row were refused by the harness (most recently: ${reason}). Pushing on this will not start working — take a materially different approach. If nothing else can advance the task, finish with \`done\` (success=false) and say what was blocked.`;
+        // `reason` can contain a page-authored element label/URL. It belongs in the untrusted outcome
+        // transcript, never interpolated into the harness-instruction channel.
+        pendingCorrection = `${consecutiveBlocks} actions in a row were refused by the harness. Pushing on the same gate will not start working — take a materially different approach. If nothing else can advance the task, finish with \`done\` (success=false) and say what was blocked.`;
       }
     };
     let lastExtractedView = '';
@@ -336,10 +675,28 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       }
 
       const raw = await perceive(driver);
+      const currentPageDecision = assessCurrentPage(raw.url, config);
+      if (currentPageDecision.verdict === 'deny') {
+        return await finish(
+          'error',
+          '',
+          `Current page blocked by run policy: ${currentPageDecision.reason}`,
+        );
+      }
       const currentHost = hostOf(raw.url);
       if (currentHost !== siteMemoryHost) {
         siteMemoryHost = currentHost;
-        siteMemoryContext = currentHost ? await memory.loadContext(currentHost, '') : '';
+        if (!currentHost) {
+          siteMemoryContext = '';
+        } else {
+          try {
+            siteMemoryContext = await memory.loadContext(currentHost, '');
+          } catch (error) {
+            siteMemoryContext = '';
+            log('warn', `Could not load encrypted site memory: ${safeError(error)}`);
+            memoryDegraded('step', safeError(error));
+          }
+        }
       }
       const rendered =
         previous && sameElements(previous, raw)
@@ -350,9 +707,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         type: 'step.observation',
         ...base,
         step,
-        url: raw.url,
-        title: raw.title,
-        summary: firstLine(rendered),
+        url: redactCredentialLikeText(redactUrl(raw.url)).text,
+        title: redactCredentialLikeText(raw.title).text,
+        summary: redactCredentialLikeText(firstLine(rendered)).text,
         elementCount: raw.elements.length,
         ts: now(),
       });
@@ -364,6 +721,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         raw.elements.length <= 2 &&
         raw.signals?.includes('canvas')
       ) {
+        // A screenshot can contain credentials, messages, customer data, or cross-origin pixels the
+        // DOM snapshot cannot classify. Mark the run non-resumable before capture/provider handoff.
+        await markJournalSensitive('image_payload');
         const captured = await driver.screenshot().catch(() => undefined);
         if (captured && captured.length <= MAX_SCREENSHOT_BASE64_CHARS) pendingImage = captured;
       }
@@ -414,46 +774,48 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // Reasoning effort consumes from `max_tokens` (OpenRouter converts effort→thinking budget for
       // Anthropic, up to ~0.8×max_tokens at High), so raise the cap when effort is on to leave room for
       // the forced action call; otherwise the tiny tool-call output only needs ~1024.
-      const maxTokens = llmConfig.effort ? 8000 : 1024;
+      const desiredMaxTokens = llmConfig.effort ? 8000 : 1024;
       const conversation = normalizeMessages([...priorTurns, ...pruneObservations(stepMessages)]);
-      // Budget from what the provider ACTUALLY billed for prior steps, falling back to an estimate
-      // only for the very first request (when nothing has been reported yet). A chars/3.5 guess drifts
-      // per model and language, and over a 40-step run the error compounds into either an early stop
-      // or a blown budget.
-      const measuredPerStep = step > 1 ? (usage.tokensIn + usage.tokensOut) / (step - 1) : 0;
-      const estimated =
-        measuredPerStep > 0
-          ? Math.ceil(measuredPerStep)
-          : estimateTokens(system) +
-            conversation.reduce((sum, m) => sum + estimateTokens(messageText(m)), 0) +
-            maxTokens;
-      if (config.tokenBudget && usage.tokensIn + usage.tokensOut + estimated > config.tokenBudget) {
+      const imageForStep = pendingImage;
+      const requestMessages = imageForStep
+        ? attachImageToLastTurn(conversation, imageForStep)
+        : conversation;
+      const tools: LlmTool[] = [
+        {
+          name: ACT_TOOL.name,
+          description: ACT_TOOL.description,
+          inputSchema: ACT_TOOL.inputSchema,
+        },
+      ];
+      // Reserve THIS request's complete input instead of extrapolating an average from prior steps.
+      // The conversation changes every step, and one long page can be many times larger than the
+      // preceding snapshots. The remaining allowance becomes a real max-output cap on the request.
+      const requestMaxTokens = budgetedMaxTokens({
+        desiredMaxTokens,
+        tokenBudget: config.tokenBudget,
+        usage,
+        system,
+        messages: requestMessages,
+        tools,
+      });
+      if (requestMaxTokens === 0) {
         return await finish(
           'stopped',
-          `Token budget (${config.tokenBudget}) would be exceeded by the next step.`,
+          `Token budget (${config.tokenBudget}) leaves too little room for another agent step.`,
         );
       }
 
       emit({ type: 'step.thinking', ...base, step, ts: now() });
-      const imageForStep = pendingImage;
       pendingImage = undefined;
       const buildRequest = (
         overrides: { maxTokens?: number; messages?: LlmMessage[] } = {},
       ): Parameters<typeof llm.complete>[0] => ({
         model: step === 1 || recovery ? llmConfig.model : (llmConfig.stepModel ?? llmConfig.model),
         system,
-        messages:
-          overrides.messages ??
-          (imageForStep ? attachImageToLastTurn(conversation, imageForStep) : conversation),
-        tools: [
-          {
-            name: ACT_TOOL.name,
-            description: ACT_TOOL.description,
-            inputSchema: ACT_TOOL.inputSchema,
-          },
-        ],
+        messages: overrides.messages ?? requestMessages,
+        tools,
         forceTool: ACT_TOOL.name,
-        maxTokens: overrides.maxTokens ?? maxTokens,
+        maxTokens: overrides.maxTokens ?? requestMaxTokens,
         cachePrefix: true,
         sessionId: runId,
         ...(llmConfig.effort ? { effort: llmConfig.effort } : {}),
@@ -480,7 +842,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         oversizeRetried = true;
         // Only take the cheap path when it actually CHANGES the request. A headroom at or above the
         // current cap would re-send an identical body and burn a call to get the same 400.
-        if (headroom >= 512 && headroom < maxTokens) {
+        if (headroom >= 512 && headroom < requestMaxTokens) {
           log('warn', `Context limit reached; retrying this step with a smaller output budget.`);
           result = await llm.complete(buildRequest({ maxTokens: headroom }));
         } else {
@@ -489,7 +851,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           result = await llm.complete(
             buildRequest({
               messages: normalizeMessages(pruneObservations(stepMessages).slice(-4)),
-              maxTokens: Math.min(maxTokens, 1024),
+              maxTokens: Math.min(requestMaxTokens, 1024),
             }),
           );
         }
@@ -497,6 +859,16 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       recovery = false;
       addUsage(result.usage);
       emit({ type: 'usage', ...base, usage: { ...result.usage }, ts: now() });
+      // Provider usage is authoritative. Estimation is necessarily conservative-but-imperfect across
+      // tokenizers and image accounting, so quarantine the returned tool call if the provider says the
+      // cumulative ceiling was crossed. No parse, approval prompt, memory mutation, or browser action
+      // may happen after this point.
+      if (tokenBudgetExceeded(config.tokenBudget, usage)) {
+        return await finish(
+          'stopped',
+          `Token budget (${config.tokenBudget}) was exceeded by the model response; no action was executed.`,
+        );
+      }
 
       if (result.stopReason === 'refusal')
         return await finish('error', '', 'The model refused this task.');
@@ -574,6 +946,34 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       lastToolCallId = result.toolCall.id;
       emit({ type: 'step.action', ...base, step, action: safeAction, ts: now() });
 
+      // The model thought against `raw`, but a page can self-navigate during the model round trip. Re-
+      // enforce the fence immediately before handling ANY proposed action (including memory/handoff
+      // actions), and refuse a stale same-site observation instead of letting old element ids operate on
+      // a new document. Compare an opaque digest of the full URL: comparing redacted strings would
+      // collapse two different token/query resources into one approval identity.
+      const browserClosed = driver.ready ? !driver.ready() : false;
+      const liveUrlBeforeAction = browserClosed
+        ? raw.url
+        : await safe(() => driver.currentUrl(), '');
+      const livePageDecision = assessCurrentPage(liveUrlBeforeAction, config);
+      const observedUrlIdentity = raw.urlIdentity ?? urlIdentity(raw.url);
+      if (
+        livePageDecision.verdict === 'deny' ||
+        urlIdentity(liveUrlBeforeAction) !== observedUrlIdentity
+      ) {
+        const reason =
+          livePageDecision.verdict === 'deny'
+            ? livePageDecision.reason
+            : 'the page navigated after it was observed; inspect the new page before acting';
+        const outcome = `blocked: ${reason}`;
+        noteBlocked(reason);
+        history.push(`${step}. ${outcome}`);
+        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
+          memoryDegraded('step', r),
+        );
+        continue;
+      }
+
       if (
         (actionCapability(action.kind).needsScreenshot ||
           (action.kind === 'ask' && action.targetX !== undefined)) &&
@@ -586,56 +986,53 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         continue;
       }
 
+      if (
+        (action.kind === 'type' || action.kind === 'type_at') &&
+        redactCredentialLikeText(action.text).sensitive
+      ) {
+        const outcome =
+          'blocked: credential-like text cannot use an ordinary model-authored typing action; request it through ask with sensitive:true and a verified target';
+        noteBlocked(
+          'credential-like text must use the direct secure human-input channel, not model-authored typing',
+        );
+        history.push(`${step}. ${outcome}`);
+        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (reason) =>
+          memoryDegraded('step', reason),
+        );
+        continue;
+      }
+
       if (action.kind === 'ask') {
-        const handled = await handleAsk(action, raw, step, runId, history, base, deps, memory, now);
+        if (action.sensitive) await markJournalSensitive('credential');
+        const askEffect: JournalActionEffect =
+          action.sensitive &&
+          (action.targetId !== undefined ||
+            (action.targetX !== undefined && action.targetY !== undefined))
+            ? 'consequential'
+            : 'read';
+        const actionId = await proposeJournalAction(action.kind, askEffect, journalHostOf(raw.url));
+        const handled = await dispatchJournaled(
+          actionId,
+          askEffect,
+          (beginEffect) =>
+            handleAsk(
+              action,
+              raw,
+              imageForStep,
+              step,
+              runId,
+              history,
+              base,
+              deps,
+              memory,
+              now,
+              beginEffect,
+              (prompt, pending) => confirmJournaled(prompt, pending, actionId),
+            ),
+          (value) => value.outcome,
+          askEffect === 'read' ? undefined : () => verifyBrowserStateObserved(driver),
+        );
         if (!handled.ok) history.push(`${step}. ${handled.outcome}`);
-        continue;
-      }
-      if (action.kind === 'remember') {
-        // Agent-authored durable memory: persist a per-domain fact this profile will recall next time.
-        const domain = hostOf(raw.url);
-        if (!domain) {
-          history.push(`${step}. remember skipped: no page domain`);
-        } else {
-          try {
-            await memory.rememberFact({ domain, key: action.factKey, value: action.factValue });
-            const outcome = `remembered "${action.factKey}" for ${domain}`;
-            history.push(`${step}. ${outcome}`);
-            await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-              memoryDegraded('step', r),
-            );
-          } catch (error) {
-            history.push(`${step}. could not remember: ${safeError(error)}`);
-          }
-        }
-        continue;
-      }
-      if (action.kind === 'learn') {
-        // The DOMAIN is set by the harness from the page actually visited — never by the model — so a
-        // skill cannot be scoped to a site the run never operated on. Steps are model-authored, so the
-        // store treats them as untrusted text: bounded, fenced on recall, and labelled as learned.
-        const domain = hostOf(raw.url);
-        if (!domain) {
-          history.push(`${step}. learn skipped: no page domain`);
-        } else {
-          try {
-            await memory.learnSkill({
-              name: action.skillName,
-              trigger: action.skillTrigger,
-              steps: action.skillSteps,
-              origin: 'learned',
-              domain,
-              learnedAt: now(),
-            });
-            const outcome = `learned procedure "${action.skillName}" for ${domain}`;
-            history.push(`${step}. ${outcome}`);
-            await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-              memoryDegraded('step', r),
-            );
-          } catch (error) {
-            history.push(`${step}. could not learn: ${safeError(error)}`);
-          }
-        }
         continue;
       }
       if (action.kind === 'screenshot' && !config.visionFallback) {
@@ -643,6 +1040,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         history.push(`${step}. blocked: visual fallback is disabled for this run`);
         continue;
       }
+      if (action.kind === 'screenshot') await markJournalSensitive('image_payload');
 
       // A privileged browser-internal page that is NOT a vetted settings surface is off limits
       // entirely — the agent leaves rather than acting. The navigation policy already refuses to open
@@ -698,14 +1096,45 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         continue;
       }
 
+      // FileMemoryStore rejects these before reading/writing its document. Mirror that deterministic
+      // validation before proposing/dispatching so a known non-applied validation failure cannot be
+      // mistaken for an ambiguous durable write in the recovery journal.
+      if (memoryActionContainsCredential(action)) {
+        const outcome = `blocked: credentials must not be saved through ${action.kind}`;
+        noteBlocked('credentials must not be saved to durable agent memory');
+        history.push(`${step}. ${outcome}`);
+        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (reason) =>
+          memoryDegraded('step', reason),
+        );
+        continue;
+      }
+      const durableMemoryDomain =
+        action.kind === 'remember' || action.kind === 'learn'
+          ? normalizeSkillHost(hostOf(raw.url))
+          : undefined;
+      if ((action.kind === 'remember' || action.kind === 'learn') && !durableMemoryDomain) {
+        const outcome = `blocked: ${action.kind} requires a current tenant/site domain, not a public suffix or malformed host`;
+        noteBlocked('durable memory requires a valid tenant/site scope');
+        history.push(`${step}. ${outcome}`);
+        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (reason) =>
+          memoryDegraded('step', reason),
+        );
+        continue;
+      }
+
+      const commitIntent = actionCommitIntent(action, raw);
+      const risk = actionRisk(action, raw);
       const target = targetUrlForAction(action, raw);
       let navigationApproved = false;
+      let approvalGranted = false;
+      let navigationDecision: PolicyDecision | undefined;
       if (target) {
         const trustedInternalMove =
           isVettedBrowserConfigUrl(raw.url) && isVettedBrowserConfigUrl(target);
-        const decision = trustedInternalMove
-          ? { verdict: 'allow' as const, reason: 'vetted browser settings navigation' }
+        const decision: PolicyDecision = trustedInternalMove
+          ? { verdict: 'allow' }
           : assessNavigation(target, raw.url, config);
+        navigationDecision = decision;
         if (decision.verdict === 'deny') {
           const outcome = `blocked: ${decision.reason}`;
           noteBlocked(decision.reason);
@@ -715,31 +1144,46 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           );
           continue;
         }
-        if (decision.verdict === 'confirm') {
-          navigationApproved = await confirm(
-            `Approve ${describeSafeAction(action, raw)}? (${decision.reason})`,
-            safeAction,
-            base,
-            deps,
-          );
-          if (!navigationApproved) {
-            history.push(`${step}. user rejected ${describeSafeAction(action, raw)}`);
-            continue;
-          }
-        }
       }
 
-      const risk = actionRisk(action, raw);
+      // Upload paths and visual payloads must never be eligible for automatic restart. This marker is
+      // fsynced before approval or execution and contains no path/image data.
+      if (action.kind === 'upload') await markJournalSensitive('upload_path');
+      const journalEffect: JournalActionEffect = risk.consequential
+        ? 'consequential'
+        : actionCapability(action.kind).mutating &&
+            !(action.kind === 'tab' && action.operation === 'list')
+          ? 'write'
+          : 'read';
+      const journalActionId = await proposeJournalAction(
+        action.kind,
+        journalEffect,
+        journalHostOf(raw.url),
+      );
+
+      if (navigationDecision?.verdict === 'confirm') {
+        navigationApproved = await confirmJournaled(
+          `Approve ${describeSafeAction(action, raw)}? (${navigationDecision.reason}${risk.consequential && risk.reason ? `; ${risk.reason}` : ''})`,
+          safeAction,
+          journalActionId,
+        );
+        if (!navigationApproved) {
+          history.push(`${step}. user rejected ${describeSafeAction(action, raw)}`);
+          continue;
+        }
+        approvalGranted = true;
+      }
+
       // CONSEQUENTIAL actions gate in EVERY mode, `auto` included: uploads, purchases, sends,
       // deletions, account creation, permission changes, data erasure. `auto` means the agent does not
       // stop to check its work — it never meant it may spend money or delete an account unattended.
-      // Everything else inside the browser is recoverable by re-reading the page, so it gates only in
-      // `confirm`.
+      // Ordinary composition/navigation inside the browser gates only in `confirm`.
       //
       // This is only safe because the pause can now END. `waitForInput` has a timeout, and a
       // panel-origin run with no panel attached fails immediately rather than waiting for an answer
       // nobody can give — without those, a gate here would have wedged the profile permanently.
       const needsConfirm =
+        Boolean(commitIntent) ||
         risk.consequential ||
         (config.autonomy === 'confirm' && (actionCapability(action.kind).mutating || risk.high));
       if (needsConfirm && !navigationApproved) {
@@ -750,37 +1194,161 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           action.kind === 'upload'
             ? `Approve uploading ${action.paths.map((p) => JSON.stringify(basename(p))).join(', ')} to ${hostOf(raw.url) || redactUrl(raw.url)}?`
             : `Approve ${describeSafeAction(action, raw)}${risk.reason ? `? (${risk.reason})` : '?'}`;
-        const approved = await confirm(prompt, safeAction, base, deps);
+        const approved = await confirmJournaled(prompt, safeAction, journalActionId);
         if (!approved) {
           history.push(`${step}. user rejected ${describeSafeAction(action, raw)}`);
           continue;
         }
+        approvalGranted = true;
       }
 
-      // Risky but NOT consequential (a coordinate click, typing into an amount field). It proceeds, and
-      // the model is told to check the result — awareness without a pause.
+      // Approval is for this exact action against this exact observation, not a reusable "yes". A
+      // page can mutate, navigate, replace a button, change a total, or move a coordinate target while
+      // the human is reading the prompt. Re-observe immediately before dispatch and fail closed on any
+      // security-relevant drift. The normal next loop iteration gives the model the fresh page and it
+      // may propose a new action, which requires a new approval.
+      if (approvalGranted) {
+        const afterApproval = await perceive(driver);
+        if (
+          approvalContextFingerprint(action, raw) !==
+          approvalContextFingerprint(action, afterApproval)
+        ) {
+          const outcome =
+            'blocked: the page or approved target changed while confirmation was pending; inspect the fresh page and request approval again';
+          noteBlocked('the page or approved target changed while confirmation was pending');
+          history.push(`${step}. ${outcome}`);
+          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
+            memoryDegraded('step', r),
+          );
+          await appendJournal({
+            type: 'action.cancelled',
+            actionId: journalActionId,
+            summary: 'The approved target changed before dispatch',
+          });
+          continue;
+        }
+        // Do this LAST, after the DOM check, to make the unobservable screenshot-to-dispatch race as
+        // small as possible. Canvas and cross-origin frame changes do not appear in `afterApproval`.
+        if (action.kind === 'click_at' || action.kind === 'type_at') {
+          const freshImage = await driver.screenshot?.().catch(() => undefined);
+          if (!imageForStep || !freshImage || freshImage !== imageForStep) {
+            const outcome =
+              'blocked: the visual page changed while confirmation was pending; capture a fresh screenshot and request approval again';
+            noteBlocked('the visual page changed while confirmation was pending');
+            history.push(`${step}. ${outcome}`);
+            await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
+              memoryDegraded('step', r),
+            );
+            await appendJournal({
+              type: 'action.cancelled',
+              actionId: journalActionId,
+              summary: 'The approved visual target changed before dispatch',
+            });
+            continue;
+          }
+        }
+      }
+
+      // Risky but NOT consequential (for example, typing into an amount field). It proceeds, and the
+      // model is told to check the result — awareness without a pause.
       if (risk.high && risk.reason && !needsConfirm) {
-        pendingCorrection = `You just took a consequential action (${risk.reason}). Verify from the next snapshot that it did what the task asked — and do not repeat it.`;
+        // The detailed risk reason may include a page-authored field label. Keep it out of the trusted
+        // nudge channel; the ordinary untrusted action outcome still tells the model what it touched.
+        pendingCorrection =
+          'You just took a high-risk composition action. Verify from the next snapshot that it did what the task asked — and do not repeat it.';
       }
 
-      const fingerprint = `${raw.url}|${JSON.stringify(safeAction)}`;
-      repeatCount = fingerprint === lastFingerprint ? repeatCount + 1 : 1;
-      lastFingerprint = fingerprint;
-      if (repeatCount >= 5) {
+      if (action.kind === 'remember' || action.kind === 'learn') {
+        // Durable memory changes future runs, so they pass through the same action-bound approval and
+        // post-confirmation freshness checks as browser commits. The scope remains harness-owned: the
+        // model can propose text, but never choose which host will receive it.
+        const domain = durableMemoryDomain;
+        if (!domain) {
+          history.push(`${step}. ${action.kind} skipped: no page domain`);
+          await appendJournal({
+            type: 'action.cancelled',
+            actionId: journalActionId,
+            summary: 'The durable-memory action had no valid host scope',
+          });
+          continue;
+        }
+        await dispatchJournaled(
+          journalActionId,
+          journalEffect,
+          async (beginEffect) => {
+            await beginEffect();
+            if (action.kind === 'remember') {
+              await memory.rememberFact({
+                domain,
+                key: action.factKey,
+                value: action.factValue,
+              });
+            } else {
+              await memory.learnSkill({
+                name: action.skillName,
+                trigger: action.skillTrigger,
+                steps: action.skillSteps,
+                origin: 'learned',
+                domain,
+                learnedAt: now(),
+              });
+            }
+            return 'durable memory updated';
+          },
+          (value) => value,
+        );
+        const outcome =
+          action.kind === 'remember'
+            ? `remembered "${action.factKey}" for ${domain}`
+            : `learned procedure "${action.skillName}" for ${domain}`;
+        history.push(`${step}. ${outcome}`);
+        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (reason) =>
+          memoryDegraded('step', reason),
+        );
+        continue;
+      }
+
+      // Two different questions, previously answered by one counter keyed on URL + action.
+      //
+      // "Stuck" is the same action against a page that did not move at all — the real no-progress
+      // signal, and cheap to stop early. "Repeating" is the same action while the page KEEPS
+      // CHANGING, which is what reading an infinite list, polling for late-arriving content, or
+      // paging through an SPA that never changes its URL all look like. Killing the second case at
+      // the fifth attempt made an explicitly supported scenario impossible: five scrolls down a feed
+      // ended the run as a loop even though every scroll had appended new rows. It still cannot go on
+      // forever — a page with a ticking clock would otherwise never look stuck — so it keeps a much
+      // looser bound of its own, under the run's step and token ceilings.
+      const actionFingerprint = `${raw.url}|${JSON.stringify(safeAction)}`;
+      const stateFingerprint = `${observationFingerprint(raw)}|${JSON.stringify(safeAction)}`;
+      stuckCount = stateFingerprint === lastStateFingerprint ? stuckCount + 1 : 1;
+      repeatCount = actionFingerprint === lastFingerprint ? repeatCount + 1 : 1;
+      lastStateFingerprint = stateFingerprint;
+      lastFingerprint = actionFingerprint;
+      if (stuckCount >= 5 || repeatCount >= 12) {
         return await finish(
           'error',
           '',
           'The agent entered a repeated-action loop and stopped safely.',
         );
       }
-      if (repeatCount >= 3) recovery = true;
+      if (stuckCount >= 3 || repeatCount >= 8) recovery = true;
 
-      const outcome = await executeAction(action, raw, driver, {
-        ...(deps.sleep ? { sleep: deps.sleep } : {}),
-        config,
-        signal,
-        navigationApproved,
-      });
+      const outcome = await dispatchJournaled(
+        journalActionId,
+        journalEffect,
+        (beginEffect) =>
+          executeAction(action, raw, driver, {
+            ...(deps.sleep ? { sleep: deps.sleep } : {}),
+            config,
+            signal,
+            navigationApproved,
+            beforeEffect: beginEffect,
+          }),
+        (value) => value.outcome,
+        journalEffect === 'read'
+          ? undefined
+          : () => verifyBrowserStateObserved(driver, movesBrowserOnly(action)),
+      );
       // An action that actually ran clears the consecutive streak (but not the total): the agent found
       // something it is allowed to do, so it is no longer stuck against the same wall.
       consecutiveBlocks = 0;
@@ -845,31 +1413,80 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // is exempt: its only navigation is the UI-fallback jump to a vetted `chrome://settings` page
       // (already guarded and, being a non-http scheme, would otherwise trip the web-navigation policy).
       if (actionCapability(action.kind).mutating && action.kind !== 'browser_config') {
-        const afterUrl = await safe(() => driver.currentUrl(), raw.url);
-        if (afterUrl !== raw.url) {
+        const afterUrl = await safe(() => driver.currentUrl(), liveUrlBeforeAction);
+        if (urlIdentity(afterUrl) !== urlIdentity(liveUrlBeforeAction)) {
           const trustedInternalMove =
-            isVettedBrowserConfigUrl(raw.url) && isVettedBrowserConfigUrl(afterUrl);
+            isVettedBrowserConfigUrl(liveUrlBeforeAction) && isVettedBrowserConfigUrl(afterUrl);
           const drift = trustedInternalMove
             ? { verdict: 'allow' as const, reason: 'vetted browser settings navigation' }
-            : assessNavigation(afterUrl, raw.url, config);
+            : assessNavigationDrift(afterUrl, liveUrlBeforeAction, config);
           if (drift.verdict === 'deny') {
-            await rollbackNavigation(driver, raw.url);
+            const reconcileActionId = await proposeJournalAction(
+              'navigation_reconcile',
+              'write',
+              journalHostOf(afterUrl),
+            );
+            await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, reconcileActionId);
             return await finish(
               'error',
               '',
               `Navigation policy blocked page drift: ${drift.reason}`,
             );
           }
-          if (drift.verdict === 'confirm' && !navigationApproved) {
-            const approved = await confirm(
-              `The page opened ${redactUrl(afterUrl)}. Approve staying there? (${drift.reason})`,
-              { kind: 'navigate', url: redactUrl(afterUrl) },
-              base,
-              deps,
+          const priorApprovalCoversDrift =
+            navigationApproved &&
+            target !== undefined &&
+            sameNavigationAuthority(target, afterUrl, liveUrlBeforeAction);
+          if (drift.verdict === 'confirm' && !priorApprovalCoversDrift) {
+            const stayActionId = await proposeJournalAction(
+              'navigation_reconcile',
+              'write',
+              journalHostOf(afterUrl),
             );
+            let approved = false;
+            try {
+              approved = await confirmJournaled(
+                `The page opened ${redactUrl(afterUrl)}. Approve staying there? (${drift.reason})`,
+                { kind: 'navigate', url: redactUrl(afterUrl) },
+                stayActionId,
+              );
+            } catch (error) {
+              await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, stayActionId);
+              throw error;
+            }
             if (!approved) {
-              await rollbackNavigation(driver, raw.url);
+              await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, stayActionId);
               history.push(`${step}. user rejected unexpected navigation; went back`);
+            } else {
+              // A stay approval is scoped to the destination authority the human saw. Redirecting to a
+              // different host while the prompt is open must not turn that answer into a reusable
+              // cross-domain permission, and the new destination still has to satisfy hard fences.
+              const afterConfirmation = await safe(() => driver.currentUrl(), '');
+              const finalDecision = assessNavigation(
+                afterConfirmation,
+                liveUrlBeforeAction,
+                config,
+              );
+              if (
+                !sameNavigationAuthority(afterUrl, afterConfirmation, liveUrlBeforeAction) ||
+                finalDecision.verdict === 'deny'
+              ) {
+                await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, stayActionId);
+                const reason =
+                  finalDecision.verdict === 'deny'
+                    ? finalDecision.reason
+                    : 'the destination changed to a different site while confirmation was pending';
+                noteBlocked(reason);
+                history.push(
+                  `${step}. unexpected navigation approval expired: ${reason}; went back`,
+                );
+              } else {
+                await appendJournal({
+                  type: 'action.cancelled',
+                  actionId: stayActionId,
+                  summary: 'The user approved the observed destination',
+                });
+              }
             }
           }
         }
@@ -877,6 +1494,15 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     }
     return await finish('stopped', `Reached the ${config.maxSteps}-step budget without finishing.`);
   } catch (error) {
+    if (
+      journalSnapshot?.state.phase === 'dispatching' ||
+      journalSnapshot?.state.phase === 'recovery_required'
+    ) {
+      // A dispatch crossed the durable boundary but has no provably clean outcome. Do not append a
+      // terminal marker over it. The manager may still report a live error event, while admission of
+      // the next run remains blocked on this authenticated recovery-required record.
+      throw error;
+    }
     if (signal.aborted) return await finish('stopped', 'Stopped by user.');
     return await finish('error', '', safeError(error));
   }
@@ -885,6 +1511,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 async function handleAsk(
   action: Extract<AgentAction, { kind: 'ask' }>,
   raw: RawPerception,
+  approvedImage: string | undefined,
   step: number,
   runId: string,
   history: string[],
@@ -892,18 +1519,41 @@ async function handleAsk(
   deps: AgentRunDeps,
   memory: MemoryStore,
   now: () => string,
+  beforeEffect: () => Promise<void>,
+  requestApproval: (prompt: string, action: AgentAction) => Promise<boolean>,
 ): Promise<{ ok: boolean; outcome: string }> {
+  const safeQuestion = redactCredentialLikeText(action.question).text;
   deps.emit({
     type: 'run.needsInput',
     ...base,
     kind: 'ask',
-    prompt: action.question,
+    prompt: safeQuestion,
     ...(action.sensitive !== undefined ? { sensitive: action.sensitive } : {}),
     ts: now(),
   });
-  const answer = await deps.waitForInput(action.question, 'ask', action);
+  const answer = await deps.waitForInput(safeQuestion, 'ask', redactAction(action));
   if (action.sensitive && action.targetId !== undefined) {
-    const element = raw.elements.find((item) => item.index === action.targetId);
+    // Supplying the sensitive reply is the human's authorization for this exact handoff. Bind it to
+    // the same page/target just like a confirm verdict; otherwise a login field can be replaced while
+    // the human is retrieving an OTP and receive a secret intended for the old observation.
+    const directAction: AgentAction = {
+      kind: 'type',
+      id: action.targetId,
+      text: answer,
+      clear: true,
+    };
+    const afterInput = await perceive(deps.driver);
+    if (
+      approvalContextFingerprint(directAction, raw) !==
+      approvalContextFingerprint(directAction, afterInput)
+    ) {
+      return {
+        ok: false,
+        outcome:
+          'blocked: the sensitive target changed while human input was pending; inspect the fresh page and ask again',
+      };
+    }
+    const element = afterInput.elements.find((item) => item.index === action.targetId);
     if (!element)
       return { ok: false, outcome: `sensitive target [${action.targetId}] is no longer available` };
     if (!isSensitiveElement(element)) {
@@ -912,12 +1562,11 @@ async function handleAsk(
         outcome: `refused sensitive handoff to non-sensitive field [${action.targetId}]`,
       };
     }
-    const direct = await executeAction(
-      { kind: 'type', id: action.targetId, text: answer, clear: true },
-      raw,
-      deps.driver,
-      { ...(deps.sleep ? { sleep: deps.sleep } : {}), signal: deps.signal },
-    );
+    const direct = await executeAction(directAction, afterInput, deps.driver, {
+      ...(deps.sleep ? { sleep: deps.sleep } : {}),
+      signal: deps.signal,
+      beforeEffect,
+    });
     const safeAction: AgentAction = {
       kind: 'type',
       id: action.targetId,
@@ -936,9 +1585,58 @@ async function handleAsk(
       text: answer,
       clear: true,
     };
-    const direct = await executeAction(directAction, raw, deps.driver, {
+    const afterInput = await perceive(deps.driver);
+    if (
+      approvalContextFingerprint(directAction, raw) !==
+      approvalContextFingerprint(directAction, afterInput)
+    ) {
+      return {
+        ok: false,
+        outcome:
+          'blocked: the page changed while sensitive coordinate input was pending; capture a fresh screenshot and ask again',
+      };
+    }
+    // The coordinate channel exists for surfaces DOM perception cannot see — a canvas widget, a
+    // cross-origin payment frame — so an unperceived point is expected and the human approval above
+    // is what authorizes it. A point perception CAN see is different: if it resolves to an ordinary
+    // control, the secret would be typed somewhere page script can read it, and the `targetId`
+    // branch would have refused the very same handoff.
+    const atPoint = elementAtPoint(afterInput, action.targetX, action.targetY);
+    if (atPoint && !isSensitiveElement(atPoint)) {
+      return {
+        ok: false,
+        outcome: `refused sensitive handoff to ${atPoint.role} ${JSON.stringify(atPoint.name)} at the requested coordinate; it is not a secret-bearing field`,
+      };
+    }
+    // Last, because it is the only check that costs a human's attention: a page that already drifted
+    // is refused above rather than turned into a prompt nobody should answer.
+    //
+    // The first thing `type_at` does is CLICK the model's pixel. `actionRisk` classifies a
+    // coordinate gesture as consequential in every autonomy mode precisely because nobody — not the
+    // policy, not the human — can see what handler sits under it. Reaching that click through `ask`
+    // does not make it less of an activation: without this gate the model chose the coordinate, the
+    // human was shown only the question, and the click was dispatched with no approval bound to it.
+    const approved = await requestApproval(
+      `Type the value you just supplied at visual coordinate (${action.targetX}, ${action.targetY}) on ${redactUrl(afterInput.url)}. Anything under that point will be clicked first.`,
+      directAction,
+    );
+    if (!approved) {
+      return { ok: false, outcome: 'the sensitive coordinate handoff was rejected' };
+    }
+    // A canvas/frame can change without affecting DOM perception. Capture immediately before the
+    // focus click and require the exact image the human/model acted against.
+    const freshImage = await deps.driver.screenshot?.().catch(() => undefined);
+    if (!approvedImage || !freshImage || freshImage !== approvedImage) {
+      return {
+        ok: false,
+        outcome:
+          'blocked: the visual page changed while sensitive coordinate input was pending; capture a fresh screenshot and ask again',
+      };
+    }
+    const direct = await executeAction(directAction, afterInput, deps.driver, {
       ...(deps.sleep ? { sleep: deps.sleep } : {}),
       signal: deps.signal,
+      beforeEffect,
     });
     const safeAction = redactAction(directAction, raw);
     await appendSafe(memory, runId, step, raw.url, safeAction, direct.outcome, now, () => {});
@@ -947,10 +1645,11 @@ async function handleAsk(
     );
     return { ok: true, outcome: direct.outcome };
   }
+  const safeAnswer = redactCredentialLikeText(answer).text;
   history.push(
     action.sensitive
       ? `${step}. human completed the sensitive handoff (reply withheld)`
-      : `${step}. human replied to ${JSON.stringify(clip(action.question, 100))}: ${JSON.stringify(clip(answer, 120))}`,
+      : `${step}. human replied to ${JSON.stringify(clip(safeQuestion, 100))}: ${JSON.stringify(clip(safeAnswer, 120))}`,
   );
   return { ok: true, outcome: 'human input received' };
 }
@@ -961,16 +1660,26 @@ async function confirm(
   base: { sessionId: string; profileId: string },
   deps: AgentRunDeps,
 ): Promise<boolean> {
+  const safeAction = redactAction(action);
+  const safePrompt = redactCredentialLikeText(prompt).text;
   deps.emit({
     type: 'run.needsInput',
     ...base,
     kind: 'confirm',
-    prompt,
-    action,
+    prompt: safePrompt,
+    action: safeAction,
     ts: deps.now(),
   });
-  const verdict = await deps.waitForInput(prompt, 'confirm', action);
+  const verdict = await deps.waitForInput(safePrompt, 'confirm', safeAction);
   return /^(approve|approved|yes|ok)$/i.test(verdict.trim());
+}
+
+function canonicalNavigationUrl(rawUrl: string, baseUrl: string): string | undefined {
+  try {
+    return new URL(rawUrl, baseUrl || undefined).toString();
+  } catch {
+    return undefined;
+  }
 }
 
 async function appendSafe(
@@ -1018,6 +1727,22 @@ function firstLine(value: string): string {
 
 function clip(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+function memoryActionContainsCredential(action: AgentAction): boolean {
+  if (action.kind === 'remember') {
+    return (
+      /(password|passcode|otp|token|secret|api.?key|private.?key|seed|cvv|cvc)/i.test(
+        action.factKey,
+      ) || redactCredentialLikeText(`${action.factKey}: ${action.factValue}`).sensitive
+    );
+  }
+  if (action.kind === 'learn') {
+    return [action.skillName, action.skillTrigger, action.skillSteps].some(
+      (value) => redactCredentialLikeText(value).sensitive,
+    );
+  }
+  return false;
 }
 
 /**
@@ -1097,6 +1822,24 @@ function hostOf(url: string): string {
   }
 }
 
+function journalHostOf(url: string): string | undefined {
+  const host = hostOf(url).replace(/\.$/, '');
+  // IPv6 literals contain colons and are intentionally omitted: the schema's optional host field is
+  // a DNS/IPv4 correlation hint, never an authority parser or an execution target.
+  return /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(host) ? host : undefined;
+}
+
+/** True when two destinations identify the same protocol/host/port authority. */
+function sameNavigationAuthority(first: string, second: string, baseUrl: string): boolean {
+  try {
+    return (
+      new URL(first, baseUrl || undefined).origin === new URL(second, baseUrl || undefined).origin
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isSettingsUiAction(action: AgentAction): boolean {
   return (
     action.kind === 'click' ||
@@ -1138,9 +1881,28 @@ function settingsActionIntent(action: AgentAction, raw: RawPerception): Array<st
   return values;
 }
 
+/**
+ * The perceived control containing a visual coordinate, if perception can see one there.
+ *
+ * Perception measures each element's centre plus its width and height, so containment is decidable
+ * without going back to the page — which matters here, because this is asked immediately before a
+ * secret is typed and a fresh round trip would only widen the window it is guarding. An unperceived
+ * point is a real answer, not a failure: canvas widgets and cross-origin frames are exactly why the
+ * coordinate channel exists.
+ */
+function elementAtPoint(raw: RawPerception, x: number, y: number): PerceivedElement | undefined {
+  return raw.elements.find(
+    (element) =>
+      x >= element.x - element.w / 2 &&
+      x <= element.x + element.w / 2 &&
+      y >= element.y - element.h / 2 &&
+      y <= element.y + element.h / 2,
+  );
+}
+
 function observationFingerprint(raw: RawPerception): string {
   return JSON.stringify([
-    raw.url,
+    raw.urlIdentity ?? urlIdentity(raw.url),
     raw.scrollY,
     raw.text ?? '',
     raw.elements.map((element) => [
@@ -1148,6 +1910,46 @@ function observationFingerprint(raw: RawPerception): string {
       element.name,
       element.value ?? '',
       element.state ?? '',
+    ]),
+  ]);
+}
+
+/**
+ * Ephemeral binding for a confirmation prompt. This deliberately includes more than the normal
+ * observation-deduplication fingerprint: target coordinates, form semantics, focus, hrefs, visible
+ * page text, and viewport geometry all affect what an approved click/key/coordinate gesture will do.
+ * Coordinate actions additionally require byte-identical fresh screenshot data immediately before
+ * dispatch, covering canvas and cross-origin content that DOM perception cannot see. The value is
+ * compared in memory only; action text (which may be secret) is never persisted or logged.
+ */
+function approvalContextFingerprint(action: AgentAction, raw: RawPerception): string {
+  return JSON.stringify([
+    action,
+    raw.urlIdentity ?? urlIdentity(raw.url),
+    raw.title,
+    raw.scrollY,
+    raw.viewportW ?? 0,
+    raw.viewportH,
+    raw.text ?? '',
+    raw.signals ?? [],
+    raw.elements.map((element) => [
+      element.index,
+      element.tag,
+      element.role,
+      element.name,
+      element.type ?? '',
+      element.submitsForm ?? false,
+      element.focused ?? false,
+      element.editable ?? false,
+      element.value ?? '',
+      element.filled ?? false,
+      element.href ?? '',
+      element.state ?? '',
+      element.context ?? '',
+      element.x,
+      element.y,
+      element.w,
+      element.h,
     ]),
   ]);
 }
@@ -1173,8 +1975,61 @@ export function contextOverflowHeadroom(error: unknown): number | null {
   return headroom > 0 ? headroom : 0;
 }
 
-function estimateTokens(value: string): number {
-  return Math.ceil(value.length / 3.5);
+interface BudgetedRequest {
+  desiredMaxTokens: number;
+  tokenBudget: number | undefined;
+  usage: AgentUsage;
+  system: string;
+  messages: readonly LlmMessage[];
+  tools: readonly LlmTool[];
+}
+
+/**
+ * Cap the request's output by the allowance left after its CURRENT input. UTF-8 bytes form a simple
+ * tokenizer-independent upper-ish bound for text (deliberately much more conservative than the old
+ * chars/3.5 guess), while explicit structural overhead covers roles/provider wrappers. Provider usage
+ * remains authoritative after the response and is checked before any returned action is dispatched.
+ */
+function budgetedMaxTokens(request: BudgetedRequest): number {
+  if (request.tokenBudget === undefined) return request.desiredMaxTokens;
+  const remaining = request.tokenBudget - totalTokens(request.usage);
+  const outputRoom = remaining - requestInputReserve(request);
+  if (outputRoom < MIN_USEFUL_OUTPUT_TOKENS) return 0;
+  return Math.min(request.desiredMaxTokens, Math.floor(outputRoom));
+}
+
+function requestInputReserve(
+  request: Pick<BudgetedRequest, 'system' | 'messages' | 'tools'>,
+): number {
+  const FIXED_REQUEST_OVERHEAD = 256;
+  const MESSAGE_OVERHEAD = 24;
+  const TOOL_OVERHEAD = 32;
+  let reserve = FIXED_REQUEST_OVERHEAD + utf8Bytes(request.system);
+  reserve += utf8Bytes(JSON.stringify(request.tools)) + request.tools.length * TOOL_OVERHEAD;
+  for (const message of request.messages) {
+    reserve += MESSAGE_OVERHEAD + utf8Bytes(messageText(message));
+    if (message.role === 'user') {
+      for (const image of message.images ?? []) {
+        // Native image inputs are billed by pixels rather than base64 text. The compressed byte count
+        // is a useful signal but can dwarf actual vision usage, so bound it at a deliberately generous
+        // per-image reserve rather than making every normal screenshot exceed the run budget.
+        reserve += 64 + Math.min(8_192, Math.max(1_024, Math.ceil(image.data.length / 4)));
+      }
+    }
+  }
+  return reserve;
+}
+
+function utf8Bytes(value: string): number {
+  return Buffer.byteLength(value, 'utf8');
+}
+
+function totalTokens(value: AgentUsage): number {
+  return value.tokensIn + value.tokensOut;
+}
+
+function tokenBudgetExceeded(tokenBudget: number | undefined, usage: AgentUsage): boolean {
+  return tokenBudget !== undefined && totalTokens(usage) > tokenBudget;
 }
 
 /** All text in a message, for budgeting. */
@@ -1346,11 +2201,74 @@ async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
   }
 }
 
+/**
+ * How many times a still-moving page is re-observed before its state is called ambiguous.
+ *
+ * The two reads this compares — perception's URL and the follow-up `currentUrl()` — are separate
+ * round trips, so anything that rewrites the location between them looks like drift: a deferred
+ * redirect, an SPA route change, or an analytics/consent script calling `history.replaceState` to
+ * strip a `?utm_source=`. None of those means an effect was lost, but a single-shot comparison
+ * reported them as "delivery completed, post-state ambiguous" — which is not merely a failed run.
+ * It leaves the journal `recovery_required`, and admission then refuses EVERY later run on that
+ * profile, permanently, over a query string. Re-observing distinguishes the two: a page that has
+ * settled agrees with itself, and a page still turning over after this many attempts genuinely
+ * cannot testify about what just happened.
+ */
+const POST_ACTION_SETTLE_ATTEMPTS = 3;
+
+/**
+ * Does this action's effect stop at "which document the browser is showing"?
+ *
+ * The distinction decides what an unreadable page after the action MEANS. A click, a keystroke, an
+ * upload or a durable memory write can commit something the browser cannot take back, so being
+ * unable to re-read the page genuinely leaves it unknown whether that happened, and the run must
+ * block rather than guess. Moving the browser is not like that: it commits nothing outside the
+ * browser and repeating it is idempotent, so an unreadable destination is a fact ABOUT THE PAGE, to
+ * be reported to the model, not an unresolved external effect.
+ *
+ * Treating them alike had a disproportionate cost. A page that calls `alert()` blocks its renderer,
+ * so nothing on it can be read — and navigating to one therefore ended the run as an ambiguous
+ * write, left the journal `recovery_required`, and refused admission for every later run on that
+ * profile. One ordinary `alert()` on one site permanently disabled the agent for that profile, with
+ * no supported way to clear it.
+ */
+function movesBrowserOnly(action: AgentAction): boolean {
+  return action.kind === 'navigate' || action.kind === 'back' || action.kind === 'tab';
+}
+
+async function verifyBrowserStateObserved(
+  driver: BrowserDriver,
+  browserMoveOnly = false,
+): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    const observed = await perceive(driver);
+    if (observed.signals?.includes('page-unreadable') && !browserMoveOnly) {
+      throw new Error('the post-action page could not be read');
+    }
+    if (observed.signals?.includes('page-unreadable')) {
+      // The move itself is not in doubt, and the next step's own observation carries the reason the
+      // page cannot be read — a blocking dialog, a hostile CSP — so the model can hand off or leave.
+      return;
+    }
+    if (driver.ready && !driver.ready()) {
+      throw new Error('the browser detached before post-action verification');
+    }
+    const liveUrl = await driver.currentUrl();
+    if (urlIdentity(liveUrl) === (observed.urlIdentity ?? urlIdentity(observed.url))) return;
+    if (attempt >= POST_ACTION_SETTLE_ATTEMPTS) {
+      throw new Error('the page changed during post-action verification');
+    }
+    // Let the navigation finish rather than sampling it again immediately; a failure to settle is
+    // itself part of the evidence that the state is not observable.
+    await driver.waitForSettle(3000).catch(() => {});
+  }
+}
+
 async function rollbackNavigation(driver: BrowserDriver, priorUrl: string): Promise<void> {
   try {
     await driver.goBack();
     await driver.waitForSettle(3000);
-    if ((await driver.currentUrl()) === priorUrl) return;
+    if (urlIdentity(await driver.currentUrl()) === urlIdentity(priorUrl)) return;
   } catch {
     // A popup/new tab has no back entry; close the active extra tab instead.
   }
@@ -1359,11 +2277,15 @@ async function rollbackNavigation(driver: BrowserDriver, priorUrl: string): Prom
     const active = tabs.find((tab) => tab.active);
     if (active && tabs.length > 1) {
       await driver.closeTab(active.index);
-      return;
+      await driver.waitForSettle(3000);
+      if (urlIdentity(await driver.currentUrl()) === urlIdentity(priorUrl)) return;
     }
   } catch {
     // Last resort below.
   }
-  await driver.navigate(priorUrl).catch(() => {});
-  await driver.waitForSettle(3000).catch(() => {});
+  await driver.navigate(priorUrl);
+  await driver.waitForSettle(3000);
+  if (urlIdentity(await driver.currentUrl()) !== urlIdentity(priorUrl)) {
+    throw new Error('could not verify restoration of the prior page');
+  }
 }

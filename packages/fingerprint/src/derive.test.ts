@@ -311,3 +311,20 @@ test('proxy geo is an OVERLAY: it rewrites locale/timezone/languages but never t
     }
   }
 });
+
+test('every claimed font is a name a page could actually match', () => {
+  // A font probe asks for a FAMILY. Derivation used to emit raw catalog rows, so macOS personas
+  // advertised 2,565 entries including `Academy Engraved LET Plain:1.0 16.0d1e1` and a bare
+  // `Accessories`, and Linux personas advertised seven fonts in total. Each of those is worse than
+  // an inaccuracy: a probe that gets a hit on a documentation artefact has found a string no real
+  // machine answers to, which identifies the product rather than hiding it.
+  const unqueryable = /\d+\.\d|\bVersion\b|\d+\.d\d|\(\d|:\d/;
+  for (const os of ['windows', 'macos', 'linux'] as const) {
+    const fonts = deriveFingerprint(`fonts-${os}`, { os, engine: 'lobium' }).fonts ?? [];
+    assert.ok(fonts.length >= 300, `${os} advertises only ${fonts.length} fonts`);
+    const bad = fonts.filter((name) => unqueryable.test(name));
+    assert.deepEqual(bad, [], `${os} claims font names no machine exposes`);
+    assert.equal(fonts.includes('Accessories'), false, `${os} claims a catalog section as a font`);
+    assert.equal(new Set(fonts).size, fonts.length, `${os} repeats a font family`);
+  }
+});

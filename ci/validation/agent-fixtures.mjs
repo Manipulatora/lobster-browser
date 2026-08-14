@@ -5,6 +5,7 @@
 // pass from its own knowledge. Served on loopback — the battery enables `allowPrivateNetwork` only for
 // the tasks that target them.
 import { createServer } from 'node:http';
+import { randomBytes } from 'node:crypto';
 
 const page = (
   title,
@@ -12,6 +13,14 @@ const page = (
 ) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>
 <style>body{font-family:system-ui;margin:24px;line-height:1.5}button{padding:8px 14px}</style>
 </head><body>${body}</body></html>`;
+
+const escapeHtml = (value) =>
+  String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 
 const FIXTURES = {
   // Content inside an open shadow root. Perception must walk into it or the page looks empty.
@@ -55,7 +64,9 @@ const FIXTURES = {
      </script>`,
   ),
 
-  // A consent wall covering the page. The answer is unreachable until it is dismissed.
+  // A consent wall covering the page. The answer is not in the DOM or response source at all until a
+  // privacy choice fetches it, so perception that incorrectly reads content behind an overlay cannot
+  // make this capability pass.
   '/consent': page(
     'Consent wall',
     `<div id="veil" style="position:fixed;inset:0;background:#000d;color:#fff;display:flex;
@@ -63,10 +74,14 @@ const FIXTURES = {
        <p>We value your privacy.</p>
        <button id="accept">Accept all</button><button id="reject">Reject non-essential</button>
      </div>
-     <h1>Quarterly figures</h1><p>Net revenue for Q3 was <b>£4,182,900</b>.</p>
+     <h1>Quarterly figures</h1><p id="figures">Choose a privacy preference to load figures.</p>
      <script>
        for (const id of ['accept','reject']) {
-         document.getElementById(id).addEventListener('click', () => document.getElementById('veil').remove());
+         document.getElementById(id).addEventListener('click', async () => {
+           document.getElementById('veil').remove();
+           const response = await fetch('/consent-data', { cache: 'no-store' });
+           document.getElementById('figures').textContent = await response.text();
+         });
        }
      </script>`,
   ),
@@ -129,19 +144,101 @@ const FIXTURES = {
 };
 
 export function startFixtureServer() {
+  // Unique per battery invocation and revealed only after a successful submit. Repeating values from
+  // the prompt can no longer satisfy the form grader without touching the page.
+  const formPostReceipt = `LB-${randomBytes(5).toString('hex').toUpperCase()}`;
   const server = createServer((req, res) => {
     const path = (req.url || '/').split('?')[0];
-    const body = FIXTURES[path];
-    if (!body) {
+    if (path === '/form-post' && req.method === 'GET') {
+      const body = page(
+        'Order form',
+        `<h1>Place an order</h1>
+         <form method="post" action="/form-post-result">
+           <label>Customer name <input name="custname" autocomplete="off"></label><br>
+           <label>Telephone <input name="custtel" autocomplete="off"></label><br>
+           <label>Email <input name="custemail" type="email" autocomplete="off"></label>
+           <fieldset><legend>Size</legend>
+             <label><input name="size" type="radio" value="small"> Small</label>
+             <label><input name="size" type="radio" value="medium"> Medium</label>
+             <label><input name="size" type="radio" value="large"> Large</label>
+           </fieldset>
+           <fieldset><legend>Toppings</legend>
+             <label><input name="topping" type="checkbox" value="cheese"> Cheese</label>
+             <label><input name="topping" type="checkbox" value="onion"> Onion</label>
+           </fieldset>
+           <button type="submit">Submit order</button>
+         </form>`,
+      );
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
+      return;
+    }
+    if (path === '/form-post-result' && req.method === 'POST') {
+      let encoded = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => {
+        encoded += chunk;
+        if (encoded.length > 16_384) req.destroy();
+      });
+      req.on('end', () => {
+        const fields = new URLSearchParams(encoded);
+        const valid =
+          fields.get('custname') === 'Lobee Test' &&
+          fields.get('custtel') === '5550100' &&
+          fields.get('custemail') === 'lobee@example.com' &&
+          fields.get('size') === 'medium' &&
+          fields.getAll('topping').length === 1 &&
+          fields.get('topping') === 'cheese';
+        if (!valid) {
+          res
+            .writeHead(422, { 'content-type': 'text/html; charset=utf-8' })
+            .end(
+              page(
+                'Order rejected',
+                '<h1>Order rejected</h1><p>Every requested field is required.</p>',
+              ),
+            );
+          return;
+        }
+        const body = page(
+          'Order accepted',
+          `<h1>Order accepted</h1>
+           <dl>
+             <dt>custname</dt><dd>${escapeHtml(fields.get('custname') ?? '')}</dd>
+             <dt>custtel</dt><dd>${escapeHtml(fields.get('custtel') ?? '')}</dd>
+             <dt>custemail</dt><dd>${escapeHtml(fields.get('custemail') ?? '')}</dd>
+             <dt>size</dt><dd>${escapeHtml(fields.get('size') ?? '')}</dd>
+             <dt>topping</dt><dd>${escapeHtml(fields.getAll('topping').join(', '))}</dd>
+             <dt>receipt</dt><dd>${formPostReceipt}</dd>
+           </dl>`,
+        );
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
+      });
+      return;
+    }
+    if (path === '/consent-data' && req.method === 'GET') {
+      res
+        .writeHead(200, {
+          'content-type': 'text/plain; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        .end('Net revenue for Q3 was £4,182,900.');
+      return;
+    }
+    const fixtureBody = FIXTURES[path];
+    if (!fixtureBody) {
       res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
       return;
     }
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(body);
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(fixtureBody);
   });
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
-      resolve({ origin: `http://127.0.0.1:${port}`, close: () => server.close() });
+      resolve({
+        origin: `http://127.0.0.1:${port}`,
+        facts: { formPostReceipt },
+        close: () => server.close(),
+      });
     });
   });
 }

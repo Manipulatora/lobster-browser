@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>fp-probe</title>
+  </head>
+  <body>
+    <!--
+      The fingerprint readout page for `deep-probe-50.mjs`.
+
+      It reports what a PAGE can observe, so the harness can compare it against what the persona
+      claimed. Nothing here may depend on the harness: the driver reads the JSON out of `#out` and
+      waits for the title to flip to `FP_READY`, because reading a value returned from an evaluate
+      would go through the automation channel this probe is meant to be independent of.
+
+      This file lives in the repository on purpose. It was previously read from an absolute path in
+      a developer's temporary scratch directory, so the script threw ENOENT at module load on every
+      machine except the one it was written on — while the docs listed it as part of the gate that
+      runs anywhere.
+    -->
+    <pre id="out"></pre>
+    <script>
+      (() => {
+        const safe = (fn, fallback = null) => {
+          try {
+            const value = fn();
+            return value === undefined ? fallback : value;
+          } catch (error) {
+            return `ERR:${String((error && error.message) || error)}`;
+          }
+        };
+
+        /** Unmasked WebGL identity plus the deep caps a real detector reads. */
+        const webgl = (contextName) =>
+          safe(() => {
+            const canvas = document.createElement('canvas');
+            const gl = canvas.getContext(contextName);
+            if (!gl) return null;
+            const debug = gl.getExtension('WEBGL_debug_renderer_info');
+            const param = (name) => safe(() => gl.getParameter(gl[name]), null);
+            return {
+              vendor: safe(() => gl.getParameter(gl.VENDOR)),
+              renderer: safe(() => gl.getParameter(gl.RENDERER)),
+              unmaskedVendor: debug
+                ? safe(() => gl.getParameter(debug.UNMASKED_VENDOR_WEBGL))
+                : null,
+              unmaskedRenderer: debug
+                ? safe(() => gl.getParameter(debug.UNMASKED_RENDERER_WEBGL))
+                : null,
+              version: safe(() => gl.getParameter(gl.VERSION)),
+              shadingLanguageVersion: safe(() => gl.getParameter(gl.SHADING_LANGUAGE_VERSION)),
+              maxTextureSize: param('MAX_TEXTURE_SIZE'),
+              maxRenderbufferSize: param('MAX_RENDERBUFFER_SIZE'),
+              maxViewportDims: safe(() => Array.from(gl.getParameter(gl.MAX_VIEWPORT_DIMS) || [])),
+              maxVertexAttribs: param('MAX_VERTEX_ATTRIBS'),
+              maxTextureImageUnits: param('MAX_TEXTURE_IMAGE_UNITS'),
+              extensions: safe(() => (gl.getSupportedExtensions() || []).slice().sort()),
+              shaderPrecision: safe(() => {
+                const p = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+                return p ? { rangeMin: p.rangeMin, rangeMax: p.rangeMax, precision: p.precision } : null;
+              }),
+            };
+          });
+
+        /** Deterministic per-seed farbling shows up as a stable-but-distinct hash. */
+        const canvasHash = safe(() => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 240;
+          canvas.height = 60;
+          const ctx = canvas.getContext('2d');
+          ctx.textBaseline = 'top';
+          ctx.font = '14px "Arial"';
+          ctx.fillStyle = '#f60';
+          ctx.fillRect(0, 0, 100, 30);
+          ctx.fillStyle = '#069';
+          ctx.fillText('Lobster fingerprint probe ☁️', 2, 15);
+          ctx.strokeStyle = 'rgba(102, 204, 0, 0.7)';
+          ctx.arc(50, 30, 20, 0, Math.PI * 2);
+          ctx.stroke();
+          return canvas.toDataURL();
+        });
+
+        const audioHash = () =>
+          new Promise((resolve) => {
+            try {
+              const Ctx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+              if (!Ctx) return resolve(null);
+              const ctx = new Ctx(1, 5000, 44100);
+              const osc = ctx.createOscillator();
+              osc.type = 'triangle';
+              osc.frequency.value = 10000;
+              const comp = ctx.createDynamicsCompressor();
+              osc.connect(comp);
+              comp.connect(ctx.destination);
+              osc.start(0);
+              ctx.startRendering();
+              ctx.oncomplete = (event) => {
+                const data = event.renderedBuffer.getChannelData(0);
+                let sum = 0;
+                for (let i = 4500; i < 5000; i++) sum += Math.abs(data[i]);
+                resolve(sum.toFixed(12));
+              };
+              setTimeout(() => resolve(null), 3000);
+            } catch (error) {
+              resolve(`ERR:${String((error && error.message) || error)}`);
+            }
+          });
+
+        /** Which of a fixed list of families this machine actually has, by advance-width probe. */
+        const fontsPresent = safe(() => {
+          const probes = [
+            'Arial',
+            'Verdana',
+            'Tahoma',
+            'Times New Roman',
+            'Courier New',
+            'Georgia',
+            'Segoe UI',
+            'Calibri',
+            'Cambria',
+            'Trebuchet MS',
+            'Impact',
+            'Comic Sans MS',
+            'Helvetica',
+            'Helvetica Neue',
+            'Menlo',
+            'Monaco',
+            'SF Pro Text',
+            'PingFang SC',
+            'Hiragino Sans',
+            'Ubuntu',
+            'DejaVu Sans',
+            'Liberation Sans',
+            'Liberation Serif',
+            'Liberation Mono',
+            'Cantarell',
+            'Noto Sans',
+            'Accessories',
+          ];
+          const base = ['monospace', 'sans-serif', 'serif'];
+          const span = document.createElement('span');
+          span.style.cssText =
+            'position:absolute;left:-9999px;top:-9999px;font-size:72px;white-space:nowrap';
+          span.textContent = 'mmmmmmmmmmlli';
+          document.body.appendChild(span);
+          const widths = {};
+          for (const family of base) {
+            span.style.fontFamily = family;
+            widths[family] = { w: span.offsetWidth, h: span.offsetHeight };
+          }
+          const found = {};
+          for (const family of probes) {
+            found[family] = base.some((fallback) => {
+              span.style.fontFamily = `"${family}",${fallback}`;
+              return (
+                span.offsetWidth !== widths[fallback].w || span.offsetHeight !== widths[fallback].h
+              );
+            });
+          }
+          // Advance widths per family: two families that measure identically are aliased to one face.
+          const metrics = {};
+          for (const family of probes) {
+            span.style.fontFamily = `"${family}"`;
+            metrics[family] = span.offsetWidth;
+          }
+          span.remove();
+          return { present: found, widths: metrics };
+        });
+
+        const readout = async () => ({
+          navigator: {
+            userAgent: safe(() => navigator.userAgent),
+            appVersion: safe(() => navigator.appVersion),
+            platform: safe(() => navigator.platform),
+            vendor: safe(() => navigator.vendor),
+            language: safe(() => navigator.language),
+            languages: safe(() => navigator.languages.slice()),
+            hardwareConcurrency: safe(() => navigator.hardwareConcurrency),
+            deviceMemory: safe(() => navigator.deviceMemory),
+            maxTouchPoints: safe(() => navigator.maxTouchPoints),
+            webdriver: safe(() => navigator.webdriver),
+            pdfViewerEnabled: safe(() => navigator.pdfViewerEnabled),
+            plugins: safe(() => Array.from(navigator.plugins).map((p) => p.name)),
+            uaData: safe(() =>
+              navigator.userAgentData
+                ? {
+                    brands: navigator.userAgentData.brands,
+                    mobile: navigator.userAgentData.mobile,
+                    platform: navigator.userAgentData.platform,
+                  }
+                : null,
+            ),
+          },
+          uaHighEntropy: await safe(
+            () =>
+              navigator.userAgentData
+                ? navigator.userAgentData.getHighEntropyValues([
+                    'architecture',
+                    'bitness',
+                    'model',
+                    'platformVersion',
+                    'uaFullVersion',
+                    'fullVersionList',
+                  ])
+                : Promise.resolve(null),
+            null,
+          ),
+          screen: {
+            width: safe(() => screen.width),
+            height: safe(() => screen.height),
+            availWidth: safe(() => screen.availWidth),
+            availHeight: safe(() => screen.availHeight),
+            availLeft: safe(() => screen.availLeft),
+            availTop: safe(() => screen.availTop),
+            colorDepth: safe(() => screen.colorDepth),
+            pixelDepth: safe(() => screen.pixelDepth),
+            devicePixelRatio: safe(() => window.devicePixelRatio),
+            innerWidth: safe(() => window.innerWidth),
+            innerHeight: safe(() => window.innerHeight),
+            orientation: safe(() => (screen.orientation ? screen.orientation.type : null)),
+          },
+          locale: {
+            timezone: safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone),
+            locale: safe(() => Intl.DateTimeFormat().resolvedOptions().locale),
+            offsetMinutes: safe(() => new Date().getTimezoneOffset()),
+            calendar: safe(() => Intl.DateTimeFormat().resolvedOptions().calendar),
+            numberingSystem: safe(() => Intl.DateTimeFormat().resolvedOptions().numberingSystem),
+          },
+          webgl: webgl('webgl'),
+          webgl2: webgl('webgl2'),
+          canvasHash,
+          audioHash: await audioHash(),
+          fonts: fontsPresent,
+          mediaDevices: await safe(
+            () =>
+              navigator.mediaDevices && navigator.mediaDevices.enumerateDevices
+                ? navigator.mediaDevices
+                    .enumerateDevices()
+                    .then((list) => list.map((d) => ({ kind: d.kind, label: d.label })))
+                : Promise.resolve(null),
+            null,
+          ),
+          // Classic automation tells. Every one of these must read exactly like an unautomated build.
+          tells: {
+            webdriver: safe(() => navigator.webdriver === true),
+            cdcKeys: safe(() => Object.keys(window).filter((k) => /^(cdc_|\$cdc)/.test(k))),
+            hasChrome: safe(() => typeof window.chrome === 'object'),
+            chromeRuntime: safe(() => !!(window.chrome && window.chrome.runtime)),
+            permissionsMismatch: await safe(
+              () =>
+                navigator.permissions && navigator.permissions.query
+                  ? navigator.permissions
+                      .query({ name: 'notifications' })
+                      .then((status) => status.state === 'denied' && Notification.permission === 'default')
+                      .catch(() => null)
+                  : Promise.resolve(null),
+              null,
+            ),
+            errorStackMentionsAutomation: safe(() => {
+              try {
+                null.x;
+              } catch (error) {
+                return /puppeteer|playwright|devtools|cdp/i.test(String(error.stack || ''));
+              }
+              return false;
+            }),
+          },
+        });
+
+        readout().then(
+          (value) => {
+            document.getElementById('out').textContent = JSON.stringify(value);
+            document.title = 'FP_READY';
+          },
+          (error) => {
+            document.getElementById('out').textContent = JSON.stringify({
+              error: String((error && error.message) || error),
+            });
+            document.title = 'FP_READY';
+          },
+        );
+      })();
+    </script>
+  </body>
+</html>

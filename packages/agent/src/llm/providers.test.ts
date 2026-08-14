@@ -363,6 +363,35 @@ test('Anthropic and Google Ask mode omit empty tool contracts', async () => {
   }
 });
 
+test('Anthropic cache-read input counts toward the run token budget', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        content: [{ type: 'text', text: 'ok' }],
+        stop_reason: 'end_turn',
+        usage: {
+          input_tokens: 4,
+          cache_creation_input_tokens: 3,
+          cache_read_input_tokens: 11,
+          output_tokens: 2,
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    )) as typeof fetch;
+  try {
+    const client = createLlmClient({
+      provider: 'anthropic',
+      model: 'claude-test',
+      apiKey: 'anthropic-private',
+    });
+    const result = await client.complete({ ...request, tools: [], forceTool: '' });
+    assert.deepEqual(result.usage, { tokensIn: 18, tokensOut: 2, cachedTokensIn: 11 });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test('provider credential redirect is blocked; managed mode routes through the proxy', () => {
   // BYOK: an untrusted base-URL override cannot redirect a provider credential off its approved host.
   assert.throws(

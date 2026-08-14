@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { isAbsolute } from 'node:path';
+import { mkdir, open, readFile, unlink } from 'node:fs/promises';
+import { isAbsolute, join, resolve } from 'node:path';
 import type {
   AgentEvent,
   AgentRunSnapshot,
@@ -8,9 +9,19 @@ import type {
   AgentStartResult,
   AgentUsage,
 } from '@lobster/shared-types';
-import { createLlmClient, FileMemoryStore, resolveConfig, runAgent } from '@lobster/agent';
+import {
+  createLlmClient,
+  FileMemoryStore,
+  projectRunRecovery,
+  resolveConfig,
+  RunJournalStore,
+  runAgent,
+} from '@lobster/agent';
+import type { RunJournalSnapshot } from '@lobster/agent';
 import type { AgentAction } from '@lobster/shared-types';
 import { LazyBrowserDriver } from './lazy-driver.js';
+import { resolveProfileNetworkRoute } from './bridge-registry.js';
+import { createNavigationEgressPreflight } from './navigation-egress.js';
 
 /** How long a run will wait for the desktop core to launch the profile after `run.needsBrowser`. */
 const BROWSER_ATTACH_TIMEOUT_MS = 180_000;
@@ -26,12 +37,16 @@ const BROWSER_ATTACH_TIMEOUT_MS = 180_000;
  */
 const HUMAN_INPUT_TIMEOUT_MS = 10 * 60_000;
 
+/** Process-wide supplement to the durable filesystem lease (covers multiple manager facades). */
+const ACTIVE_PROFILE_RUNS = new Set<string>();
+
 /** How the manager reaches a running profile's CDP endpoint (injected so it's decoupled + testable). */
 export type ResolveWs = (profileId: string) => Promise<string | undefined>;
 
 interface Session {
   sessionId: string;
   profileId: string;
+  threadId?: string;
   task: string;
   status: AgentRunStatus;
   step: number;
@@ -59,6 +74,8 @@ interface Session {
  */
 export class AgentManager {
   private readonly sessions = new Map<string, Session>();
+  /** Covers async journal admission/browser attachment before a Session is visible in `sessions`. */
+  private readonly startingProfiles = new Set<string>();
   private readonly resolveWs: ResolveWs;
   private readonly emit: (event: AgentEvent) => void;
 
@@ -81,6 +98,42 @@ export class AgentManager {
 
   async start(params: AgentStartParams): Promise<AgentStartResult> {
     validateStartParams(params);
+    if (this.startingProfiles.has(params.profileId)) {
+      throw new Error(`profile ${params.profileId} already has an agent starting`);
+    }
+    this.startingProfiles.add(params.profileId);
+    const runKey = `${resolve(params.memoryDir)}\0${params.profileId}`;
+    if (ACTIVE_PROFILE_RUNS.has(runKey)) {
+      this.startingProfiles.delete(params.profileId);
+      throw new Error(`profile ${params.profileId} already has a running agent`);
+    }
+    ACTIVE_PROFILE_RUNS.add(runKey);
+    let releaseLease: (() => Promise<void>) | undefined;
+    try {
+      releaseLease = await acquireProfileLease(params.memoryDir, params.profileId);
+      return await this.startUnlocked(params, async () => {
+        try {
+          await releaseLease?.();
+        } finally {
+          ACTIVE_PROFILE_RUNS.delete(runKey);
+        }
+      });
+    } catch (error) {
+      try {
+        await releaseLease?.();
+      } finally {
+        ACTIVE_PROFILE_RUNS.delete(runKey);
+      }
+      throw error;
+    } finally {
+      this.startingProfiles.delete(params.profileId);
+    }
+  }
+
+  private async startUnlocked(
+    params: AgentStartParams,
+    releaseRunLease: () => Promise<void>,
+  ): Promise<AgentStartResult> {
     const existing = this.sessions.get(params.profileId);
     if (existing && (existing.status === 'running' || existing.status === 'awaiting_input')) {
       throw new Error(`profile ${params.profileId} already has a running agent`);
@@ -91,6 +144,12 @@ export class AgentManager {
     const memory = new FileMemoryStore(params.memoryDir, {
       encryptionKey: params.memoryKey as string,
     });
+    const journal = new RunJournalStore(join(params.memoryDir, 'journals'), {
+      // The journal is another per-profile encrypted record, not another key lifecycle. Native code
+      // already provisions this exact 32-byte profile key for memory and never persists it here.
+      encryptionKey: params.memoryKey as string,
+    });
+    await admitUnfinishedRunJournals(journal, params.profileId);
 
     const sessionId = randomUUID();
     const abort = new AbortController();
@@ -131,6 +190,12 @@ export class AgentManager {
             ts: new Date().toISOString(),
           });
         }),
+      createNavigationEgressPreflight({
+        // Read lazily: the first action can launch the profile, which provisions this route while
+        // `requestWs` above is pending. Unknown legacy/unprovisioned launches fail closed.
+        route: () => resolveProfileNetworkRoute(params.profileId) ?? 'unknown',
+        allowPrivateNetwork: config.allowPrivateNetwork === true,
+      }),
     );
     // Ask mode is a browser-less chat — never attach a CDP session for it. Attaching up front is
     // wasteful for a chat, and a transient attach failure must not break a run that never touches the
@@ -142,6 +207,7 @@ export class AgentManager {
     const session: Session = {
       sessionId,
       profileId: params.profileId,
+      ...(params.threadId ? { threadId: params.threadId } : {}),
       task: params.task,
       status: 'running',
       step: 0,
@@ -224,6 +290,7 @@ export class AgentManager {
         driver,
         llm,
         memory,
+        journal,
         emit,
         waitForInput,
         signal: abort.signal,
@@ -247,8 +314,12 @@ export class AgentManager {
           this.emit(event);
         }
       })
-      .finally(() => {
-        driver.close();
+      .finally(async () => {
+        try {
+          driver.close();
+        } finally {
+          await releaseRunLease();
+        }
       });
 
     return { sessionId, profileId: params.profileId };
@@ -318,6 +389,7 @@ export class AgentManager {
       runs.push({
         sessionId: s.sessionId,
         profileId: s.profileId,
+        ...(s.threadId ? { threadId: s.threadId } : {}),
         task: s.task,
         status: s.status,
         step: s.step,
@@ -367,6 +439,178 @@ export class AgentManager {
         break;
     }
   }
+}
+
+async function acquireProfileLease(
+  memoryDir: string,
+  profileId: string,
+): Promise<() => Promise<void>> {
+  await mkdir(memoryDir, { recursive: true, mode: 0o700 });
+  const path = join(memoryDir, '.lobee-agent.lock');
+  const nonce = randomUUID();
+  const owner = JSON.stringify({
+    version: 1,
+    profileId,
+    pid: process.pid,
+    processStart: await processStartMarker(process.pid),
+    nonce,
+  });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let handle;
+    try {
+      handle = await open(path, 'wx', 0o600);
+      await handle.writeFile(owner, 'utf8');
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        // Never unlink a successor's lease if an operator/process replaced this file unexpectedly.
+        const current = await readFile(path, 'utf8').catch(() => '');
+        if (current === owner) await unlink(path).catch(() => {});
+      };
+    } catch (error) {
+      await handle?.close().catch(() => {});
+      if (!isFsCode(error, 'EEXIST')) {
+        throw error;
+      }
+      if (await leaseOwnerMayBeAlive(path)) {
+        throw new Error(`profile ${profileId} already has a running agent`);
+      }
+      // An authenticated run journal still decides whether a dead process crossed an effect boundary;
+      // this file only serializes admission. Removing a proven-dead owner's lease never replays work.
+      await unlink(path).catch((unlinkError) => {
+        if (!isFsCode(unlinkError, 'ENOENT')) throw unlinkError;
+      });
+    }
+  }
+  throw new Error(`profile ${profileId} already has a running agent`);
+}
+
+async function leaseOwnerMayBeAlive(path: string): Promise<boolean> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(await readFile(path, 'utf8')) as unknown;
+  } catch {
+    // A concurrently-created or corrupt lease is not safe to delete automatically.
+    return true;
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return true;
+  const owner = raw as { pid?: unknown; processStart?: unknown };
+  if (!Number.isSafeInteger(owner.pid) || (owner.pid as number) <= 0) return true;
+  const pid = owner.pid as number;
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    return !isFsCode(error, 'ESRCH');
+  }
+  if (typeof owner.processStart === 'string' && owner.processStart) {
+    const current = await processStartMarker(pid);
+    if (current && current !== owner.processStart) return false;
+  }
+  return true;
+}
+
+async function processStartMarker(pid: number): Promise<string | undefined> {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat
+      .slice(stat.lastIndexOf(') ') + 2)
+      .trim()
+      .split(/\s+/);
+    return fields[19]; // Linux /proc field 22 (starttime); fields[0] is field 3 after comm.
+  } catch {
+    return undefined;
+  }
+}
+
+function isFsCode(error: unknown, code: string): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && error.code === code);
+}
+
+/**
+ * Close only checkpoints which prove no side effect needs reconciliation. Stored action digests are
+ * never returned to the loop and never replayed. A write/consequential dispatch, an explicitly
+ * unknown outcome, or any unfinished sensitive handoff blocks admission for operator review.
+ */
+export async function admitUnfinishedRunJournals(
+  store: RunJournalStore,
+  profileId: string,
+): Promise<void> {
+  for (const initial of await store.listUnfinished()) {
+    const projection = projectRunRecovery(initial.state);
+    if (projection.kind === 'non_resumable') {
+      throw recoveryRequired(
+        profileId,
+        initial,
+        'the interrupted run handled a credential, upload path, or image payload',
+      );
+    }
+    const activeAction = initial.state.activeAction;
+    if (activeAction?.actionKind === 'navigation_reconcile') {
+      throw recoveryRequired(
+        profileId,
+        initial,
+        'an unexpected navigation was not reconciled before interruption',
+      );
+    }
+    const recoverableRead =
+      activeAction?.effect === 'read' &&
+      (initial.state.phase === 'dispatching' || initial.state.phase === 'recovery_required')
+        ? activeAction.actionId
+        : undefined;
+    if (projection.kind === 'recovery_required' && !recoverableRead) {
+      throw recoveryRequired(
+        profileId,
+        initial,
+        'the last write or consequential action may already have taken effect',
+      );
+    }
+    if (projection.kind === 'terminal') continue;
+
+    let snapshot = initial;
+    if (recoverableRead && snapshot.state.phase === 'dispatching') {
+      // A read might have reached the browser, but it cannot create an external effect. Record the
+      // ambiguity and explicitly abandon it before closing; do not reconstruct/replay the digest.
+      snapshot = await store.append(
+        snapshot.journal.runId,
+        {
+          type: 'action.observed',
+          actionId: recoverableRead,
+          outcome: 'unknown',
+          summary: 'Interrupted read was not resumed',
+        },
+        snapshot.journal.revision,
+      );
+    }
+    if (recoverableRead && snapshot.state.phase === 'recovery_required') {
+      snapshot = await store.append(
+        snapshot.journal.runId,
+        {
+          type: 'recovery.resolved',
+          actionId: recoverableRead,
+          resolution: 'abandoned',
+          summary: 'Read action was discarded and will be replanned from a fresh observation',
+        },
+        snapshot.journal.revision,
+      );
+    }
+    await store.append(
+      snapshot.journal.runId,
+      { type: 'run.stopped', summary: 'Interrupted run closed without replay' },
+      snapshot.journal.revision,
+    );
+  }
+}
+
+function recoveryRequired(profileId: string, snapshot: RunJournalSnapshot, reason: string): Error {
+  const effect = snapshot.state.activeAction?.effect;
+  return new Error(
+    `Agent recovery required for profile ${profileId}, interrupted run ${snapshot.journal.runId}: ${reason}${effect ? ` (${effect})` : ''}. Verify the live browser and external service state, then explicitly resolve or discard this encrypted journal before starting another run. Lobee will not replay the action automatically.`,
+  );
 }
 
 function validateStartParams(params: AgentStartParams): void {

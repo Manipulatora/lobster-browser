@@ -117,11 +117,16 @@ export interface AgentConfig {
    */
   autonomy: 'auto' | 'confirm';
   /**
-   * Registrable-domain allowlist (a navigation/anti-runaway fence). When set, the agent may not
-   * `navigate` off these domains and flags cross-domain drift. Empty/omitted = no fence.
+   * Site/domain allowlist (a navigation/anti-runaway fence). Public and multi-tenant suffixes are
+   * rejected; each entry may be a registrable domain or an intentionally narrower host scope. When
+   * set, the agent may not navigate or remain outside these domains. Empty/omitted = no fence.
    */
   allowedDomains?: string[];
-  /** Stop the run once combined tokens exceed this. Cost guardrail; omit for no token cap. */
+  /**
+   * Conservative per-run token guardrail. Each request reserves its current input and caps output to
+   * the remaining allowance; provider-reported overage is quarantined before action dispatch. This is
+   * not exact billing enforcement because provider metering/tokenizers can differ. Omit for no cap.
+   */
   tokenBudget?: number;
   /** URL to open before the first step. Omit to act on the page the profile already shows. */
   startUrl?: string;
@@ -439,6 +444,8 @@ export interface AgentSendInputResult {
 export interface AgentRunSnapshot {
   sessionId: string;
   profileId: string;
+  /** Conversation that owns this run. Required for panel reopen/reconciliation isolation. */
+  threadId?: string;
   task: string;
   status: AgentRunStatus;
   step: number;

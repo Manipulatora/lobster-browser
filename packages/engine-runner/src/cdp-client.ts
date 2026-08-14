@@ -16,7 +16,12 @@
 
 /** Minimal CDP session: send a method, get its result. */
 export interface CdpSession {
-  send(method: string, params?: Record<string, unknown>): Promise<unknown>;
+  /** `opts.timeoutMs` is honoured by transports that support a per-command deadline. */
+  send(
+    method: string,
+    params?: Record<string, unknown>,
+    opts?: { timeoutMs?: number },
+  ): Promise<unknown>;
 }
 
 /**
@@ -113,12 +118,20 @@ export async function withCdpSession<T>(
  * uncaught exceptions. `expression` must be an expression that yields the value (wrap arrow functions
  * with a trailing call, e.g. `(async () => {...})()`).
  */
-export async function cdpEvaluate<T>(session: CdpSession, expression: string): Promise<T> {
-  const res = (await session.send('Runtime.evaluate', {
-    expression,
-    returnByValue: true,
-    awaitPromise: true,
-  })) as {
+export async function cdpEvaluate<T>(
+  session: CdpSession,
+  expression: string,
+  opts?: { timeoutMs?: number },
+): Promise<T> {
+  const res = (await session.send(
+    'Runtime.evaluate',
+    {
+      expression,
+      returnByValue: true,
+      awaitPromise: true,
+    },
+    opts,
+  )) as {
     result?: { value?: T };
     exceptionDetails?: { text?: string; exception?: { description?: string } };
   };

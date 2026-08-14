@@ -1,4 +1,7 @@
 import type { AgentAction, BrowserConfigOp } from '@lobster/shared-types';
+import { isIP } from 'node:net';
+import { domainToASCII } from 'node:url';
+import { parse as parseDomain } from 'tldts';
 
 /**
  * The anti-detect gate for deep browser-config control.
@@ -231,6 +234,108 @@ export function normalizeBrowserPermission(raw?: string): string {
   return aliases[key] ?? key;
 }
 
+/**
+ * Canonicalize the origin a site-permission command will actually affect.
+ *
+ * Browser.setPermission makes `origin` optional, but omitting it changes the meaning from one site to
+ * every origin.  Keep that dangerous API default unreachable: only an explicit HTTP(S) origin, or a
+ * syntactically valid host promoted to HTTPS, produces a value.  The returned string is always an
+ * origin (no credentials, path, query, fragment, trailing root dot, or default port spelling).
+ */
+export function normalizeBrowserPermissionOrigin(origin?: string, domain?: string): string {
+  const explicit = origin?.trim();
+  if (explicit) {
+    let url: URL;
+    try {
+      url = new URL(explicit);
+    } catch {
+      return '';
+    }
+    if (
+      (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+      url.username !== '' ||
+      url.password !== ''
+    ) {
+      return '';
+    }
+    const host = canonicalBrowserHostname(url.hostname);
+    if (!host) return '';
+    return `${url.protocol}//${originHost(host)}${url.port ? `:${url.port}` : ''}`;
+  }
+
+  // An explicitly supplied but empty/malformed origin must not silently fall through to a different
+  // scope in direct callers. parseAction already drops whitespace-only strings, so the ordinary
+  // domain-only tool form still reaches the branch below.
+  if (origin !== undefined) return '';
+  const host = canonicalBrowserHostname(domain ?? '');
+  return host ? `https://${originHost(host)}` : '';
+}
+
+/**
+ * Canonicalize a clear-cookies scope and reject public/private suffix boundaries.  Cookie deletion
+ * deliberately includes subdomains; accepting `com`, `co.uk`, `github.io`, `pages.dev`, etc. would
+ * therefore turn a site-scoped action into a large cross-site wipe.
+ */
+export function normalizeCookieDomain(raw?: string): string {
+  if (!raw) return '';
+  const withoutCookieDot = raw.trim().replace(/^\./, '');
+  const host = canonicalBrowserHostname(withoutCookieDot);
+  if (!host) return '';
+
+  if (isIP(host) === 0) {
+    const parsed = parseDomain(host, {
+      allowPrivateDomains: true,
+      detectSpecialUse: true,
+    });
+    const deliberatelyLocal = host === 'localhost';
+    const unregisteredSingleLabel =
+      !host.includes('.') &&
+      parsed.isIcann !== true &&
+      parsed.isPrivate !== true &&
+      parsed.isSpecialUse !== true;
+    if (parsed.domain === null && !deliberatelyLocal && !unregisteredSingleLabel) return '';
+  }
+  return host;
+}
+
+/** Return lower-case ASCII/IDNA hostname form, or an empty result for non-host input. */
+function canonicalBrowserHostname(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.endsWith('..')) return '';
+  const candidate = trimmed.endsWith('.') ? trimmed.slice(0, -1) : trimmed;
+  if (!candidate) return '';
+
+  const bracketedIpv6 = /^\[([^\]]+)\]$/.exec(candidate);
+  const ipCandidate = bracketedIpv6?.[1] ?? candidate;
+  const ipVersion = isIP(ipCandidate);
+  if (ipVersion === 4) return ipCandidate;
+  if (ipVersion === 6) {
+    try {
+      return new URL(`http://[${ipCandidate}]/`).hostname.slice(1, -1).toLowerCase();
+    } catch {
+      return '';
+    }
+  }
+  if (bracketedIpv6 || /[:/\\@?#\s]/u.test(candidate)) return '';
+
+  const ascii = domainToASCII(candidate).toLowerCase();
+  if (!ascii || ascii.length > 253 || ascii.startsWith('.') || ascii.endsWith('.')) return '';
+  const labels = ascii.split('.');
+  if (
+    labels.some(
+      (label) =>
+        label.length === 0 || label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+    )
+  ) {
+    return '';
+  }
+  return ascii;
+}
+
+function originHost(host: string): string {
+  return isIP(host) === 6 ? `[${host}]` : host;
+}
+
 function hasFingerprintTell(...values: Array<string | undefined>): string | undefined {
   for (const value of values) {
     if (!value) continue;
@@ -256,7 +361,13 @@ export function assessBrowserConfig(
   // fingerprint, so domains are NOT screened for tell-tokens (a site literally named "fonts.google.com"
   // must remain clearable). Only set_permission is constrained, to the real Permissions-API grants.
   if (LIVE_OPS.has(op)) {
+    if (op === 'clear_cookies' && !normalizeCookieDomain(action.domain)) {
+      return block('clear_cookies needs a specific site domain, not a public/private suffix');
+    }
     if (op === 'set_permission') {
+      if (!normalizeBrowserPermissionOrigin(action.origin, action.domain)) {
+        return block('set_permission needs a valid non-empty HTTP(S) origin');
+      }
       const name = normalizeBrowserPermission(action.permission);
       if (!name) return block('set_permission needs a permission name');
       if (!ALLOWED_PERMISSIONS.has(name)) {

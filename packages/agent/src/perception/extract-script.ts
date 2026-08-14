@@ -1,44 +1,45 @@
+import type { RawPerception } from '../types.js';
+
 /** Text-first, trace-free perception evaluated in the page's main world. */
 export const MAX_ELEMENTS = 90;
 export const MAX_NAME = 90;
 export const MAX_PAGE_TEXT = 1600;
 
 /**
- * Walks the top document, open shadow roots, and accessible same-origin frames. No attributes,
- * globals, listeners, or observers are installed. Secret-bearing form values are represented only by
- * `filled:true`; their bytes never leave the page.
+ * What {@link EXTRACT_SCRIPT} resolves to.
+ *
+ * The script runs in the page's own main world, so a page-defined global or a patched prototype can
+ * make the walk throw. Its top-level catch therefore reports through `error` and returns NO `elements`
+ * key: a failed read must not be shaped like a successful read of an empty page, because the only
+ * consumer that turns this into the model-facing observation decides "unreadable" from exactly these
+ * two tells, and a caller that discriminated on the element array alone would say "no interactive
+ * elements visible" about a page that was never read.
  */
-export const EXTRACT_SCRIPT = `(() => {
-  try {
-    const MAX_ELEMENTS = ${MAX_ELEMENTS};
-    const MAX_CANDIDATES = 500;
+export interface ExtractResult extends Partial<RawPerception> {
+  /** Present only when the in-page walk threw. The page was NOT read; `elements` is absent. */
+  error?: string;
+}
+
+/**
+ * The ONE definition of how an element is named and typed, as page-evaluated source.
+ *
+ * Perception decides what the model sees; the executor's pre-dispatch check decides whether the
+ * thing under the coordinate is still that element. When those two derived their own answers, they
+ * disagreed on the most ordinary controls on the web — a checkbox perceived as `checkbox "Accept
+ * terms"` was identified at dispatch time as `input "yes"` (its `value` attribute), a `<select>`
+ * labelled by `<label for>` as the concatenation of its options, and a text field as whatever the
+ * agent had just typed into it. Every one of those reads as "a DIFFERENT labelled control is here
+ * now", so the action was refused as stale drift. The agent could not tick a consent box, could not
+ * re-type into a field it had filled, and could not click a labelled select — while every unit test
+ * passed, because the check had only ever run against a fake driver returning canned answers.
+ *
+ * Sharing the source is the fix: a divergence is now impossible rather than merely unlikely.
+ */
+export const NAME_ROLE_HELPERS = `
     const MAX_NAME = ${MAX_NAME};
-    const MAX_PAGE_TEXT = ${MAX_PAGE_TEXT};
     const clip = (s, n = MAX_NAME) => {
       s = String(s || '').replace(/\\s+/g, ' ').trim();
       return s.length > n ? s.slice(0, n - 1) + '\\u2026' : s;
-    };
-    const safeUrl = (value) => {
-      try {
-        const url = new URL(String(value), location.href);
-        for (const key of [...url.searchParams.keys()]) {
-          if (/(token|code|key|secret|pass|session|auth|signature|credential|assertion)/i.test(key)) url.searchParams.set(key, '[REDACTED]');
-        }
-        if (/(access_token|id_token|token|code|secret|session)/i.test(url.hash)) url.hash = '#[REDACTED]';
-        url.username = ''; url.password = '';
-        return url.toString();
-      } catch { return String(value || '').slice(0, 8192); }
-    };
-    const topW = window.innerWidth || document.documentElement.clientWidth || 0;
-    const topH = window.innerHeight || document.documentElement.clientHeight || 0;
-    const interactiveTags = new Set(['a','button','input','textarea','select','summary','label']);
-    const interactiveRoles = new Set(['button','link','checkbox','radio','tab','menuitem','switch','option','combobox','listbox','textbox','searchbox','slider','spinbutton','treeitem','menuitemcheckbox','menuitemradio']);
-    const secretWords = /(pass(word|code)?|pin|otp|one[ -]?time|2fa|mfa|verification|security.?code|secret|token|api.?key|cvv|cvc|card.?number|credit.?card|private.?key|seed.?phrase)/i;
-
-    const isInteractive = (el) => {
-      const tag = el.tagName.toLowerCase();
-      const role = el.getAttribute('role');
-      return interactiveTags.has(tag) || (role && interactiveRoles.has(role)) || el.hasAttribute('onclick') || el.isContentEditable || (el.tabIndex >= 0 && ['div','span','li'].includes(tag));
     };
     const roleOf = (el, tag) => {
       const role = el.getAttribute('role');
@@ -64,12 +65,14 @@ export const EXTRACT_SCRIPT = `(() => {
       const owner = el.ownerDocument || document;
       const labelledby = el.getAttribute('aria-labelledby');
       if (labelledby) {
-        const text = labelledby.split(/\\s+/).map((id) => owner.getElementById(id)?.textContent || '').join(' ');
+        const scope = el.getRootNode && el.getRootNode().getElementById ? el.getRootNode() : owner;
+        const text = labelledby.split(/\\s+/).map((id) => scope.getElementById(id)?.textContent || '').join(' ');
         if (text.trim()) return clip(text);
       }
       if (['input','textarea','select'].includes(tag)) {
         if (el.id) {
-          const label = owner.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+          const scope = el.getRootNode && el.getRootNode().querySelector ? el.getRootNode() : owner;
+          const label = scope.querySelector('label[for="' + CSS.escape(el.id) + '"]');
           if (label?.textContent?.trim()) return clip(label.textContent);
         }
         const wrapping = el.closest('label');
@@ -83,6 +86,60 @@ export const EXTRACT_SCRIPT = `(() => {
       for (const attr of ['title','alt']) if (el.getAttribute(attr)) return clip(el.getAttribute(attr));
       const image = el.querySelector?.('img[alt]');
       return image ? clip(image.getAttribute('alt')) : '';
+    };
+    /**
+     * document.elementFromPoint retargets a hit inside a shadow tree up to the outermost host, so a
+     * control in a web component identifies as its host. Descend through open roots to the node the
+     * user would actually hit.
+     */
+    const deepElementFromPoint = (x, y) => {
+      let node = document.elementFromPoint(x, y);
+      for (let depth = 0; node && node.shadowRoot && depth < 12; depth++) {
+        const inner = node.shadowRoot.elementFromPoint(x, y);
+        if (!inner || inner === node) break;
+        node = inner;
+      }
+      return node;
+    };
+`;
+
+/**
+ * Walks the top document, open shadow roots, and accessible same-origin frames. No attributes,
+ * globals, listeners, or observers are installed. Secret-bearing form values are represented only by
+ * `filled:true`; their bytes never leave the page.
+ */
+export const EXTRACT_SCRIPT = `(() => {
+  try {
+    const MAX_ELEMENTS = ${MAX_ELEMENTS};
+    const MAX_CANDIDATES = 500;
+    // Candidates are collected in traversal order and the top document is walked first, so a page dense
+    // enough to reach the cap would drop every shadow-root and same-origin-frame control before it was
+    // ever ranked — precisely the controls (browser WebUI, web components, embedded forms) that nothing
+    // else in the observation can reach. Hold part of the budget back for non-top roots.
+    const NESTED_CANDIDATE_RESERVE = 150;
+    const MAX_PAGE_TEXT = ${MAX_PAGE_TEXT};
+${NAME_ROLE_HELPERS}
+    const safeUrl = (value) => {
+      try {
+        const url = new URL(String(value), location.href);
+        for (const key of [...url.searchParams.keys()]) {
+          if (/(token|code|key|secret|pass|session|auth|signature|credential|assertion)/i.test(key)) url.searchParams.set(key, '[REDACTED]');
+        }
+        if (/(access_token|id_token|token|code|secret|session)/i.test(url.hash)) url.hash = '#[REDACTED]';
+        url.username = ''; url.password = '';
+        return url.toString();
+      } catch { return String(value || '').slice(0, 8192); }
+    };
+    const topW = window.innerWidth || document.documentElement.clientWidth || 0;
+    const topH = window.innerHeight || document.documentElement.clientHeight || 0;
+    const interactiveTags = new Set(['a','button','input','textarea','select','summary','label']);
+    const interactiveRoles = new Set(['button','link','checkbox','radio','tab','menuitem','switch','option','combobox','listbox','textbox','searchbox','slider','spinbutton','treeitem','menuitemcheckbox','menuitemradio']);
+    const secretWords = /(pass(word|code)?|pin|otp|one[ -]?time|2fa|mfa|verification|security.?code|secret|token|api.?key|cvv|cvc|card.?number|credit.?card|private.?key|seed.?phrase)/i;
+
+    const isInteractive = (el) => {
+      const tag = el.tagName.toLowerCase();
+      const role = el.getAttribute('role');
+      return interactiveTags.has(tag) || (role && interactiveRoles.has(role)) || el.hasAttribute('onclick') || el.isContentEditable || (el.tabIndex >= 0 && ['div','span','li'].includes(tag));
     };
     const isSensitive = (el, name) => {
       const type = (el.getAttribute('type') || '').toLowerCase();
@@ -106,6 +163,7 @@ export const EXTRACT_SCRIPT = `(() => {
     const contextualText = [];
     const contextualTextSeen = new Set();
     let truncated = 0;
+    let cappedCandidates = false;
     const seen = new Set();
     const addedEls = new Set(); // elements actually listed — used for containment collapse
     const addRoot = (root, owner, offsetX, offsetY, context) => {
@@ -123,6 +181,7 @@ export const EXTRACT_SCRIPT = `(() => {
           }
         }
       }
+      const candidateBudget = context === 'top' ? MAX_CANDIDATES - NESTED_CANDIDATE_RESERVE : MAX_CANDIDATES;
       let nodes = [];
       try { nodes = [...root.querySelectorAll('a,button,input,textarea,select,summary,label,[role],[onclick],[tabindex],[contenteditable]')]; } catch {}
       for (const el of nodes) {
@@ -157,7 +216,7 @@ export const EXTRACT_SCRIPT = `(() => {
         const probe = hitRoot && hitRoot !== owner && typeof hitRoot.elementFromPoint === 'function' ? hitRoot : owner;
         const top = probe.elementFromPoint(localX, localY);
         if (top && el !== top && !el.contains(top) && !top.contains(el)) continue;
-        if (out.length >= MAX_CANDIDATES) { truncated++; continue; }
+        if (out.length >= candidateBudget) { truncated++; cappedCandidates = true; continue; }
         const tag = el.tagName.toLowerCase();
         const name = nameOf(el, tag);
         const item = {
@@ -169,6 +228,18 @@ export const EXTRACT_SCRIPT = `(() => {
         };
         const type = el.getAttribute('type');
         if (type) item.type = type.toLowerCase();
+        // Preserve the effective HTML semantics, not just the literal attribute. A <button> inside a
+        // form defaults to type=submit even when it has no explicit type attribute; losing that distinction
+        // lets a generic-looking "Continue" bypass the pre-execution commit gate.
+        const form = el.form || el.closest?.('form');
+        const effectiveType = tag === 'button' ? (type || 'submit').toLowerCase() : (type || '').toLowerCase();
+        if (form && ((tag === 'button' && effectiveType === 'submit') || (tag === 'input' && ['submit','image'].includes(effectiveType)))) item.submitsForm = true;
+        // Keyboard actions have no element id. Surface focus so an Enter/Space approval names the
+        // control it is bound to; the policy still fails closed if focus is outside the bounded tree.
+        try {
+          if (owner.activeElement === el || root.activeElement === el) item.focused = true;
+        } catch {}
+        if (el.isContentEditable) item.editable = true;
         if (context !== 'top') item.context = context;
         const sensitive = isSensitive(el, name);
         if (sensitive) item.sensitive = true;
@@ -230,6 +301,11 @@ export const EXTRACT_SCRIPT = `(() => {
     if (/sign in|log in|password/i.test(signalText)) signals.push('login');
     if (document.querySelector('[role="dialog"],dialog[open],[aria-modal="true"]')) signals.push('dialog');
     if (document.querySelector('canvas')) signals.push('canvas');
+    // The truncation footer tells the model the cut was made by relevance. That is true of the ranked
+    // slice below, but not of candidates dropped at the collection cap, which are lost in traversal
+    // order before any score exists. Say when that happened so the model knows the page is denser than
+    // the ranking can account for and reaches for extract/scroll instead of trusting the ranking.
+    if (cappedCandidates) signals.push('too-many-candidates');
     // A cross-origin frame is STRUCTURALLY invisible to this extractor: contentDocument throws, so its
     // controls produce no elements at all. Without a signal the model sees a page that looks simply
     // empty and has no idea a payment form, captcha or consent dialog is sitting in front of it. Say
@@ -258,6 +334,13 @@ export const EXTRACT_SCRIPT = `(() => {
       truncated,
     };
   } catch (error) {
-    return { url: location.href, title: document.title || '', scrollY: 0, viewportH: 0, docH: 0, canScrollUp: false, canScrollDown: false, text: '', signals: [], elements: [], truncated: 0, error: String(error?.message || error) };
+    // Report a failed read AS a failed read. A well-formed perception carrying an empty elements array
+    // here is indistinguishable from a genuinely empty page: no page-unreadable signal is raised, the
+    // model is told "(no interactive elements visible — try scrolling, waiting, or navigating)" about a
+    // page nobody could read, and the post-action verification that fails only on that signal certifies
+    // the unread page as observed. No elements key plus an error string are both of perception's failure
+    // tells, so an in-page exception lands exactly where a rejected evaluate does. The url is kept
+    // (the caller redacts it) because naming the page is most of the value of the failure message.
+    return { url: location.href, error: String(error?.message || error) };
   }
 })()`;

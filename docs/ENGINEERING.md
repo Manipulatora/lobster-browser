@@ -1,7 +1,7 @@
 # Lobium Engineering — Anti-Detect Engine, Fingerprint Model & Roadmap
 
 The single source of truth for how the browser hides, how fingerprints are modeled, and the plan to reach
-top-1%. Updated 2026-07-21.
+top-1%. Updated 2026-08-10.
 
 ## 1. Principles
 
@@ -32,8 +32,16 @@ surface. Notable surfaces:
   shaderPrecision), intersected/clamped to the live backend so the reported surface is coherent. The
   masked `VENDOR`/`RENDERER` stay Chrome's constants ("WebKit"/"WebKit WebGL").
 - **canvas / audio**: deterministic per-seed farbling (stable within a profile, distinct across profiles).
-- **fonts**: isolated via a private font pack + `FONTCONFIG_FILE`, so the observable font set matches the
-  persona OS instead of the host.
+- **fonts**: isolated via a private font pack + `FONTCONFIG_FILE`, so the observable font set follows the
+  persona OS rather than the host. **Metric fidelity is partial and is a known tell.** The pack carries
+  ~33 open faces, and a claimed family is aliased onto a metric clone where one exists (Arial→Liberation
+  Sans, Times New Roman→Liberation Serif, Courier New→Liberation Mono, Calibri→Carlito,
+  Cambria→Caladea). Everything else falls back to its serif/sans/mono class face, so on a Windows
+  persona ~358 of 435 claimed families resolve to Liberation Sans and therefore report identical
+  advance widths — where real Windows gives Verdana, Tahoma, Segoe UI, Trebuchet MS, Impact and Comic
+  Sans MS six different ones. A width-probing detector can see that. Closing it needs metric-compatible
+  faces in the pack for those families, not another mapping rule; `packages/engine-runner/src/fonts.ts`
+  emits no alias it cannot back with a physically present face.
 - **timezone / locale / geolocation**: applied natively; derived from proxy geo.
 - **WebRTC**: policy controls prevent local-IP leaks.
 - **device emulation** (mobile profiles): a native device-frame view renders a phone/tablet; scrolling a
@@ -74,10 +82,17 @@ deterministic entry point (FNV-1a(seed) → mulberry32 RNG). The generated `Fing
 
 Two tiers:
 
-- **Software gate (runs anywhere).** Offline coherence + automation-tell + distinctness probes:
-  `battle-test.mjs` (loopback coherence probe incl. cross-context worker), `deep-probe-50.mjs` (50
-  pure-native personas: surface application + no-automation-tells + coherence + distinctness),
-  `regression-gate.mjs` (orchestrates the software checks vs committed baselines).
+- **Software gate (runs anywhere).** `regression-gate.mjs`: in-process coherence, per-OS device-class
+  diversity floors, and the fingerprint unit contracts. No browser, no baseline file, no tell probe.
+- **Engine gate (needs the native binary).** `battle-test.mjs` (per-persona surface application incl.
+  cross-context worker coherence and the deep-GPU host-leak check) and `deep-probe-50.mjs` (50
+  pure-native personas: surface application + no-automation-tells + distinctness, reading
+  `ci/validation/fixtures/fp-probe.html`). Both launch Lobium, so neither belongs to the tier that runs
+  anywhere; on a software renderer `battle-test.mjs` correctly reports the deep-GPU tell described in W1.
+- **Agent browser gate (needs an engine, no model).** `ci/validation/e2e/agent-browser-e2e.mjs` drives the
+  production loop and CDP driver against a real browser and a deterministic fixture origin whose answers
+  are minted per boot. It reports which engine it ran on: the shipping Lobium binary is Gate-B evidence,
+  an interim Chromium is browser-integration evidence only.
 - **Real-GPU gate (release blocker, hardware-gated).** `gate.mjs` enforces "real-GPU, headless, zero lies";
   `detector-matrix.mjs` + `detector-matrix.json` grade 15 external tools (CreepJS, Sannysoft,
   BrowserLeaks, FingerprintJS, Pixelscan, IPHey, AmIUnique, BrowserScan, …) under an evidence policy that
@@ -117,8 +132,10 @@ harden `lobium/rebase.sh` to apply the patch series onto the new ref and fail lo
 asserts UA major == build major. The rebase/build step needs the build host; the tooling is buildable now.
 
 ### W5 — Continuous detection regression on real-GPU — IN PROGRESS (infra) / HW-GATED (run)
-Software tier (`regression-gate.mjs`) runs everywhere and covers automation-tells + coherence + surface
-application vs baselines. Real-GPU tier (`gate.mjs` via `.github/workflows/real-gpu-gate.yml`) is the
+Software tier (`regression-gate.mjs`) runs everywhere and covers coherence + catalog-diversity floors +
+the fingerprint unit contracts. It does **not** cover automation-tells, surface application, or a
+committed baseline — it reads no baseline file and launches no browser. Those live in the engine tier
+below, which needs the native binary; wording claiming otherwise was wrong. Real-GPU tier (`gate.mjs` via `.github/workflows/real-gpu-gate.yml`) is the
 release blocker; wire it to a self-hosted `real-gpu` runner on relevant PRs + a nightly schedule, persist
 results, and fail on any new lie / renderer downgrade / headless-rating regression.
 
@@ -145,53 +162,99 @@ forced structured `act` tool call (Anthropic/OpenAI/OpenRouter/xAI/Google)
         ↓
 policy + risk gate ── human confirmation / secret handoff when required
         ↓
-trusted Input.* / DOM command through CdpBrowserDriver ── observe again
+deterministic executor preflight
+        ↓
+durably journal dispatch immediately before first effect
+        ↓
+trusted Input.* / DOM command through CdpBrowserDriver ── fresh browser observation
 ```
 
 - **Browser-use ideas:** rich browser tools, numbered text-first perception, human handoff, and optional
   vision are implemented behind the project-owned `BrowserDriver`; no browser-use code or runtime is
   embedded.
-- **OpenClaw ideas:** progressive skill disclosure and strict separation between untrusted page content,
+- **Claw Code ideas:** progressive skill disclosure and strict separation between untrusted page content,
   trusted harness history, and local memory. Skills are short read-only procedures, never webpage-supplied
-  executable code.
+  executable code. Learned procedures are scoped to a canonical site boundary and are not disclosed on
+  unrelated hosts.
 - **Codex/Claude Code ideas:** least privilege, bounded tools, cancellation, recovery after invalid or
-  repeated actions, and secrets that are not echoed into transcripts. Consequential-action confirmation is
-  implemented but reached only in `confirm` autonomy (plus `upload`, which always confirms) — see the
-  confirmation note below.
+  repeated actions, and secrets that are not echoed into transcripts. Commit-capable and consequential
+  actions require a fresh, action-bound human approval in both autonomy modes; `confirm` additionally
+  pauses before ordinary browser mutations.
 
 ### Trust boundaries and guarantees
 
-- Page text is delimited as untrusted data. URLs are limited to HTTP(S), private/local destinations are
-  blocked by default, and an optional domain fence is enforced on explicit navigation and post-action
-  drift. Cross-domain handling follows the run's autonomy: `confirm` gates a cross-domain move on a human,
-  while `auto` allows it. A domain fence bounds an `auto` run; the panel can now send `allowedDomains`,
-  `autonomy` and `tokenBudget` through the bridge (all validated there), though it does not set them by
-  default.
+- Page text and prior action-result details are delimited as untrusted data; page-derived labels, URLs,
+  and refusal reasons never become harness instructions. Full URLs receive an in-memory opaque identity so
+  approval and action freshness can distinguish resources whose redacted URLs look identical. Navigation
+  URLs are limited to HTTP(S), private/local destinations are blocked by default, and an optional domain
+  fence is enforced on explicit navigation and post-action drift. Domain fences use the ICANN and private
+  Public Suffix List, so a scope such as `co.uk` or
+  `github.io` is rejected instead of accidentally authorizing every tenant. Direct routes also resolve a
+  destination before top-level navigation and reject the whole answer set if any address is non-public.
+  Proxy routes skip a misleading local DNS check; hard isolation there requires an enforcing upstream
+  exit-side ACL, which this agent layer does not currently prove.
+  Cross-domain handling follows the run's autonomy: `confirm` gates a cross-domain move on a human, while
+  `auto` allows it. A domain fence can bound an `auto` run. The panel persists and sends
+  `allowedDomains`, `autonomy`, and `tokenBudget` through the bridge (all validated there); new installs
+  default to review-before-changes and a 100,000-token ceiling, with an explicitly unrestricted domain
+  field until the user supplies a fence.
 - Password/OTP/payment/token fields expose only `filled` state. `ask {sensitive:true,targetId}` sends the
   reply directly from the UI to the measured field; it is never added to model history, UI action events,
-  or run memory. CAPTCHA is a human handoff—there is intentionally no bypass service.
+  or run memory. Credential-shaped task text is rejected before model/storage access, and a model cannot
+  place credential-shaped text through an ordinary typing action. CAPTCHA is a human handoff—there is
+  intentionally no bypass service.
 - Provider keys are stored in the Rust-owned encrypted SQLite secret table. The React webview receives
   only a `stored` boolean. Run memory uses a separately generated per-profile AES-256-GCM key, authenticated
-  files, 0600 permissions, atomic replacement, and one-time migration of legacy plaintext records.
+  files, 0600 permissions, atomic replacement, strict wrong-key reads, and credential-scrubbing migration
+  of legacy plaintext/encrypted records. A wrong-key append cannot overwrite the last known-good file. A
+  path-authenticated encrypted run journal records only non-executable action digests and fsyncs a dispatch
+  boundary after deterministic preflight and immediately before effects. Mutating browser actions then
+  require a fresh readable observation with matching full-URL identity; this confirms current browser
+  state, not semantic business success. Unexpected denied/rejected navigation uses a separately journaled,
+  verified rollback. On restart, clean/pending/read-only checkpoints are closed without replay; ambiguous
+  writes, consequential actions, failed navigation reconciliation, and unfinished sensitive handoffs block
+  the next run. There is not yet a supported operator UI/API that can record a verified resolution and
+  unblock admission; filesystem inspection alone is not a product-level recovery workflow.
+- Encrypted thread history is authoritative, but the panel currently keeps a bounded, heuristically
+  redacted plaintext availability/migration fallback in extension local storage (and standalone
+  `localStorage`) when the encrypted thread cannot be verified. It is removed only after an exact encrypted
+  counterpart is observed. This preserves a terminal result through transient failure, but it is not an
+  encryption or arbitrary-PII confidentiality boundary and can persist if core thread persistence never
+  succeeds.
 - File uploads are disabled unless absolute roots are explicitly configured; paths are canonicalized and
-  checked after symlink resolution. Upload path strings are redacted from events and memory.
-- The action loop has hard step/token bounds, abortable provider calls with retry/backoff, repeated-action
+  checked after symlink resolution. The filesystem root, user home, and equivalent dot/symlink aliases are
+  rejected, and complete file contents are streamed through the credential/private-key detector before
+  dispatch. Upload path strings are redacted from events and memory.
+- The action loop has hard step/token bounds, a conservative per-request input reserve, dynamic output
+  caps, provider-usage overage quarantine, abortable provider calls with retry/backoff, repeated-action
   detection, validation of every tool payload, blocked-action escalation, context-overflow recovery, and
-  fail-closed provider/base-URL selection. Managed LLM mode is IMPLEMENTED and is what the side panel
+  fail-closed provider/base-URL selection. Token accounting is a safety budget, not billing-grade local
+  tokenization; provider-reported usage remains authoritative when returned. Managed LLM mode is
+  IMPLEMENTED and is what the side panel
   uses: the sidecar talks to the backend `agent/llm` proxy, which holds the OpenRouter key server-side,
   authenticates every call with a Bearer token (`AgentProxyGuard`), pins the model to an allowlist, caps
   output tokens, and meters usage. The sidecar never sees a provider credential.
-- **Confirmation, precisely.** Actions classified CONSEQUENTIAL — irreversible or externally visible —
-  require a human in EVERY mode including `auto`: uploads, purchases, sends, deletions, account
-  creation, site-permission changes, and cookie/site-data erasure (`actionRisk` in `policy.ts`). `auto`
-  means the agent does not stop to check its progress; it never meant it may spend money or delete an
-  account unattended. Everything else inside the browser is recoverable by re-reading the page and gates
-  only under `autonomy: 'confirm'`.
-  The line is COMMIT, not COMPOSITION: typing into an amount field proceeds with a harness note, while
-  pressing the button that sends it is gated. Coordinate clicks are flagged but not blocked — they are
-  un-inspectable, not irreversible, and blocking them would stall the vision fallback on ordinary pages.
+- **Confirmation, precisely.** Every commit-capable activation requires a fresh human approval in both
+  autonomy modes: semantic and coordinate clicks (including right-click), keys, selects, drags, submits,
+  uploads, and durable memory/skill writes. Actions additionally classified CONSEQUENTIAL — purchases,
+  sends, deletions, account creation, permission changes, and site-data erasure — remain gated even when
+  their UI shape is unusual (`actionRisk` in `policy.ts`). `auto` skips routine progress pauses; it never
+  authorizes an externally visible commit. The line is COMMIT, not COMPOSITION: text may be entered only
+  into a browser-verified text-entry control, while the activation that sends it is gated. Approval is
+  bound to the exact action, page, semantic target, and (for coordinate actions) screenshot, then checked
+  again immediately before dispatch.
   A gate is only safe because the pause can end: `waitForInput` has a timeout, and a panel-origin run
   with no panel attached fails immediately rather than waiting for an answer nobody can give.
+- **Session isolation and retry safety.** One run per profile is enforced across manager instances and
+  sidecar processes with an exclusive filesystem lease; only a provably dead owner is reclaimed. The
+  panel-to-sidecar token travels in `x-lobee-token`, including the event stream, rather than in the URL.
+  `/run` and `/input` carry body-bound request ids so one lost HTTP response can be retried without
+  duplicating the run or human input. A transient missing bridge registry file does not erase the last
+  authenticated profile identity, while a genuinely rotated identity terminates the stale run visibly.
+  The extension token and memory directory are staged before browser launch so `bridge.json` can be loaded;
+  the memory key and network route are committed only after launch succeeds. A successful owned stop revokes
+  the registry entry. An out-of-band browser close currently evicts the runner handle but can leave that
+  entry until a later successful relaunch-and-stop or sidecar restart.
 
 ### Browser coverage
 
@@ -200,3 +263,18 @@ combobox fallback, scrolling, drag/drop, restricted file inputs, back navigation
 switch/close, popup adoption, extraction, and screenshots. Perception walks visible controls in the top
 document, open shadow roots, and accessible same-origin frames; cross-origin frames and inaccessible custom
 canvas widgets use the explicit vision/human fallback.
+
+The direct-navigation DNS preflight is defense in depth, not a browser-wide egress sandbox: redirect
+chains, subresources, page-initiated navigation, service workers, DNS rebinding after the preflight, and
+the proxy's eventual exit address remain browser/process or upstream-network enforcement work. These gaps
+stay release-visible in `docs/LOBEE_AGENT_ROADMAP.md` rather than being described as solved by the agent
+loop.
+
+Perception and some semantic target checks currently evaluate DOM code in the page's main world. A hostile
+page can monkeypatch those APIs; an isolated-world or browser-native accessibility extraction boundary is
+future work. Likewise, a fresh post-effect observation is not an action-specific receipt: consequential
+tasks still need task-local assertions or external receipts before Lobee can claim semantic completion.
+
+The deterministic suites and grader tests establish contract and safety behavior, not live model/browser
+capability. No paid self-hosted capability battery was run in this hardening pass; capability remains
+unverified until that protected gate runs with the shipping browser and approved provider cohort.
