@@ -19,8 +19,10 @@ import { RenewalService } from './renewal.service';
  * team rather than trusting the request body — on a billing endpoint that distinction is what
  * stops one team spending another's Credit).
  *
- * `BILLING_REPOSITORY` is exported so ProfilesModule can read a team's `profileLimit` from the
- * subscription without depending on BillingService.
+ * NOTE ON profileLimit. ProfilesModule does NOT go through this module to read it — its own
+ * repository reads `subscriptions.profileLimit` directly, which predates this module and still
+ * works. `BILLING_REPOSITORY` is exported so that path can be consolidated here later without a
+ * second consumer having to reach into Prisma; nothing depends on it yet.
  */
 @Module({
   imports: [AuthModule, ConfigModule],

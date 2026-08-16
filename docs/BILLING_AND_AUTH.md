@@ -35,6 +35,20 @@ change both together.
 `Subscription.priceCents` and `profileLimit` are **snapshotted at purchase**. Re-pricing the
 catalog changes the storefront without re-pricing existing subscribers.
 
+### Changing package mid-period
+
+Switching packages **credits back the unused part of the current period**, prorated by elapsed time
+and floored to the cent. Upgrading from Light to Pro on day two of a Light month costs
+`$100 − ~$9.33`, not `$100`.
+
+Without this, an ordinary action — upgrading — would silently confiscate time the customer had
+already paid for. The refund and the charge are applied as **one net movement**, never as a refund
+followed by a charge: two movements can half-apply, leaving either a windfall plus the old package,
+or a double payment.
+
+No credit is given when the subscription is `past_due` (the last renewal was not paid, so there is
+no paid period to refund) or when the period has already ended.
+
 ---
 
 ## 2. Money representation
@@ -278,7 +292,7 @@ The web app resolves its API origin from the page origin (`api.<host>`), falling
 | Command | Checks |
 | --- | --- |
 | `npm run gate:migrations` | Applies the migration chain to real Postgres (PGlite/WASM) and asserts both the schema and the SQL-level money invariants |
-| `npm test --workspace @lobster/backend` | 103 specs, including the billing and IPN suites |
+| `npm test --workspace @lobster/backend` | 106 specs, including the billing and IPN suites |
 | `cargo test --lib` (in `src-tauri`) | Includes the PKCE challenge against the RFC 7636 test vector |
 
 ---

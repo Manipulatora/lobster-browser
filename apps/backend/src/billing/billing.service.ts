@@ -241,20 +241,51 @@ export class BillingService {
       throw new ConflictException(`already subscribed to ${plan.name}`);
     }
 
-    const charge = await this.repo.move({
-      teamId: team,
-      kind: 'purchase',
-      amountCents: -plan.priceCents,
-      description: `${plan.name} package — ${plan.profileLimit} profiles`,
-      metadata: { tier, profileLimit: plan.profileLimit },
-    });
+    // Credit back whatever the team already paid for and has not used, so switching packages
+    // mid-period does not quietly confiscate the remainder. See {@link unusedCents}.
+    const unused = unusedCents(existing);
+    const netCents = plan.priceCents - unused;
+
+    const description =
+      unused > 0
+        ? `${plan.name} package — ${plan.profileLimit} profiles ` +
+          `(less ${usd(unused)} credit for unused time)`
+        : `${plan.name} package — ${plan.profileLimit} profiles`;
+
+    // ONE movement, not a refund followed by a charge. Two movements can half-apply: refund first
+    // and the charge fails, and the team keeps its old package plus a windfall; charge first and
+    // the refund fails, and they have paid twice. Netting them means the whole plan change either
+    // happens or does not.
+    //
+    // A net that is zero or negative (downgrading to something cheaper than the credit owed) is a
+    // refund, and `move` must be given the correct sign and kind for the statement to read
+    // sensibly.
+    const charge =
+      netCents > 0
+        ? await this.repo.move({
+            teamId: team,
+            kind: 'purchase',
+            amountCents: -netCents,
+            description,
+            metadata: { tier, profileLimit: plan.profileLimit, unusedCreditCents: unused },
+          })
+        : await this.repo.move({
+            teamId: team,
+            kind: 'refund',
+            amountCents: -netCents,
+            description,
+            metadata: { tier, profileLimit: plan.profileLimit, unusedCreditCents: unused },
+          });
 
     if (!charge) {
       const balance = await this.repo.getBalanceCents(team);
-      const shortBy = plan.priceCents - balance;
+      const shortBy = netCents - balance;
+      const cost =
+        unused > 0
+          ? `${plan.name} costs ${usd(netCents)} after credit for your unused time`
+          : `${plan.name} costs ${usd(plan.priceCents)}`;
       throw new BadRequestException(
-        `not enough Credit — ${plan.name} costs $${(plan.priceCents / 100).toFixed(2)}, ` +
-          `you have $${(balance / 100).toFixed(2)}. Deposit $${(shortBy / 100).toFixed(2)} more.`,
+        `not enough Credit — ${cost}, you have ${usd(balance)}. Deposit ${usd(shortBy)} more.`,
       );
     }
 
@@ -288,4 +319,38 @@ export function addDays(from: Date, days: number): Date {
   const out = new Date(from);
   out.setUTCDate(out.getUTCDate() + days);
   return out;
+}
+
+/** Format USD cents for a user-facing message. */
+function usd(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+/**
+ * What a team has already paid for and not yet used, in USD cents.
+ *
+ * WHY THIS EXISTS. Without it, switching packages mid-period charges the new plan in full and
+ * silently discards the remainder of the old one — someone who upgrades from Light to Pro on day
+ * two has just thrown away 28 days they paid for. That is an ordinary action, not an edge case, and
+ * losing the customer's money on it is a defect rather than simplicity.
+ *
+ * Prorated by elapsed time against a 30-day period, floored to the cent so rounding can never
+ * credit MORE than was actually unused. Returns 0 for:
+ *   - no subscription, or the free tier — nothing was paid
+ *   - a period that has already ended — it was consumed, and the next one was never charged
+ *   - `past_due` — the last renewal failed, so there is no paid period to refund
+ */
+function unusedCents(subscription: Subscription | null): number {
+  if (!subscription || subscription.tier === 'free') return 0;
+  if (subscription.status !== 'active') return 0;
+  if (!subscription.currentPeriodEnd || subscription.priceCents <= 0) return 0;
+
+  const remainingMs = new Date(subscription.currentPeriodEnd).getTime() - Date.now();
+  if (remainingMs <= 0) return 0;
+
+  const periodMs = PERIOD_DAYS * 24 * 60 * 60 * 1000;
+  // Clamp: a period end further out than one full period (a support grant, a clock skew) must not
+  // refund more than the team ever paid.
+  const fraction = Math.min(remainingMs / periodMs, 1);
+  return Math.floor(subscription.priceCents * fraction);
 }

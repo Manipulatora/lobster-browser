@@ -150,6 +150,71 @@ test('buying the same active plan twice is rejected', async () => {
   await assert.rejects(() => svc.purchasePlan(USER, 'pro'), ConflictException);
 });
 
+test('switching packages credits back the unused part of the current period', async () => {
+  const { svc, repo } = makeService();
+  await fund(repo, 30_000);
+  await svc.purchasePlan(USER, 'light'); // -1_000 → 29_000, 30 days ahead
+
+  // Halfway through the period: half of Light's $10 is unused.
+  await repo.activateSubscription({
+    teamId: TEAM,
+    tier: 'light',
+    profileLimit: 10,
+    priceCents: 1_000,
+    currentPeriodEnd: new Date(Date.now() + 15 * 24 * 3600 * 1000),
+  });
+
+  await svc.purchasePlan(USER, 'pro'); // $100 less ~$5 unused Light
+
+  const balance = await repo.getBalanceCents(TEAM);
+  // 29_000 - (10_000 - ~500). Floored proration, so allow a cent of slack for clock movement.
+  assert.ok(
+    Math.abs(balance - 19_500) <= 2,
+    `expected ~19_500 after prorated switch, got ${balance}`,
+  );
+  assert.equal((await repo.getSubscription(TEAM))?.profileLimit, 200);
+});
+
+test('a downgrade worth more than the new plan lands as a refund, not a negative charge', async () => {
+  const { svc, repo } = makeService();
+  await fund(repo, 30_000);
+  await svc.purchasePlan(USER, 'max'); // -20_000 → 10_000
+
+  // Almost the whole Max period unused: ~$200 of credit against a $10 Light plan.
+  await repo.activateSubscription({
+    teamId: TEAM,
+    tier: 'max',
+    profileLimit: 1_000,
+    priceCents: 20_000,
+    currentPeriodEnd: new Date(Date.now() + 30 * 24 * 3600 * 1000),
+  });
+
+  await svc.purchasePlan(USER, 'light');
+
+  const balance = await repo.getBalanceCents(TEAM);
+  // 10_000 + (20_000 - 1_000) = 29_000, give or take the floor.
+  assert.ok(Math.abs(balance - 29_000) <= 2, `expected ~29_000, got ${balance}`);
+
+  const [latest] = await repo.listTransactions(TEAM, 1);
+  assert.equal(latest?.kind, 'refund', 'a net credit must be recorded as a refund');
+  assert.ok(latest!.amountCents > 0, 'a refund must be a positive movement');
+});
+
+test('a lapsed subscription earns no unused-time credit', async () => {
+  // past_due means the last renewal was NOT paid, so there is no paid period to refund. Crediting
+  // one would hand out money for time that was never bought.
+  const { svc, repo } = makeService();
+  await fund(repo, 10_000);
+  await svc.purchasePlan(USER, 'pro'); // balance 0
+  await expire(repo, 1);
+  await renewal(repo).sweep(); // lapses to past_due
+
+  await fund(repo, 1_000);
+  await svc.purchasePlan(USER, 'light');
+
+  assert.equal(await repo.getBalanceCents(TEAM), 0, 'charged Light in full, no proration credit');
+});
+
 test('a caller cannot spend a team they do not belong to', async () => {
   const { svc, repo } = makeService();
   await fund(repo, 30_000);
