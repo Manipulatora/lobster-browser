@@ -1,4 +1,5 @@
-import { CheckCircleIcon } from '@heroicons/react/24/outline';
+import { Icon } from '../../ui/Icon';
+
 
 const PLANS = [
   {
@@ -60,7 +61,7 @@ export function PricingView(): JSX.Element {
             <ul>
               {plan.details.map((detail) => (
                 <li key={detail}>
-                  <CheckCircleIcon aria-hidden />
+                  <Icon name="CheckCircleIcon" aria-hidden />
                   {detail}
                 </li>
               ))}

@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import type { ReactNode } from 'react';
-import { CheckIcon, ClipboardIcon } from '@heroicons/react/24/outline';
+
 import { Button } from './Button';
+import { Icon } from './Icon';
 
 /** Loading spinner. */
 export function Spinner({ size = 16 }: { size?: number }): JSX.Element {
@@ -90,7 +91,7 @@ export function CodeBlock({ code, label }: { code: string; label?: string }): JS
         variant="secondary"
         size="sm"
         onClick={copy}
-        leadingIcon={copied ? <CheckIcon aria-hidden /> : <ClipboardIcon aria-hidden />}
+        leadingIcon={copied ? <Icon name="CheckIcon" aria-hidden /> : <Icon name="ClipboardIcon" aria-hidden />}
       >
         {copied ? 'Copied' : 'Copy'}
       </Button>

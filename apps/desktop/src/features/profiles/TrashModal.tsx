@@ -1,13 +1,9 @@
 import type { Profile } from '@lobster/shared-types';
-import {
-  ArrowPathIcon,
-  ArrowUturnLeftIcon,
-  TrashIcon,
-  XMarkIcon,
-} from '@heroicons/react/24/outline';
+
 
 import appIcon from '../../assets/brand/icon.png';
 import { osLabel } from './options';
+import { Icon } from '../../ui/Icon';
 
 interface TrashModalProps {
   profiles: Profile[];
@@ -63,10 +59,10 @@ export function TrashModal({
             aria-label="Refresh trash"
             title="Refresh"
           >
-            <ArrowPathIcon aria-hidden />
+            <Icon name="ArrowPathIcon" aria-hidden />
           </button>
           <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
-            <XMarkIcon aria-hidden />
+            <Icon name="XMarkIcon" aria-hidden />
           </button>
         </div>
       </header>
@@ -114,7 +110,7 @@ export function TrashModal({
                       disabled={busy}
                       onClick={() => onRestore(profile.id)}
                     >
-                      <ArrowUturnLeftIcon aria-hidden />
+                      <Icon name="ArrowUturnLeftIcon" aria-hidden />
                       Restore
                     </button>
                     <button
@@ -123,7 +119,7 @@ export function TrashModal({
                       disabled={busy}
                       onClick={() => onPermanentlyDelete(profile.id)}
                     >
-                      <TrashIcon aria-hidden />
+                      <Icon name="TrashIcon" aria-hidden />
                       Delete
                     </button>
                   </div>

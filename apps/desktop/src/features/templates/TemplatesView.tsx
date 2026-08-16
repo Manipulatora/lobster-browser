@@ -1,9 +1,4 @@
-import {
-  DocumentDuplicateIcon,
-  MagnifyingGlassIcon,
-  PlayIcon,
-  SparklesIcon,
-} from '@heroicons/react/24/outline';
+
 import { useEffect, useState } from 'react';
 
 import type {
@@ -18,6 +13,7 @@ import { profilesClient, templatesClient } from '../../api/tauri';
 import appIcon from '../../assets/brand/icon.png';
 import { EmptyState, Modal, Skeleton, useToast } from '../../ui';
 import { ENGINE_OPTIONS, OS_OPTIONS, OS_VERSION_OPTIONS } from '../profiles/options';
+import { Icon } from '../../ui/Icon';
 
 interface TemplateFormState {
   name: string;
@@ -296,7 +292,7 @@ export function TemplatesView(): JSX.Element {
           <strong>{rows.length}</strong>
         </div>
         <label className="search-field search-field--templates">
-          <MagnifyingGlassIcon aria-hidden />
+          <Icon name="MagnifyingGlassIcon" aria-hidden />
           <input
             type="search"
             value={query}
@@ -305,7 +301,7 @@ export function TemplatesView(): JSX.Element {
           />
         </label>
         <button type="button" className="btn btn--primary" onClick={() => setShowCreate(true)}>
-          <SparklesIcon aria-hidden />
+          <Icon name="SparklesIcon" aria-hidden />
           Create Template
         </button>
       </header>
@@ -321,7 +317,7 @@ export function TemplatesView(): JSX.Element {
 
       {!loading && rows.length === 0 ? (
         <EmptyState
-          icon={<DocumentDuplicateIcon aria-hidden />}
+          icon={<Icon name="DocumentDuplicateIcon" aria-hidden />}
           title={query.trim() ? 'No matching templates' : 'No templates yet'}
           description={
             query.trim()
@@ -335,7 +331,7 @@ export function TemplatesView(): JSX.Element {
                 className="btn btn--primary"
                 onClick={() => setShowCreate(true)}
               >
-                <SparklesIcon aria-hidden />
+                <Icon name="SparklesIcon" aria-hidden />
                 Create Template
               </button>
             )
@@ -392,7 +388,7 @@ export function TemplatesView(): JSX.Element {
                         void handleCreateProfile(template);
                       }}
                     >
-                      <PlayIcon aria-hidden />
+                      <Icon name="PlayIcon" aria-hidden />
                       Create Profile
                     </button>
                   </td>

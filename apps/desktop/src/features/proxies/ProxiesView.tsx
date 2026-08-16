@@ -1,10 +1,4 @@
-import {
-  ArrowPathIcon,
-  ClipboardDocumentIcon,
-  PlusIcon,
-  ServerStackIcon,
-  SignalIcon,
-} from '@heroicons/react/24/outline';
+
 import { useEffect, useState } from 'react';
 
 import type {
@@ -17,6 +11,7 @@ import type {
 
 import { proxiesClient } from '../../api/tauri';
 import { ActionDialog, EmptyState, Modal, Skeleton, useToast } from '../../ui';
+import { Icon } from '../../ui/Icon';
 
 interface ProxyFormState {
   title: string;
@@ -271,7 +266,7 @@ function AddProxyModal({
                 void pasteProxy();
               }}
             >
-              <ClipboardDocumentIcon aria-hidden />
+              <Icon name="ClipboardDocumentIcon" aria-hidden />
             </button>
             <input
               className="input"
@@ -322,7 +317,7 @@ function AddProxyModal({
           }}
           disabled={checking || !canSubmit}
         >
-          <ArrowPathIcon aria-hidden />
+          <Icon name="ArrowPathIcon" aria-hidden />
           {checking ? 'Checking...' : 'Check Proxy'}
         </button>
 
@@ -489,7 +484,7 @@ export function ProxiesView(): JSX.Element {
           <strong>{rows.length}</strong>
         </div>
         <button type="button" className="btn btn--primary" onClick={() => setShowAddProxy(true)}>
-          <PlusIcon aria-hidden />
+          <Icon name="PlusIcon" aria-hidden />
           Add Proxy
         </button>
       </header>
@@ -505,7 +500,7 @@ export function ProxiesView(): JSX.Element {
 
       {!loading && rows.length === 0 ? (
         <EmptyState
-          icon={<ServerStackIcon aria-hidden />}
+          icon={<Icon name="ServerStackIcon" aria-hidden />}
           title="No proxies yet"
           description="Add a SOCKS5 or HTTP(S) proxy to assign it to profiles."
           action={
@@ -514,7 +509,7 @@ export function ProxiesView(): JSX.Element {
               className="btn btn--primary"
               onClick={() => setShowAddProxy(true)}
             >
-              <PlusIcon aria-hidden />
+              <Icon name="PlusIcon" aria-hidden />
               Add Proxy
             </button>
           }
@@ -576,7 +571,7 @@ export function ProxiesView(): JSX.Element {
                             onClick={() => void handleRotateProxy(proxy)}
                             disabled={checking}
                           >
-                            <ArrowPathIcon aria-hidden />
+                            <Icon name="ArrowPathIcon" aria-hidden />
                             Rotate
                           </button>
                         ) : null}
@@ -605,7 +600,7 @@ export function ProxiesView(): JSX.Element {
       ) : null}
 
       <div className="info-strip">
-        <SignalIcon aria-hidden />
+        <Icon name="SignalIcon" aria-hidden />
         <span>
           Proxy tests resolve exit IP, latency, timezone, and datacenter warnings through the Rust
           IPC path.

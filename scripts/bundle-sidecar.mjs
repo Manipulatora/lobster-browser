@@ -3,10 +3,10 @@
  * Bundle a self-contained engine-runner sidecar for packaged desktop installs (DSK-5/11).
  *
  * Output: apps/desktop/src-tauri/resources/sidecar/
- *   index.js          — entry (copies dist/index.js)
- *   lib/…             — engine-runner dist
- *   node_modules/     — @lobster/* + proxy-chain/undici (no patchright: CDP is first-party)
- *   package.json      — marks the bundle as ESM
+ *   index.js          â€” entry (copies dist/index.js)
+ *   lib/â€¦             â€” engine-runner dist
+ *   node_modules/     â€” @lobster/* + proxy-chain/undici (no patchright: CDP is first-party)
+ *   package.json      â€” marks the bundle as ESM
  *
  * The Rust core spawns: `$LOBSTER_NODE_BIN <resources>/sidecar/index.js`
  */
@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repo = join(here, '..'); // scripts/ → lobster-browser/
+const repo = join(here, '..'); // scripts/ â†’ lobster-browser/
 const outDir = join(repo, 'apps/desktop/src-tauri/resources/sidecar');
 const require = createRequire(import.meta.url);
 
@@ -27,7 +27,7 @@ const require = createRequire(import.meta.url);
  *
  * Spawning the `npm` wrapper is a portability trap. On Windows `npm` is npm.cmd, and since the
  * CVE-2024-27980 hardening (Node >= 18.20.2 / 20.12.2) spawnSync REFUSES to execute a .cmd/.bat
- * unless shell:true — it fails with EINVAL and a null status, which the old
+ * unless shell:true â€” it fails with EINVAL and a null status, which the old
  * `process.exit(r.status ?? 1)` turned into a silent exit-1 on the very first workspace. Using
  * shell:true instead fixes that but trips DEP0190 (args are concatenated, not escaped).
  * Running npm-cli.js under the current interpreter avoids both, on every platform.
@@ -45,7 +45,7 @@ function resolveNpmCli() {
 const npmCli = resolveNpmCli();
 
 function mustBuild(workspace) {
-  console.log(`[bundle-sidecar] building ${workspace}…`);
+  console.log(`[bundle-sidecar] building ${workspace}â€¦`);
   const args = ['run', 'build', '--workspace', workspace];
   const r = npmCli
     ? spawnSync(process.execPath, [npmCli, ...args], {
@@ -60,7 +60,7 @@ function mustBuild(workspace) {
         env: process.env,
         shell: process.platform === 'win32',
       });
-  // spawn failures (ENOENT, EACCES) surface on r.error with a null status — report them instead of
+  // spawn failures (ENOENT, EACCES) surface on r.error with a null status â€” report them instead of
   // exiting with a bare code.
   if (r.error) {
     console.error(`[bundle-sidecar] cannot run npm: ${r.error.message}`);
@@ -91,7 +91,7 @@ function copyPkg(name, destName = name) {
   const dest = join(outDir, 'node_modules', destName);
   mkdirSync(dirname(dest), { recursive: true });
   cpSync(src, dest, { recursive: true, filter: (p) => !p.includes('/.git') });
-  console.log(`[bundle-sidecar] copied ${name} → node_modules/${destName}`);
+  console.log(`[bundle-sidecar] copied ${name} â†’ node_modules/${destName}`);
 }
 
 // 1. Build workspace packages the sidecar imports.
@@ -111,18 +111,50 @@ for (const ws of [
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
-// 3. Copy engine-runner dist as the runnable tree.
-const runnerDist = join(repo, 'packages/engine-runner/dist');
-if (!existsSync(join(runnerDist, 'index.js'))) {
+// 3. Bundle engine-runner and everything it imports into ONE file.
+//
+// This used to copy dist/ verbatim and then copy every dependency's whole package directory beside
+// it. That shipped 41.8 MB of node_modules - 21.5 MB of it our own @lobster packages, which carry
+// the full fingerprint catalog in unminified source form, plus every README, .d.ts, map and test
+// fixture in every third-party package. Node then resolved and parsed that tree on each launch.
+//
+// Bundling keeps only the code actually reachable from the entry. Node built-ins stay external
+// (they are provided by the runtime); everything else is inlined.
+const runnerEntry = join(repo, 'packages/engine-runner/dist/index.js');
+if (!existsSync(runnerEntry)) {
   console.error('[bundle-sidecar] engine-runner dist/index.js missing');
   process.exit(1);
 }
-cpSync(runnerDist, join(outDir, 'dist'), { recursive: true });
-writeFileSync(
-  join(outDir, 'index.js'),
-  `#!/usr/bin/env node\nimport './dist/index.js';\n`,
-  { mode: 0o755 },
-);
+
+{
+  const { rolldown } = await import('rolldown');
+  const build = await rolldown({
+    input: runnerEntry,
+    platform: 'node',
+    // Node built-ins only. Anything else that stays external would have to be shipped beside the
+    // bundle, which is the thing being removed.
+    external: [/^node:/],
+    // A dependency that cannot be resolved must fail the build, not silently become a runtime
+    // require of something we did not ship - that is the failure mode the tldts incident had.
+    onwarn(warning, warn) {
+      if (warning.code === 'UNRESOLVED_IMPORT' || warning.code === 'MISSING_EXPORT') {
+        console.error(`[bundle-sidecar] ${warning.code}: ${warning.message}`);
+        process.exit(1);
+      }
+      warn(warning);
+    },
+  });
+  await build.write({
+    file: join(outDir, 'index.js'),
+    format: 'esm',
+    // One file: no module resolution work at startup, and nothing beside it that can go missing.
+    codeSplitting: false,
+    banner: '#!/usr/bin/env node',
+  });
+  await build.close();
+  const bytes = readFileSync(join(outDir, 'index.js')).length;
+  console.log(`[bundle-sidecar] bundled index.js  ${(bytes / 1024 / 1024).toFixed(2)} MB`);
+}
 
 // 4. Minimal package.json so Node treats the bundle as ESM and resolves local deps.
 writeFileSync(
@@ -140,61 +172,13 @@ writeFileSync(
   ) + '\n',
 );
 
-// 5. Workspace packages (file: layout under node_modules/@lobster).
-mkdirSync(join(outDir, 'node_modules/@lobster'), { recursive: true });
-for (const name of ['shared-types', 'proxy', 'fingerprint', 'cookies', 'crypto', 'agent', 'engine-runner']) {
-  const src = join(repo, 'packages', name);
-  const dest = join(outDir, 'node_modules/@lobster', name);
-  // Prefer dist + package.json only (smaller).
-  mkdirSync(dest, { recursive: true });
-  const pkg = JSON.parse(readFileSync(join(src, 'package.json'), 'utf8'));
-  writeFileSync(join(dest, 'package.json'), JSON.stringify(pkg, null, 2) + '\n');
-  if (existsSync(join(src, 'dist'))) {
-    cpSync(join(src, 'dist'), join(dest, 'dist'), { recursive: true });
-  }
-  console.log(`[bundle-sidecar] staged @lobster/${name}`);
-}
-
-// 6. Third-party runtime deps (and their transitive deps) from the hoisted root node_modules.
-// proxy-chain (+ tslib) backs the authenticated SOCKS/HTTP local shim (docs/OPERATIONS.md).
-// NOTE: patchright is intentionally NOT bundled — the sidecar drives CDP via the first-party
-// cdp-client.ts (raw DevTools WebSocket). patchright is a dev-only tool for ci/validation tests.
-for (const name of [
-  'undici',
-  'socks-proxy-agent',
-  'socks',
-  'agent-base',
-  'debug',
-  'ms',
-  'ip-address',
-  'smart-buffer',
-  'proxy-chain',
-  'tslib',
-  // CRX/unpacked extension preparation.
-  'yauzl',
-  'pend',
-  // Public-suffix lookup for @lobster/agent's browser-config guard, plus its own dependency.
-  // Its absence did not fail the bundle - the catch below only warns - so the packaged sidecar
-  // shipped unable to start at all: `ERR_MODULE_NOT_FOUND: Cannot find package 'tldts'`, thrown
-  // before the first RPC. The app still opened, reported no error, and every profile launch failed.
-  // See the smoke test at the end of this script, which now makes that impossible to ship again.
-  'tldts',
-  'tldts-core',
-]) {
-  try {
-    copyPkg(name);
-  } catch (err) {
-    console.warn(`[bundle-sidecar] skip ${name}: ${err instanceof Error ? err.message : err}`);
-  }
-}
-// @noble/hashes (scoped)
-{
-  const src = resolvePkg('@noble/hashes');
-  const dest = join(outDir, 'node_modules/@noble/hashes');
-  mkdirSync(dirname(dest), { recursive: true });
-  cpSync(src, dest, { recursive: true });
-  console.log('[bundle-sidecar] copied @noble/hashes');
-}
+// 5. Nothing else to copy.
+//
+// Sections 5 and 6 used to copy the @lobster workspace packages and a HAND-MAINTAINED list of
+// third-party packages into node_modules/ beside the entry. The bundle above inlines everything
+// reachable from the entry, so both are gone - and with them the hand-maintained list that once
+// shipped a sidecar unable to start, because @lobster/agent gained a dependency nobody added to
+// it and copyPkg only warned. What the bundler cannot resolve now fails the build.
 
 // ---------------------------------------------------------------------------------------------
 // Smoke test: START the bundle that was just produced and round-trip a `ping`.
@@ -232,12 +216,12 @@ for (const name of [
     .find((m) => m && m.id === 1);
 
   if (!pong || pong.ok !== true || pong.result?.pong !== true) {
-    console.error('[bundle-sidecar] SMOKE TEST FAILED — the bundle does not start.');
+    console.error('[bundle-sidecar] SMOKE TEST FAILED â€” the bundle does not start.');
     if (res.error) console.error(`  spawn error: ${res.error.message}`);
     if (res.stderr) console.error(res.stderr.split('\n').slice(0, 15).join('\n'));
     if (stdout) console.error(`  stdout: ${stdout.slice(0, 400)}`);
     console.error(
-      '\n  A missing runtime dependency is the usual cause. Add it to the third-party list above —\n' +
+      '\n  A missing runtime dependency is the usual cause. Add it to the third-party list above â€”\n' +
         '  copyPkg only warns when a package is absent, so the bundle is produced either way.',
     );
     process.exit(1);
@@ -245,4 +229,4 @@ for (const name of [
   console.log('[bundle-sidecar] smoke test OK (ping/pong)');
 }
 
-console.log(`[bundle-sidecar] done → ${outDir}`);
+console.log(`[bundle-sidecar] done â†’ ${outDir}`);

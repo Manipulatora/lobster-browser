@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { XMarkIcon } from '@heroicons/react/24/outline';
+import { Icon } from './Icon';
+
 
 export interface ModalProps {
   open: boolean;
@@ -104,7 +105,7 @@ export function Modal({
               aria-label="Close"
               onClick={onClose}
             >
-              <XMarkIcon aria-hidden />
+              <Icon name="XMarkIcon" aria-hidden />
             </button>
           </div>
         ) : null}

@@ -1,15 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import {
-  EllipsisHorizontalIcon,
-  FunnelIcon,
-  MagnifyingGlassIcon,
-  PlayIcon,
-  PlusIcon,
-  StopIcon,
-  TrashIcon,
-  UserGroupIcon,
-} from '@heroicons/react/24/outline';
+
 
 import type {
   CreateProfileInput,
@@ -37,6 +28,7 @@ import { ENGINE_OPTIONS, OS_OPTIONS, STATUS_META } from './options';
 import { ProfileList, type ProfileSortKey, type SortDir } from './ProfileList';
 import { TrashModal } from './TrashModal';
 import { useProfiles } from './useProfiles';
+import { Icon } from '../../ui/Icon';
 
 const NewProfileForm = lazy(() =>
   import('./NewProfileForm').then((module) => ({ default: module.NewProfileForm })),
@@ -708,7 +700,7 @@ export function ProfilesView({
         </div>
         <div className="toolbar-search">
           <label className="search-field">
-            <MagnifyingGlassIcon aria-hidden />
+            <Icon name="MagnifyingGlassIcon" aria-hidden />
             <input
               type="search"
               value={query}
@@ -726,13 +718,13 @@ export function ProfilesView({
               aria-expanded={showFilters}
               onClick={() => setShowFilters((current) => !current)}
             >
-              <FunnelIcon aria-hidden />
+              <Icon name="FunnelIcon" aria-hidden />
             </button>
           </label>
         </div>
         <div className="toolbar-actions">
           <button type="button" className="btn btn--primary" onClick={() => setShowForm(true)}>
-            <PlusIcon aria-hidden />
+            <Icon name="PlusIcon" aria-hidden />
             Create Profile
           </button>
           <div className="toolbar-menu" ref={toolbarMenuRef}>
@@ -743,7 +735,7 @@ export function ProfilesView({
               aria-expanded={showToolbarMenu}
               onClick={() => setShowToolbarMenu((current) => !current)}
             >
-              <EllipsisHorizontalIcon aria-hidden />
+              <Icon name="EllipsisHorizontalIcon" aria-hidden />
             </button>
             {showToolbarMenu ? (
               <div className="action-menu toolbar-action-menu" role="menu">
@@ -755,7 +747,7 @@ export function ProfilesView({
                     void handleOpenTrash();
                   }}
                 >
-                  <TrashIcon aria-hidden />
+                  <Icon name="TrashIcon" aria-hidden />
                   Trash
                 </button>
               </div>
@@ -858,7 +850,7 @@ export function ProfilesView({
           <Button
             variant="secondary"
             size="sm"
-            leadingIcon={<PlayIcon aria-hidden />}
+            leadingIcon={<Icon name="PlayIcon" aria-hidden />}
             onClick={() => {
               void handleBulkLaunch();
             }}
@@ -868,7 +860,7 @@ export function ProfilesView({
           <Button
             variant="secondary"
             size="sm"
-            leadingIcon={<StopIcon aria-hidden />}
+            leadingIcon={<Icon name="StopIcon" aria-hidden />}
             onClick={() => {
               void handleBulkStop();
             }}
@@ -878,7 +870,7 @@ export function ProfilesView({
           <Button
             variant="danger"
             size="sm"
-            leadingIcon={<TrashIcon aria-hidden />}
+            leadingIcon={<Icon name="TrashIcon" aria-hidden />}
             onClick={() => {
               void handleBulkTrash();
             }}
@@ -903,12 +895,12 @@ export function ProfilesView({
           </div>
         ) : isEmpty ? (
           <EmptyState
-            icon={<UserGroupIcon aria-hidden />}
+            icon={<Icon name="UserGroupIcon" aria-hidden />}
             title={t('profiles.empty.title')}
             description={t('profiles.empty.desc')}
             action={
               <button type="button" className="btn btn--primary" onClick={() => setShowForm(true)}>
-                <PlusIcon aria-hidden />
+                <Icon name="PlusIcon" aria-hidden />
                 Create Profile
               </button>
             }

@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { XMarkIcon } from '@heroicons/react/24/outline';
+import { Icon } from './Icon';
+
 
 export type ToastTone = 'success' | 'error' | 'info';
 interface Toast {
@@ -64,7 +65,7 @@ export function ToastProvider({ children }: { children: ReactNode }): JSX.Elemen
               aria-label="Dismiss notification"
               onClick={() => remove(t.id)}
             >
-              <XMarkIcon aria-hidden />
+              <Icon name="XMarkIcon" aria-hidden />
             </button>
           </div>
         ))}

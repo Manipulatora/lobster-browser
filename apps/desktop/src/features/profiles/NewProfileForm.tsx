@@ -1,4 +1,4 @@
-import { ChevronDownIcon, XMarkIcon } from '@heroicons/react/24/outline';
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { parseJson, parseNetscape } from '@lobster/cookies';
 import { normalizeDeviceMemory } from '@lobster/fingerprint';
@@ -57,6 +57,7 @@ import {
   validateProfileDraft,
   type ProfileDraft,
 } from './profileDraft';
+import { Icon } from '../../ui/Icon';
 
 interface NewProfileFormProps {
   profile?: Profile;
@@ -551,7 +552,7 @@ function OsSelect({
       >
         <OsIcon os={value} size={18} className="os-select__glyph" />
         <span className="os-select__value">{selected?.label ?? value}</span>
-        <ChevronDownIcon className="os-select__chevron" aria-hidden />
+        <Icon name="ChevronDownIcon" className="os-select__chevron" aria-hidden />
       </button>
       {open ? (
         <div className="os-select__list" role="listbox">
@@ -1028,7 +1029,7 @@ export function NewProfileForm({
       <header className="modal-header">
         <h2 id="new-profile-title">{editing ? 'Edit profile' : 'New profile'}</h2>
         <button type="button" className="icon-button" onClick={onCancel} aria-label="Close">
-          <XMarkIcon aria-hidden />
+          <Icon name="XMarkIcon" aria-hidden />
         </button>
       </header>
 

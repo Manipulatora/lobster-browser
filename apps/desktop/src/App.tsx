@@ -1,9 +1,4 @@
-import {
-  DocumentDuplicateIcon,
-  MagnifyingGlassIcon,
-  ServerStackIcon,
-  UserGroupIcon,
-} from '@heroicons/react/24/outline';
+
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { isDesktopRuntime, profilesClient } from './api/tauri';
@@ -13,12 +8,15 @@ import { TemplatesView } from './features/templates/TemplatesView';
 import siteLogo from './assets/brand/site-logo.png';
 import { ActionDialog, CommandPalette, ErrorDialog, Kbd, type Command } from './ui';
 import type { Profile } from '@lobster/shared-types';
+import { Icon, type IconName } from './ui/Icon';
 
+// Icon NAMES rather than components: <Icon> resolves the path itself, so the nav table stays plain
+// data and nothing here has to shadow the component to render it.
 const NAV_ITEMS = [
-  { key: 'profiles', label: 'Profiles', icon: UserGroupIcon },
-  { key: 'proxies', label: 'Proxies', icon: ServerStackIcon },
-  { key: 'templates', label: 'Templates', icon: DocumentDuplicateIcon },
-] as const;
+  { key: 'profiles', label: 'Profiles', icon: 'UserGroupIcon' },
+  { key: 'proxies', label: 'Proxies', icon: 'ServerStackIcon' },
+  { key: 'templates', label: 'Templates', icon: 'DocumentDuplicateIcon' },
+] as const satisfies ReadonlyArray<{ key: string; label: string; icon: IconName }>;
 
 export type NavKey = (typeof NAV_ITEMS)[number]['key'];
 
@@ -130,7 +128,7 @@ export function App(): JSX.Element {
       title: `Go to ${item.label}`,
       group: 'Navigation',
       keywords: item.label,
-      icon: <item.icon aria-hidden />,
+      icon: <Icon name={item.icon} aria-hidden />,
       run: () => setActive(item.key),
     }));
 
@@ -179,8 +177,8 @@ export function App(): JSX.Element {
             onClick={() => setPaletteOpen(true)}
             title="Command palette"
           >
-            <MagnifyingGlassIcon aria-hidden />
-            <Kbd>{isMac ? '⌘K' : 'Ctrl K'}</Kbd>
+            <Icon name="MagnifyingGlassIcon" aria-hidden />
+            <Kbd>{isMac ? 'âŒ˜K' : 'Ctrl K'}</Kbd>
           </button>
         </div>
       </header>
@@ -189,7 +187,6 @@ export function App(): JSX.Element {
         <aside className="sidebar" aria-label="Primary navigation">
           <nav className="nav">
             {NAV_ITEMS.map((item) => {
-              const Icon = item.icon;
               return (
                 <button
                   key={item.key}
@@ -199,7 +196,7 @@ export function App(): JSX.Element {
                   aria-current={item.key === active ? 'page' : undefined}
                   title={item.label}
                 >
-                  <Icon className="nav-item__icon" aria-hidden />
+                  <Icon name={item.icon} className="nav-item__icon" aria-hidden />
                   <span>{item.label}</span>
                 </button>
               );
@@ -223,7 +220,7 @@ export function App(): JSX.Element {
       <ActionDialog
         open={quickLaunchProfile !== null}
         title="Unlock profile"
-        description={`Enter the password for “${quickLaunchProfile?.name ?? 'this profile'}” to launch it in Lobium.`}
+        description={`Enter the password for â€œ${quickLaunchProfile?.name ?? 'this profile'}â€ to launch it in Lobium.`}
         confirmLabel="Launch profile"
         busy={quickLaunchBusy}
         input={{

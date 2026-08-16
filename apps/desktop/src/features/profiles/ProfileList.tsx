@@ -1,12 +1,5 @@
 import type { Profile, StoredProxy } from '@lobster/shared-types';
-import {
-  ChevronDownIcon,
-  ChevronUpIcon,
-  EllipsisVerticalIcon,
-  LockClosedIcon,
-  PlayIcon,
-  StopIcon,
-} from '@heroicons/react/24/outline';
+
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -15,6 +8,7 @@ import appIcon from '../../assets/brand/icon.png';
 import { EmptyState } from '../../ui';
 import { isAndroidTarget, osLabel, STATUS_META } from './options';
 import { OsIcon, countryFlag } from './OsIcon';
+import { Icon } from '../../ui/Icon';
 
 export type ProfileSortKey = 'name' | 'updatedAt' | 'status' | 'proxy' | 'description' | 'tags';
 export type SortDir = 'asc' | 'desc';
@@ -126,9 +120,9 @@ function SortHeader({
       <span>{label}</span>
       {active ? (
         dir === 'asc' ? (
-          <ChevronUpIcon aria-hidden />
+          <Icon name="ChevronUpIcon" aria-hidden />
         ) : (
-          <ChevronDownIcon aria-hidden />
+          <Icon name="ChevronDownIcon" aria-hidden />
         )
       ) : null}
     </button>
@@ -194,7 +188,7 @@ function StatusActionButton({
         aria-label={`Stop ${profile.name}`}
         title="Stop"
       >
-        <StopIcon aria-hidden />
+        <Icon name="StopIcon" aria-hidden />
       </button>
     );
   }
@@ -210,7 +204,7 @@ function StatusActionButton({
         androidTarget ? 'Launch (phone-emulated Chrome — no device or APK required)' : 'Launch'
       }
     >
-      <PlayIcon aria-hidden />
+      <Icon name="PlayIcon" aria-hidden />
     </button>
   );
 }
@@ -292,7 +286,7 @@ export function ProfileList({
   if (profiles.length === 0) {
     return (
       <EmptyState
-        icon={<LockClosedIcon aria-hidden />}
+        icon={<Icon name="LockClosedIcon" aria-hidden />}
         title="No matching profiles"
         description="Adjust the current filters to see more profiles."
       />
@@ -407,7 +401,7 @@ export function ProfileList({
                 </td>
                 <td>
                   <div className={`proxy-cell${proxy.present ? '' : ' proxy-cell--empty'}`}>
-                    <LockClosedIcon aria-hidden />
+                    <Icon name="LockClosedIcon" aria-hidden />
                     <div className="proxy-cell__text">
                       <div className="proxy-cell__name cell-ellipsis" title={proxy.name}>
                         {proxy.name}
@@ -462,7 +456,7 @@ export function ProfileList({
                           setOpenMenuId((current) => (current === profile.id ? null : profile.id))
                         }
                       >
-                        <EllipsisVerticalIcon aria-hidden />
+                        <Icon name="EllipsisVerticalIcon" aria-hidden />
                       </button>
                     </div>
                   </div>

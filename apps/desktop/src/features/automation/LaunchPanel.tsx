@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import { CheckCircleIcon } from '@heroicons/react/24/solid';
+
 import type { LaunchInfo } from '../../api/tauri';
 import { Badge, CodeBlock, Modal } from '../../ui';
 import { SNIPPETS } from './snippets';
+import { Icon } from '../../ui/Icon';
 
 /**
  * Post-launch automation panel (UI-6). Shows the profile's live CDP endpoints and copy-paste
@@ -30,7 +31,7 @@ export function LaunchPanel({
       size="lg"
       title={
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-          <CheckCircleIcon style={{ width: 20, height: 20, color: 'var(--green)' }} aria-hidden />
+          <Icon name="CheckCircleIcon" style={{ width: 20, height: 20, color: 'var(--green)' }} aria-hidden />
           {profileName} is running
         </span>
       }

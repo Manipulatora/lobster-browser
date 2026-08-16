@@ -4,6 +4,8 @@ import ReactDOM from 'react-dom/client';
 import { App } from './App';
 import { EngineGate } from './features/engine/EngineGate';
 import { ToastProvider } from './ui/Toast';
+// Before the tokens, so the @font-face declarations exist by the time --font references the family.
+import './assets/google-sans.css';
 import './ui/tokens.css';
 import './styles.css';
 import './ui/components.css';

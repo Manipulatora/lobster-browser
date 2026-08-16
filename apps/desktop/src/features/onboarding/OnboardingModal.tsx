@@ -1,6 +1,7 @@
-import { SparklesIcon } from '@heroicons/react/24/outline';
+
 
 import { Button, Modal } from '../../ui';
+import { Icon } from '../../ui/Icon';
 
 export const ONBOARD_KEY = 'lobster.onboarded';
 
@@ -53,7 +54,7 @@ export function OnboardingModal({
     >
       <div className="onboarding-body">
         <div className="onboarding-hero-icon" aria-hidden>
-          <SparklesIcon />
+          <Icon name="SparklesIcon" />
         </div>
         <p>
           Lobster Browser builds a coherent browser identity per profile — OS, locale, WebGL, and
