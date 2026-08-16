@@ -12,6 +12,34 @@ import { JournalRevisionConflictError, RunJournalStore, type RunJournalSnapshot 
 const key = (): string => randomBytes(32).toString('base64');
 const NOW = '2026-08-03T12:00:00.000Z';
 
+/**
+ * Assert that a journal path is private to its owner.
+ *
+ * POSIX: exactly the mode the store asks for — 0o700 for the directory, 0o600 for a journal — and
+ * nothing wider.
+ *
+ * Windows: `fs.chmod` there only toggles the read-only ATTRIBUTE; the mode reads back as 0o666 no
+ * matter what was requested, so asserting a POSIX mode is not weakening the test, it is asserting
+ * something the platform cannot express. Confidentiality on Windows comes from the ACL the journal
+ * root inherits from the user profile directory, and the product sets no explicit ACL of its own.
+ *
+ * That is a real, unclosed gap, recorded here rather than papered over: closing it means an explicit
+ * `icacls <path> /inheritance:r /grant:r "%USERNAME%":F` at store creation plus an icacls-based
+ * assertion. Until then we assert the one property Windows does express and that the store depends
+ * on operationally — the path exists, is the right kind of object, and is still writable, so the
+ * next append can rewrite it.
+ */
+async function assertOwnerOnly(path: string, posixMode: number, kind: 'dir' | 'file'): Promise<void> {
+  const st = await stat(path);
+  assert.equal(kind === 'dir' ? st.isDirectory() : st.isFile(), true, `${path} is not a ${kind}`);
+  if (process.platform === 'win32') {
+    // 0o200 is the only bit Windows actually reflects (the read-only attribute, inverted).
+    assert.equal((st.mode & 0o200) !== 0, true, `${path} lost its write bit`);
+    return;
+  }
+  assert.equal(st.mode & 0o777, posixMode, `${path} has wider permissions than ${posixMode.toString(8)}`);
+}
+
 async function withStore(
   fn: (ctx: { dir: string; encryptionKey: string; store: RunJournalStore }) => Promise<void>,
   options: { maxEvents?: number; maxBytes?: number; clock?: () => string } = {},
@@ -59,8 +87,8 @@ test('journal is AES-GCM encrypted, path-bound, and written with private permiss
     const raw = await readFile(path, 'utf8');
     assert.match(raw, /^lobee-run-journal-v1:/);
     assert.doesNotMatch(raw, /private quarterly report|reports\.example|model-x/);
-    assert.equal((await stat(dir)).mode & 0o777, 0o700);
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    await assertOwnerOnly(dir, 0o700, 'dir');
+    await assertOwnerOnly(path, 0o600, 'file');
 
     // Authenticated additional data binds ciphertext to its final relative path. A copied envelope
     // cannot become another run merely because its filename changed.
@@ -80,8 +108,8 @@ test('a missing journal root is durably created under its parent with private pe
   try {
     const store = new RunJournalStore(dir, { encryptionKey: key() });
     await store.create({ runId: 'created_root', task: 'task', mode: 'agent' });
-    assert.equal((await stat(dir)).mode & 0o777, 0o700);
-    assert.equal((await stat(join(dir, 'created_root.journal'))).mode & 0o777, 0o600);
+    await assertOwnerOnly(dir, 0o700, 'dir');
+    await assertOwnerOnly(join(dir, 'created_root.journal'), 0o600, 'file');
   } finally {
     await rm(parent, { recursive: true, force: true });
   }

@@ -8,6 +8,52 @@ const ENVELOPE_PREFIX = 'lobee-run-journal-v1:';
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
 
+/**
+ * Whether this platform can fsync a directory to persist its entries.
+ *
+ * POSIX: a rename is only durable once the containing directory is fsynced, so the barrier below is
+ * mandatory and a failure there is intentionally fatal.
+ *
+ * Windows: there is no directory fsync. `FlushFileBuffers` on a directory handle returns
+ * ERROR_ACCESS_DENIED, which Node surfaces as `EPERM: operation not permitted, fsync` — so the
+ * POSIX code path did not merely degrade on Windows, it made every journal write throw and the
+ * agent unrunnable. Windows does not need the call: NTFS and ReFS journal metadata operations
+ * (create/rename/unlink), so the directory entry produced by the rename is already recoverable
+ * after a crash — the same guarantee the POSIX fsync buys. The file contents are still flushed
+ * explicitly via `handle.sync()` before the rename on every platform.
+ */
+const DIRECTORY_SYNC_SUPPORTED = process.platform !== 'win32';
+
+/**
+ * `O_NOFOLLOW` refuses to open a final path component that is a symlink. Windows does not define it,
+ * and `constants.O_NOFOLLOW` is therefore `undefined` there — which `|` coerces to 0, silently
+ * dropping the protection instead of failing. Resolve it once so the degradation is explicit, and
+ * fall back to `lstatNoFollow` below wherever it is unavailable.
+ */
+const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+const HAS_O_NOFOLLOW = O_NOFOLLOW !== 0;
+
+/**
+ * The portable half of `O_NOFOLLOW`: refuse a path whose final component is a symlink (on Windows,
+ * that includes a directory junction, which `lstat` also reports as a link).
+ *
+ * This is a check-then-open, so unlike the real `O_NOFOLLOW` it has a TOCTOU window. It is only used
+ * where the kernel flag does not exist, it is strictly better than the silent no-op it replaces, and
+ * Node exposes no way to close the window on Windows. Callers that CREATE a file still use
+ * `O_CREAT | O_EXCL`, which is atomic and needs no such check.
+ */
+async function assertNotSymlink(path: string): Promise<void> {
+  if (HAS_O_NOFOLLOW) return;
+  try {
+    if ((await lstat(path)).isSymbolicLink()) {
+      throw new JournalStorageError(`${basename(path)} is a symbolic link`);
+    }
+  } catch (error) {
+    if (isMissing(error)) return; // the open below reports the absence
+    throw error;
+  }
+}
+
 export class JournalStorageError extends Error {
   constructor(message: string) {
     super(`run journal storage error: ${message}`);
@@ -44,10 +90,12 @@ export class EncryptedJournalFile {
     if (!(await this.verifyRoot())) return false;
     let handle;
     try {
-      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      await assertNotSymlink(path);
+      handle = await open(path, constants.O_RDONLY | O_NOFOLLOW);
       return true;
     } catch (error) {
       if (isMissing(error)) return false;
+      if (error instanceof JournalStorageError) throw error;
       throw storageFailure(error, basename(path));
     } finally {
       await handle?.close().catch(() => {});
@@ -59,7 +107,8 @@ export class EncryptedJournalFile {
     if (!(await this.verifyRoot())) return null;
     let handle;
     try {
-      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      await assertNotSymlink(path);
+      handle = await open(path, constants.O_RDONLY | O_NOFOLLOW);
       const stat = await handle.stat();
       if (!stat.isFile()) throw new JournalStorageError(`${basename(path)} is not a regular file`);
       const maxEnvelopeBytes =
@@ -159,6 +208,9 @@ export class EncryptedJournalFile {
   }
 
   private async fsyncDirectory(path = this.root): Promise<void> {
+    // See DIRECTORY_SYNC_SUPPORTED: skipped only where the platform provides the same ordering
+    // guarantee through metadata journaling, never as a way to swallow a real sync failure.
+    if (!DIRECTORY_SYNC_SUPPORTED) return;
     let handle;
     try {
       handle = await open(path, constants.O_RDONLY);

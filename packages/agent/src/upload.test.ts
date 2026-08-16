@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { link, mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -73,7 +73,12 @@ test('a file inside an approved root uploads', async () => {
     await writeFile(file, '%PDF-1.4\n');
     const { outcome, uploaded } = await attempt([file], [root]);
     assert.match(outcome, /uploaded 1 approved/);
-    assert.deepEqual(uploaded, [[file]]);
+    // Compare against the CANONICAL path. The executor realpaths before checking the allowlist —
+    // that is the whole defence, since without it a symlink or an 8.3 alias would sidestep the root
+    // check — so it hands the driver the resolved path. On Windows os.tmpdir() returns the 8.3 short
+    // form ("ADMINI~1"), so the un-resolved `file` here is a different string for the same file and
+    // asserting on it fails for a reason that has nothing to do with the behaviour under test.
+    assert.deepEqual(uploaded, [[await realpath(file)]]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
