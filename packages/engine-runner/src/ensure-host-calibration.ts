@@ -86,6 +86,21 @@ export async function ensureHostCalibration(
     os: opts.os ?? detectOs(),
     arch: opts.arch ?? detectArch(),
   });
+
+  // Validate BEFORE persisting. A freshly probed snapshot used to be written to disk unchecked
+  // while only a previously loaded one was validated, so a host that produces an invalid profile
+  // cached it and then failed on every subsequent launch with the same error — and the cache made
+  // it look permanent rather than like a bad capture. Refusing to persist keeps the failure
+  // transient and self-correcting.
+  const issues = validateHostCalibrationProfile(profile, {
+    allowSoftwareRenderer: allowProvisionalSoftwareGpu(),
+  });
+  if (issues.length > 0) {
+    throw new Error(
+      `refusing to persist an invalid host calibration probed into ${path}: ${issues.join('; ')}`,
+    );
+  }
+
   await persistHostCalibration(path, profile);
   return { path, profile, source: 'probed' };
 }

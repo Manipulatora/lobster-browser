@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import {
   LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
 } from '../lobium-capabilities.js';
 import { LOBIUM_CONFIG_FILENAME } from '../lobium-config.js';
+import { CHROMIUM_BINARY_NAME, writeFakeBinary } from '../test-fake-binary.js';
 import {
   buildLobiumLaunchArgs,
   buildNativeLobiumProcessArgs,
@@ -79,7 +80,7 @@ test('resolveLobiumBinary / isLobiumAvailable follow LOBSTER_LOBIUM_BIN', async 
 
     // Point at a real file (this test file) to prove the existsSync gate.
     const real = await mkdtemp(join(tmpdir(), 'lobium-bin-'));
-    const binPath = join(real, 'chrome');
+    const binPath = join(real, CHROMIUM_BINARY_NAME);
     await writeFile(binPath, '#!/bin/true\n', { mode: 0o755 });
     process.env.LOBSTER_LOBIUM_BIN = binPath;
     assert.equal(resolveLobiumBinary(), binPath);
@@ -104,7 +105,9 @@ test('resolveLobiumBinary can discover a built output from LOBSTER_LOBIUM_DIR', 
     delete process.env.LOBSTER_LOBIUM_BIN;
     process.env.LOBSTER_LOBIUM_AUTO_DISCOVER = '0';
     const out = join(root, 'src', 'out', 'Lobium');
-    const binPath = join(out, 'chrome');
+    // Discovery is name-based, and the name is platform-specific: a Chromium build output is
+    // `chrome.exe` on Windows and `chrome` elsewhere, so the fixture has to match the real artifact.
+    const binPath = join(out, CHROMIUM_BINARY_NAME);
     await mkdir(out, { recursive: true });
     await writeFile(binPath, '#!/bin/true\n', { mode: 0o755 });
     process.env.LOBSTER_LOBIUM_DIR = root;
@@ -368,17 +371,17 @@ test('buildNativeLobiumProcessArgs passes unauthenticated proxy straight through
 test('createLobiumLauncher fail-closes when the upstream proxy TCP is unreachable', async () => {
   const root = await mkdtemp(join(tmpdir(), 'lobium-proxy-dead-'));
   const userDataDir = join(root, 'profile');
-  const fakeBin = join(root, 'fake-lobium.cjs');
-  await writeFile(
-    fakeBin,
-    `#!/usr/bin/env node
-if (process.argv.includes('--lobium-fingerprint-capabilities')) {
+  // The capability probe runs before the proxy check, so the fixture has to be genuinely spawnable
+  // for the proxy gate to be reached at all (see writeFakeBinary for the Windows mechanics).
+  const fakeBin = await writeFakeBinary(
+    root,
+    'fake-lobium',
+    `if (process.argv.includes('--lobium-fingerprint-capabilities')) {
   process.stdout.write(${JSON.stringify(capabilityManifest)});
 }
 process.exit(0);
 `,
   );
-  await chmod(fakeBin, 0o755);
   try {
     const launcher = createLobiumLauncher({
       executablePath: fakeBin,
@@ -403,11 +406,10 @@ process.exit(0);
 test('createLobiumLauncher spawns a native binary directly and reads DevToolsActivePort', async () => {
   const root = await mkdtemp(join(tmpdir(), 'lobium-direct-launch-'));
   const userDataDir = join(root, 'profile');
-  const fakeBin = join(root, 'fake-lobium.cjs');
-  await writeFile(
-    fakeBin,
-    `#!/usr/bin/env node
-const fs = require('node:fs');
+  const fakeBin = await writeFakeBinary(
+    root,
+    'fake-lobium',
+    `const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
 if (process.argv.includes('--lobium-fingerprint-capabilities')) {
@@ -423,10 +425,19 @@ const server = net.createServer();
 server.listen(43210, '127.0.0.1', () => {
   fs.writeFileSync(path.join(userDataDir, 'DevToolsActivePort'), '43210\\n/devtools/browser/native-fake\\n');
 });
-setInterval(() => {}, 1000);
+// Stay resident like a browser, but never outlive the launcher. On Windows the launcher can only
+// terminate the .exe shim that started this script, so no signal reaches here — poll the parent
+// instead, otherwise a torn-down launch leaks an orphan still holding port 43210 and the next run
+// of this test never sees a DevToolsActivePort.
+setInterval(() => {
+  try {
+    process.kill(process.ppid, 0);
+  } catch {
+    process.exit(0);
+  }
+}, 250);
 `,
   );
-  await chmod(fakeBin, 0o755);
   try {
     const launcher = createLobiumLauncher({
       executablePath: fakeBin,

@@ -83,7 +83,7 @@ function hostCalibration(
     capturedAt: '2026-07-08T12:00:00.000Z',
     os,
     arch,
-    browserVersion: '152.0.7928.0',
+    browserVersion: '152.0.7977.42',
     navigator: {
       platform: isMac ? 'MacIntel' : os === 'linux' ? 'Linux x86_64' : 'Win32',
       languages: ['en-US', 'en'],
@@ -323,7 +323,7 @@ test('startProfile derives from host calibration when one is supplied', async ()
   ]);
   assert.equal(launched.fingerprint.navigator.hardwareConcurrency, 12);
   assert.equal(launched.fingerprint.navigator.deviceMemory, 8, 'host RAM is spec-capped');
-  assert.equal(launched.fingerprint.navigator.uaFullVersion, '152.0.7928.0');
+  assert.equal(launched.fingerprint.navigator.uaFullVersion, '152.0.7977.42');
 });
 
 test('startProfile uses a PERSISTED host profile as the default when captured (HC-3)', async () => {

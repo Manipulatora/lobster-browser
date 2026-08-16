@@ -11,6 +11,20 @@ import {
   writeFontConfig,
 } from './fonts.js';
 
+/**
+ * A regex source matching an absolute host path as it appears inside the generated XML, on either
+ * platform. Interpolating a path straight into `new RegExp` only works on POSIX: a Windows path is
+ * dense with regex metacharacters (`C:\Users` reads as the escape `\U`, not a literal backslash), and
+ * its separator is `\` where the XML assertions were written with `/`. Escape each segment and accept
+ * either separator so one assertion covers both.
+ */
+function pathPattern(...segments: string[]): string {
+  return segments
+    .flatMap((segment) => segment.split(/[\\/]/))
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[\\\\/]');
+}
+
 async function fixturePack(root: string): Promise<string> {
   const pack = join(root, 'pack');
   const digest = createHash('sha256').update('font').digest('hex');
@@ -115,7 +129,7 @@ test('macOS persona exposes only physically bundled open-family names, no propri
     assert.deepEqual(await availableFontFamilies(pack, 'macos'), ['Liberation Sans']);
     const conf = await writeFontConfig(udd, 'macos', pack, ['Liberation Sans']);
     const xml = await readFile(conf, 'utf8');
-    assert.match(xml, new RegExp(`<dir>${udd}/font-files</dir>`));
+    assert.match(xml, new RegExp(`<dir>${pathPattern(udd, 'font-files')}</dir>`));
     assert.doesNotMatch(xml, /etc\/fonts/);
     assert.match(xml, /Liberation Sans/);
     assert.doesNotMatch(xml, /Helvetica|Arial|Times New Roman/);
@@ -131,12 +145,12 @@ test('writeFontConfig writes a private fontconfig exposing ONLY the persona dir 
     const conf = await writeFontConfig(udd, 'windows', pack, ['Liberation Sans']);
     assert.equal(conf, join(udd, 'lobium-fonts.conf'));
     const xml = await readFile(conf, 'utf8');
-    assert.match(xml, new RegExp(`<dir>${udd}/font-files</dir>`));
+    assert.match(xml, new RegExp(`<dir>${pathPattern(udd, 'font-files')}</dir>`));
     assert.match(xml, /<reset-dirs \/>/);
     assert.doesNotMatch(xml, /<include/);
     assert.doesNotMatch(xml, /etc\/fonts/);
     // Private, per-profile cache dir (so no jitter / no writes to a shared cache).
-    assert.match(xml, new RegExp(`<cachedir>${udd}/fc-cache</cachedir>`));
+    assert.match(xml, new RegExp(`<cachedir>${pathPattern(udd, 'fc-cache')}</cachedir>`));
     assert.equal((await readdir(join(udd, 'font-files'))).length, 1);
     assert.match(xml, /sans-serif<\/family><prefer><family>Liberation Sans/);
     // Generics must ALSO carry a strong prepend, not only the weak <alias>. Without this, `sans-serif`
@@ -200,7 +214,7 @@ test('linux persona keeps DejaVu/Liberation names (real Linux fonts) but restric
     const conf = await writeFontConfig(udd, 'linux', pack, ['DejaVu Sans']);
     assert.equal(conf, join(udd, 'lobium-fonts.conf'));
     const xml = await readFile(conf, 'utf8');
-    assert.match(xml, new RegExp(`<dir>${udd}/font-files</dir>`));
+    assert.match(xml, new RegExp(`<dir>${pathPattern(udd, 'font-files')}</dir>`));
     assert.doesNotMatch(xml, /etc\/fonts/);
     assert.match(xml, /sans-serif<\/family><prefer><family>Liberation Sans/);
   } finally {

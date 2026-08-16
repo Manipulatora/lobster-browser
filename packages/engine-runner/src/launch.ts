@@ -115,7 +115,7 @@ export interface UserAgentMetadata {
   fullVersion: string;
   /**
    * The high-entropy `fullVersionList` (returned by `navigator.userAgentData.getHighEntropyValues`).
-   * MUST be set: if omitted, Chromium fills it with the REAL engine build (e.g. `152.0.7928.0`), which
+   * MUST be set: if omitted, Chromium fills it with the REAL engine build (e.g. `152.0.7977.42`), which
    * leaks the true version and contradicts a spoofed UA — a hard lie a detector reads directly.
    */
   fullVersionList: Array<{ brand: string; version: string }>;

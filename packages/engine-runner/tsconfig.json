@@ -8,7 +8,8 @@
     { "path": "../shared-types" },
     { "path": "../proxy" },
     { "path": "../fingerprint" },
-    { "path": "../agent" }
+    { "path": "../agent" },
+    { "path": "../cookies" }
   ],
   "include": ["src/**/*.ts"]
 }

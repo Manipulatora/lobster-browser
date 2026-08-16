@@ -8,6 +8,14 @@ const execFileAsync = promisify(execFile);
 export const LOBIUM_CAPABILITY_SWITCH = '--lobium-fingerprint-capabilities';
 export const LOBIUM_CAPABILITY_CONTRACT_VERSION = 1;
 
+/**
+ * Mirror of the list in `lobium/src/lobium_capabilities.cc`, which is the single source of truth —
+ * it sits beside the hooks it describes, so it cannot claim a hook that was never compiled.
+ *
+ * `ci/validation/patch-series.test.mjs` fails the build if the two lists diverge. This copy exists
+ * only so TypeScript can type-check capability names; it is never the authority on what a binary
+ * actually contains — that comes from probing the binary itself.
+ */
 export const LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES = [
   'config-channel-v1',
   'navigator-languages',
@@ -16,11 +24,19 @@ export const LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES = [
   'native-geolocation',
   'webrtc-policy',
   'webgl-deep',
+  'webgl2-deep',
+  'screen-metrics',
+  /** Compiled everywhere, but only meaningful for an Android persona, so never required on desktop. */
+  'mobile-persona',
   'canvas-farbling',
   'webgl-farbling',
   'audio-farbling',
   'client-rects',
   'media-devices',
+  'webgpu-adapter',
+  'native-timezone',
+  /** Windows-only: the engine reports it just on win64 builds, so never require it elsewhere. */
+  'font-isolation',
 ] as const;
 
 export type LobiumNativeFingerprintCapability =
@@ -101,6 +117,7 @@ export async function probeLobiumBuildCapabilities(
 export function requiredLobiumCapabilities(
   policy: FingerprintLaunchPolicy,
   hasConfiguredGeolocation: boolean,
+  platform: NodeJS.Platform = process.platform,
 ): LobiumNativeFingerprintCapability[] {
   const required: LobiumNativeFingerprintCapability[] = [
     'config-channel-v1',
@@ -109,9 +126,28 @@ export function requiredLobiumCapabilities(
     'process-locale-timezone',
     'webrtc-policy',
     'webgl-deep',
+    // Required alongside webgl-deep, not instead of it: a build with only the WebGL1 hooks lets a
+    // WebGL2 context report the host's extension list and component limits while WebGL1 reports the
+    // persona's, so the two contexts disagree on one page. That is worse than neither being spoofed.
+    'webgl2-deep',
+    // screen.*, devicePixelRatio and the CSS device-size media values. Unconditional: every persona
+    // claims a display, and an unspoofed screen block contradicts the rest of the persona outright.
+    'screen-metrics',
     'media-devices',
+    // navigator.gpu names the same GPU as WEBGL_debug_renderer_info. Unconditional for the same
+    // reason: an unhooked WebGPU adapter reports the real card next to a spoofed WebGL renderer.
+    'webgpu-adapter',
+    // Applied inside the engine because the TZ environment variable is POSIX-only. On Windows the
+    // process-locale route is a no-op, so without this hook the persona timezone silently does not
+    // apply at all — the failure mode that made this a required capability rather than an optional
+    // one.
+    'native-timezone',
   ];
   if (hasConfiguredGeolocation) required.push('native-geolocation');
+  // Windows resolves fonts through DirectWrite in the browser process; Linux and macOS reach the
+  // same isolation through the launcher's per-profile FONTCONFIG_FILE, which is not a property of
+  // the binary. Requiring it everywhere would fail launches on platforms that never compile it.
+  if (platform === 'win32') required.push('font-isolation');
   if (policy.hardwareNoise.canvas) required.push('canvas-farbling');
   if (policy.hardwareNoise.webgl) required.push('webgl-farbling');
   if (policy.hardwareNoise.audio) required.push('audio-farbling');

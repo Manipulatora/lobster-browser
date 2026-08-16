@@ -152,6 +152,15 @@ export function resolveFontsBaseDir(): string | undefined {
     // custom sidecar entry point cannot disconnect an otherwise valid packaged font pack.
     join(nodeDir, '..', '..', 'fonts'),
     join(homedir(), '.local', 'share', 'lobster', 'lobium', 'fonts'),
+    // Windows has no XDG data dir. The Tauri MSI/NSIS bundle installs resources next to the
+    // executable, and a per-user install lands under %LOCALAPPDATA%; both are checked so a packaged
+    // Windows build finds its pack without the user setting LOBSTER_FONTS_DIR by hand.
+    ...(process.platform === 'win32'
+      ? [
+          join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'Lobster', 'lobium', 'fonts'),
+          join(process.env.PROGRAMDATA ?? 'C:\\ProgramData', 'Lobster', 'lobium', 'fonts'),
+        ]
+      : []),
     join(process.cwd(), 'lobium', 'fonts'),
     join(process.cwd(), 'resources', 'fonts'),
   ];
@@ -162,6 +171,13 @@ export function resolveFontsBaseDir(): string | undefined {
  * Per-launch env: write the profile's private fontconfig and point FONTCONFIG_FILE at it (ENG-6), so the
  * font fingerprint is OS-plausible + stable per profile. This is fail-closed: a profile always carries
  * a resolved font list, so an absent pack must never degrade to host `/etc/fonts`.
+ *
+ * Windows reaches the same isolation through a different mechanism, because none of these variables
+ * exist there: fontconfig is not used at all (DirectWrite is), and ICU reads the timezone from the
+ * registry rather than from `TZ`. Both are handled natively instead — the engine filters DirectWrite
+ * family lookups against `cfg.fonts` and sideloads `cfg.fontPackDir`, and applies the persona
+ * timezone inside TimeZoneController. So on Windows this function contributes only the inert Google
+ * API keys, and the pack is passed through the config file by {@link windowsFontPackDir}.
  */
 export async function buildLobiumLaunchEnv(
   ctx: LaunchContext,
@@ -173,17 +189,26 @@ export async function buildLobiumLaunchEnv(
     GOOGLE_API_KEY: 'no',
     GOOGLE_DEFAULT_CLIENT_ID: 'no',
     GOOGLE_DEFAULT_CLIENT_SECRET: 'no',
-    // Chromium's native locale/timezone defaults come from the child process environment on desktop
-    // Linux. Keep those process-wide (including workers and Intl/Date) aligned with the resolved
-    // profile instead of relying on the test-only CDP overrides.
-    TZ: ctx.fingerprint.locale.timezone,
-    LANG: `${ctx.fingerprint.locale.locale.replaceAll('-', '_')}.UTF-8`,
-    LC_ALL: `${ctx.fingerprint.locale.locale.replaceAll('-', '_')}.UTF-8`,
-    // Fontconfig accepts BCP-47 directly even when the matching libc locale is not installed on the
-    // host. This selects the correct localized face from bundled CJK collections without weakening
-    // the private font-directory isolation.
-    FC_LANG: ctx.fingerprint.locale.locale,
   };
+
+  if (process.platform === 'win32') {
+    // No POSIX locale/fontconfig variables: setting TZ here would look like the timezone was
+    // handled when ICU ignores it, which is exactly the silent half-application the native
+    // timezone hook exists to prevent.
+    return env;
+  }
+
+  // Chromium's native locale/timezone defaults come from the child process environment on desktop
+  // Linux. Keep those process-wide (including workers and Intl/Date) aligned with the resolved
+  // profile instead of relying on the test-only CDP overrides.
+  env.TZ = ctx.fingerprint.locale.timezone;
+  env.LANG = `${ctx.fingerprint.locale.locale.replaceAll('-', '_')}.UTF-8`;
+  env.LC_ALL = `${ctx.fingerprint.locale.locale.replaceAll('-', '_')}.UTF-8`;
+  // Fontconfig accepts BCP-47 directly even when the matching libc locale is not installed on the
+  // host. This selects the correct localized face from bundled CJK collections without weakening
+  // the private font-directory isolation.
+  env.FC_LANG = ctx.fingerprint.locale.locale;
+
   const base = resolveFontsBaseDir();
   if (!base) {
     throw new Error(
@@ -212,6 +237,22 @@ export async function buildLobiumLaunchEnv(
     }
   }
   return env;
+}
+
+/**
+ * The font-pack directory to hand the engine on Windows, or undefined everywhere else.
+ *
+ * Fail-OPEN, unlike the Linux path above, and the asymmetry is deliberate. On Linux an absent pack
+ * would leave FONTCONFIG_FILE unset and the profile would fall back to the host's `/etc/fonts` —
+ * host fonts leaking wholesale, so the launch must abort. On Windows the native filter still applies
+ * with no pack at all: the persona's measurable set becomes host ∩ persona, which is narrower than
+ * the persona claims but never wider than the host. Degraded, not leaking. Aborting the launch would
+ * trade a partial fingerprint for no browser.
+ */
+export function windowsFontPackDir(): string | undefined {
+  if (process.platform !== 'win32') return undefined;
+  const base = resolveFontsBaseDir();
+  return base ? resolve(base) : undefined;
 }
 
 /** True when the native Lobium binary is provisioned in this environment. */
@@ -269,6 +310,8 @@ export async function buildLobiumLaunchArgs(ctx: LaunchContext): Promise<string[
     ...(ctx.fingerprintPolicy?.mediaDevices !== undefined
       ? { mediaDevices: ctx.fingerprintPolicy.mediaDevices }
       : {}),
+    // Windows only; elsewhere the same pack is reached through FONTCONFIG_FILE instead.
+    ...(windowsFontPackDir() ? { fontPackDir: windowsFontPackDir()! } : {}),
   });
   const path = await writeLobiumConfig(ctx.options.userDataDir, config);
   return [lobiumConfigArg(path)];

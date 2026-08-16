@@ -49,6 +49,21 @@ function uniqSorted(values: readonly string[]): string[] {
   );
 }
 
+/**
+ * De-duplicate while preserving the order the values arrived in.
+ *
+ * Required for `WebGLRenderingContext.getSupportedExtensions()`. Chrome returns extensions in
+ * REGISTRATION order, which is a fixed property of the build and of the driver, not alphabetical:
+ * on a real Chrome, `EXT_sRGB` follows the `EXT_texture_*` block, `WEBGL_debug_renderer_info` sits
+ * among the other WEBGL_* entries, and so on. Sorting the list therefore replaces one host
+ * fingerprint with a different, *impossible* one — every Lobium profile would return a perfectly
+ * alphabetised array that no real Chrome ever produces, which is a stronger signal than the host
+ * order it was trying to hide. Capture and replay the order verbatim.
+ */
+function uniqPreservingOrder(values: readonly string[]): string[] {
+  return [...new Set(values.map((v) => v.trim()).filter(Boolean))];
+}
+
 function cloneCaps(caps: WebGlCaps | undefined): WebGlCaps | undefined {
   return caps
     ? {
@@ -84,7 +99,8 @@ function normalizeWebgl(webgl: WebGlFingerprint): WebGlFingerprint {
   if (webgl.shadingLanguageVersion) {
     normalized.shadingLanguageVersion = webgl.shadingLanguageVersion;
   }
-  if (webgl.extensions) normalized.extensions = uniqSorted(webgl.extensions);
+  // Registration order, not alphabetical — see uniqPreservingOrder.
+  if (webgl.extensions) normalized.extensions = uniqPreservingOrder(webgl.extensions);
   const precision = clonePrecision(webgl.shaderPrecision);
   if (precision) normalized.shaderPrecision = precision;
   return normalized;

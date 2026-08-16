@@ -88,7 +88,16 @@ test('writeAndroidLobiumConfig writes owner-only JSON that round-trips', async (
 
     assert.equal(path, join(dir, ANDROID_LOBIUM_CONFIG_FILENAME));
     assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), config);
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    const mode = (await stat(path)).mode & 0o777;
+    if (process.platform === 'win32') {
+      // Windows maps `mode` onto the read-only ATTRIBUTE only, so this always reads back 0o666 and
+      // 0o600 would assert nothing. Owner-only is NOT enforced on Windows — that needs an NTFS ACL
+      // the product never sets, verifiable only via `icacls <path>`. Assert what the platform does
+      // express: the write bit survived, so the next launch can rewrite the config.
+      assert.equal(mode & 0o200, 0o200, 'the config must stay writable for the next launch');
+    } else {
+      assert.equal(mode, 0o600);
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -216,6 +216,13 @@ export async function startProfile(
       hostCalibration = persisted;
     }
   }
+  // Why the capture failure is context and not the thrown error: this step is opportunistic (it only
+  // runs when the persona's OS matches this machine's, and `LOBSTER_AUTO_HOST_CALIBRATION=0` turns it
+  // off entirely), so letting it own the launch failure made the reported error depend on the HOST
+  // OS — a Windows persona on Linux reported the actionable renderer-policy refusal below, while the
+  // very same profile on a Windows host reported "cannot capture host calibration: Lobium binary is
+  // unavailable". Both describe the same missing evidence. Keep the reason, let the policy gate speak.
+  let hostCalibrationCaptureFailure: string | undefined;
   if (
     !hostCalibration &&
     rendererWantsHostCalibration &&
@@ -223,13 +230,17 @@ export async function startProfile(
     process.env.LOBSTER_AUTO_HOST_CALIBRATION !== '0'
   ) {
     const calibrationPath = resolveHostCalibrationPath();
-    const captured = await ensureHostCalibration({
-      ...(calibrationPath ? { path: calibrationPath } : {}),
-      os: params.os,
-      arch: process.arch === 'arm64' ? 'arm64' : 'x86_64',
-      probe: captureHostCalibrationRawSnapshot,
-    });
-    hostCalibration = captured.profile;
+    try {
+      const captured = await ensureHostCalibration({
+        ...(calibrationPath ? { path: calibrationPath } : {}),
+        os: params.os,
+        arch: process.arch === 'arm64' ? 'arm64' : 'x86_64',
+        probe: captureHostCalibrationRawSnapshot,
+      });
+      hostCalibration = captured.profile;
+    } catch (err) {
+      hostCalibrationCaptureFailure = err instanceof Error ? err.message : String(err);
+    }
   }
 
   const rendererPolicy = launchPolicy.renderer;
@@ -239,9 +250,11 @@ export async function startProfile(
   ) {
     // Host policies assert measured evidence. Substituting a catalog renderer for a cross-OS persona
     // would silently change policy semantics and can create a detectable GPU/OS mismatch, so fail closed.
+    // Any first-run capture attempt that just failed is appended so the root cause is not lost.
     throw new Error(
       `refusing to launch profile ${params.profileId}: renderer policy "${rendererPolicy.mode}" ` +
-        'requires a complete compatible host calibration',
+        'requires a complete compatible host calibration' +
+        (hostCalibrationCaptureFailure ? ` (${hostCalibrationCaptureFailure})` : ''),
     );
   }
   // Renderer policy owns the complete WebGL surface. Legacy profiles may still contain the old

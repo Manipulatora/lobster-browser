@@ -64,8 +64,24 @@ export interface LobiumConfig {
   navigator: Fingerprint['navigator'];
   screen: Fingerprint['screen'];
   webgl: Fingerprint['webgl'];
+  /**
+   * Omitted when the fingerprint predates WebGPU support. The native side treats an absent `webgpu`
+   * key as "do not override", so an old profile keeps working rather than getting a zeroed adapter.
+   */
+  webgpu?: Fingerprint['webgpu'];
   locale: Fingerprint['locale'];
+  /**
+   * The families the persona claims. Consumed browser-side only, and stripped from the renderer copy
+   * of this document, so its length has no effect on the renderer command-line size guard.
+   */
   fonts: string[];
+  /**
+   * Absolute path to the profile's font pack. Windows sideloads every face in it into the
+   * DirectWrite collection so the persona can advertise fonts the host does not have installed —
+   * filtering `fonts` can only ever subtract. Absent on platforms that isolate fonts another way
+   * (Linux uses a per-profile FONTCONFIG_FILE), or when no pack is provisioned.
+   */
+  fontPackDir?: string;
   seeds: LobiumFarblingSeeds;
   policy: LobiumPolicyConfig;
   net: LobiumNetConfig;
@@ -81,6 +97,12 @@ export interface BuildLobiumConfigOptions {
   rendererPolicy?: RendererPolicy;
   hardwareNoise?: Partial<HardwareNoisePolicy>;
   mediaDevices?: Partial<MediaDeviceProfile>;
+  /**
+   * Absolute path to the provisioned font pack, on platforms where the engine sideloads it (Windows).
+   * Omitted elsewhere: Linux points FONTCONFIG_FILE at the same pack instead, so passing it here too
+   * would imply a second, non-existent mechanism.
+   */
+  fontPackDir?: string;
 }
 
 const DEFAULT_HARDWARE_NOISE: HardwareNoisePolicy = {
@@ -189,19 +211,31 @@ export function buildLobiumConfig(
   // Gate farbling seeds by Hardware noise checkboxes. A zero seed disables native farbling for that
   // surface (Lobium treats seed==0 as off).
   //
-  // fonts: intentionally empty in the native channel. Lobium does not yet consume cfg.fonts (font
-  // isolation is FONTCONFIG_FILE / LOBSTER_FONTS_DIR packaging). Shipping the full OS catalog here
-  // (macOS ~2500 names) base64-blows past the renderer command-line size guard (~24 KiB), so the
-  // browser silently drops --lobium-fp-data and workers leak host platform/HWC — a CreepJS lie.
-  // Keep the field for schema stability; populate only when a non-cmdline transport exists.
+  // fonts: now populated, because the engine consumes it and the size hazard has been removed.
+  //
+  // It used to be empty for a good reason: the browser base64s this whole file onto the renderer
+  // command line, Windows caps that line at 32767 chars, and a large font catalog pushed it past the
+  // engine's 28 KiB guard — at which point the browser drops --lobium-fp-data entirely and every
+  // renderer reports the HOST platform and hardware concurrency. A missing font list traded for a
+  // total spoofing failure.
+  //
+  // The engine now strips `fonts` and `fontPackDir` from the renderer copy (StripBrowserOnlyKeys),
+  // since every font hook — DirectWrite family lookup, Local Font Access, the pack sideload — runs in
+  // the browser process, which reads this file directly and is not size-bound. So the list can be
+  // complete on the side that consumes it while the renderer payload stays exactly as small as it
+  // was. Populating it is what makes Windows font isolation work at all.
   const config: LobiumConfig = {
     version: LOBIUM_CONFIG_VERSION,
     arch: fp.arch,
     navigator: fp.navigator,
     screen: fp.screen,
     webgl: fp.webgl,
+    // Spread so the key is absent (not `undefined`) on pre-WebGPU fingerprints — JSON.stringify drops
+    // undefined values, but the config is also compared structurally in tests where the two differ.
+    ...(fp.webgpu ? { webgpu: fp.webgpu } : {}),
     locale: fp.locale,
-    fonts: [],
+    fonts: fp.fonts,
+    ...(opts.fontPackDir ? { fontPackDir: opts.fontPackDir } : {}),
     seeds: {
       canvas: noise.canvas ? hashStringToUint32(`${base}:canvas`) : 0,
       webgl: noise.webgl ? hashStringToUint32(`${base}:webgl`) : 0,

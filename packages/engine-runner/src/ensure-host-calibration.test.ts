@@ -18,7 +18,7 @@ function sampleHost(): HostCalibrationProfile {
     capturedAt: '2026-07-09T00:00:00.000Z',
     os: 'linux',
     arch: 'x86_64',
-    browserVersion: '152.0.7928.0',
+    browserVersion: '152.0.7977.42',
     navigator: {
       platform: 'Linux x86_64',
       languages: ['en-US', 'en'],
@@ -125,7 +125,7 @@ describe('ensureHostCalibration', () => {
         webgl: host.webgl,
         fonts: host.fonts,
         timezone: host.timezone ?? 'UTC',
-        browserVersion: host.browserVersion ?? '152.0.7928.0',
+        browserVersion: host.browserVersion ?? '152.0.7977.42',
       }),
     });
     assert.equal(result.source, 'probed');

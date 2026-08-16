@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -11,6 +11,7 @@ import {
   probeLobiumBuildCapabilities,
   requiredLobiumCapabilities,
 } from './lobium-capabilities.js';
+import { writeFakeBinary } from './test-fake-binary.js';
 
 const policy: FingerprintLaunchPolicy = {
   renderer: { mode: 'host' },
@@ -30,14 +31,18 @@ test('required capability set follows selected native policies', () => {
 
 test('exact executable capability probe parses the native contract', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'lobium-capabilities-'));
-  const executable = join(dir, 'lobium');
   const manifest = {
     contractVersion: LOBIUM_CAPABILITY_CONTRACT_VERSION,
     product: 'Lobium',
     capabilities: LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
   };
-  await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(manifest)}'\n`);
-  await chmod(executable, 0o700);
+  // The probe deliberately trusts nothing but the real executable, so the fixture must be a process
+  // the platform can actually launch — see writeFakeBinary for why Windows needs a compiled shim.
+  const executable = await writeFakeBinary(
+    dir,
+    'lobium',
+    `process.stdout.write(${JSON.stringify(`${JSON.stringify(manifest)}\n`)});\n`,
+  );
   try {
     const observed = await probeLobiumBuildCapabilities(executable);
     assert.deepEqual(observed, manifest);

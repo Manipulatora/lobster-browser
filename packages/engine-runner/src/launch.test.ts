@@ -212,12 +212,12 @@ test('buildCdpEmulation carries UA, UA-CH metadata, timezone/locale, and geoloca
 
 test('buildCdpEmulation sets a coherent fullVersionList (masks the real engine build, no leak)', () => {
   // Without this, getHighEntropyValues(['fullVersionList']) returns the REAL engine build (e.g.
-  // 152.0.7928.0), contradicting a spoofed UA — a hard lie. The override must give each REAL brand the
+  // 152.0.7977.42), contradicting a spoofed UA — a hard lie. The override must give each REAL brand the
   // full build (== uaFullVersion) and pad the GREASE brand, so high-entropy agrees with the UA.
   const fp = sampleFingerprint();
   fp.navigator.userAgent =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36';
-  fp.navigator.uaFullVersion = '152.0.7928.0';
+  fp.navigator.uaFullVersion = '152.0.7977.42';
   fp.navigator.uaBrands = [
     { brand: 'Chromium', version: '152' },
     { brand: 'Google Chrome', version: '152' },
@@ -225,8 +225,8 @@ test('buildCdpEmulation sets a coherent fullVersionList (masks the real engine b
   ];
   const { fullVersionList } = buildCdpEmulation(fp).userAgentMetadata;
   assert.deepEqual(fullVersionList, [
-    { brand: 'Chromium', version: '152.0.7928.0' }, // real brand -> full build
-    { brand: 'Google Chrome', version: '152.0.7928.0' }, // real brand -> full build
+    { brand: 'Chromium', version: '152.0.7977.42' }, // real brand -> full build
+    { brand: 'Google Chrome', version: '152.0.7977.42' }, // real brand -> full build
     { brand: 'Not_A Brand', version: '24.0.0.0' }, // GREASE -> padded, not the engine build
   ]);
   // Every entry's major agrees with the UA major -> no version contradiction a detector can read.

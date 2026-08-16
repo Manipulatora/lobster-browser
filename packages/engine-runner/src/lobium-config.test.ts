@@ -64,8 +64,15 @@ test('buildLobiumConfig carries the fingerprint surfaces + a version', () => {
     'WEBGL_debug_renderer_info',
   ]);
   assert.equal(config.locale.timezone, 'Europe/Berlin');
-  // Native channel omits font catalogs (cmdline size); fingerprint.fonts stay on the Fingerprint.
-  assert.deepEqual(config.fonts, []);
+  // The font list reaches the engine now. It was previously held back because the browser base64s
+  // this whole document onto the renderer command line, where a large catalog trips the size guard
+  // and the browser drops the config entirely — a total host leak caused by a field no renderer
+  // reads. The engine now strips `fonts`/`fontPackDir` from the renderer copy, so the browser-side
+  // font hooks get the full list while the renderer payload is unchanged.
+  assert.deepEqual(config.fonts, ['Arial', 'Calibri']);
+  // Absent, not empty, when no pack is provisioned: the engine treats a missing key as "no pack" and
+  // an empty string would be a path it then tries to enumerate.
+  assert.equal(config.fontPackDir, undefined);
   assert.deepEqual(config.policy.renderer, { mode: 'host' });
   assert.deepEqual(config.policy.hardwareNoise, {
     webgl: true,
@@ -240,7 +247,20 @@ test('writeLobiumConfig writes owner-only JSON that round-trips, and the flag po
     assert.equal(path, join(dir, LOBIUM_CONFIG_FILENAME));
     assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), config);
     // Owner-only (0600) — a leaked-readable config could expose the profile identity.
-    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    const mode = (await stat(path)).mode & 0o777;
+    if (process.platform === 'win32') {
+      // Windows has no POSIX mode bits. Confidentiality there is an NTFS ACL, and Node maps `mode`
+      // onto the single read-only ATTRIBUTE, so this always reads back 0o666 — asserting 0o600 would
+      // assert nothing. The product does not set an ACL either, so owner-only is NOT enforced on
+      // Windows; it is merely inherited from the user-profile directory. Proving the real property
+      // would take an `icacls <path>` check that no broad principal (Everyone, BUILTIN\Users,
+      // Authenticated Users) is granted read. What IS assertable — and worth pinning — is that the
+      // 0o600 request did not clear owner-write: that would set FILE_ATTRIBUTE_READONLY and break the
+      // next launch's rewrite of this config.
+      assert.equal(mode & 0o200, 0o200, 'the config must stay writable for the next launch');
+    } else {
+      assert.equal(mode, 0o600);
+    }
     assert.equal(lobiumConfigArg(path), `--lobium-fp-config=${path}`);
   } finally {
     await rm(dir, { recursive: true, force: true });
