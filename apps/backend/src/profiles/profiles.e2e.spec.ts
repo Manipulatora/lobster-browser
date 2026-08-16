@@ -37,7 +37,10 @@ async function registerToken(email: string): Promise<string> {
 }
 
 before(async () => {
-  delete process.env.DATABASE_URL; // force the in-memory repositories
+  process.env.DATABASE_URL = ''; // force in-memory repos. NOT `delete`: requiring @prisma/client
+  // auto-loads .env and re-injects DATABASE_URL, so a deleted var comes back and the suite
+  // silently runs against whatever database .env points at. dotenv never overwrites a var that
+  // is already set, so an empty string (falsy) survives and PrismaService picks in-memory.
   process.env.NODE_ENV = 'test'; // allow the dev JWT secret outside production
 
   const moduleRef = await Test.createTestingModule({
