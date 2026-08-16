@@ -1,8 +1,13 @@
 {
   "schemaVersion": 1,
-  "matrixVersion": "2026-07-11.1",
+  "matrixVersion": "2026-08-16.1",
   "minimumIndependentProviders": 10,
-  "verdicts": ["pass", "fail", "inconclusive", "not_run"],
+  "verdicts": [
+    "pass",
+    "fail",
+    "inconclusive",
+    "not_run"
+  ],
   "evidencePolicy": {
     "maxAgeHours": 24,
     "requireHeadful": true,
@@ -64,7 +69,9 @@
       "kind": "public-diagnostic",
       "capturePolicy": "single-visit",
       "parser": "sannysoft",
-      "routes": ["https://bot.sannysoft.com/"],
+      "routes": [
+        "https://bot.sannysoft.com/"
+      ],
       "sourceUrl": "https://bot.sannysoft.com/",
       "signals": [
         "webdriver",
@@ -92,7 +99,9 @@
       "kind": "open-source-diagnostic",
       "capturePolicy": "single-visit",
       "parser": "creepjs",
-      "routes": ["https://abrahamjuliot.github.io/creepjs/"],
+      "routes": [
+        "https://abrahamjuliot.github.io/creepjs/"
+      ],
       "sourceUrl": "https://github.com/abrahamjuliot/creepjs",
       "signals": [
         "prototype lies",
@@ -123,7 +132,9 @@
       "kind": "open-source-bot-diagnostic",
       "capturePolicy": "single-visit",
       "parser": "manual",
-      "routes": ["https://fpscanner.com/demo/"],
+      "routes": [
+        "https://fpscanner.com/demo/"
+      ],
       "sourceUrl": "https://github.com/antoinevastel/fpscanner",
       "signals": [
         "webdriver",
@@ -151,7 +162,9 @@
       "kind": "public-bot-diagnostic",
       "capturePolicy": "single-visit",
       "parser": "deviceinfo-bot",
-      "routes": ["https://deviceandbrowserinfo.com/are_you_a_bot"],
+      "routes": [
+        "https://deviceandbrowserinfo.com/are_you_a_bot"
+      ],
       "sourceUrl": "https://deviceandbrowserinfo.com/are_you_a_bot",
       "signals": [
         "webdriver",
@@ -178,10 +191,20 @@
       "kind": "open-source-identifier",
       "capturePolicy": "single-visit",
       "parser": "manual",
-      "routes": ["https://fingerprintjs.github.io/fingerprintjs/"],
+      "routes": [
+        "https://fingerprintjs.github.io/fingerprintjs/"
+      ],
       "sourceUrl": "https://github.com/fingerprintjs/fingerprintjs",
-      "signals": ["visitor identifier", "component stability", "cross-profile distinctness"],
-      "requiredScenarios": ["same-profile-relaunch", "different-profile", "stock-browser-control"],
+      "signals": [
+        "visitor identifier",
+        "component stability",
+        "cross-profile distinctness"
+      ],
+      "requiredScenarios": [
+        "same-profile-relaunch",
+        "different-profile",
+        "stock-browser-control"
+      ],
       "criterion": "The component set is complete; the same profile is stable across relaunch; different profiles differ on intended profile-scoped surfaces. Merely obtaining a visitorId is inconclusive.",
       "limitations": "FingerprintJS OSS identifies a browser and does not return a bot verdict. Its maintainers document lower accuracy than the commercial product."
     },
@@ -196,7 +219,11 @@
       "parser": "manual",
       "routes": [],
       "sourceUrl": "https://github.com/fingerprintjs/botd",
-      "signals": ["automation frameworks", "headless browsers", "browser spoofing"],
+      "signals": [
+        "automation frameworks",
+        "headless browsers",
+        "browser spoofing"
+      ],
       "requiredScenarios": [
         "proxy-headful-uncontrolled",
         "proxy-headful-controlled",
@@ -226,7 +253,11 @@
         "locale",
         "identifier stability"
       ],
-      "requiredScenarios": ["same-profile-relaunch", "different-profile", "stock-browser-control"],
+      "requiredScenarios": [
+        "same-profile-relaunch",
+        "different-profile",
+        "stock-browser-control"
+      ],
       "criterion": "A pinned OSS build returns complete components; the same profile is stable and different profiles are distinct on intended surfaces without cross-surface contradictions.",
       "limitations": "The OSS thumbmark is an identifier, not a bot verdict. Server-side TLS, headers, IP classification, and visitorId require the separate API product."
     },
@@ -246,7 +277,14 @@
         "https://browserleaks.com/webgl"
       ],
       "sourceUrl": "https://browserleaks.com/",
-      "signals": ["egress IP", "WebRTC local/public IP", "canvas", "WebGL", "headers", "timezone"],
+      "signals": [
+        "egress IP",
+        "WebRTC local/public IP",
+        "canvas",
+        "WebGL",
+        "headers",
+        "timezone"
+      ],
       "requiredScenarios": [
         "proxy-headful-uncontrolled",
         "proxy-headful-controlled",
@@ -266,7 +304,9 @@
       "kind": "public-consistency-diagnostic",
       "capturePolicy": "single-visit",
       "parser": "manual",
-      "routes": ["https://pixelscan.net/"],
+      "routes": [
+        "https://pixelscan.net/"
+      ],
       "sourceUrl": "https://pixelscan.net/manifest",
       "signals": [
         "fingerprint consistency",
@@ -294,9 +334,20 @@
       "kind": "public-trust-diagnostic",
       "capturePolicy": "single-visit",
       "parser": "manual",
-      "routes": ["https://iphey.com/"],
+      "routes": [
+        "https://iphey.com/"
+      ],
       "sourceUrl": "https://iphey.com/",
-      "signals": ["browser", "OS", "location", "IP", "hardware", "software", "DNS", "automation"],
+      "signals": [
+        "browser",
+        "OS",
+        "location",
+        "IP",
+        "hardware",
+        "software",
+        "DNS",
+        "automation"
+      ],
       "requiredScenarios": [
         "proxy-headful-uncontrolled",
         "proxy-headful-controlled",
@@ -315,10 +366,21 @@
       "kind": "academic-population-diagnostic",
       "capturePolicy": "manual-consent",
       "parser": "manual",
-      "routes": ["https://www.amiunique.org/fingerprint"],
+      "routes": [
+        "https://www.amiunique.org/fingerprint"
+      ],
       "sourceUrl": "https://www.amiunique.org/",
-      "signals": ["population rarity", "HTTP headers", "JavaScript attributes", "history"],
-      "requiredScenarios": ["same-profile-relaunch", "different-profile", "stock-browser-control"],
+      "signals": [
+        "population rarity",
+        "HTTP headers",
+        "JavaScript attributes",
+        "history"
+      ],
+      "requiredScenarios": [
+        "same-profile-relaunch",
+        "different-profile",
+        "stock-browser-control"
+      ],
       "criterion": "No impossible or contradictory attributes; record rarity as a trend relative to the stock control, not as a universal threshold.",
       "limitations": "Uniqueness depends on the site's changing volunteer population. The test submits fingerprint data and requires reviewer consent."
     },
@@ -331,7 +393,9 @@
       "kind": "privacy-population-diagnostic",
       "capturePolicy": "manual-consent",
       "parser": "manual",
-      "routes": ["https://coveryourtracks.eff.org/"],
+      "routes": [
+        "https://coveryourtracks.eff.org/"
+      ],
       "sourceUrl": "https://coveryourtracks.eff.org/about",
       "signals": [
         "fingerprintability",
@@ -394,9 +458,17 @@
       "kind": "public-network-leak-diagnostic",
       "capturePolicy": "single-visit",
       "parser": "manual",
-      "routes": ["https://ipleak.net/"],
+      "routes": [
+        "https://ipleak.net/"
+      ],
       "sourceUrl": "https://ipleak.net/",
-      "signals": ["IPv4 and IPv6", "WebRTC", "DNS resolvers", "geolocation", "headers"],
+      "signals": [
+        "IPv4 and IPv6",
+        "WebRTC",
+        "DNS resolvers",
+        "geolocation",
+        "headers"
+      ],
       "requiredScenarios": [
         "proxy-headful-uncontrolled",
         "proxy-headful-controlled",
@@ -414,7 +486,10 @@
       "kind": "public-bot-and-transport-diagnostic",
       "capturePolicy": "single-visit",
       "parser": "manual",
-      "routes": ["https://www.browserscan.net/bot-detection", "https://www.browserscan.net/tls"],
+      "routes": [
+        "https://www.browserscan.net/bot-detection",
+        "https://www.browserscan.net/tls"
+      ],
       "sourceUrl": "https://www.browserscan.net/tools",
       "signals": [
         "webdriver",
@@ -431,6 +506,116 @@
       ],
       "criterion": "No bot flag; navigator/client-hint values agree; TLS and HTTP/2 identify the real shipped Chromium/Lobium family and do not contradict the claimed UA major.",
       "limitations": "Live and opaque. Transport fingerprints should be compared with the same Lobium build and stock control, not matched to a hand-picked hash."
+    },
+    {
+      "id": "incolumitas-botornot",
+      "name": "Incolumitas BotOrNot",
+      "providerId": "incolumitas",
+      "provider": "Nikolai Tschacher (incolumitas.com)",
+      "tier": "required",
+      "kind": "public-bot-classifier",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": [
+        "https://bot.incolumitas.com/"
+      ],
+      "sourceUrl": "https://incolumitas.com/pages/BotOrNot/",
+      "signals": [
+        "behavioural mouse and keyboard entropy",
+        "navigator.webdriver and CDP artifacts",
+        "headless heuristics",
+        "TCP/TLS fingerprint",
+        "browser feature coherence"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "stock-browser-control"
+      ],
+      "criterion": "The reported detection score stays in the human band and no individual test is flagged, in a headful session with real input.",
+      "limitations": "Includes BEHAVIOURAL tests that a scripted session cannot pass regardless of fingerprint quality, so a failing behavioural sub-score is not evidence of a fingerprint defect. Score only the fingerprint and automation sections."
+    },
+    {
+      "id": "rebrowser-bot-detector",
+      "name": "Rebrowser Bot Detector",
+      "providerId": "rebrowser",
+      "provider": "Rebrowser",
+      "tier": "required",
+      "kind": "automation-leak-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": [
+        "https://bot-detector.rebrowser.net/"
+      ],
+      "sourceUrl": "https://github.com/rebrowser/rebrowser-bot-detector",
+      "signals": [
+        "CDP runtime enable leak",
+        "main-world isolation artifacts",
+        "source-url leak in stack traces",
+        "exposed automation globals",
+        "viewport and window dimension coherence"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "stock-browser-control"
+      ],
+      "criterion": "Every automation test reports green, with no CDP or isolated-world artifact detected.",
+      "limitations": "Targets automation plumbing rather than fingerprint values, so it is the only entry here that directly measures whether driving the browser over CDP is observable. Run it in the same mode the product actually launches profiles in — testing a hand-driven session would not measure the product."
+    },
+    {
+      "id": "deviceandbrowserinfo",
+      "name": "DeviceAndBrowserInfo bot check",
+      "providerId": "deviceandbrowserinfo",
+      "provider": "Antoine Vastel",
+      "tier": "required",
+      "kind": "public-bot-classifier",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": [
+        "https://deviceandbrowserinfo.com/are_you_a_bot",
+        "https://deviceandbrowserinfo.com/info_device"
+      ],
+      "sourceUrl": "https://deviceandbrowserinfo.com/",
+      "signals": [
+        "headless and automation heuristics",
+        "canvas and WebGL identifiers",
+        "font enumeration",
+        "navigator coherence"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "stock-browser-control"
+      ],
+      "criterion": "Classified as not-a-bot, with the device section agreeing with the persona.",
+      "limitations": "From the author of fp-scanner, so its heuristics overlap that entry; treat the pair as one provider family when counting independent evidence."
+    },
+    {
+      "id": "whatismybrowser",
+      "name": "WhatIsMyBrowser detection",
+      "providerId": "whatismybrowser",
+      "provider": "WhatIsMyBrowser",
+      "tier": "optional",
+      "kind": "ua-coherence-diagnostic",
+      "capturePolicy": "single-visit",
+      "parser": "manual",
+      "routes": [
+        "https://www.whatismybrowser.com/detect/what-is-my-user-agent/"
+      ],
+      "sourceUrl": "https://www.whatismybrowser.com/",
+      "signals": [
+        "User-Agent parsing",
+        "client hints vs UA agreement",
+        "reported OS and browser version vs feature detection"
+      ],
+      "requiredScenarios": [
+        "proxy-headful-uncontrolled",
+        "proxy-headful-controlled",
+        "stock-browser-control"
+      ],
+      "criterion": "The parsed browser, version and OS match the persona exactly, and no \"user agent looks modified\" notice appears.",
+      "limitations": "Reads the UA and client hints and little else, so it cannot detect a deep fingerprint defect. Its value is narrow and specific: it catches a UA that disagrees with the client hints or with the engine version, which is the one lie the rest of this matrix is weakest at surfacing."
     }
   ]
 }

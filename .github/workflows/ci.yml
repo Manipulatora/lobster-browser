@@ -174,4 +174,11 @@ jobs:
       # whether a later gate can be trusted, and every one of them was executed by no workflow — so a
       # regression in the detector-matrix grader or the native-policy contract reached main green.
       - run: node ci/validation/detector-matrix.mjs --check
-      - run: node --test ci/validation/detector-matrix.test.mjs ci/validation/antibot-exam.test.mjs ci/validation/native-policy-contract.test.mjs
+      - run: node --test ci/validation/detector-matrix.test.mjs ci/validation/antibot-exam.test.mjs ci/validation/native-policy-contract.test.mjs ci/validation/version-coherence.test.mjs
+      # Offline W4 guard: the build ref, the UA-claimed version, and the engine manifest must agree,
+      # and the pin must not be a canary/branch-point build. This is what would have caught the repo
+      # sitting on canary 152.0.7928.0. The ONLINE half (is the pin behind stable / still a real
+      # release) is scripts/track-upstream.mjs, run non-blocking so a new stable does not red every PR.
+      - name: Chrome-version tracker (report only)
+        continue-on-error: true
+        run: node scripts/track-upstream.mjs

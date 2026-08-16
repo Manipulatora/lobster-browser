@@ -57,7 +57,7 @@ test('complete fresh evidence passes only with all environment preconditions and
     observedDirectIp: '198.51.100.20',
     expectedTimezone: 'Europe/Berlin',
     observedTimezone: 'Europe/Berlin',
-    stockBrowserBuild: 'Chromium 152.0.7928.0',
+    stockBrowserBuild: 'Chromium 152.0.7977.42',
     stockBrowserBinarySha256: 'c'.repeat(64),
     connectionModesTested: ['uncontrolled', 'controlled'],
   };
@@ -97,7 +97,7 @@ test('an inconclusive public page cannot be promoted to release-ready evidence',
     observedDirectIp: '198.51.100.21',
     expectedTimezone: 'America/New_York',
     observedTimezone: 'America/New_York',
-    stockBrowserBuild: 'Chromium 152.0.7928.0',
+    stockBrowserBuild: 'Chromium 152.0.7977.42',
     stockBrowserBinarySha256: 'd'.repeat(64),
     connectionModesTested: ['uncontrolled', 'controlled'],
   };
