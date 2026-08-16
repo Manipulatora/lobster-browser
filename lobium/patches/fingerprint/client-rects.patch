@@ -11,6 +11,7 @@ Value keying gives equal inputs equal outputs, so the relations survive; it also
 sites below agree by construction rather than by both happening to pass index 0.
 
 diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+index 3ae6d39c4a711..3b2d939a313a3 100644
 --- a/third_party/blink/renderer/core/dom/element.cc
 +++ b/third_party/blink/renderer/core/dom/element.cc
 @@ -26,6 +26,9 @@
@@ -23,7 +24,46 @@ diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/
  #include <algorithm>
  #include <bitset>
  #include <limits>
-@@ -3463,6 +3466,19 @@
+@@ -3348,6 +3351,38 @@ void Element::ClientQuads(Vector<gfx::QuadF>& quads) const {
+   }
+ }
+ 
++// Lobium: does this element's box actually carry HOST entropy worth hiding?
++//
++// clientRects fingerprinting reads sub-pixel geometry that varies by machine, and that variation
++// comes from TEXT METRICS - a content-sized box is as wide as the font rasteriser made its glyphs.
++// A box whose width and height are explicit CSS lengths is pure arithmetic: 100px is 100px on every
++// machine, and stays exactly reproducible under a transform. Perturbing it hides nothing and is
++// trivially detectable, because the detector can compute what the value must have been.
++//
++// CreepJS does exactly that, twice (creep.js L4189-4216):
++//   .rect-known  width:100px; height:100px; transform:rotate(45deg)  -> bounding box is 100*sqrt(2)
++//                everywhere, compared against a HARDCODED hash (9d9215cc)
++//   .rect-ghost  width:0; height:0                                   -> every field must read 0
++// Both were flagged purely because we perturbed values that could not have differed between hosts.
++//
++// So: farble content-sized boxes and leave CSS-determined ones exact. This narrows the noise to
++// where the entropy actually is; it does not weaken it.
++static bool LobiumRectCarriesHostEntropy(const Element& element,
++                                         const gfx::RectF& rect) {
++  // A zero-area box says nothing about the host, and noise here is what produced "unknown ghost
++  // dimensions". Checked before the style lookup because it holds however the box was sized.
++  if (rect.width() == 0.0f && rect.height() == 0.0f) {
++    return false;
++  }
++  const ComputedStyle* style = element.GetComputedStyle();
++  if (!style) {
++    return false;
++  }
++  // Both axes fixed => fully specified by CSS. Either axis auto/percentage/content-driven means
++  // layout decided it, and layout is where the machine shows through.
++  return !(style->Width().IsFixed() && style->Height().IsFixed());
++}
++
+ DOMRectList* Element::getClientRects() {
+   Vector<gfx::RectF> rects = GetClientRectsNoAdjustment();
+   if (rects.empty()) {
+@@ -3359,6 +3394,22 @@ DOMRectList* Element::getClientRects() {
      GetDocument().AdjustRectForScrollAndAbsoluteZoom(rect,
                                                       *element_layout_object);
    }
@@ -31,6 +71,9 @@ diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +      cfg && cfg->seeds.client_rects) {
 +    for (wtf_size_t i = 0; i < rects.size(); ++i) {
++      if (!LobiumRectCarriesHostEntropy(*this, rects[i])) {
++        continue;
++      }
 +      float x = rects[i].x();
 +      float y = rects[i].y();
 +      float w = rects[i].width();
@@ -43,15 +86,17 @@ diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/
    return MakeGarbageCollected<DOMRectList>(rects);
  }
  
-@@ -3515,7 +3531,18 @@
+@@ -3411,7 +3462,20 @@ gfx::RectF Element::GetBoundingClientRectNoLifecycleUpdate() const {
  DOMRect* Element::GetBoundingClientRect() {
    GetDocument().EnsurePaintLocationDataValidForNode(
        this, DocumentUpdateReason::kJavaScript);
 -  return DOMRect::FromRectF(GetBoundingClientRectNoLifecycleUpdate());
 +  gfx::RectF result = GetBoundingClientRectNoLifecycleUpdate();
-+  // Lobium: same client-rect seed as getClientRects so bounding box agrees with the list.
++  // Lobium: same client-rect seed AND the same entropy gate as getClientRects, so the bounding box
++  // agrees with the list on both the value and the decision to leave it alone.
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
-+      cfg && cfg->seeds.client_rects) {
++      cfg && cfg->seeds.client_rects &&
++      LobiumRectCarriesHostEntropy(*this, result)) {
 +    float x = result.x();
 +    float y = result.y();
 +    float w = result.width();

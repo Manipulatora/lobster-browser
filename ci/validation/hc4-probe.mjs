@@ -140,9 +140,19 @@ async function main() {
       observed.shadingLanguageVersion === SENTINEL.shadingLanguageVersion,
       observed.shadingLanguageVersion,
     ],
+    // The two checks below were written before fingerprint/webgl-runtime-safety.patch, and asserting
+    // verbatim echo made them report "HC-4 hook is NOT live" on a binary where it demonstrably IS.
+    // Runtime-safety deliberately INTERSECTS the configured extension list with what the active
+    // backend can actually enable, and CLAMPS precision to what it can deliver, so a synthetic
+    // sentinel can never come back untouched. Asserting the pre-patch behaviour tests a contract the
+    // engine no longer has - and a gate that cries wolf is worse than no gate.
     [
-      'getSupportedExtensions() == sentinel list',
-      JSON.stringify(observed.extensions) === JSON.stringify(SENTINEL.extensions),
+      // Synthetic names cannot survive the intersection, so what proves the hook is that the ONE
+      // real name in the sentinel list survives and nothing from the host leaks in.
+      'getSupportedExtensions() ⊆ sentinel list (runtime-safety intersects)',
+      Array.isArray(observed.extensions) &&
+        observed.extensions.length > 0 &&
+        observed.extensions.every((e) => SENTINEL.extensions.includes(e)),
       JSON.stringify(observed.extensions),
     ],
     [
@@ -151,11 +161,15 @@ async function main() {
       observed.getExtensionOutsideList,
     ],
     [
-      'getShaderPrecisionFormat(FRAGMENT, HIGH_FLOAT) == sentinel bucket',
+      // rangeMin/rangeMax are pass-through, so they must echo exactly - no real GPU reports 77/66.
+      // precision is clamped to the backend, so it may be <= the configured value but must not
+      // exceed it.
+      'getShaderPrecisionFormat(FRAGMENT, HIGH_FLOAT) == sentinel range, precision clamped',
       observed.highFloat &&
         observed.highFloat.rangeMin === SENTINEL.highFloat.rangeMin &&
         observed.highFloat.rangeMax === SENTINEL.highFloat.rangeMax &&
-        observed.highFloat.precision === SENTINEL.highFloat.precision,
+        observed.highFloat.precision > 0 &&
+        observed.highFloat.precision <= SENTINEL.highFloat.precision,
       JSON.stringify(observed.highFloat),
     ],
   ];

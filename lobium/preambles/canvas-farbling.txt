@@ -1,0 +1,29 @@
+Lobium - canvas 2D and OffscreenCanvas readback farbling (seeds.canvas).
+
+Split out of core/config-channel.patch so the canvas surface owns its own hooks.
+
+The shared kernel is lobium::FarbleCanvasRgba (//components/lobium_fp/lobium_farble.cc, an added
+file, not part of this patch). It nudges R/G/B by {-1,0,+1} keyed on (seed, ABSOLUTE canvas
+coordinate, channel), and only for pixels that are byte-identical to none of their four orthogonal
+neighbours - so a solid fill, a hard edge between two fills and a cleared canvas all read back
+EXACTLY, which is what a detector's known-input probe checks, while anti-aliased and blended pixels
+(where the fingerprint entropy actually lives) are perturbed.
+
+Absolute-coordinate keying is what makes the readback paths agree: a getImageData(sx,sy,w,h)
+sub-rect and a full-canvas toDataURL perturb the same on-screen pixel identically.
+
+Hook points, all reading Current() and all no-ops when seeds.canvas is 0:
+  1. modules/canvas/canvas2d/base_rendering_context_2d.cc - getImageData. Farbles the freshly
+     allocated, private ImageData buffer at origin (sx, sy); the live canvas is never touched, so
+     repeated reads cannot compound.
+  2. core/html/canvas/html_canvas_element.cc - toDataURL and toBlob. Farbles a private
+     RGBA8888/UNPREMULTIPLIED copy of the snapshot (unpremultiplied so an RGB nudge can never
+     produce the impossible RGB > A of an invalid premultiplied pixel). Deliberately NOT applied in
+     Snapshot(), which is also the drawImage / createImageBitmap / texImage2D source - farbling
+     there would perturb ordinary rendering and double-apply with getImageData.
+  3. core/offscreencanvas/offscreen_canvas.cc - convertToBlob, a separate encode path. Without it a
+     worker's convertToBlob would leak the true host canvas hash while getImageData on the same
+     canvas returned farbled pixels: a cross-surface contradiction.
+
+The seed is chosen by context type: seeds.canvas for a 2D context, seeds.webgl for a WebGL one (see
+fingerprint/webgl-surfaces.patch for why the WebGL readback must stay Y-flip-coherent).

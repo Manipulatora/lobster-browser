@@ -552,9 +552,19 @@ async function captureHost() {
           ];
         }
       }
+      // The host snapshot describes THIS machine, so its OS has to be this machine's. It was
+      // hardcoded to 'linux', which on the Windows build host mislabelled the report and — worse —
+      // would have derived Linux personas for every `host-calibrated` situation, since those take
+      // their OS from host.os. Only the catalog situations run at a small --limit, which is why it
+      // went unnoticed.
       const profile = normalizeHostCalibrationSnapshot(raw, {
-        os: 'linux',
-        arch: 'x86_64',
+        os:
+          process.platform === 'win32'
+            ? 'windows'
+            : process.platform === 'darwin'
+              ? 'macos'
+              : 'linux',
+        arch: process.arch === 'arm64' ? 'arm64' : 'x86_64',
       });
       return {
         profile,

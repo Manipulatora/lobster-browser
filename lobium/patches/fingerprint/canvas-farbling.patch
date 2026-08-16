@@ -28,8 +28,29 @@ Hook points, all reading Current() and all no-ops when seeds.canvas is 0:
 The seed is chosen by context type: seeds.canvas for a 2D context, seeds.webgl for a WebGL one (see
 fingerprint/webgl-surfaces.patch for why the WebGL readback must stay Y-flip-coherent).
 
+diff --git a/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h b/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
+--- a/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
++++ b/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
+@@ -125,6 +125,18 @@ class CORE_EXPORT CanvasRenderingContext
+   bool IsRenderingContext2D() const {
+     return canvas_rendering_type_ == CanvasRenderingAPI::k2D;
+   }
++
++  // Lobium: has anything been drawn into this context that could differ between HOSTS?
++  //
++  // Declared here, in core, purely so the toDataURL/toBlob path in html_canvas_element.cc can ask
++  // the question - core cannot include the modules header where the 2D answer lives.
++  // BaseRenderingContext2D overrides it; every other context type keeps the default.
++  //
++  // Defaults to TRUE, the fail-safe direction: an unknown context keeps farbling. Only the 2D
++  // context, which tracks its own draw provenance, may answer "nothing was rasterised here, these
++  // are the exact bytes the page wrote".
++  virtual bool LobiumHostEntropyDrawn() const { return true; }
++
+   bool IsImageBitmapRenderingContext() const {
+     return canvas_rendering_type_ == CanvasRenderingAPI::kBitmaprenderer;
+   }
 diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
-index d1193b68f5051..238dde3fa7c0e 100644
 --- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 +++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 @@ -45,6 +45,8 @@
@@ -60,7 +81,7 @@ index d1193b68f5051..238dde3fa7c0e 100644
  #include "ui/accessibility/accessibility_features.h"
  #include "ui/base/resource/resource_scale_factor.h"
  #include "ui/gfx/geometry/rect_conversions.h"
-@@ -1243,6 +1250,50 @@ const AtomicString HTMLCanvasElement::ImageSourceURL() const {
+@@ -1243,6 +1250,59 @@ const AtomicString HTMLCanvasElement::ImageSourceURL() const {
        ImageEncoderUtils::kDefaultRequestedMimeType, 0, kFrontBuffer));
  }
  
@@ -100,6 +121,15 @@ index d1193b68f5051..238dde3fa7c0e 100644
 +    return 0u;
 +  }
 +  if (host->IsRenderingContext2D()) {
++    // Lobium: the same provenance gate getImageData uses. A 2D canvas built only from solid
++    // fillRects holds exactly the bytes the page wrote - identical on every host - so encoding it
++    // honestly costs no unlinkability, and farbling it would contradict getImageData, which is a
++    // tell in itself. Anything rasterised (text, paths, images, gradients, shadows, filters) sets
++    // the flag. WebGL is unconditional below: its readback is always rasterised output.
++    const CanvasRenderingContext* context = host->RenderingContext();
++    if (context && !context->LobiumHostEntropyDrawn()) {
++      return 0u;
++    }
 +    return cfg->seeds.canvas;
 +  }
 +  if (host->IsWebGL()) {
@@ -111,7 +141,7 @@ index d1193b68f5051..238dde3fa7c0e 100644
  scoped_refptr<StaticBitmapImage> HTMLCanvasElement::Snapshot(
      SourceDrawingBuffer source_buffer) const {
    if (Size().IsEmpty()) {
-@@ -1270,6 +1321,10 @@ scoped_refptr<StaticBitmapImage> HTMLCanvasElement::Snapshot(
+@@ -1270,6 +1330,10 @@ scoped_refptr<StaticBitmapImage> HTMLCanvasElement::Snapshot(
      image_bitmap = CreateTransparentImage();
    }
  
@@ -122,7 +152,7 @@ index d1193b68f5051..238dde3fa7c0e 100644
    return image_bitmap;
  }
  
-@@ -1286,6 +1341,9 @@ String HTMLCanvasElement::ToDataURLInternal(
+@@ -1286,6 +1350,9 @@ String HTMLCanvasElement::ToDataURLInternal(
            mime_type, ImageEncoderUtils::kEncodeReasonToDataURL);
  
    scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(source_buffer);
@@ -132,7 +162,7 @@ index d1193b68f5051..238dde3fa7c0e 100644
    if (image_bitmap) {
      std::unique_ptr<ImageDataBuffer> data_buffer =
          ImageDataBuffer::Create(image_bitmap);
-@@ -1391,6 +1449,8 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
+@@ -1391,6 +1458,8 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
  
    CanvasAsyncBlobCreator* async_creator = nullptr;
    scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(kBackBuffer);
@@ -142,7 +172,6 @@ index d1193b68f5051..238dde3fa7c0e 100644
      auto* options = ImageEncodeOptions::Create();
      options->setType(ImageEncoderUtils::MimeTypeName(encoding_mime_type));
 diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
-index 97e94a4aa123d..5ac2c4caa7923 100644
 --- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
 +++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
 @@ -11,6 +11,8 @@
@@ -206,7 +235,6 @@ index 97e94a4aa123d..5ac2c4caa7923 100644
      auto* resolver = MakeGarbageCollected<ScriptPromiseResolver<Blob>>(
          script_state, exception_state.GetContext());
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
-index 1ab234ddb6343..74437c8e40b82 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
 @@ -27,6 +27,8 @@
@@ -227,13 +255,20 @@ index 1ab234ddb6343..74437c8e40b82 100644
  #include "ui/gfx/geometry/skia_conversions.h"
  #include "ui/gfx/geometry/vector2d_f.h"
  
-@@ -513,6 +517,46 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+@@ -513,6 +517,53 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
        SkIRect bounds =
            snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
        DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
 +    } else if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
-+               cfg && cfg->seeds.canvas &&
++               cfg && cfg->seeds.canvas && LobiumHostEntropyDrawn() &&
 +               image_data_pixmap.colorType() == kRGBA_8888_SkColorType) {
++      // LobiumHostEntropyDrawn(): only perturb a canvas that had something RASTERISED into it -
++      // glyphs, paths, images, gradients, shadows, filters. A canvas built purely from solid
++      // fillRects holds exactly the bytes the page asked for, identical on every machine, so
++      // farbling it buys no unlinkability while being trivially detectable: CreepJS's getPixelMods
++      // writes 64 random opaque colours that way and calls any difference a lie. See
++      // Canvas2DRecorderContext::LobiumNoteDraw for the classification.
++      //
 +      // Lobium: seeded canvas farbling. image_data_pixmap is the freshly allocated, private
 +      // ImageData buffer - never the live canvas - so perturbing it in place cannot compound
 +      // across reads. The colorType guard matters: getImageData({storageFormat:'float16'|
@@ -274,3 +309,130 @@ index 1ab234ddb6343..74437c8e40b82 100644
      }
    }
  
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
+@@ -75,6 +75,13 @@ enum class PredefinedColorSpace;
+ class MODULES_EXPORT BaseRenderingContext2D : public CanvasRenderingContext,
+                                               public Canvas2DRecorderContext {
+  public:
++  // Lobium: both bases declare this name - CanvasRenderingContext as the virtual the core-side
++  // toDataURL/toBlob path calls, Canvas2DRecorderContext as the flag the draw funnel maintains.
++  // Overriding here joins them and removes the ambiguity that inheriting both would otherwise cause.
++  bool LobiumHostEntropyDrawn() const override {
++    return Canvas2DRecorderContext::LobiumHostEntropyDrawn();
++  }
++
+   static constexpr unsigned kFallbackToCPUAfterReadbacks = 2;
+ 
+   // Try to restore context 4 times in the event that the context is lost. If
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+@@ -831,6 +831,9 @@ void Canvas2DRecorderContext::ResetInternal() {
+   state_stack_.resize(1);
+   state_stack_.front() = MakeGarbageCollected<CanvasRenderingContext2DState>();
+   layer_count_ = 0;
++  // Lobium: the canvas contents are gone, so the draw provenance that justified farbling is gone
++  // with them. This is the path `canvas.width = N` and ctx.reset() take.
++  lobium_host_entropy_drawn_ = false;
+   SetIsTransformInvertible(true);
+ 
+   CanvasPath::Clear();
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h
+@@ -459,6 +459,9 @@ class MODULES_EXPORT Canvas2DRecorderContext : public CanvasPath {
+   unsigned max_state_stack_depth_ = 1;
+   // Counts how many states have been pushed with BeginLayer.
+   int layer_count_ = 0;
++  // Lobium: set by LobiumNoteDraw when something rasterised is drawn; cleared by ResetInternal,
++  // which is what `canvas.width = N` and ctx.reset() go through. Gates canvas farbling at readback.
++  bool lobium_host_entropy_drawn_ = false;
+   AntiAliasingMode clip_antialiasing_ = kNotAntiAliased;
+   // The paint worklet canvas operates on CSS pixels, and that's different than
+   // the HTML canvas which operates on physical pixels. In other words, the
+@@ -505,6 +508,57 @@ class MODULES_EXPORT Canvas2DRecorderContext : public CanvasPath {
+   virtual void WillDraw(const gfx::Rect& dirty_rect,
+                         CanvasPerformanceMonitor::DrawType) = 0;
+ 
++  // Lobium: has anything been drawn into this canvas that could differ between HOSTS?
++  //
++  // Canvas farbling has to answer one question at readback time: are these pixels a fingerprint, or
++  // are they exactly what the page asked for? The pixel buffer cannot answer it - 64 random colours
++  // written with fillRect are byte-indistinguishable from 64 pixels of rendered text. But Blink
++  // knows the PROVENANCE, and Chromium already classifies every draw for the performance monitor,
++  // so the answer is available for free one layer up.
++  //
++  // This is what CreepJS's getPixelMods exploits (creep.js L2913-2992): it fills an 8x8 canvas with
++  // random opaque colours via fillRect, reads each pixel back, and calls any difference a lie. Those
++  // 64 pixels carry ZERO cross-host entropy - an exact sRGB colour is the same on every machine - so
++  // perturbing them buys no unlinkability and is trivially detectable.
++  //
++  // Real canvas entropy is in rasterisation: glyphs, path anti-aliasing, decoded images, gradient
++  // interpolation, shadow blur, filters. Those set the flag; plain rectangles of a solid colour do
++  // not. The gate only ever makes FEWER pixels move, so it cannot regress known-input fidelity,
++  // idempotence, or read-rectangle independence.
++  bool LobiumHostEntropyDrawn() const { return lobium_host_entropy_drawn_; }
++
++  // Note a draw against the entropy flag. Deliberately NOT keyed on DrawType alone: a fillRect
++  // painted with a gradient or a pattern, or under a shadow or a filter, is rasterised and does
++  // carry host entropy even though its DrawType is kRectangle.
++  void LobiumNoteDraw(CanvasPerformanceMonitor::DrawType draw_type) {
++    if (lobium_host_entropy_drawn_) {
++      return;
++    }
++    switch (draw_type) {
++      case CanvasPerformanceMonitor::DrawType::kText:
++      case CanvasPerformanceMonitor::DrawType::kPath:
++      case CanvasPerformanceMonitor::DrawType::kImage:
++      case CanvasPerformanceMonitor::DrawType::kElement:
++        lobium_host_entropy_drawn_ = true;
++        return;
++      default:
++        break;
++    }
++    // kRectangle / kImageData / kOther: only entropy-carrying via the paint state.
++    //
++    // kOther in particular must NOT mark on its own - ResetInternal() fires it for every
++    // `canvas.width = N` assignment, and getPixelMods does exactly that before it draws. Marking
++    // there would defeat the whole gate.
++    const CanvasRenderingContext2DState& state = GetState();
++    if (state.ShouldDrawShadows() ||
++        state.HasPattern(CanvasRenderingContext2DState::kFillPaintType) ||
++        state.HasPattern(CanvasRenderingContext2DState::kStrokePaintType) ||
++        state.FillStyle().GetCanvasGradient() ||
++        state.StrokeStyle().GetCanvasGradient()) {
++      lobium_host_entropy_drawn_ = true;
++    }
++  }
++
+   virtual sk_sp<PaintFilter> StateGetFilter() = 0;
+ 
+   virtual CanvasRenderingContextHost* GetCanvasRenderingContextHost() const {
+@@ -824,6 +878,7 @@ void Canvas2DRecorderContext::DrawInternal(
+   const CanvasRenderingContext2DState& state = GetState();
+   SkBlendMode global_composite = state.GlobalComposite();
+   if (ShouldUseCompositedDraw(paint_type, image_type)) {
++    LobiumNoteDraw(draw_type);
+     WillDraw(gfx::SkIRectToRect(clip_bounds), draw_type);
+     CompositedDraw(draw_func, paint_canvas, paint_type, image_type);
+     ResetAlphaIfNeeded(paint_canvas, global_composite);
+@@ -832,6 +887,7 @@ void Canvas2DRecorderContext::DrawInternal(
+     paint_canvas->clear(HasAlpha() ? SkColors::kTransparent : SkColors::kBlack);
+     const cc::PaintFlags* flags =
+         state.GetFlags(paint_type, kDrawForegroundOnly, image_type);
++    LobiumNoteDraw(draw_type);
+     WillDraw(gfx::SkIRectToRect(clip_bounds), draw_type);
+     draw_func(paint_canvas, flags);
+     ResetAlphaIfNeeded(paint_canvas, global_composite, &bounds);
+@@ -848,7 +904,8 @@ void Canvas2DRecorderContext::DrawInternal(
+           CheckOverdraw(flags, image_type, CurrentOverdrawOp);
+         }
+       }
+-      WillDraw(gfx::SkIRectToRect(dirty_rect), draw_type);
++      LobiumNoteDraw(draw_type);
++    WillDraw(gfx::SkIRectToRect(dirty_rect), draw_type);
+       draw_func(paint_canvas, flags);
+       ResetAlphaIfNeeded(paint_canvas, global_composite, &bounds);
+     }
