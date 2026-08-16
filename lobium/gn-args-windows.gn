@@ -1,0 +1,50 @@
+# Shipping GN build args for Lobium on WINDOWS (x64).
+#
+# DESIGN PRINCIPLE: match Google's official Chrome-for-Windows build configuration as closely as a
+# non-Google build can. This is an anti-detect engine, so the build config itself is part of the
+# fingerprint: DCHECK builds, component builds, missing PGO and disabled codecs all change timing
+# signatures, feature availability, chrome://gpu contents and error-message shapes in ways that
+# differ from the Chrome a persona claims to be. "Faster to build" is never a reason to deviate.
+#
+# Used by lobium/build.ps1. The Linux counterpart is gn-args.gn.example.
+
+# ---- Release configuration -------------------------------------------------------------------
+# Chromium's BUILDCONFIG is explicit that `is_debug = false` alone is NOT an end-user build:
+# DCHECKs and the component layout materially reduce performance. is_official_build turns on the
+# full optimisation set (whole-program opt, /OPT:ICF, no dev-only instrumentation).
+is_debug = false
+is_official_build = true
+is_component_build = false
+dcheck_always_on = false
+target_cpu = "x64"
+
+# ---- Runtime speed ---------------------------------------------------------------------------
+# PGO is the single largest runtime win on Chromium (~10% on real page loads) and is what stock
+# Chrome ships with. phase 2 = "use the downloaded profile". The profile must be present in
+# chrome/build/pgo_profiles/ - fetched by tools/update_pgo_profiles.py --target=win64, which only
+# runs as a gclient hook when .gclient sets custom_vars = { "checkout_pgo_profiles": True }.
+# Without the profile, gn gen FAILS rather than silently producing a slower binary.
+chrome_pgo_phase = 2
+
+# ThinLTO is also what stock Chrome ships. It costs a long link but is worth several percent at
+# runtime and, more importantly, keeps codegen equivalent to real Chrome.
+use_thin_lto = true
+
+# ---- Media ------------------------------------------------------------------------------------
+# Without these, HTMLMediaElement.canPlayType() and MediaRecorder.isTypeSupported() report no
+# H.264/AAC - an immediate Chromium-not-Chrome tell, and broken video on most of the web.
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# ---- Binary size / build time (does not change runtime behaviour) ------------------------------
+# Stock Chrome ships stripped binaries with separate PDBs. We drop debug info entirely: it saves
+# roughly 40 GB of intermediates and hours of link time on this 8-core host, and the shipped
+# runtime is byte-for-byte equivalent in behaviour.
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+
+# ---- Build throughput (does not alter the produced runtime) -------------------------------------
+# No RBE credentials on this host, so everything is local. Left explicit rather than defaulted so
+# a stray environment variable cannot silently enable a remote backend for a private build.
+use_remoteexec = false

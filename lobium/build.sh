@@ -10,9 +10,18 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Pin an exact Chrome-stable tag. Bumped by rebase.sh; keep within a few days of upstream stable.
-# Default matches the ref the active patches (core/build-gn + core/config-channel) were built + proven on.
-CHROMIUM_REF="${CHROMIUM_REF:-152.0.7928.0}"
+# Pin an exact Chrome-RELEASE tag. Bumped by rebase.sh / scripts/bump-engine-version.mjs; keep within a
+# few days of upstream stable.
+#
+# It MUST be a build Google actually shipped on a release channel (stable/beta/dev), never a canary.
+# A canary build number is close to globally unique in `getHighEntropyValues(['fullVersionList'])`, and
+# its `.0` patch component is itself the signature of a branch-point build rather than a release — so
+# pinning one hands every profile a near-unique version fingerprint. `scripts/track-upstream.mjs`
+# verifies channel membership against the Chrome version-history API and fails on an unreleased pin.
+#
+# 152.0.7977.42 is the M152 beta-frozen build (beta @ 100%, already trickling into stable); M152 is
+# scheduled stable 2026-08-25. Previous pin 152.0.7928.0 was a CANARY nightly.
+CHROMIUM_REF="${CHROMIUM_REF:-152.0.7977.42}"
 SRC_DIR="${SRC_DIR:-${HERE}/chromium/src}"
 OUT_DIR="${OUT_DIR:-out/Lobium}"
 RUN="${1:-}"
