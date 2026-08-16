@@ -37,7 +37,6 @@
     "resources": {
       "resources/sidecar": "sidecar",
       "resources/node": "node",
-      "resources/fonts": "fonts",
       "resources/lobee": "lobee",
       "resources/engine-manifest.json": "engine-manifest.json"
     }

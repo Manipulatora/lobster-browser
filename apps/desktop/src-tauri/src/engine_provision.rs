@@ -51,18 +51,54 @@ pub fn resolve_source(manifest_path: Option<&Path>) -> Result<EngineSource> {
         .with_context(|| format!("reading engine manifest {}", path.display()))?;
     let json: serde_json::Value =
         serde_json::from_str(&raw).with_context(|| "parsing engine manifest")?;
-    let url = json
+
+    // Pick the entry for THIS platform.
+    //
+    // The manifest used to be a single flat object describing the Linux tarball, which a Windows
+    // install would happily download and unpack — leaving a `chrome` ELF binary that cannot execute,
+    // and an error at first launch rather than at provisioning. A `platforms` map makes the mismatch
+    // impossible: an absent entry is a clear error here instead of a broken install later.
+    //
+    // The flat shape is still accepted so an already-shipped manifest keeps working, but only when
+    // its `platform` names the host — an unlabelled or foreign-labelled flat manifest is refused for
+    // the same reason.
+    let want = engine_platform_id();
+    let entry = match json.get("platforms").and_then(|v| v.as_object()) {
+        Some(platforms) => platforms
+            .get(want)
+            .ok_or_else(|| {
+                anyhow!(
+                    "engine manifest has no '{want}' entry (available: {})",
+                    platforms.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            })?
+            .clone(),
+        None => {
+            let declared = json.get("platform").and_then(|v| v.as_str());
+            if declared != Some(want) {
+                bail!(
+                    "engine manifest describes '{}' but this build needs '{want}'; \
+                     downloading it would install an engine that cannot run here",
+                    declared.unwrap_or("an unspecified platform")
+                );
+            }
+            json.clone()
+        }
+    };
+
+    let url = entry
         .get("url")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("engine manifest missing 'url'"))?
+        .ok_or_else(|| anyhow!("engine manifest entry for '{want}' is missing 'url'"))?
         .to_string();
-    let sha256 = json
+    let sha256 = entry
         .get("sha256")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("engine manifest missing 'sha256'"))?
+        .ok_or_else(|| anyhow!("engine manifest entry for '{want}' is missing 'sha256'"))?
         .to_ascii_lowercase();
-    let version = json
+    let version = entry
         .get("version")
+        .or_else(|| json.get("version"))
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
@@ -73,9 +109,50 @@ pub fn resolve_source(manifest_path: Option<&Path>) -> Result<EngineSource> {
     })
 }
 
+/// The manifest key for the platform this binary was built for.
+///
+/// Derived from the compile target rather than from a runtime probe: the engine archive has to match
+/// the app's own architecture, and a runtime check would report the emulated architecture under
+/// Rosetta or Windows-on-ARM and pick an archive the app cannot load.
+pub fn engine_platform_id() -> &'static str {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        "linux-x64"
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        "win-x64"
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        "mac-x64"
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        "mac-arm64"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        "linux-arm64"
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+    )))]
+    {
+        "unsupported"
+    }
+}
+
 /// True when a usable engine binary already exists in `runtime_dir`.
+///
+/// The binary is `chrome.exe` on Windows; hard-coding `chrome` reported "no engine" for a correctly
+/// provisioned Windows runtime and would have re-downloaded ~840 MB on every launch.
 pub fn engine_present(runtime_dir: &Path) -> bool {
-    runtime_dir.join("chrome").is_file()
+    runtime_dir.join(crate::CHROME_BIN).is_file()
 }
 
 /// Download + verify + extract the engine into `runtime_dir`. `on_progress(received, total)` is called

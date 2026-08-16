@@ -54,9 +54,94 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// The user-local engine runtime dir (`~/.local/share/lobster/lobium`) where the downloaded engine lives.
+/// Strip Windows' extended-length (`\\?\`) verbatim prefix from a path.
+///
+/// `AppHandle::path().resource_dir()` returns a VERBATIM path on Windows — `\\?\C:\Program Files\…`.
+/// Most Windows APIs accept that, but Node does not accept it as a main-module argument: it calls
+/// `realpathSync` on the path and aborts with
+/// `EISDIR: illegal operation on a directory, lstat 'C:'`.
+///
+/// The failure was invisible from the Rust side and genuinely nasty. `SidecarClient::spawn` succeeded
+/// (the process *did* start), so `sidecar` was `Some` and the local automation API came up as normal —
+/// but the interpreter had already died, leaving a running app wired to a dead sidecar in which every
+/// profile launch and every agent call fails. Found only by running the installed bundle; a `cargo`
+/// run resolves its resources through the dev fallback path and never reproduces it.
+///
+/// UNC shares (`\\?\UNC\server\share`) are mapped back to `\\server\share`; anything that is not a
+/// drive-letter or UNC verbatim path is returned untouched.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            // Only a real drive path (`C:\…`) is safe to un-prefix.
+            if rest.as_bytes().get(1) == Some(&b':') {
+                return PathBuf::from(rest);
+            }
+        }
+        path
+    }
+    #[cfg(not(windows))]
+    {
+        path
+    }
+}
+
+/// The app's bundled-resource directory, with the Windows verbatim prefix removed.
+/// Every resource lookup must go through this rather than calling `resource_dir()` directly.
+fn app_resource_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path().resource_dir().ok().map(strip_verbatim_prefix)
+}
+
+/// Chromium's executable file name on this platform.
+///
+/// Every engine-discovery path used to hard-code `chrome`, so on Windows the packaged/downloaded
+/// runtime was never found even when it was present.
+#[cfg(windows)]
+pub(crate) const CHROME_BIN: &str = "chrome.exe";
+#[cfg(not(windows))]
+pub(crate) const CHROME_BIN: &str = "chrome";
+
+/// The user's home directory, cross-platform.
+///
+/// `HOME` is not set on Windows. The original `var_os("HOME")` therefore yielded `None` for every
+/// caller: `engine_status()` reported an empty runtime dir and `provision_engine` failed with
+/// "cannot resolve engine runtime dir (no HOME)" on a machine with a perfectly good home directory —
+/// a silent, confusing dead end rather than an error anyone could act on.
+fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let drive = std::env::var_os("HOMEDRIVE")?;
+                let path = std::env::var_os("HOMEPATH")?;
+                Some(PathBuf::from(drive).join(path))
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+/// The user-local engine runtime dir where the downloaded engine lives.
+/// Unix: `~/.local/share/lobster/lobium`.  Windows: `%LOCALAPPDATA%\lobster\lobium`.
 fn user_engine_runtime_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/lobster/lobium"))
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .or_else(|| user_home_dir().map(|home| home.join("AppData").join("Local")))
+            .map(|base| base.join("lobster").join("lobium"))
+    }
+    #[cfg(not(windows))]
+    {
+        user_home_dir().map(|home| home.join(".local/share/lobster/lobium"))
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -101,17 +186,16 @@ struct EngineDownloadProgress {
 /// pointed at it (no restart needed).
 #[tauri::command]
 async fn provision_engine(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri::{Emitter, Manager};
-    let runtime_dir = user_engine_runtime_dir()
-        .ok_or_else(|| "cannot resolve engine runtime dir (no HOME)".to_string())?;
+    use tauri::Emitter;
+    let runtime_dir = user_engine_runtime_dir().ok_or_else(|| {
+        "cannot resolve the engine runtime directory (no LOCALAPPDATA/USERPROFILE on Windows, \
+         no HOME otherwise)"
+            .to_string()
+    })?;
     if engine_provision::engine_present(&runtime_dir) {
         return Ok(());
     }
-    let manifest = app
-        .path()
-        .resource_dir()
-        .ok()
-        .map(|r| r.join("engine-manifest.json"));
+    let manifest = app_resource_dir(&app).map(|r| r.join("engine-manifest.json"));
     let source = engine_provision::resolve_source(manifest.as_deref())
         .map_err(|e| format!("no engine source configured: {e:#}"))?;
     let app_for_progress = app.clone();
@@ -126,7 +210,7 @@ async fn provision_engine(app: tauri::AppHandle) -> Result<(), String> {
     // Point the RUNNING process at the freshly installed engine so a launch works without a restart.
     std::env::set_var(
         "LOBSTER_LOBIUM_BIN",
-        runtime_dir.join("chrome").to_string_lossy().as_ref(),
+        runtime_dir.join(CHROME_BIN).to_string_lossy().as_ref(),
     );
     std::env::set_var("LOBSTER_LOBIUM_DIR", runtime_dir.to_string_lossy().as_ref());
     Ok(())
@@ -167,7 +251,7 @@ fn list_font_families(app: tauri::AppHandle, os: String) -> Result<Vec<String>, 
     if let Some(explicit) = std::env::var_os("LOBSTER_FONTS_DIR") {
         candidates.push(PathBuf::from(explicit));
     }
-    if let Ok(resources) = app.path().resource_dir() {
+    if let Some(resources) = app_resource_dir(&app) {
         candidates.push(resources.join("fonts"));
     }
     let pack = candidates
@@ -612,7 +696,7 @@ fn resolve_sidecar_js(app: &tauri::AppHandle) -> String {
         }
     }
     // Packaged resource layouts (self-contained bundle or legacy engine-runner nest).
-    if let Ok(resource_dir) = app.path().resource_dir() {
+    if let Some(resource_dir) = app_resource_dir(app) {
         for rel in [
             "sidecar/index.js",
             "sidecar/engine-runner/index.js",
@@ -638,8 +722,16 @@ fn resolve_node_bin(app: &tauri::AppHandle) -> String {
             return path;
         }
     }
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        for rel in ["node/bin/node", "node/node"] {
+    // The vendored interpreter is `node.exe` on Windows and a bare `node` elsewhere. Probing only the
+    // POSIX names made the packaged runtime invisible on Windows, so resolution fell through to a bare
+    // "node" on PATH — which a packaged install has no reason to have, and the sidecar never started.
+    #[cfg(windows)]
+    const NODE_RELATIVE: &[&str] = &["node/node.exe", "node/bin/node.exe"];
+    #[cfg(not(windows))]
+    const NODE_RELATIVE: &[&str] = &["node/bin/node", "node/node"];
+
+    if let Some(resource_dir) = app_resource_dir(app) {
+        for rel in NODE_RELATIVE {
             let packaged = resource_dir.join(rel);
             if packaged.is_file() {
                 return packaged.to_string_lossy().into_owned();
@@ -688,19 +780,19 @@ fn host_has_drm_render_node() -> bool {
 /// independently: Linux `.deb` resources contain the font pack while the large Lobium runtime may
 /// live in the per-user product installation.
 fn ensure_lobium_env(app: &tauri::AppHandle) {
-    let resource_dir = app.path().resource_dir().ok();
-    let user_runtime = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".local/share/lobster/lobium"));
+    let resource_dir = app_resource_dir(app);
+    // Shared with engine_status()/provision_engine() so all three agree on where the engine lives —
+    // and so it resolves at all on Windows, where HOME is unset.
+    let user_runtime = user_engine_runtime_dir();
 
     if std::env::var_os("LOBSTER_LOBIUM_BIN").is_none() {
         let mut candidates = Vec::new();
         if let Some(resources) = resource_dir.as_ref() {
-            candidates.push(resources.join("lobium/chrome"));
-            candidates.push(resources.join("engines/lobium/chrome"));
+            candidates.push(resources.join("lobium").join(CHROME_BIN));
+            candidates.push(resources.join("engines").join("lobium").join(CHROME_BIN));
         }
         if let Some(runtime) = user_runtime.as_ref() {
-            candidates.push(runtime.join("chrome"));
+            candidates.push(runtime.join(CHROME_BIN));
         }
         if let Some(chrome) = candidates.into_iter().find(|path| path.is_file()) {
             std::env::set_var("LOBSTER_LOBIUM_BIN", chrome.to_string_lossy().as_ref());
@@ -867,7 +959,8 @@ async fn agent_start(
         // Managed runs go through the backend proxy: inject its URL + access token from operator env,
         // never an OpenRouter key. The sidecar's managed client uses `apiKey` as the proxy bearer token.
         let proxy_url = std::env::var("LOBSTER_AGENT_PROXY_URL").map_err(|_| {
-            "managed mode requires LOBSTER_AGENT_PROXY_URL (the backend /agent/llm base)".to_string()
+            "managed mode requires LOBSTER_AGENT_PROXY_URL (the backend /agent/llm base)"
+                .to_string()
         })?;
         let proxy_token = std::env::var("LOBSTER_AGENT_PROXY_TOKEN")
             .map_err(|_| "managed mode requires LOBSTER_AGENT_PROXY_TOKEN".to_string())?;
@@ -1062,7 +1155,11 @@ pub fn run() {
     builder
         .setup(|app| {
             // Open the local profile store under the OS app-data dir.
-            let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+            // De-verbatim'd for the same reason as the resource dir: `profiles_dir` derives from this
+            // and is handed to the Node sidecar as the agent `memoryDir`, where the journal and memory
+            // stores do path-containment checks. A `\\?\`-prefixed root would not compare equal to the
+            // plain paths those checks resolve, so containment could fail on correct input.
+            let dir = strip_verbatim_prefix(app.path().app_data_dir().map_err(|e| e.to_string())?);
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let conn =
                 profile_store::init(dir.join("profiles.sqlite")).map_err(|e| e.to_string())?;
