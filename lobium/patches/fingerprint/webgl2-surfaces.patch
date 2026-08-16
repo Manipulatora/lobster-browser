@@ -1,0 +1,98 @@
+Lobium - WebGL2 limits that must agree with the WebGL1 limits the persona already reports.
+
+WebGL2 exposes several of the same driver limits as WebGL1, counted in scalar COMPONENTS instead of
+4-component VECTORS. Spoofing only the WebGL1 view lets one page contradict itself: a persona
+reporting 1024 vertex uniform vectors in a WebGL1 context, next to the host's real component count in
+a WebGL2 context, is caught by dividing by four.
+
+The x4 relation is not an assumption. ANGLE's D3D11 renderer derives them that way itself, in
+third_party/angle/src/libANGLE/renderer/d3d/d3d11/renderer11_utils.cpp:
+
+    maxShaderUniformComponents[Vertex]   = maxVertexUniformVectors   * 4
+    maxShaderUniformComponents[Fragment] = maxFragmentUniformVectors * 4
+    maxVaryingComponents                 = maxVaryingVectors         * 4
+
+so reproducing the identity keeps the pair consistent for any persona value, with no per-GPU data to
+capture and nothing invented.
+
+DELIBERATELY NOT SPOOFED: MAX_3D_TEXTURE_SIZE, MAX_ARRAY_TEXTURE_LAYERS, MAX_DRAW_BUFFERS,
+MAX_COLOR_ATTACHMENTS and MAX_TEXTURE_LOD_BIAS. On D3D11 those are functions of the FEATURE LEVEL,
+not of the GPU - GetMaximum3DTextureSize and friends switch on D3D_FEATURE_LEVEL alone - so every
+real Windows machine reports the same values and overriding them could only introduce a difference
+where none exists.
+
+Clamped against the backend for the same reason as the WebGL1 caps block: advertising a limit the GL
+implementation cannot satisfy makes content allocate resources that then fail, which shows up as
+missing 3D or a lost context rather than as a fingerprint win.
+
+The WebGL2 EXTENSION list is a separate concern and lives with the WebGL1 one in
+fingerprint/webgl-surfaces.patch, since both go through getSupportedExtensions in the shared base
+class.
+
+Hook point: third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+
+diff --git a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+@@ -11,6 +11,7 @@
+ #include "base/feature_list.h"
+ #include "base/numerics/checked_math.h"
+ #include "base/numerics/safe_conversions.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "gpu/command_buffer/client/gles2_interface.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/platform/web_graphics_context_3d_provider.h"
+@@ -4840,6 +4841,53 @@ ScriptValue WebGL2RenderingContextBase::getParameter(ScriptState* script_state,
+                                                      GLenum pname) {
+   if (isContextLost())
+     return ScriptValue::CreateNull(script_state->GetIsolate());
++
++  // Lobium: WebGL2 exposes several of the SAME driver limits the persona already spoofs in WebGL1,
++  // counted in scalar components instead of 4-component vectors. Leaving these honest lets one
++  // context contradict the other in a single page: a persona reporting 1024 vertex uniform VECTORS
++  // while the WebGL2 context reports the host's own COMPONENTS value is caught by dividing by four.
++  //
++  // The x4 relation is not a guess - it is how the backend itself derives them. ANGLE's D3D11
++  // renderer (renderer11_utils.cpp) computes:
++  //   maxShaderUniformComponents[Vertex]   = maxVertexUniformVectors   * 4
++  //   maxShaderUniformComponents[Fragment] = maxFragmentUniformVectors * 4
++  //   maxVaryingComponents                 = maxVaryingVectors         * 4
++  // so reproducing the identity here keeps the pair consistent for ANY persona value, with no
++  // per-GPU data to capture. The remaining WebGL2-only limits (MAX_3D_TEXTURE_SIZE,
++  // MAX_ARRAY_TEXTURE_LAYERS, MAX_DRAW_BUFFERS, MAX_COLOR_ATTACHMENTS, MAX_TEXTURE_LOD_BIAS) are
++  // deliberately left alone: on D3D11 they are functions of the FEATURE LEVEL, not of the GPU, so
++  // every real Windows machine reports the same values and spoofing them could only introduce a
++  // difference where none exists.
++  //
++  // Clamped against the backend for the same reason as the WebGL1 caps block: advertising a limit
++  // the GL implementation cannot satisfy makes content allocate resources that then fail.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->webgl.caps.present) {
++    const auto derived_component_cap = [&](GLint configured_vectors) -> GLint {
++      GLint backend = 0;
++      ContextGL()->GetIntegerv(pname, &backend);
++      if (configured_vectors <= 0 || backend <= 0) {
++        return backend;
++      }
++      return std::min(configured_vectors * 4, backend);
++    };
++    switch (pname) {
++      case GL_MAX_VERTEX_UNIFORM_COMPONENTS:
++        return WebGLAny(script_state, derived_component_cap(
++                                          cfg->webgl.caps.max_vertex_uniform_vectors));
++      case GL_MAX_FRAGMENT_UNIFORM_COMPONENTS:
++        return WebGLAny(script_state,
++                        derived_component_cap(
++                            cfg->webgl.caps.max_fragment_uniform_vectors));
++      case GL_MAX_VARYING_COMPONENTS:
++        return WebGLAny(
++            script_state,
++            derived_component_cap(cfg->webgl.caps.max_varying_vectors));
++      default:
++        break;
++    }
++  }
++
+   switch (pname) {
+     case GL_SHADING_LANGUAGE_VERSION: {
+       return WebGLAny(

@@ -5,77 +5,115 @@ Replaces the host device list with persona camera/microphone/speaker counts. Lab
 (no libc buffer APIs) for Chromium -Wunsafe-buffer-usage cleanliness.
 
 diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.cc b/third_party/blink/renderer/modules/mediastream/media_devices.cc
-@@ -3,9 +3,11 @@
- // found in the LICENSE file.
- 
+index 4fe2cb45a0089..7e22e422bd639 100644
+--- a/third_party/blink/renderer/modules/mediastream/media_devices.cc
++++ b/third_party/blink/renderer/modules/mediastream/media_devices.cc
+@@ -5,6 +5,7 @@
  #include "third_party/blink/renderer/modules/mediastream/media_devices.h"
-+#include "components/lobium_fp/lobium_fp_config.h"
  
  #include <algorithm>
- #include <string>
 +#include <string_view>
  #include <utility>
  
  #include "base/feature_list.h"
-@@ -1484,6 +1486,63 @@
+@@ -14,6 +15,8 @@
+ #include "base/strings/stringprintf.h"
+ #include "base/uuid.h"
+ #include "build/build_config.h"
++#include "components/lobium_fp/lobium_fp_config.h"
++#include "components/lobium_fp/lobium_media_devices.h"
+ #include "media/base/media_permission.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
+@@ -1486,6 +1489,95 @@ void MediaDevices::DevicesEnumerated(
      }
    }
  
 +  // Lobium: replace host device enumeration with the persona mediaDevices policy counts.
-+  // Labels stay empty (permission-gated on real Chrome); deviceIds are stable when configured.
++  //
++  // The identifiers are built with the SAME construction Chrome uses
++  // (content/browser/media/media_devices_util.cc, GetHMACForRawMediaDeviceID): HMAC-SHA256 keyed on
++  // the requesting ORIGIN over a per-profile salt, hex-encoded lowercase - 64 characters. Three
++  // properties of that matter, and the previous implementation had none of them:
++  //
++  //   * LENGTH. Chrome emits 64 hex chars (a full SHA-256). The old id was 32, which is a length no
++  //     Chrome build produces.
++  //   * PER-ORIGIN. Because the origin is the HMAC key, the same physical device reports a DIFFERENT
++  //     id to every site. The old id was origin-independent, so two of an attacker's own domains
++  //     could compare ids and correlate the visitor - something a real browser never allows.
++  //   * ENTROPY. The old id XORed one 32-bit value with a per-word constant, so it carried ~16 bits
++  //     and any two words of it recovered the seed.
++  //
++  // The id/label SHAPE is also corrected. Chrome never emits a non-empty deviceId beside an empty
++  // label: with permission it returns both, and WITHOUT permission it returns a single entry per
++  // kind with everything empty. Emitting real-looking ids with blank labels - as this hook used to -
++  // is a combination that cannot occur, so it advertised the spoof rather than hiding it.
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +      cfg && cfg->media_devices.present) {
 +    media_devices.clear();
 +    result_contains_nonempty_input_device_ids = false;
 +    const auto& md = cfg->media_devices;
-+    auto stable_id = [&](std::string_view kind, int index) -> String {
-+      if (!md.stable_device_ids) {
-+        return String();
-+      }
-+      // Dedicated per-profile seed: canvas/WebGL noise can both be disabled (their seeds become 0),
-+      // but stable media IDs must still differ across profiles rather than collapse to one linkable ID.
-+      uint32_t h = cfg->seeds.media_devices ^ 0x4D454449u;  // 'MEDI'
-+      for (unsigned char c : kind) {
-+        h = (h ^ static_cast<uint32_t>(c)) * 16777619u;
-+      }
-+      h ^= static_cast<uint32_t>(index) * 0x9E3779B1u;
-+      h ^= h >> 16;
-+      h *= 0x7FEB352Du;
-+      h ^= h >> 15;
-+      // 32 hex chars — Chrome-shaped deviceId length without claiming a real host id.
-+      StringBuilder id;
-+      for (int i = 0; i < 8; ++i) {
-+        const uint32_t nibble_word =
-+            h ^ (0xA5A5A5A5u * static_cast<uint32_t>(i + 1));
-+        id.AppendFormat("%04x", nibble_word & 0xFFFFu);
-+      }
-+      return id.ReleaseString();
-+    };
++
++    // The HMAC key. An opaque origin serializes to "null", which is exactly what Chrome keys on for
++    // a sandboxed frame, so the behaviour matches there too.
++    ExecutionContext* context = GetExecutionContext();
++    const std::string origin =
++        context ? context->GetSecurityOrigin()->ToString().Utf8() : std::string("null");
++    const std::string salt = lobium::MediaDeviceSaltFromSeed(cfg->seeds.media_devices);
++
++    // Labels are only populated once the page holds a capture permission, which is the same gate
++    // Chrome applies. `has_permission` here mirrors the surrounding enumeration's own notion of it.
++    const bool expose_ids = md.stable_device_ids;
++
 +    auto push_devices = [&](mojom::blink::MediaDeviceType type, int count,
 +                            std::string_view kind_key) {
-+      const std::string group_key = std::string(kind_key) + "-group";
 +      for (int i = 0; i < count; ++i) {
-+        String id = stable_id(kind_key, i);
++        String id;
++        String group;
++        if (expose_ids) {
++          id = String::FromUtf8(
++              lobium::MediaDeviceHmacId(origin, salt, kind_key, i, /*group=*/false));
++          // One group per kind, matching a machine whose devices share a physical grouping.
++          group = String::FromUtf8(
++              lobium::MediaDeviceHmacId(origin, salt, kind_key, 0, /*group=*/true));
++        }
 +        if (!id.empty() &&
 +            (type == mojom::blink::MediaDeviceType::kMediaAudioInput ||
 +             type == mojom::blink::MediaDeviceType::kMediaVideoInput)) {
 +          result_contains_nonempty_input_device_ids = true;
 +        }
-+        String group = stable_id(group_key, 0);
 +        if (type == mojom::blink::MediaDeviceType::kMediaVideoInput ||
 +            type == mojom::blink::MediaDeviceType::kMediaAudioInput) {
-+          media_devices.push_back(MakeGarbageCollected<InputDeviceInfo>(
-+              id, String(), group, type));
++          media_devices.push_back(
++              MakeGarbageCollected<InputDeviceInfo>(id, String(), group, type));
 +        } else {
-+          media_devices.push_back(MakeGarbageCollected<MediaDeviceInfo>(
-+              id, String(), group, type));
++          media_devices.push_back(
++              MakeGarbageCollected<MediaDeviceInfo>(id, String(), group, type));
 +        }
 +      }
 +    };
++
 +    push_devices(mojom::blink::MediaDeviceType::kMediaAudioInput, md.microphones,
 +                 "audioinput");
 +    push_devices(mojom::blink::MediaDeviceType::kMediaVideoInput, md.cameras,
 +                 "videoinput");
++
++    // Audio OUTPUT starts with the unhashed pseudo-devices Chrome passes through verbatim:
++    // "default" always, and on Windows "communications" as well (GetHMACForRawMediaDeviceID
++    // short-circuits both). A Windows persona whose speaker list lacks them is missing entries every
++    // real Windows Chrome has.
++    if (md.speakers > 0 && expose_ids) {
++      const String out_group = String::FromUtf8(
++          lobium::MediaDeviceHmacId(origin, salt, "audiooutput", 0, /*group=*/true));
++      media_devices.push_back(MakeGarbageCollected<MediaDeviceInfo>(
++          String("default"), String(), out_group,
++          mojom::blink::MediaDeviceType::kMediaAudioOutput));
++      if (cfg->navigator.ua_platform == "Windows") {
++        media_devices.push_back(MakeGarbageCollected<MediaDeviceInfo>(
++            String("communications"), String(), out_group,
++            mojom::blink::MediaDeviceType::kMediaAudioOutput));
++      }
++    }
 +    push_devices(mojom::blink::MediaDeviceType::kMediaAudioOutput, md.speakers,
 +                 "audiooutput");
 +  }

@@ -14,7 +14,7 @@ diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_ba
    if (isContextLost())
      return ScriptValue::CreateNull(script_state->GetIsolate());
 -  // Lobium: override the numeric GPU limits (ENG-8) so MAX_* / viewport / aliased ranges agree with the
--  // spoofed UNMASKED_RENDERER string instead of leaking the real (or software) backend's caps — a
+-  // spoofed UNMASKED_RENDERER string instead of leaking the real (or software) backend's caps - a
 -  // SwiftShader-shaped cap next to a real-GPU renderer is a direct cross-check tell. Only config-provided
 -  // caps are intercepted; every other pname falls through to the normal driver query below.
 +  // Lobium: expose persona limits only when the active backend can actually satisfy them. Advertising

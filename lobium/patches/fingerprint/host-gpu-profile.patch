@@ -9,6 +9,8 @@ No BUILD.gn change (hooks live in already-wired webgl module); no config-schema 
 parses these fields). Requires a Lobium rebuild on the build VPS to prove in binary.
 
 diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 @@ -3873,6 +3873,24 @@
      UseCounter::Count(context, WebFeature::kWebGLDebugRendererInfo);
    }

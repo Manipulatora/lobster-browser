@@ -1,5 +1,5 @@
 diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/resources/new_tab_page/app.css
-index 4dd7a53745..76e5f02eff 100644
+index d9d32b0e8eb63..7b87644979b99 100644
 --- a/chrome/browser/resources/new_tab_page/app.css
 +++ b/chrome/browser/resources/new_tab_page/app.css
 @@ -198,6 +198,29 @@ cr-most-visited {
@@ -33,10 +33,10 @@ index 4dd7a53745..76e5f02eff 100644
    /* We use animation instead of transition to allow a fade-in out of
       display: none. */
 diff --git a/chrome/browser/resources/new_tab_page/app.html b/chrome/browser/resources/new_tab_page/app.html
-index 7b648b82ea..fc6f8c5cc0 100644
+index b6dab963bf644..fbb64f26ed104 100644
 --- a/chrome/browser/resources/new_tab_page/app.html
 +++ b/chrome/browser/resources/new_tab_page/app.html
-@@ -120,6 +120,10 @@ import {SubmitButtonIconType} from '//resources/cr_components/composebox/compose
+@@ -98,6 +98,10 @@ import {SubmitButtonIconType} from '//resources/cr_components/composebox/compose
        </ntp-lens-upload-dialog>
      ` : ''}
    </div>
@@ -48,10 +48,10 @@ index 7b648b82ea..fc6f8c5cc0 100644
    && this.isActionChipsVisible_ ? html`
      <ntp-action-chips
 diff --git a/chrome/browser/resources/new_tab_page/icons/BUILD.gn b/chrome/browser/resources/new_tab_page/icons/BUILD.gn
-index d0bfb6693e..6bbbe47525 100644
+index d3958628cf58b..c4b15e40190af 100644
 --- a/chrome/browser/resources/new_tab_page/icons/BUILD.gn
 +++ b/chrome/browser/resources/new_tab_page/icons/BUILD.gn
-@@ -11,6 +11,10 @@ generate_grd("build_grdp") {
+@@ -12,6 +12,10 @@ generate_grd("build_grdp") {
    grd_prefix = "new_tab_page"
    out_grd = "$target_gen_dir/resources.grdp"
    input_files = [
@@ -63,10 +63,10 @@ index d0bfb6693e..6bbbe47525 100644
      "copy.svg",
      "drag_drop_illustration.svg",
 diff --git a/chrome/browser/resources/new_tab_page/logo.css b/chrome/browser/resources/new_tab_page/logo.css
-index d9830f0abc..ece252aa68 100644
+index 7153f6db34add..ece252aa688ea 100644
 --- a/chrome/browser/resources/new_tab_page/logo.css
 +++ b/chrome/browser/resources/new_tab_page/logo.css
-@@ -31,20 +31,31 @@
+@@ -31,27 +31,31 @@
  }
  
  #logo {
@@ -74,6 +74,11 @@ index d9830f0abc..ece252aa68 100644
    forced-color-adjust: none;
 -  height: 92px;
 -  width: 272px;
+-}
+-
+-:host([use-google-logo26_]) #logo {
+-  height: 82px;
+-  width: 270px;
 +  height: auto;
 +  width: auto;
 +  display: flex;
@@ -101,13 +106,15 @@ index d9830f0abc..ece252aa68 100644
 +:host([single-colored]) #logo,
  :host(:not([single-colored])) #logo {
 -  background-image: url(./icons/google_logo.svg);
+-  background-repeat: no-repeat;
+-  background-size: 100%;
 +  -webkit-mask-image: none;
 +  background-image: none;
  }
  
  #imageDoodle {
 diff --git a/chrome/browser/resources/new_tab_page/logo.html b/chrome/browser/resources/new_tab_page/logo.html
-index efb32fff8f..bfa86b9375 100644
+index efb32fff8f9d5..bfa86b9375977 100644
 --- a/chrome/browser/resources/new_tab_page/logo.html
 +++ b/chrome/browser/resources/new_tab_page/logo.html
 @@ -1,5 +1,7 @@
@@ -120,26 +127,26 @@ index efb32fff8f..bfa86b9375 100644
  ${this.showDoodle_ ? html`
    <div id="doodle" title="${this.doodle_!.description}">
 diff --git a/chrome/browser/resources/new_tab_page/logo.ts b/chrome/browser/resources/new_tab_page/logo.ts
-index d63d0527d5..b9e14554fc 100644
+index 17c796eea4864..7b2b6bf1b7f95 100644
 --- a/chrome/browser/resources/new_tab_page/logo.ts
 +++ b/chrome/browser/resources/new_tab_page/logo.ts
-@@ -168,7 +168,10 @@ export class LogoElement extends CrLitElement {
+@@ -175,7 +175,10 @@ export class LogoElement extends CrLitElement {
    }
  
    private computeShowDoodle_(): boolean {
 -    return !!this.imageDoodle_;
 +    // Lobium: NEVER show the Google logo or the animated Google doodle. Only our own brand image
-+    // (icons/lobium_master.png) appears above the search box — gated by showLogo_ = loaded_ &&
++    // (icons/lobium_master.png) appears above the search box - gated by showLogo_ = loaded_ &&
 +    // !showDoodle_, which stays true because the doodle is always suppressed here.
 +    return false;
    }
  
    /**
 diff --git a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
-index 2e48e58257..e4cc6895a7 100644
+index 20936d6cca48e..886b2ef2e6b5d 100644
 --- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
 +++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
-@@ -691,17 +691,10 @@ void NewTabPageHandler::GetMostVisitedSettings(
+@@ -698,17 +698,10 @@ void NewTabPageHandler::GetMostVisitedSettings(
  }
  
  void NewTabPageHandler::GetDoodle(GetDoodleCallback callback) {

@@ -1,0 +1,63 @@
+Lobium - Windows font-set isolation through DirectWrite.
+
+The installed font set is one of the highest-entropy signals a page can read, and it needs no
+permission: lay a string out in a candidate family with a known fallback, measure the advance width,
+and the family exists if the width differs. A few hundred probes separate machines more sharply than
+the User-Agent does, and a VPS, a developer workstation and a consumer laptop all measure
+differently - so a persona claiming Windows 11 while measuring as "Windows Server without the Office
+fonts" is caught by arithmetic alone.
+
+Linux solves this with a per-profile FONTCONFIG_FILE written by the launcher, pointing at a
+provisioned pack. Windows has no fontconfig; fonts resolve through DirectWrite in the BROWSER
+process, so the same isolation needs hooks here.
+
+TWO DIFFERENT SERVICES, AND THE OBVIOUS ONE IS DEAD CODE. The first version of this patch hooked
+only DWriteFontProxyImpl, which every guide and every older Chromium source describes as the Windows
+font path. It had no effect whatsoever: measured in-browser, EVERY installed family still resolved
+while the config listed three. As of M152 `content::InitializeFontIntegration` routes the renderer to
+`font_data_service::FontDataManager` instead, because `kFontDataServiceAllWebContents` is
+FEATURE_ENABLED_BY_DEFAULT on Windows (content/common/features.cc). DWriteFontProxy is only
+reached in single-process mode or with that feature switched off. Both are hooked, since either can
+be the live one depending on flags:
+
+  FontDataServiceImpl::MatchFamilyName        THE by-name lookup today. Every `font-family:`
+                                              resolution and every width-measurement probe.
+  FontDataServiceImpl::LegacyMakeTypeface     the GDI-compatible by-name route to the same thing.
+  FontDataServiceImpl::MatchLocalFont         `src: local("ArialMT")`, by PostScript/full name.
+  FontDataServiceImpl::GetAllFamilyNames      enumeration; must agree with what MatchFamilyName
+                                              will actually resolve.
+  DWriteFontProxyImpl::FindFamily             the pre-M152 equivalent of MatchFamilyName.
+  DWriteFontProxyImpl::MatchUniqueFont        the pre-M152 equivalent of MatchLocalFont.
+  FontEnumerationDataSourceWin::GetFonts      the Local Font Access API (navigator.fonts.query).
+                                              Permission-gated, but a granted prompt hands over the
+                                              whole list at once.
+
+A null / not-found result is each service's own "no such font" answer, so a filtered family is
+indistinguishable from one that was never installed.
+
+MatchFamilyNameCharacter and MapCharacters are deliberately NOT filtered. They are the per-character
+fallback used when the primary font lacks a glyph; blocking them does not hide a font, it breaks the
+rendering of scripts the persona should be able to display.
+
+Not filtered by equality: MatchLocalFont receives a PostScript name ("ArialMT"), not a family, so it
+uses a prefix test against the claimed families. See FontUniqueNameAllowed for why that errs toward
+admitting - a false admit leaks one font, a false reject renders a legitimate page in a fallback
+face, which is both a functional bug and its own tell.
+
+FILTERING IS ONLY HALF OF IT. A filter can subtract host fonts the persona does not claim; it cannot
+add fonts the persona claims that the host lacks, and a persona measurably MISSING fonts is its own
+tell. So the profile's font pack is sideloaded into the DirectWrite collection - reusing Chromium's
+existing sideload path, which merges the extra faces with the system set rather than replacing it.
+
+The merged collection is built ONCE per process and shared. DWriteFontProxyImpl is created per
+renderer, and Chromium only ever sideloaded from tests, where two files and one instance made the
+cost invisible; a real pack is a few hundred faces, so rebuilding per instance would put hundreds of
+CreateFontFileReference + Analyze calls on every renderer's first font lookup.
+
+Fail-open throughout: no config, no font list, or an unreadable pack all degrade to stock behaviour.
+Chromium's own kLastResortFontNames are always allowed, because getLastResortFallbackFont CRASHES
+the renderer if none of them can be loaded, and a persona list that omitted them all must not be
+able to express that.
+
+Hook points: content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
+              content/browser/font_access/font_enumeration_data_source_win.cc

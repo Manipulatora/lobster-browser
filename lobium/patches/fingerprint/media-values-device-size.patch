@@ -7,6 +7,8 @@ still read the host display. Hook both to cfg->screen.width/height (and DPR for 
 quirk) so CSS device-* media queries agree with screen.*.
 
 diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
 @@ -165,6 +165,17 @@
  
  int MediaValues::CalculateDeviceWidth(LocalFrame* frame) {

@@ -5,28 +5,39 @@ browser startup, so the sidecar probes the exact binary it will spawn instead of
 package label, or stale sidecar manifest. Any older/unpatched Chromium build has no contract and profile
 launch fails closed.
 
-Keep this list synchronized with the hooks compiled in patches/series and
-packages/engine-runner/src/lobium-capabilities.ts.
+The capability LIST is not written here. It lives in components/lobium_fp/lobium_capabilities.cc, next
+to the hooks it describes, because a list duplicated into a patch literal drifts: adding a hook and
+forgetting the literal under-reports, while editing the literal without adding the hook makes the binary
+claim spoofing it does not have — and the sidecar trusts that claim. Keeping this patch to a single call
+means the hook inventory changes in one place, and ci/validation/patch-series.test.mjs cross-checks that
+place against both patches/series and packages/engine-runner/src/lobium-capabilities.ts.
 
 diff --git a/chrome/app/chrome_main.cc b/chrome/app/chrome_main.cc
+index f3c06b9e10d09..7f1770b1b0886 100644
 --- a/chrome/app/chrome_main.cc
 +++ b/chrome/app/chrome_main.cc
-@@ -160,6 +160,21 @@
+@@ -20,6 +20,7 @@
+ #include "build/build_config.h"
+ #if !defined(BUILDING_CHROME_RENDERER)
+ #include "chrome/app/chrome_main_delegate.h"
++#include "components/lobium_fp/lobium_capabilities.h"
+ #endif
+ #include "chrome/app/startup_timestamps.h"
+ #include "chrome/browser/headless/headless_mode_init.h"
+@@ -196,6 +197,19 @@ int ChromeMain(int argc, const char** argv) {
  
    base::CommandLine* command_line(base::CommandLine::ForCurrentProcess());
  
 +  // Lobium: machine-readable proof of the native fingerprint hooks in THIS executable. The sidecar
 +  // runs this before every first launch of a binary (then caches by path/size/mtime) and rejects a
-+  // missing/incompatible capability. Keep output compact and stdout-only for exact JSON parsing.
++  // missing/incompatible capability. Emitted before any browser startup work so the probe stays
++  // cheap, and on stdout alone so the sidecar can parse it as exact JSON.
++  //
++  // The list itself lives in components/lobium_fp/lobium_capabilities.cc, beside the hooks it
++  // describes - a copy here would drift, and a manifest that over-reports is worse than none,
++  // because the sidecar launches on the strength of it.
 +  if (command_line->HasSwitch("lobium-fingerprint-capabilities")) {
-+    std::cout
-+        << "{\"contractVersion\":1,\"product\":\"Lobium\",\"capabilities\":["
-+           "\"config-channel-v1\",\"navigator-languages\","
-+           "\"network-accept-language\",\"process-locale-timezone\","
-+           "\"native-geolocation\",\"webrtc-policy\","
-+           "\"webgl-deep\",\"canvas-farbling\",\"webgl-farbling\","
-+           "\"audio-farbling\",\"client-rects\",\"media-devices\"]}"
-+        << std::endl;
++    std::cout << lobium::CapabilityManifestJson() << std::endl;
 +    return 0;
 +  }
 +

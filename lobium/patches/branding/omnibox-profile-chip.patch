@@ -1,16 +1,16 @@
 diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.cc b/chrome/browser/ui/views/location_bar/location_bar_view.cc
-index 0353e3f0ae..77b3248522 100644
+index fd8525abd9c38..70cbda7776630 100644
 --- a/chrome/browser/ui/views/location_bar/location_bar_view.cc
 +++ b/chrome/browser/ui/views/location_bar/location_bar_view.cc
-@@ -16,6 +16,7 @@
- #include "base/functional/callback_helpers.h"
- #include "base/i18n/rtl.h"
- #include "base/metrics/field_trial_params.h"
+@@ -9,6 +9,7 @@
+ #include <string_view>
+ #include <utility>
+ 
 +#include "base/command_line.h"
- #include "base/strings/utf_string_conversions.h"
- #include "base/trace_event/trace_event.h"
- #include "base/trace_event/typed_macros.h"
-@@ -185,7 +186,10 @@
+ #include "base/containers/adapters.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+@@ -156,7 +157,10 @@
  #include "ui/views/controls/button/image_button_factory.h"
  #include "ui/views/controls/focus_ring.h"
  #include "ui/views/controls/highlight_path_generator.h"
@@ -21,12 +21,12 @@ index 0353e3f0ae..77b3248522 100644
  #include "ui/views/interaction/element_tracker_views.h"
  #include "ui/views/property_effects.h"
  #include "ui/views/style/typography.h"
-@@ -340,6 +344,13 @@ void LocationBarView::Init() {
+@@ -314,6 +318,13 @@ void LocationBarView::Init() {
    location_icon_view->set_drag_controller(this);
    location_icon_view_ = AddChildView(std::move(location_icon_view));
  
 +  // Lobium: the per-profile identity rides on the LEADING location-icon chip (the
-+  // small box at the left of the omnibox) on EVERY page/URL — see GetSecurityChipText
++  // small box at the left of the omnibox) on EVERY page/URL - see GetSecurityChipText
 +  // / ShouldShowSecurityChipText, which read --lobium-profile-name and surface it
 +  // whenever no security warning is present (warnings still take precedence, and the
 +  // chip hides while the user is editing the omnibox). The former trailing (right-side)
@@ -35,11 +35,11 @@ index 0353e3f0ae..77b3248522 100644
    // Initialize the Omnibox view. browser_ can be nullptr on ChromeOS in the
    // case of simple_web_view_dialog. Or it can be nulltpr on ChromeOS and on
    // other desktop platforms in the case of presentation_receiver_window_view.
-@@ -2170,6 +2181,15 @@ bool LocationBarView::IsEditingOrEmpty() const {
+@@ -2066,6 +2077,15 @@ bool LocationBarView::IsEditingOrEmpty() const {
    return omnibox_view_ && omnibox_view_->IsEditingOrEmpty();
  }
  
-+// Lobium: actively-editing only (text input in progress), NOT the empty-but-not-editing NTP state — so
++// Lobium: actively-editing only (text input in progress), NOT the empty-but-not-editing NTP state - so
 +// the leading profile-name chip stays visible on the New Tab Page and hides only while typing a URL.
 +// Uses GetOmniboxController() (the same accessor the rest of this file uses) since OmniboxView::
 +// controller() is protected.
@@ -52,10 +52,10 @@ index 0353e3f0ae..77b3248522 100644
    return views::View::IsMouseHovered();
  }
 diff --git a/chrome/browser/ui/views/location_bar/location_bar_view.h b/chrome/browser/ui/views/location_bar/location_bar_view.h
-index 62b5f976ff..eee2b597ae 100644
+index 495fecc019ebe..d7b8ef9a12c6a 100644
 --- a/chrome/browser/ui/views/location_bar/location_bar_view.h
 +++ b/chrome/browser/ui/views/location_bar/location_bar_view.h
-@@ -308,6 +308,7 @@ class LocationBarView
+@@ -321,6 +321,7 @@ class LocationBarView
    // LocationIconView::Delegate:
    const LocationBarModel* GetLocationBarModel() const override;
    bool IsEditingOrEmpty() const override;
@@ -64,7 +64,7 @@ index 62b5f976ff..eee2b597ae 100644
    void OnLocationIconPressed(const ui::MouseEvent& event) override;
    void OnLocationIconDragged(const ui::MouseEvent& event) override;
 diff --git a/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc b/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc
-index 16523a13c5..ae8d38cf43 100644
+index 08c7e431db486..2b9751250ddbb 100644
 --- a/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc
 +++ b/chrome/browser/ui/views/location_bar/location_icon_state_helper.cc
 @@ -4,6 +4,8 @@
@@ -76,7 +76,7 @@ index 16523a13c5..ae8d38cf43 100644
  #include "build/branding_buildflags.h"
  #include "chrome/browser/extensions/extension_ui_util.h"
  #include "chrome/grit/branded_strings.h"
-@@ -29,6 +31,21 @@
+@@ -28,6 +30,21 @@
  
  namespace location_bar {
  
@@ -98,7 +98,7 @@ index 16523a13c5..ae8d38cf43 100644
  std::u16string GetSecurityChipText(const LocationBarModel* model,
                                     content::WebContents* web_contents,
                                     bool is_editing_or_empty) {
-@@ -39,6 +56,13 @@ std::u16string GetSecurityChipText(const LocationBarModel* model,
+@@ -38,6 +55,13 @@ std::u16string GetSecurityChipText(const LocationBarModel* model,
    if (model->GetURL().SchemeIs(content::kChromeUIScheme) ||
        (contextual_tasks::ShouldShowExpandedSecurityChip() &&
         model->IsContextualTasksPage())) {
@@ -112,7 +112,7 @@ index 16523a13c5..ae8d38cf43 100644
      return l10n_util::GetStringUTF16(IDS_SHORT_PRODUCT_NAME);
    }
  
-@@ -64,7 +88,17 @@ std::u16string GetSecurityChipText(const LocationBarModel* model,
+@@ -63,7 +87,17 @@ std::u16string GetSecurityChipText(const LocationBarModel* model,
      }
    }
  
@@ -124,14 +124,14 @@ index 16523a13c5..ae8d38cf43 100644
 +    return secure_text;
 +  }
 +  // Lobium: on every other page (a normal secure https:// site, which otherwise shows no chip text) the
-+  // leading chip carries the profile identity, so the omnibox always reads as "<profile>" — the same as
-+  // the chrome:// case above — instead of being blank. Returns empty (ordinary Chromium behavior) when
++  // leading chip carries the profile identity, so the omnibox always reads as "<profile>" - the same as
++  // the chrome:// case above - instead of being blank. Returns empty (ordinary Chromium behavior) when
 +  // no --lobium-profile-name was supplied.
 +  return LobiumProfileName();
  }
  
  bool ShouldShowSecurityChipText(const LocationBarModel* model,
-@@ -94,7 +128,13 @@ bool ShouldShowSecurityChipText(const LocationBarModel* model,
+@@ -93,7 +127,13 @@ bool ShouldShowSecurityChipText(const LocationBarModel* model,
      return true;
    }
  
@@ -140,17 +140,17 @@ index 16523a13c5..ae8d38cf43 100644
 +    return true;
 +  }
 +  // Lobium: always show the chip when a profile identity is present, so the profile name is visible on
-+  // EVERY page/URL — not just internal (chrome://) pages. While the user is editing the omnibox the
++  // EVERY page/URL - not just internal (chrome://) pages. While the user is editing the omnibox the
 +  // early is_editing_or_empty guard above still hides it, matching normal Chromium.
 +  return !LobiumProfileName().empty();
  }
  
  std::optional<int> MaybeGetGradientGoogleSuperGIcon(
 diff --git a/chrome/browser/ui/views/location_bar/location_icon_view.cc b/chrome/browser/ui/views/location_bar/location_icon_view.cc
-index 01ba0aa4ae..11eeb92171 100644
+index 9b355a4392845..0b1837f51b655 100644
 --- a/chrome/browser/ui/views/location_bar/location_icon_view.cc
 +++ b/chrome/browser/ui/views/location_bar/location_icon_view.cc
-@@ -200,10 +200,19 @@ int LocationIconView::GetMinimumLabelTextWidth() const {
+@@ -192,10 +192,19 @@ int LocationIconView::GetMinimumLabelTextWidth() const {
    return GetMinimumSizeForPreferredSize(GetSizeForLabelWidth(width)).width();
  }
  
@@ -171,7 +171,7 @@ index 01ba0aa4ae..11eeb92171 100644
  }
  
  void LocationIconView::MaybeAnimateIcon(bool open) {
-@@ -253,9 +262,11 @@ const views::InkDrop* LocationIconView::get_ink_drop_for_testing() {
+@@ -245,9 +254,11 @@ const views::InkDrop* LocationIconView::get_ink_drop_for_testing() {
  }
  
  std::u16string LocationIconView::GetText() const {
@@ -185,7 +185,7 @@ index 01ba0aa4ae..11eeb92171 100644
  
  bool LocationIconView::GetAnimateTextVisibilityChange() const {
 diff --git a/chrome/browser/ui/views/location_bar/location_icon_view.h b/chrome/browser/ui/views/location_bar/location_icon_view.h
-index 0a3cb10759..fb68f68d12 100644
+index 0a3cb10759d55..fb68f68d12df8 100644
 --- a/chrome/browser/ui/views/location_bar/location_icon_view.h
 +++ b/chrome/browser/ui/views/location_bar/location_icon_view.h
 @@ -39,6 +39,13 @@ class LocationIconView : public IconLabelBubbleView {

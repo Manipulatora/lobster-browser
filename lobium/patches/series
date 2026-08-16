@@ -1,86 +1,134 @@
-# Lobium patch apply order (quilt). One patch path per line; grouped by domain.
+# Lobium patch apply order (quilt). One patch path per line, applied top to bottom.
 #
-# STRATEGY: nearly all Lobium logic lives in ADDED files under //components/lobium_fp/ (staged by
-# build.sh, see ../src/) which never conflict on rebase. The patches below are the MINIMAL hook points
-# into existing Chromium files — each just routes a surface through lobium::LobiumFpConfig::Current().
-# Keeping them tiny is what makes tracking Chrome stable within days feasible (see rebase.sh).
+# ARCHITECTURE
+# Almost all Lobium logic lives in ADDED files under //components/lobium_fp/ (staged from lobium/src/
+# by build.ps1 / build.sh). An added directory never conflicts on an upstream rebase, so the patches
+# below are only the MINIMAL hook points into existing Chromium files - each one routes a surface
+# through lobium::LobiumFpConfig::Current() and falls back to the real host value when the config is
+# absent. Keeping them tiny is what makes tracking Chrome stable within days feasible.
 #
-# Status: authored against the pinned ref (build.sh CHROMIUM_REF); each is refreshed + compiled on the
-# build machine (T-010/T-011). See hooks.md for the hook point + code of each.
+# ONE PATCH PER CONCERN. Every hunk belongs to exactly one patch. That is not cosmetic:
+#   * `patch --forward` reports a duplicated hunk as "previously applied" and exits non-zero, which
+#     silently breaks a whole-series apply;
+#   * a duplicated hunk rejects in two patches at once on rebase, and neither quilt nor git can tell
+#     you which concern actually broke.
+# ci/validation/patch-series.test.mjs enforces this: no hunk body may appear in two patches.
 #
-# --- Native product shell ---
+# ORDER MATTERS. Patches that hook the same upstream FILE at different places are cut against the
+# tree as it exists after the earlier ones applied, so their context can contain Lobium lines. The
+# constrained chains are noted inline below.
+#
+# Status of every hook, with its exact file and line, is in ../hooks.md. The diffs are the source of
+# truth; hooks.md explains why each one exists.
+
+# =================================================================================================
+# Native product shell
+# =================================================================================================
+# Android phone/tablet workspace behind the real WebContents.
+# KNOWN INCOMPLETE, LINUX-ONLY: every hook is #if BUILDFLAG(IS_LINUX), so this is inert on the
+# Windows build; the created lobium_device_frame_view.cc is in no GN target so it is never compiled;
+# and it calls content::SetLobiumDeviceEmulationScale() from a header that does not exist yet. It
+# applies cleanly and changes nothing. See ../hooks.md "device frame" before enabling it.
 branding/device-frame.patch
-#
-# --- Core: config channel + navigator/UA-CH (T-011 — first native surfaces) ---
-# core/build-gn.patch — ✅ registers the added //components/lobium_fp module in the build graph
-#   (blink core dep + core/DEPS include-rule).
+
+# =================================================================================================
+# Core: build wiring, capability contract, config transport
+# =================================================================================================
+# Registers the added //components/lobium_fp module in the build graph: blink core, blink common,
+# blink modules, components/embedder_support:user_agent and content/renderer.
 core/build-gn.patch
-# Exact-build contract consumed by startProfile; must precede capability-gated surface patches.
+# --lobium-fingerprint-capabilities: the executable prints its versioned contract before browser
+# startup, so the sidecar probes the exact binary it will spawn instead of trusting a filename.
+# Must precede every capability-gated surface. Keep in sync with
+# packages/engine-runner/src/lobium-capabilities.ts.
 core/capability-contract.patch
-# core/config-channel.patch — ✅ BUILT + DEV-PROVEN on Chromium 152. Browser reads --lobium-fp-config and
-#   forwards base64 --lobium-fp-data to the renderer (cached, size-guarded, logged); the renderer's
-#   LobiumFpConfig::Current() serves it. Surfaces folded here now include hardwareConcurrency,
-#   deviceMemory (+ client-hint header), maxTouchPoints, native UA/platform/UA-CH/header plumbing,
-#   WebGL unmasked vendor/renderer, scalar WebGL caps, WebGL pixel farbling, canvas 2D farbling,
-#   audio byte helpers, and screen integration helpers. The single-value --lobium-hwc POC switch is
-#   retained as a fallback. Read "proven" as SwiftShader/dev proof until RG-1 real-GPU validation.
+# Transport only: the browser reads --lobium-fp-config once and forwards base64 --lobium-fp-data to
+# every renderer (workers included). Every surface below is a separate patch.
 core/config-channel.patch
-# core/navigator-ua-ch.patch          # NOT YET AUTHORED — navigator.* + Sec-CH-UA from config (userAgent/platform/langs/hw)
-#
-# --- Fingerprint deep surfaces (the native moat) ---
-# WebGL vendor/renderer + canvas 2D farbling are BUILT + PROVEN — they live in config-channel.patch
-# above (folded in during their commits). Audio farbling is BUILT + PROVEN as its own patch below
-# (deep surfaces get an independent patch from here on so one can rebase without disturbing the others).
-# fingerprint/audio-context.patch — ✅ BUILT + PROVEN on Chromium 152. Seeded Web Audio farbling
-#   (seeds.audio): OfflineAudioContext result (getChannelData/copyFromChannel — the dominant vector) +
-#   AnalyserNode float freq/time paths, via the added kernel //components/lobium_fp/lobium_audio_farble.cc.
-#   Playback-safe (audio_buffer.cc untouched), stereo-coherent. See hooks.md for hook points + limitations.
+# navigator.* + User-Agent header + Sec-CH-UA, in all contexts including workers.
+core/navigator-ua-ch.patch
+
+# =================================================================================================
+# Fingerprint surfaces (the native moat)
+# =================================================================================================
+# Canvas 2D + OffscreenCanvas readback farbling (seeds.canvas).
+fingerprint/canvas-farbling.patch
+# WebGL vendor/renderer + scalar caps + pixel farbling (seeds.webgl).
+# CHAIN: webgl-surfaces -> host-gpu-profile -> webgl-runtime-safety, all in
+# webgl_rendering_context_base.cc. The later two are cut against the earlier ones and cannot apply
+# to a pristine tree; never validate them in isolation.
+fingerprint/webgl-surfaces.patch
+# Deep WebGL: version / shadingLanguageVersion / extensions / shaderPrecision. Confirmed necessary
+# by battle-test on real GPUs - the extension set and precision leaked the host while
+# UNMASKED_RENDERER was already spoofed.
+fingerprint/host-gpu-profile.patch
+# Never advertise a capability the active GL backend cannot execute.
+fingerprint/webgl-runtime-safety.patch
+# Closes two call sequences that routed AROUND the hooks above: a no-op PACK_ROW_LENGTH that switched
+# readPixels farbling off, and a WebGL1 extension list collapsing on a WebGL2 context. Last in the
+# chain and cut against all three; verified with lobium/chain-delta.mjs.
+fingerprint/webgl-bypass-closures.patch
+# WebGL2-only limits: the uniform/varying COMPONENT counts, which ANGLE derives as exactly 4x the
+# WebGL1 VECTOR limits the patches above already spoof. Separate file, separate TU
+# (webgl2_rendering_context_base.cc), so it is outside the three-patch chain above.
+fingerprint/webgl2-surfaces.patch
+# navigator.gpu adapter identity, derived from the same GPU the WebGL renderer names. Must not be
+# skipped when WebGL is spoofed: an unhooked WebGPU adapter reports the real card next to a spoofed
+# WebGL renderer, and the mismatch is a stronger signal than either surface alone.
+fingerprint/webgpu-adapter.patch
+# Web Audio farbling (seeds.audio): OfflineAudioContext result + AnalyserNode float AND byte paths.
 fingerprint/audio-context.patch
-# fingerprint/audio-worklet-tap.patch — ✅ BUILT + PROVEN on Chromium 152. Farbles the upstream sample
-#   taps a page can read BEFORE the farbled offline result: AudioWorkletProcessor.process(inputs) and the
-#   deprecated ScriptProcessorNode.onaudioprocess inputBuffer. Gated to OFFLINE (worklet: a default-false
-#   AudioWorkletGlobalScope flag only OfflineAudioWorkletThread sets; SPN: !HasRealtimeConstraint) so
-#   realtime DSP is untouched; farbles only the JS-visible copy (playback bit-exact). Same kernel/seed.
+# The upstream sample taps a page can read BEFORE the farbled offline result:
+# AudioWorkletProcessor.process(inputs) and ScriptProcessorNode.onaudioprocess inputBuffer. Gated to
+# offline contexts so realtime DSP is untouched.
 fingerprint/audio-worklet-tap.patch
-# fingerprint/screen-dpr.patch — ✅ BUILT + PROVEN on Chromium 152. Persona screen geometry + colour
-#   depth + DPR from config: Screen::GetRect (width/height/avail*), Screen::colorDepth, and the DPR
-#   through BOTH window.devicePixelRatio and the CSS media-query path (MediaValues) so matchMedia agrees.
-#   Removes the headless 800x600 tell. See hooks.md for hook points + deferred limitations.
+# Persona screen geometry + colour depth + DPR, through window.devicePixelRatio AND the CSS
+# media-query path so matchMedia agrees with the getter.
 fingerprint/screen-dpr.patch
 # matchMedia('(device-width/height)') must agree with screen.width/height (CreepJS Screen lie).
+# CHAIN: after screen-dpr; both hook media_values.cc.
 fingerprint/media-values-device-size.patch
-# navigator language(s) in all contexts + configured geolocation after normal permission grant.
+# navigator.language(s) in all contexts + configured geolocation after a normal permission grant +
+# ICU locale applied before Blink/V8 init.
 fingerprint/locale-geolocation.patch
-# HC-4 deep WebGL (version / shadingLanguageVersion / extensions / shaderPrecision). Config reader +
-#   sidecar already carry the fields; this routes them through Blink. Rebuild Lobium to prove in binary.
-fingerprint/host-gpu-profile.patch
-fingerprint/webgl-runtime-safety.patch
-# clientRects farbling (seeds.clientRects) + mediaDevices enumerateDevices (policy.mediaDevices).
+# clientRects farbling (seeds.clientRects).
 fingerprint/client-rects.patch
+# mediaDevices.enumerateDevices from policy.mediaDevices.
 fingerprint/media-devices.patch
+# Android persona parity: suppress the desktop PDF plugin surface when the config declares uaMobile.
 fingerprint/mobile-persona.patch
-# Four observably distinct policies; proxy_only relay-only, disabled rejects RTCPeerConnection.
+# Four observably distinct WebRTC policies; proxy_only is relay-only, disabled rejects
+# RTCPeerConnection.
 fingerprint/webrtc-policy.patch
-# Still to author / prove:
-#   Renderer normalization policy (HC-5, RendererPolicy.normalized_host) stays a separate follow-up.
-# fonts: NOT a Blink patch. The packaged runtime and desktop resources carry a hashed, redistributable
-#   open-font pack. The launcher writes a private per-profile fontconfig, aliases each persona's claimed
-#   catalog to a physical same-class face, and sets FONTCONFIG_FILE. Exact proprietary metrics remain a
-#   licensed-bundle follow-up; queryLocalFonts intentionally enumerates only physical bundled faces.
-# fingerprint/webgpu-adapter.patch    # coherent WebGPU adapter
-#
-# --- Network (Phase 2 — TLS/JA4 parity) ---
-# net/webrtc-ip-policy.patch          # WebRTC IP handling from config.net
-# net/tls-ja3-ja4.patch               # BoringSSL ClientHello order → match claimed Chrome
-# net/http2-settings-order.patch      # HTTP/2 SETTINGS + pseudo-header order
+# The persona timezone applied inside the engine. NOT redundant with the launcher's TZ variable: TZ
+# is POSIX-only and ICU ignores it on Windows, so the env route silently did nothing there. Hooked at
+# OnTimeZoneChange because the browser's TimeZoneMonitor overwrites anything adopted earlier.
+fingerprint/native-timezone.patch
+# Windows font-set isolation through DirectWrite (FindFamily, MatchUniqueFont, Local Font Access) plus
+# the font-pack sideload. Windows-only by nature: Linux reaches the same isolation through the
+# launcher's per-profile FONTCONFIG_FILE, which is not a property of the binary.
+fingerprint/windows-font-isolation.patch
+
+# --- NOT YET AUTHORED -----------------------------------------------------------------------------
+# net/tls-ja3-ja4.patch              BoringSSL ClientHello order -> match the claimed Chrome.
+# net/http2-settings-order.patch     HTTP/2 SETTINGS + pseudo-header order.
+
+# =================================================================================================
+# Branding
+# =================================================================================================
 branding/account-menu-trim.patch
-# Omnibox: remove the trailing per-profile name chip; the LEADING location-icon chip on
-# chrome:// pages now shows the profile name (from --lobium-profile-name) instead of "Lobium".
+# Omnibox: drop the trailing per-profile name chip; the LEADING location-icon chip shows the profile
+# name from --lobium-profile-name.
 branding/omnibox-profile-chip.patch
-# Product glyph → lobster brand mark (traced from the app icon). Left omnibox chip on chrome://
-# pages + all omnibox product-icon spots. chrome://version page logos are done by the branding
-# script (binary PNGs), not a patch.
+# Product glyph -> lobster brand mark. chrome://version page logos are done by
+# scripts/apply-lobium-branding.mjs (binary PNGs), not by a patch.
 branding/product-icon-lobster.patch
 branding/signin-disable.patch
+# REQUIRES scripts/apply-lobium-branding.mjs to have staged the NTP icon PNGs into
+# chrome/browser/resources/new_tab_page/icons/ first: this patch adds them to that directory's
+# generate_grd input_files, and gn/ninja fail if the files are absent.
 branding/ntp-branding.patch
 branding/profile-lockdown.patch
+
+# Present on disk but deliberately NOT in the series:
+#   branding/suppress-sandbox-infobar.patch - only needed for --no-sandbox dev runs.

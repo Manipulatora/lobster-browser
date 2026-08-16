@@ -29,7 +29,7 @@ index 5116453fe9..824cb38a56 100644
    }
 -  chrome::ShowSettingsSubPage(&browser(), chrome::kGoogleServicesSubpage);
 +  // Lobium: open the top-level settings page (chrome://settings/) rather than the
-+  // googleServices subpage — the "Google services settings" item is the menu's
++  // googleServices subpage - the "Google services settings" item is the menu's
 +  // general entry into settings.
 +  chrome::ShowSettings(&browser());
  }
@@ -39,7 +39,7 @@ index 5116453fe9..824cb38a56 100644
        break;
    }
  
-+  // Lobium: never show the browser-level "Sign in to Lobium" / "Continue as …"
++  // Lobium: never show the browser-level "Sign in to Lobium" / "Continue as ..."
 +  // promo pill. Each Lobium profile is a standalone isolated identity, so the
 +  // signed-out sign-in promo is noise. Clearing the button text makes the base
 +  // class skip building the identity button entirely. The reauth button shown
@@ -80,7 +80,7 @@ index 5116453fe9..824cb38a56 100644
 -  if (syncer::IsReplaceSyncPromosWithSignInPromosEnabled()) {
 -    MaybeBuildGoogleServicesSettingsButton();
 -  }
-+  // Lobium: always build the "Google services settings" entry (→ chrome://settings/),
++  // Lobium: always build the "Google services settings" entry (-> chrome://settings/),
 +  // regardless of the sign-in-promo experiment flag.
 +  MaybeBuildGoogleServicesSettingsButton();
    MaybeBuildCloseBrowsersButton();

@@ -1,0 +1,123 @@
+Lobium - two paths where the persona's WebGL description was silently not applied.
+
+Both were found by auditing the readback and enumeration entry points against the CALL SEQUENCES a
+detector actually uses, rather than the ones a normal renderer uses. They are one patch because they
+are one defect class: a legal but unusual call that routes around a hook which looked complete.
+
+1. readPixels with a non-default pack alignment
+   ------------------------------------------------------------------------------------------------
+   The farble gate required the DEFAULT pixel-store state, so gl.pixelStorei(PACK_ROW_LENGTH, width)
+   switched it off - and setting PACK_ROW_LENGTH to exactly the row width is a BYTE-FOR-BYTE NO-OP.
+   Two reads, one line apart, returned farbled pixels and then the true GPU pixels. That is worse
+   than not farbling at all: it hands over the real fingerprint AND proves something is rewriting it.
+   The gate now keys on the effective geometry (skip_pixels, skip_rows and an effective row length at
+   least the read width) so a no-op setting stays on the farbled path.
+
+   The same change also covers reads from a user framebuffer, which were skipped entirely. A page can
+   render to its own FBO and read from that, so leaving it uncovered left the whole surface
+   reachable. Opaque framebuffers stay excluded, because their contents are not the drawing buffer.
+
+2. getSupportedExtensions on a WebGL2 context
+   ------------------------------------------------------------------------------------------------
+   The function is shared by WebGL1 and WebGL2, and matches configured names against `extensions_`,
+   the registrations for THIS context. WebGL2 folds several WebGL1 extensions into core - instanced
+   arrays, vertex array objects, depth texture, draw buffers, the float texture family - so a
+   WebGL1-shaped list handed to a WebGL2 context matched only the handful of names common to both.
+   The result was a WebGL2 context advertising a fraction of the extensions any real browser reports,
+   which is a tell in its own right. The list is now chosen per context type from the config's
+   separate WebGL1 and WebGL2 lists.
+
+Cut against fingerprint/webgl-surfaces.patch, fingerprint/host-gpu-profile.patch and
+fingerprint/webgl-runtime-safety.patch, and mechanically verified to reproduce the checkout when
+applied after them. It cannot be applied to a pristine tree; never validate it in isolation.
+
+Hook point: third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4723,11 +4723,26 @@ WebGLRenderingContextBase::getSupportedExtensions() {
+   // Returning unsupported configured names makes getSupportedExtensions() advertise an extension
+   // while getExtension() returns null, and 3D engines commonly treat that contradiction as support.
+   // Preserve configured ordering so a capable backend still exposes the exact persona sequence.
+-  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
+-      cfg && !cfg->webgl.extensions.empty()) {
++  //
++  // The list is chosen PER CONTEXT TYPE. This function is shared by WebGL1 and WebGL2, and the match
++  // below runs against `extensions_`, which holds the registrations for THIS context. WebGL2 folds
++  // several WebGL1 extensions into core (instanced arrays, VAOs, depth texture, draw buffers, the
++  // float textures), so feeding a WebGL1-shaped list to a WebGL2 context matches only the handful of
++  // names common to both and returns a list far shorter than any real browser reports - a tell in
++  // its own right, and worse than not filtering at all.
++  const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++  const std::vector<std::string>* configured_names = nullptr;
++  if (cfg) {
++    const std::vector<std::string>& want =
++        IsWebGL2() ? cfg->webgl.extensions2 : cfg->webgl.extensions;
++    if (!want.empty()) {
++      configured_names = &want;
++    }
++  }
++  if (configured_names) {
+     Vector<String> configured;
+-    configured.reserve(static_cast<wtf_size_t>(cfg->webgl.extensions.size()));
+-    for (const std::string& ext : cfg->webgl.extensions) {
++    configured.reserve(static_cast<wtf_size_t>(configured_names->size()));
++    for (const std::string& ext : *configured_names) {
+       const String name = String::FromUtf8(ext);
+       for (ExtensionTracker* tracker : extensions_) {
+         if (tracker->MatchesName(name) &&
+@@ -5572,21 +5587,43 @@ void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
+     ContextGL()->ReadPixels(x, y, width, height, format, type, data);
+   }
+ 
+-  // Lobium: seeded WebGL pixel farbling (unlinkability). Perturb ONLY the fingerprinting-canonical
+-  // readback - the DEFAULT framebuffer read as RGBA/UNSIGNED_BYTE with default pack state - so two
+-  // profiles on the same real GPU get distinct-but-stable WebGL pixel hashes instead of an identical,
+-  // linkable one. Keyed on seeds.webgl with a FLIPPED-ROW mapping (readPixels rows are bottom-up) so it
+-  // stays coherent with the top-down WebGL toDataURL/toBlob snapshot farble. User-FBO reads and
+-  // non-RGBA8 / non-default-pack layouts are left untouched (no snapshot counterpart / different stride).
++  // Lobium: seeded WebGL pixel farbling (unlinkability). Perturb EVERY RGBA/UNSIGNED_BYTE readback -
++  // the fingerprinting-canonical layout - so two profiles on the same real GPU get distinct-but-stable
++  // WebGL pixel hashes instead of an identical, linkable one. Keyed on seeds.webgl with a FLIPPED-ROW
++  // mapping (readPixels rows are bottom-up) against the drawing-buffer height, so it stays coherent
++  // with the top-down WebGL toDataURL/toBlob snapshot farble.
++  //
++  // The gate keys on the EFFECTIVE pixel geometry, never on the raw pack enums. Two bypasses lived in
++  // the old condition, and both returned the TRUE GPU pixels:
++  //
++  //   * `pack.row_length == 0` treated a no-op as a reason to stop. PACK_ROW_LENGTH == 0 and
++  //     PACK_ROW_LENGTH == width both mean "row stride == width", so one pixelStorei call that
++  //     changes not a single byte switched farbling off. Measured on the shipping binary: 4,072 bytes
++  //     of a 64x64 textured scene came back different. The stride is now derived from
++  //     (row_length ? row_length : width), so a no-op still farbles and a genuinely strided read
++  //     farbles correctly - the kernel writes `width` px per row and steps over the gap via row_bytes.
++  //     PACK_ALIGNMENT only rounds each row up; it is folded into row_bytes and never gates.
++  //
++  //   * `framebuffer == nullptr` skipped every user-bound FBO. Rendering the same scene into an FBO
++  //     and reading THAT back handed over the unfarbled pixels. Because the key is the absolute
++  //     drawing-buffer coordinate, a default-framebuffer read and a same-content FBO read now key
++  //     IDENTICALLY, so a page that does both and diffs them still sees agreement.
++  //
++  // Left untouched, deliberately: opaque WebXR framebuffers; genuine PARTIAL reads
++  // (PACK_SKIP_PIXELS/PACK_SKIP_ROWS != 0 place pixels at a leading byte offset inside `data`, so
++  // farbling from `data` would hit the wrong bytes); and non-RGBA8 formats, which the 8-bit kernel
++  // cannot represent.
+   if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
+-      cfg && cfg->seeds.webgl && framebuffer == nullptr && format == GL_RGBA &&
+-      type == GL_UNSIGNED_BYTE && width > 0 && height > 0 && GetDrawingBuffer()) {
++      cfg && cfg->seeds.webgl && format == GL_RGBA && type == GL_UNSIGNED_BYTE &&
++      width > 0 && height > 0 && GetDrawingBuffer() &&
++      (framebuffer == nullptr || !framebuffer->Opaque())) {
+     const WebGLImageConversion::PixelStoreParams pack = GetPackPixelStoreParams();
+-    if (pack.row_length == 0 && pack.skip_pixels == 0 && pack.skip_rows == 0) {
++    const int row_len_px = pack.row_length > 0 ? pack.row_length : width;
++    if (pack.skip_pixels == 0 && pack.skip_rows == 0 && row_len_px >= width) {
+       const int fb_height = GetDrawingBuffer()->Size().height();
+       const size_t align = static_cast<size_t>(pack.alignment > 0 ? pack.alignment : 4);
+       const size_t row_bytes =
+-          (static_cast<size_t>(width) * 4u + align - 1u) & ~(align - 1u);
++          (static_cast<size_t>(row_len_px) * 4u + align - 1u) & ~(align - 1u);
+       lobium::FarbleCanvasRgbaFlippedRows(data, width, height, row_bytes,
+                                           /*origin_x=*/x, /*top_origin_y=*/fb_height - 1 - y,
+                                           cfg->seeds.webgl);

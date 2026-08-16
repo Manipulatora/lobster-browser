@@ -1,0 +1,71 @@
+Lobium - apply the persona timezone inside the engine, not through the environment.
+
+The launcher sets TZ/LANG/LC_ALL before spawning the browser, which is how the persona timezone
+reaches ICU on Linux. On Windows that route does not exist: ICU reads the timezone from the registry
+and ignores TZ entirely, so the profile's timezone silently did not apply at all - Date, Intl and
+every timezone-derived value reported the HOST zone while the persona claimed another, which a page
+compares against the proxy exit IP in one line of JavaScript.
+
+Hook point: TimeZoneController::OnTimeZoneChange, deliberately.
+
+An earlier attempt hooked RenderThreadImpl::Init to adopt the persona zone at renderer startup. That
+does not survive: the browser's device::TimeZoneMonitor pushes the HOST zone to every renderer
+shortly after start, overwriting whatever was adopted earlier. OnTimeZoneChange is the receiving end
+of that push, so overriding there is applied both at startup and on every subsequent host change,
+and no later notification can undo it.
+
+The explicit override path (HasTimeZoneOverride, used by DevTools emulation) is left in control when
+it is active: an operator emulating a zone in DevTools should see the zone they asked for.
+
+Hook point: third_party/blink/renderer/core/timezone/timezone_controller.cc
+
+diff --git a/third_party/blink/renderer/core/timezone/timezone_controller.cc b/third_party/blink/renderer/core/timezone/timezone_controller.cc
+--- a/third_party/blink/renderer/core/timezone/timezone_controller.cc
++++ b/third_party/blink/renderer/core/timezone/timezone_controller.cc
+@@ -5,6 +5,7 @@
+ #include "third_party/blink/renderer/core/timezone/timezone_controller.h"
+ 
+ #include "base/feature_list.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+@@ -245,12 +246,36 @@ void TimeZoneController::OnTimeZoneChange(const String& timezone_id) {
+ 
+   base::AutoLock locker(instance().lock_);
+ 
++  // Lobium: substitute the persona IANA zone for the host's.
++  //
++  // This is THE renderer-side authority for the ICU default zone, and hooking anywhere earlier does
++  // not work. The browser's device::TimeZoneMonitor pushes the host zone id to every renderer: once
++  // when TimeZoneController::Init() registers as a client during Blink startup (AddClient calls back
++  // immediately), and again on every host zone change. Any adoptDefault done before that - for
++  // instance alongside the ICU locale in RenderThreadImpl::Init - is simply overwritten by that
++  // push. On a sandboxed Windows renderer the in-renderer zone detection is blocked anyway, so ICU
++  // starts at UTC and the browser push is the only thing that ever sets it: exactly the observed
++  // "reports UTC while the persona says America/New_York" leak.
++  //
++  // Substituting here covers the main frame, iframes and dedicated/shared/service workers in one
++  // place, because SetIcuTimeZoneAndNotifyV8 calls icu::TimeZone::adoptDefault and then
++  // DateTimeConfigurationChangeNotification on the main isolate AND every worker thread - so both
++  // Intl.DateTimeFormat and Date observe it. Recording it as host_timezone_id_ additionally means
++  // that clearing a DevTools timezone override restores the PERSONA zone, not the host's.
++  //
++  // Fail open: an absent or empty configured timezone leaves the real host value untouched.
++  String effective_timezone_id = timezone_id;
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && !cfg->locale.timezone.empty()) {
++    effective_timezone_id = String::FromUtf8(cfg->locale.timezone);
++  }
++
+   // Remember requested timezone id so we can set it when timezone
+   // override is removed.
+-  instance().host_timezone_id_ = timezone_id;
++  instance().host_timezone_id_ = effective_timezone_id;
+ 
+   if (!HasTimeZoneOverride())
+-    SetIcuTimeZoneAndNotifyV8(timezone_id);
++    SetIcuTimeZoneAndNotifyV8(effective_timezone_id);
+ }
+ 
+ const String& TimeZoneController::GetHostTimezoneId() {

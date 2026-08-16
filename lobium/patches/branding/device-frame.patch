@@ -1,8 +1,8 @@
 diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
-index 2da4e711b9..2f01fee82c 100644
+index 141a168f48356..d6d25964fc5a1 100644
 --- a/chrome/browser/ui/views/frame/browser_view.cc
 +++ b/chrome/browser/ui/views/frame/browser_view.cc
-@@ -149,6 +149,9 @@
+@@ -153,6 +153,9 @@
  #include "chrome/browser/ui/views/frame/browser_native_widget.h"
  #include "chrome/browser/ui/views/frame/browser_widget.h"
  #include "chrome/browser/ui/views/frame/contents_container_view.h"
@@ -12,9 +12,9 @@ index 2da4e711b9..2f01fee82c 100644
  #include "chrome/browser/ui/views/frame/contents_layout_manager.h"
  #include "chrome/browser/ui/views/frame/contents_separator.h"
  #include "chrome/browser/ui/views/frame/custom_floating_corner.h"
-@@ -958,6 +961,12 @@ BrowserView::BrowserView(Browser* browser)
-   top_container_separator_->SetProperty(views::kElementIdentifierKey,
-                                         kContentsSeparatorTopEdgeElementId);
+@@ -944,6 +947,12 @@ BrowserView::BrowserView(Browser* browser)
+   contents_container->SetLayoutManager(
+       std::make_unique<ContentsLayoutManager>(multi_contents_view_));
  
 +#if BUILDFLAG(IS_LINUX)
 +  if (LobiumDeviceFrameView::IsEnabled()) {
@@ -25,17 +25,17 @@ index 2da4e711b9..2f01fee82c 100644
    contents_container_ = AddChildView(std::move(contents_container));
    set_contents_view(contents_container_);
  
-@@ -1145,6 +1154,9 @@ BrowserView::~BrowserView() {
-   context_highlight_view_ = nullptr;
+@@ -1132,6 +1141,9 @@ BrowserView::~BrowserView() {
+   main_shadow_overlay_ = nullptr;
    window_scrim_view_ = nullptr;
    contents_container_ = nullptr;
 +#if BUILDFLAG(IS_LINUX)
 +  lobium_device_frame_view_ = nullptr;
 +#endif
    vertical_tab_strip_region_view_ = nullptr;
+   vertical_tab_strip_background_blur_backdrop_ = nullptr;
    vertical_tab_strip_top_corner_ = nullptr;
-   vertical_tab_strip_bottom_corner_ = nullptr;
-@@ -1939,6 +1951,12 @@ void BrowserView::OnActiveTabChanged(content::WebContents* old_contents,
+@@ -1942,6 +1954,12 @@ void BrowserView::OnActiveTabChanged(content::WebContents* old_contents,
  
    WebContentsObserver::Observe(new_contents);
  
@@ -48,7 +48,7 @@ index 2da4e711b9..2f01fee82c 100644
    // If |contents_container_| already has the correct WebContents, we can save
    // some work.  This also prevents extra events from being reported by the
    // Visibility API under Windows, as ChangeWebContents will briefly hide
-@@ -4932,6 +4950,9 @@ void BrowserView::AddedToWidget() {
+@@ -4966,6 +4984,9 @@ void BrowserView::AddedToWidget() {
    layout_views.toolbar = toolbar_;
    layout_views.infobar_container = infobar_container_;
    layout_views.contents_container = contents_container_;
@@ -58,7 +58,7 @@ index 2da4e711b9..2f01fee82c 100644
    layout_views.multi_contents_view = multi_contents_view_;
    layout_views.side_panel = side_panel_;
    layout_views.top_container_separator = top_container_separator_;
-@@ -5079,6 +5100,24 @@ bool BrowserView::AcceleratorPressed(const ui::Accelerator& accelerator) {
+@@ -5113,6 +5134,24 @@ bool BrowserView::AcceleratorPressed(const ui::Accelerator& accelerator) {
  
    UpdateAcceleratorMetrics(accelerator, command_id);
  
@@ -84,18 +84,18 @@ index 2da4e711b9..2f01fee82c 100644
      views::ElementTrackerViews::GetInstance()->NotifyCustomEvent(
          browsing_data_important_sites_util::
 diff --git a/chrome/browser/ui/views/frame/browser_view.h b/chrome/browser/ui/views/frame/browser_view.h
-index 7847f1e545..703a319f88 100644
+index 70e811360e59b..8bb1026c044a5 100644
 --- a/chrome/browser/ui/views/frame/browser_view.h
 +++ b/chrome/browser/ui/views/frame/browser_view.h
-@@ -82,6 +82,7 @@ struct DropData;
+@@ -83,6 +83,7 @@ struct DropData;
  class ExclusiveAccessBubbleViews;
  class ExclusiveAccessBubbleViewsContext;
  class InfoBarContainerView;
 +class LobiumDeviceFrameView;
  class LocationBarView;
  class MultiContentsView;
- class ProjectsPanelView;
-@@ -1239,6 +1240,12 @@ class BrowserView : public BrowserWindow,
+ class OrganizerPanelView;
+@@ -1219,6 +1220,12 @@ class BrowserView : public BrowserWindow,
    // Handled by ContentsLayoutManager.
    raw_ptr<views::View> contents_container_ = nullptr;
  
@@ -107,9 +107,9 @@ index 7847f1e545..703a319f88 100644
 +
    // The view responsible for housing the contents of the vertical tab strip.
    raw_ptr<VerticalTabStripRegionView> vertical_tab_strip_region_view_ = nullptr;
- 
+   raw_ptr<VerticalTabStripBackgroundBlurBackdrop>
 diff --git a/chrome/browser/ui/views/frame/layout/browser_view_layout.h b/chrome/browser/ui/views/frame/layout/browser_view_layout.h
-index 4d5b544dff..1f6718035f 100644
+index 8145f86c2a17f..a3cbc78e2692e 100644
 --- a/chrome/browser/ui/views/frame/layout/browser_view_layout.h
 +++ b/chrome/browser/ui/views/frame/layout/browser_view_layout.h
 @@ -8,6 +8,7 @@
@@ -125,10 +125,10 @@ index 4d5b544dff..1f6718035f 100644
  class InfoBarContainerView;
  class MultiContentsView;
 +class LobiumDeviceFrameView;
- class ProjectsPanelView;
+ class OrganizerPanelView;
  class SidePanel;
  class TabStrip;
-@@ -73,6 +75,9 @@ struct BrowserViewLayoutViews {
+@@ -75,6 +77,9 @@ struct BrowserViewLayoutViews {
    raw_ptr<views::View> toolbar = nullptr;
    raw_ptr<InfoBarContainerView> infobar_container = nullptr;
    raw_ptr<views::View> contents_container = nullptr;
@@ -139,7 +139,7 @@ index 4d5b544dff..1f6718035f 100644
    raw_ptr<SidePanel> side_panel = nullptr;
    raw_ptr<views::View> side_panel_animation_content = nullptr;
 diff --git a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
-index 8a9a7c3ef3..e3e137920c 100644
+index 64cc69c116d30..4c246bb43687f 100644
 --- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
 +++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
 @@ -14,6 +14,9 @@
@@ -152,7 +152,7 @@ index 8a9a7c3ef3..e3e137920c 100644
  #include "chrome/browser/ui/animation/browser_animation_controller.h"
  #include "chrome/browser/ui/color/chrome_color_id.h"
  #include "chrome/browser/ui/immersive/immersive_mode_controller.h"
-@@ -1109,11 +1112,22 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+@@ -1117,11 +1120,22 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
      content_right =
          std::min(content_right, browser_params.visual_client_area.right());
    }
@@ -179,14 +179,14 @@ index 8a9a7c3ef3..e3e137920c 100644
  
    // Maybe expand and clip the web contents to avoid issues during animation.
    if (features::UseSidePanelFlyoverAnimation()) {
-@@ -1156,6 +1170,26 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+@@ -1164,6 +1178,26 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
      }
    }
  
 +#if BUILDFLAG(IS_LINUX)
 +  // Lobium: clip the device aperture to the content-area (stage). When the zoomed phone/tablet is
 +  // scrolled, the aperture's top rises above the stage; clip so the WebContents keeps its full size
-+  // but the part above the stage top is hidden — the device slides UNDER the toolbar instead of
++  // but the part above the stage top is hidden - the device slides UNDER the toolbar instead of
 +  // painting over it. Reuses the same MultiContentsView expand+clip the side-panel animation uses.
 +  if (views().lobium_device_frame_view) {
 +    const gfx::Rect lobium_aperture = contents_layout.bounds;
@@ -203,12 +203,12 @@ index 8a9a7c3ef3..e3e137920c 100644
 +  }
 +#endif
 +
-   if (features::IsGlassFrameEnabled()) {
+   // If the window goes out of glass mode, these changes won't hurt anything.
+   if (in_glass_mode()) {
      gfx::RoundedCornersF content_corners;
-     if (layout_data_->tab_strip_type == TabStripType::kVertical &&
 diff --git a/chrome/browser/ui/views/frame/lobium_device_frame_view.cc b/chrome/browser/ui/views/frame/lobium_device_frame_view.cc
 new file mode 100644
-index 0000000000..83488ac64d
+index 0000000000000..83488ac64d80d
 --- /dev/null
 +++ b/chrome/browser/ui/views/frame/lobium_device_frame_view.cc
 @@ -0,0 +1,406 @@
@@ -252,8 +252,8 @@ index 0000000000..83488ac64d
 +
 +// Reserved strip at the RIGHT edge of the stage for the vertical scrollbar, shown
 +// only when the zoomed device is taller than the content area. The aperture width
-+// is clamped to leave this gutter so the scrollbar — painted by this view, which
-+// sits behind the WebContents — stays visible and clickable.
++// is clamped to leave this gutter so the scrollbar - painted by this view, which
++// sits behind the WebContents - stays visible and clickable.
 +constexpr int kScrollbarGutter = 16;
 +constexpr int kScrollbarThumbWidth = 6;
 +constexpr int kScrollbarMinThumb = 28;
@@ -323,7 +323,7 @@ index 0000000000..83488ac64d
 +  // the SAME default scale (min(fit, 1.0)) with no async handshake, avoiding the old ~8% bottom gap.
 +  const float fill_scale = FillScale(local_workspace);
 +  const float base = std::min(1.0f, fill_scale);
-+  // User zoom multiplies around the base fit and MAY exceed fill — the device deliberately grows LARGER
++  // User zoom multiplies around the base fit and MAY exceed fill - the device deliberately grows LARGER
 +  // than the stage on zoom-in (that is what "zoom in" must do). Overrun is kept off the browser chrome by
 +  // clamping the device POSITION below, not by capping the scale, so zoom-in is never a no-op.
 +  const float scale =
@@ -340,7 +340,7 @@ index 0000000000..83488ac64d
 +  const int scroll = std::clamp(scroll_offset_, 0, overflow_y);
 +
 +  // Center the device while it fits the stage. Horizontally, once it is wider than the stage, PIN its left
-+  // edge inside the stage so it can never ride off the left — it overflows right, where the window clips
++  // edge inside the stage so it can never ride off the left - it overflows right, where the window clips
 +  // it. Vertically, when it overflows PIN the top and move UP by the scroll offset (so scrolling down
 +  // reveals the lower part); otherwise center it. This keeps the phone off the toolbar/omnibox while
 +  // letting zoom-in enlarge it and the scrollbar reach the bottom.
@@ -421,11 +421,11 @@ index 0000000000..83488ac64d
 +  // false while Blink device emulation is not yet enabled. The sidecar enables it
 +  // AFTER endpoint-ready + cookie import, so the aperture's fit scale is computed
 +  // (at first layout) before there is anything to push it to. Retry until the push
-+  // actually lands — otherwise the emulated image stays at the sidecar's bootstrap
++  // actually lands - otherwise the emulated image stays at the sidecar's bootstrap
 +  // scale (1.0) while the native aperture sits at the real fit (~1.10), leaving the
 +  // ~8% bottom gap that previously only a manual Ctrl+zoom could correct.
 +  if (content::SetLobiumDeviceEmulationScale(web_contents.get(), scale)) {
-+    // The scale landed — Blink device emulation is now enabled for this (possibly brand-new) tab. Re-fit
++    // The scale landed - Blink device emulation is now enabled for this (possibly brand-new) tab. Re-fit
 +    // the aperture and repaint so the WebContents covers the whole device screen. Without this, a new tab
 +    // created while zoomed in stayed at the bootstrap scale until a manual zoom, leaving the phone screen
 +    // partly dark.
@@ -450,7 +450,7 @@ index 0000000000..83488ac64d
 +  if (!web_contents) {
 +    return;
 +  }
-+  // One self-terminating chain (100ms x 240 ≈ up to 24s) rather than a fixed
++  // One self-terminating chain (100ms x 240 ~ up to 24s) rather than a fixed
 +  // burst: it tries immediately, then keeps retrying only until emulation is
 +  // enabled and the scale lands, so it wins regardless of how late the sidecar
 +  // turns emulation on. The fast 100ms cadence shrinks the window in which a
@@ -471,7 +471,7 @@ index 0000000000..83488ac64d
 +  // emulation on the tab, then pushes this scale so the emulated image fills the
 +  // whole aperture. Without a correct scale, a tab created while zoomed in kept the
 +  // sidecar's bootstrap fit-scale and showed a dark emulation letterbox in the part
-+  // of the aperture the smaller image did not cover — until a manual zoom re-armed
++  // of the aperture the smaller image did not cover - until a manual zoom re-armed
 +  // the sync. Setting current_scale_ here keeps the retry guard consistent.
 +  const float scale = CalculateGeometry(GetLocalBounds()).scale;
 +  current_scale_ = scale;
@@ -487,7 +487,7 @@ index 0000000000..83488ac64d
 +  canvas->DrawColor(SkColorSetRGB(246, 248, 251));
 +
 +  const Geometry geometry = CalculateGeometry(GetLocalBounds());
-+  // Paint ONLY a thin border ring around the device screen — not a filled rectangle. The real WebContents
++  // Paint ONLY a thin border ring around the device screen - not a filled rectangle. The real WebContents
 +  // sibling covers the aperture; anything it does not yet cover (a brand-new tab momentarily at the wrong
 +  // emulation scale, a mid-zoom frame) now shows the light desk instead of a black block. That is the fix
 +  // for "part of the phone goes dark after zoom-in + new tab", and the thin stroke doubles as the hairline
@@ -620,7 +620,7 @@ index 0000000000..83488ac64d
 +END_METADATA
 diff --git a/chrome/browser/ui/views/frame/lobium_device_frame_view.h b/chrome/browser/ui/views/frame/lobium_device_frame_view.h
 new file mode 100644
-index 0000000000..7b86773b13
+index 0000000000000..7b86773b13ba6
 --- /dev/null
 +++ b/chrome/browser/ui/views/frame/lobium_device_frame_view.h
 @@ -0,0 +1,87 @@
@@ -704,7 +704,7 @@ index 0000000000..7b86773b13
 +  float current_scale_ = 1.0f;
 +  // Vertical stage scroll offset (in stage pixels) used when the zoomed device
 +  // is taller than the content area. max_scroll_ is the largest valid offset and
-+  // is recomputed by CalculateGeometry (hence mutable — that method is const).
++  // is recomputed by CalculateGeometry (hence mutable - that method is const).
 +  int scroll_offset_ = 0;
 +  mutable int max_scroll_ = 0;
 +  base::WeakPtrFactory<LobiumDeviceFrameView> weak_factory_{this};

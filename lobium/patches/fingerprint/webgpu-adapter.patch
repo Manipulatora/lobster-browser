@@ -1,0 +1,79 @@
+Lobium - navigator.gpu adapter identity.
+
+WebGPU and WebGL are two independent descriptions of the same physical GPU, readable from one page in
+two calls. Until this patch WebGL reported the persona's GPU while WebGPU reported the REAL one,
+which is strictly worse than leaving either alone: a mismatch between them is a positive signal that
+something is rewriting the first, whereas an honest pair is merely a host fingerprint.
+
+GPUAdapterInfo fields are overridden from the config, which derives them from the same renderer
+string the WebGL hooks report, so the two cannot name different hardware.
+
+adapter_type_ is included in the override, and not only for completeness: CreateAdapterInfoForAdapter
+derives isFallbackAdapter from it. A persona claiming a discrete GeForce while reporting a fallback
+adapter contradicts itself inside a single object read, so the type has to move with the rest.
+
+Chrome exposes vendor, architecture, subgroup sizes and isFallbackAdapter by default; device,
+description and driver appear with WebGPU developer features enabled. All are set, because a
+fingerprinter with those features enabled is exactly the caller worth being consistent for.
+
+Hook point: third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "third_party/blink/renderer/modules/webgpu/gpu_adapter.h"
+ 
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "services/metrics/public/cpp/ukm_builders.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_object_builder.h"
+@@ -113,6 +114,47 @@ GPUAdapter::GPUAdapter(
+   subgroup_max_size_ = info.subgroupMaxSize;
+   power_preference_ = powerProperties.powerPreference;
+ 
++  // Lobium: report the persona's GPU through navigator.gpu, the same one WebGL reports.
++  //
++  // WebGPU is a SECOND, independent hardware identity. Left alone it names the real device while
++  // WebGL names the persona's, and a page reads both in two calls - so the pair is a contradiction,
++  // which is worse than either surface being honest on its own. Overriding here, right after Dawn's
++  // values are unpacked, covers both shapes of adapter.info: the default reduced set (vendor,
++  // architecture, subgroup sizes, isFallbackAdapter) and the fuller set exposed when WebGPU
++  // developer features are enabled (device, description, driver).
++  //
++  // adapter_type_ is included deliberately, because CreateAdapterInfoForAdapter() below derives
++  // isFallbackAdapter from it - a CPU adapter reports true. Any software backend is a CPU adapter,
++  // so a persona claiming real silicon while advertising the fallback bit would contradict its own
++  // renderer string. Empty fields keep Dawn's real values, so a partial config degrades to honesty
++  // rather than to an incoherent mixture.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->webgpu.present) {
++    const lobium::WebGpuConfig& gpu_cfg = cfg->webgpu;
++    if (!gpu_cfg.vendor.empty()) {
++      vendor_ = String::FromUtf8(gpu_cfg.vendor);
++    }
++    if (!gpu_cfg.architecture.empty()) {
++      architecture_ = String::FromUtf8(gpu_cfg.architecture);
++    }
++    if (!gpu_cfg.device.empty()) {
++      device_ = String::FromUtf8(gpu_cfg.device);
++    }
++    if (!gpu_cfg.description.empty()) {
++      description_ = String::FromUtf8(gpu_cfg.description);
++    }
++    if (!gpu_cfg.driver.empty()) {
++      driver_ = String::FromUtf8(gpu_cfg.driver);
++    }
++    if (gpu_cfg.adapter_type == "discrete") {
++      adapter_type_ = wgpu::AdapterType::DiscreteGPU;
++    } else if (gpu_cfg.adapter_type == "integrated") {
++      adapter_type_ = wgpu::AdapterType::IntegratedGPU;
++    } else if (gpu_cfg.adapter_type == "cpu") {
++      adapter_type_ = wgpu::AdapterType::CPU;
++    }
++  }
++
+   features_ = MakeFeatureNameSet(GetHandle());
+ 
+   GPUSupportedLimits::ComboLimits limits;

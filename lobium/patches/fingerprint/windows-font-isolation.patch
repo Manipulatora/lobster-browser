@@ -1,0 +1,342 @@
+Lobium - Windows font-set isolation through DirectWrite.
+
+The installed font set is one of the highest-entropy signals a page can read, and it needs no
+permission: lay a string out in a candidate family with a known fallback, measure the advance width,
+and the family exists if the width differs. A few hundred probes separate machines more sharply than
+the User-Agent does, and a VPS, a developer workstation and a consumer laptop all measure
+differently - so a persona claiming Windows 11 while measuring as "Windows Server without the Office
+fonts" is caught by arithmetic alone.
+
+Linux solves this with a per-profile FONTCONFIG_FILE written by the launcher, pointing at a
+provisioned pack. Windows has no fontconfig; fonts resolve through DirectWrite in the BROWSER
+process, so the same isolation needs hooks here.
+
+TWO DIFFERENT SERVICES, AND THE OBVIOUS ONE IS DEAD CODE. The first version of this patch hooked
+only DWriteFontProxyImpl, which every guide and every older Chromium source describes as the Windows
+font path. It had no effect whatsoever: measured in-browser, EVERY installed family still resolved
+while the config listed three. As of M152 `content::InitializeFontIntegration` routes the renderer to
+`font_data_service::FontDataManager` instead, because `kFontDataServiceAllWebContents` is
+FEATURE_ENABLED_BY_DEFAULT on Windows (content/common/features.cc). DWriteFontProxy is only
+reached in single-process mode or with that feature switched off. Both are hooked, since either can
+be the live one depending on flags:
+
+  FontDataServiceImpl::MatchFamilyName        THE by-name lookup today. Every `font-family:`
+                                              resolution and every width-measurement probe.
+  FontDataServiceImpl::LegacyMakeTypeface     the GDI-compatible by-name route to the same thing.
+  FontDataServiceImpl::MatchLocalFont         `src: local("ArialMT")`, by PostScript/full name.
+  FontDataServiceImpl::GetAllFamilyNames      enumeration; must agree with what MatchFamilyName
+                                              will actually resolve.
+  DWriteFontProxyImpl::FindFamily             the pre-M152 equivalent of MatchFamilyName.
+  DWriteFontProxyImpl::MatchUniqueFont        the pre-M152 equivalent of MatchLocalFont.
+  FontEnumerationDataSourceWin::GetFonts      the Local Font Access API (navigator.fonts.query).
+                                              Permission-gated, but a granted prompt hands over the
+                                              whole list at once.
+
+A null / not-found result is each service's own "no such font" answer, so a filtered family is
+indistinguishable from one that was never installed.
+
+MatchFamilyNameCharacter and MapCharacters are deliberately NOT filtered. They are the per-character
+fallback used when the primary font lacks a glyph; blocking them does not hide a font, it breaks the
+rendering of scripts the persona should be able to display.
+
+Not filtered by equality: MatchLocalFont receives a PostScript name ("ArialMT"), not a family, so it
+uses a prefix test against the claimed families. See FontUniqueNameAllowed for why that errs toward
+admitting - a false admit leaks one font, a false reject renders a legitimate page in a fallback
+face, which is both a functional bug and its own tell.
+
+FILTERING IS ONLY HALF OF IT. A filter can subtract host fonts the persona does not claim; it cannot
+add fonts the persona claims that the host lacks, and a persona measurably MISSING fonts is its own
+tell. So the profile's font pack is sideloaded into the DirectWrite collection - reusing Chromium's
+existing sideload path, which merges the extra faces with the system set rather than replacing it.
+
+The merged collection is built ONCE per process and shared. DWriteFontProxyImpl is created per
+renderer, and Chromium only ever sideloaded from tests, where two files and one instance made the
+cost invisible; a real pack is a few hundred faces, so rebuilding per instance would put hundreds of
+CreateFontFileReference + Analyze calls on every renderer's first font lookup.
+
+Fail-open throughout: no config, no font list, or an unreadable pack all degrade to stock behaviour.
+Chromium's own kLastResortFontNames are always allowed, because getLastResortFallbackFont CRASHES
+the renderer if none of them can be loaded, and a persona list that omitted them all must not be
+able to express that.
+
+Hook points: content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
+              content/browser/font_access/font_enumeration_data_source_win.cc
+
+diff --git a/components/services/font_data/font_data_service_impl.cc b/components/services/font_data/font_data_service_impl.cc
+--- a/components/services/font_data/font_data_service_impl.cc
++++ b/components/services/font_data/font_data_service_impl.cc
+@@ -19,6 +19,7 @@
+ #include "base/metrics/histogram_macros.h"
+ #include "base/no_destructor.h"
+ #include "base/notreached.h"
++#include "components/lobium_fp/lobium_fonts.h"
+ #include "base/task/thread_pool.h"
+ #include "base/trace_event/trace_event.h"
+ #include "skia/ext/font_utils.h"
+@@ -267,6 +268,22 @@ void FontDataServiceImpl::MatchFamilyName(const std::string& family_name,
+   base::UmaHistogramEnumeration("Chrome.FontDataService.InvokedIPC",
+                                 FontDataServiceIPC::kMatchFamilyName);
+ 
++  // Lobium: THE by-name font lookup. Every `font-family:` resolution reaches here, and so does the
++  // width-measurement probe that enumerates installed fonts without any permission.
++  //
++  // This is the live path as of M152. DWriteFontProxyImpl::FindFamily was the equivalent, but
++  // kFontDataServiceAllWebContents is now enabled by default on Windows, so the renderer builds a
++  // FontDataManager and the DWrite proxy is no longer on the CSS matching path at all. Both are
++  // hooked: the proxy still serves single-process mode and any build with the feature disabled.
++  //
++  // A null result is the service's own "no such font" answer - CreateMatchFamilyNameResult returns
++  // nullptr for a style mismatch and MatchLocalFont for a miss - so a filtered family is
++  // indistinguishable from one that was never installed.
++  if (!lobium::FontFamilyAllowed(family_name)) {
++    std::move(callback).Run(nullptr);
++    return;
++  }
++
+   // Call the font manager of the browser process to process the proxied match
+   // family request.
+   SkFontStyle sk_font_style(style->weight, style->width,
+@@ -326,7 +343,13 @@ void FontDataServiceImpl::GetAllFamilyNames(
+   for (int i = 0; i < family_count; ++i) {
+     SkString out;
+     font_manager_->getFamilyName(i, &out);
+-    result.emplace_back(out.begin(), out.end());
++    std::string name(out.begin(), out.end());
++    // Lobium: the enumeration must agree with what MatchFamilyName will resolve. A list wider than
++    // the set that actually resolves contradicts itself, and is the shape a detector cross-checks.
++    if (!lobium::FontFamilyAllowed(name)) {
++      continue;
++    }
++    result.push_back(std::move(name));
+   }
+ 
+   std::move(callback).Run(std::move(result));
+@@ -338,6 +361,15 @@ void FontDataServiceImpl::LegacyMakeTypeface(
+     LegacyMakeTypefaceCallback callback) {
+   base::UmaHistogramEnumeration("Chrome.FontDataService.InvokedIPC",
+                                 FontDataServiceIPC::kLegacyMakeTypeface);
++
++  // Lobium: the GDI-compatible by-name route. A nullopt family means "give me the default face",
++  // which carries no persona information and is left alone; a NAMED lookup is the same oracle as
++  // MatchFamilyName and is filtered the same way.
++  if (family_name && !lobium::FontFamilyAllowed(*family_name)) {
++    std::move(callback).Run(nullptr);
++    return;
++  }
++
+   SkFontStyle sk_font_style(style->weight, style->width,
+                             ConvertToFontStyle(style->slant));
+ 
+@@ -518,6 +550,14 @@ void FontDataServiceImpl::MatchLocalFont(const std::string& font_unique_name,
+   base::UmaHistogramEnumeration("Chrome.FontDataService.InvokedIPC",
+                                 FontDataServiceIPC::kMatchLocalFont);
+ 
++  // Lobium: `src: local("ArialMT")` looks a face up by its PostScript or full name, bypassing the
++  // family lookup above. Filtered on the unique name, since the family is not available here - see
++  // FontUniqueNameAllowed for why that is a prefix test rather than an equality test.
++  if (!lobium::FontUniqueNameAllowed(font_unique_name)) {
++    std::move(callback).Run(nullptr);
++    return;
++  }
++
+   if (local_font_matcher_) {
+     std::optional<LocalFontMatchResult> match =
+         local_font_matcher_->MatchLocalFont(font_unique_name);
+diff --git a/content/browser/font_access/font_enumeration_data_source_win.cc b/content/browser/font_access/font_enumeration_data_source_win.cc
+--- a/content/browser/font_access/font_enumeration_data_source_win.cc
++++ b/content/browser/font_access/font_enumeration_data_source_win.cc
+@@ -15,6 +15,7 @@
+ #include "base/notreached.h"
+ #include "base/sequence_checker.h"
+ #include "base/threading/scoped_blocking_call.h"
++#include "components/lobium_fp/lobium_fonts.h"
+ #include "content/browser/font_access/font_enumeration_cache.h"
+ #include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
+ #include "third_party/blink/public/common/font_access/font_enumeration_table.pb.h"
+@@ -204,6 +205,16 @@ blink::FontEnumerationTable FontEnumerationDataSourceWin::GetFonts(
+       continue;
+ 
+     std::optional<std::string> family_name = GetFamilyName(family.Get());
++    // Lobium: the Local Font Access API (navigator.fonts.query) is the direct, non-inferential read
++    // of the installed font set, so it must agree with what CSS font matching resolves - a persona
++    // whose enumerated list is wider than the families FindFamily will resolve contradicts itself.
++    // Permission-gated, but a granted prompt hands over the whole list at once.
++    //
++    // The nullopt check is also load-bearing on its own: set_family(*family_name) below dereferences
++    // this optional unconditionally, unlike every other field here, which guards first.
++    if (!family_name || !lobium::FontFamilyAllowed(*family_name)) {
++      continue;
++    }
+ 
+     uint32_t font_count = family->GetFontCount();
+     for (uint32_t font_index = 0; font_index < font_count; ++font_index) {
+diff --git a/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc b/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
+--- a/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
++++ b/content/browser/renderer_host/dwrite_font_proxy_impl_win.cc
+@@ -22,6 +22,7 @@
+ #include "base/functional/callback_helpers.h"
+ #include "base/i18n/case_conversion.h"
+ #include "base/metrics/histogram_functions.h"
++#include "base/no_destructor.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/sequenced_task_runner.h"
+@@ -30,6 +31,8 @@
+ #include "base/threading/thread_restrictions.h"
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
++#include "components/lobium_fp/lobium_fonts.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "content/browser/renderer_host/dwrite_font_file_util_win.h"
+ #include "mojo/public/cpp/bindings/callback_helpers.h"
+ #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+@@ -123,20 +126,47 @@ bool CheckRequiredStylesPresent(IDWriteFontCollection* collection,
+   return true;
+ }
+ 
+-HRESULT GetLocalFontCollection(mswr::ComPtr<IDWriteFactory3>& factory,
+-                               IDWriteFontCollection** collection) {
+-  if (!g_sideloaded_fonts) {
+-    // Normal path - use the system's font collection with no sideloading.
+-    return factory->GetSystemFontCollection(collection);
+-  }
+-  // If sideloading - build a font set with sideloads then add the system font
+-  // collection.
++// Lobium: the profile's font pack, enumerated once per process.
++//
++// This is the "add" half of font isolation, and it is why a filter alone is not enough. A persona
++// claiming a consumer Windows 11 machine must be able to resolve fonts the HOST may not have
++// installed - a Windows Server VPS ships a visibly thinner set than a retail laptop, and a persona
++// measurably MISSING fonts is as much a tell as one carrying too many. Filtering can only subtract;
++// only real font files can add, so the launcher provisions a pack and names it in the config.
++//
++// Enumerated lazily and exactly once: DWriteFontProxyImpl is created per renderer, so doing this
++// per instance would re-stat the whole pack directory for every renderer the browser spawns.
++const std::vector<base::FilePath>& LobiumFontPackFaces() {
++  static base::NoDestructor<std::vector<base::FilePath>> faces([]() {
++    const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++    if (!cfg || cfg->font_pack_dir.empty()) {
++      return std::vector<base::FilePath>();
++    }
++    base::ScopedBlockingCall scoped_blocking_call(
++        FROM_HERE, base::BlockingType::MAY_BLOCK);
++    return lobium::FontPackFaces(
++        base::FilePath::FromUTF8Unsafe(cfg->font_pack_dir));
++  }());
++  return *faces;
++}
++
++HRESULT BuildSideloadedFontCollection(mswr::ComPtr<IDWriteFactory3>& factory,
++                                      IDWriteFontCollection** collection) {
++  // Build a font set with sideloads then add the system font collection.
+   mswr::ComPtr<IDWriteFontSetBuilder> font_set_builder;
+   HRESULT hr = factory->CreateFontSetBuilder(&font_set_builder);
+   if (!SUCCEEDED(hr)) {
+     return hr;
+   }
+-  for (auto& path : *g_sideloaded_fonts) {
++  // Lobium: the pack is merged with, not substituted for, the testing sideloads and the system set
++  // below - so provisioning a pack never removes a font, and FindFamily filters the union down to
++  // the persona's list.
++  std::vector<base::FilePath> sideloads = LobiumFontPackFaces();
++  if (g_sideloaded_fonts) {
++    sideloads.insert(sideloads.end(), g_sideloaded_fonts->begin(),
++                     g_sideloaded_fonts->end());
++  }
++  for (auto& path : sideloads) {
+     mswr::ComPtr<IDWriteFontFile> font_file;
+     hr = factory->CreateFontFileReference(path.value().c_str(), nullptr,
+                                           &font_file);
+@@ -190,6 +220,47 @@ HRESULT GetLocalFontCollection(mswr::ComPtr<IDWriteFactory3>& factory,
+   return hr;
+ }
+ 
++HRESULT GetLocalFontCollection(mswr::ComPtr<IDWriteFactory3>& factory,
++                               IDWriteFontCollection** collection) {
++  if (!g_sideloaded_fonts && LobiumFontPackFaces().empty()) {
++    // Normal path - use the system's font collection with no sideloading.
++    return factory->GetSystemFontCollection(collection);
++  }
++
++  // Lobium: build the merged collection ONCE per process and hand every DWriteFontProxyImpl a
++  // reference to it.
++  //
++  // Chromium only ever sideloaded from tests, where a single instance and a couple of files made
++  // the cost invisible. A real font pack is a few hundred faces, and DWriteFontProxyImpl is created
++  // per renderer, so rebuilding the set per instance would mean hundreds of CreateFontFileReference
++  // + Analyze calls on every renderer's first font lookup - directly the browsing lag this build is
++  // meant not to have. The factory is DWRITE_FACTORY_TYPE_SHARED, and IDWriteFontCollection is
++  // read-only once built, so one instance is safely shared across sequences.
++  //
++  // Deliberately cached across font-installation changes: a collection that shifted mid-session
++  // would make the profile's font fingerprint unstable, and instability is more observable than
++  // being slightly stale.
++  struct CachedCollection {
++    mswr::ComPtr<IDWriteFontCollection> collection;
++  };
++  static base::NoDestructor<CachedCollection> cached([&factory]() {
++    CachedCollection built;
++    const HRESULT hr =
++        BuildSideloadedFontCollection(factory, &built.collection);
++    if (!SUCCEEDED(hr)) {
++      built.collection.Reset();
++    }
++    return built;
++  }());
++
++  if (!cached->collection) {
++    // Fail open. A malformed pack must degrade to the host's own fonts - still filtered by
++    // FindFamily - rather than to a browser with no font collection at all, which does not render.
++    return factory->GetSystemFontCollection(collection);
++  }
++  return cached->collection.CopyTo(collection);
++}
++
+ }  // namespace
+ 
+ DWriteFontProxyImpl::DWriteFontProxyImpl()
+@@ -224,7 +295,11 @@ void DWriteFontProxyImpl::FindFamily(const std::u16string& family_name,
+   base::UmaHistogramEnumeration("Chrome.DWriteFontProxy.InvokedIPC",
+                                 DWriteFontProxyIPC::kFindFamily);
+   UINT32 family_index = UINT32_MAX;
+-  if (collection_) {
++  // Lobium: the by-name lookup every `font-family:` resolution goes through, and therefore the
++  // chokepoint for the width-measurement probe that enumerates installed fonts without permission.
++  // Reporting UINT32_MAX is the collection's own "no such family" answer, so a filtered family is
++  // indistinguishable from one that was never installed. See components/lobium_fp/lobium_fonts.h.
++  if (collection_ && lobium::FontFamilyAllowed(family_name)) {
+     BOOL exists = FALSE;
+     UINT32 index = UINT32_MAX;
+     HRESULT hr = collection_->FindFamilyName(base::as_wcstr(family_name),
+@@ -536,6 +611,31 @@ void DWriteFontProxyImpl::MatchUniqueFont(
+   if (!filtered_set->GetFontCount())
+     return;
+ 
++  // Lobium: MatchUniqueFont looks a font up by PostScript or full name, which bypasses FindFamily
++  // entirely - so without this the persona's font list would be enforced for `font-family:` while
++  // `@font-face { src: local("ArialMT") }` and Local Font Access still answered from the host's real
++  // set. Resolve the match back to its FAMILY, because that is the granularity the persona
++  // describes, and drop it if the persona does not claim that family. Returning without running the
++  // callback yields the same "no such font" result as a name that matched nothing.
++  {
++    mswr::ComPtr<IDWriteLocalizedStrings> family_values;
++    BOOL family_exists = FALSE;
++    if (SUCCEEDED(filtered_set->GetPropertyValues(
++            /*listIndex=*/0, DWRITE_FONT_PROPERTY_ID_FAMILY_NAME,
++            &family_exists, &family_values)) &&
++        family_exists && family_values && family_values->GetCount() > 0) {
++      UINT32 length = 0;
++      if (SUCCEEDED(family_values->GetStringLength(0, &length))) {
++        std::vector<wchar_t> family(length + 1);
++        if (SUCCEEDED(family_values->GetString(0, family.data(), length + 1)) &&
++            !lobium::FontFamilyAllowed(
++                base::WideToUTF16(std::wstring_view(family.data(), length)))) {
++          return;
++        }
++      }
++    }
++  }
++
+   mswr::ComPtr<IDWriteFontFaceReference> first_font;
+   hr = filtered_set->GetFontFaceReference(0, &first_font);
+   if (FAILED(hr))

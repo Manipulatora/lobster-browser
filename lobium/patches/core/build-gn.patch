@@ -1,21 +1,36 @@
-Lobium — register the //components/lobium_fp config-channel module in the build graph.
+Lobium â€” register the //components/lobium_fp config-channel module in the build graph.
 
 Wires the added first-party module (components/lobium_fp/, staged by lobium/build.sh) into the three
 Blink targets whose hooks read lobium::LobiumFpConfig::Current():
   - blink core   (component("core")):     deps += //components/lobium_fp ; core/DEPS   += +components/lobium_fp
   - blink common (source_set("common")):  deps += //components/lobium_fp ; common/DEPS += +components/lobium_fp
-    (owns approximated_device_memory.cc — the deviceMemory single source)
+    (owns approximated_device_memory.cc â€” the deviceMemory single source)
   - blink modules (component("modules")):  deps += //components/lobium_fp ; modules/DEPS += +components/lobium_fp
-    (owns webgl_rendering_context_base.cc — the WebGL vendor/renderer hook)
+    (owns webgl_rendering_context_base.cc â€” the WebGL vendor/renderer hook)
 
 Kept minimal, and in the //components first-party root rather than //third_party (which the license
 scanner tools/licenses.py rejects for a directory lacking README.chromium/LICENSE, breaking the
 is_official_build credits step). COMPILE-VERIFIED on Chromium 152.0.7928.0.
 
-  • components/embedder_support/BUILD.gn — user_agent target deps on //components/lobium_fp (native UA header + Sec-CH-UA metadata).
-  • content/renderer/BUILD.gn — renderer startup applies configured ICU locale before Blink/V8 init.
+  â€¢ components/embedder_support/BUILD.gn â€” user_agent target deps on //components/lobium_fp (native UA header + Sec-CH-UA metadata).
+  â€¢ content/renderer/BUILD.gn â€” renderer startup applies configured ICU locale before Blink/V8 init.
+
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -445,6 +445,11 @@ if (is_win) {
+       "//chrome/install_static:install_static_util",
+       "//chrome/install_static:secondary_module",
+       "//components/crash/core/app",
++      # Lobium: chrome_main.cc answers --lobium-fingerprint-capabilities from this module. The symbol
++      # would also arrive transitively through //content, but the dependency is stated because the
++      # capability contract is a safety claim the sidecar gates launches on - it should not rest on
++      # an unrelated target happening to pull the module in.
++      "//components/lobium_fp",
+       "//components/memory_system",
+       "//components/policy:generated",
+       "//components/webapps/isolated_web_apps:scheme",
 diff --git a/components/embedder_support/BUILD.gn b/components/embedder_support/BUILD.gn
-index 847ba42327..b20621d099 100644
 --- a/components/embedder_support/BUILD.gn
 +++ b/components/embedder_support/BUILD.gn
 @@ -58,6 +58,7 @@ static_library("user_agent") {
@@ -26,11 +41,48 @@ index 847ba42327..b20621d099 100644
      "//components/policy/core/common",
      "//components/prefs",
      "//components/version_info",
+diff --git a/components/services/font_data/BUILD.gn b/components/services/font_data/BUILD.gn
+--- a/components/services/font_data/BUILD.gn
++++ b/components/services/font_data/BUILD.gn
+@@ -21,6 +21,10 @@ source_set("lib") {
+ 
+   deps = [
+     "//base",
++    # Lobium: font-set isolation. This service is the live by-name font lookup on Windows as of
++    # M152 - kFontDataServiceAllWebContents is enabled by default, so the DWrite proxy is no longer
++    # on the CSS matching path.
++    "//components/lobium_fp",
+     "//components/services/font_data/public/mojom",
+     "//mojo/public/cpp/bindings",
+     "//mojo/public/cpp/system",
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -161,6 +161,9 @@ source_set("browser") {
+     "//components/language/core/common",
+     "//components/language_detection/content/common",
+     "//components/link_header_util",
++    # Lobium: font-set isolation runs in the BROWSER process - DirectWrite family lookup and the
++    # Local Font Access enumerator both live here, not in the renderer.
++    "//components/lobium_fp",
+     "//components/metrics",
+     "//components/metrics:single_sample_metrics",
+     "//components/metrics/dwa:dwa_builders",
+diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
+--- a/content/renderer/BUILD.gn
++++ b/content/renderer/BUILD.gn
+@@ -240,6 +240,7 @@ target(link_target_type, "renderer") {
+     "//components/discardable_memory/client",
+     "//components/history/core/browser:features",
+     "//components/input",
++    "//components/lobium_fp",
+     "//components/metrics",
+     "//components/metrics:single_sample_metrics",
+     "//components/performance_manager/scenario_api",
 diff --git a/third_party/blink/common/BUILD.gn b/third_party/blink/common/BUILD.gn
-index c34a848099..4b4ef10665 100644
 --- a/third_party/blink/common/BUILD.gn
 +++ b/third_party/blink/common/BUILD.gn
-@@ -310,6 +310,7 @@ source_set("common") {
+@@ -307,6 +307,7 @@ source_set("common") {
      "//base",
      "//build:android_buildflags",
      "//build:chromecast_buildflags",
@@ -39,19 +91,17 @@ index c34a848099..4b4ef10665 100644
      "//media/capture/mojom:video_capture_mojom_support",
      "//mojo/public/cpp/system",
 diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
-index a4a53a9003..e5143277a2 100644
 --- a/third_party/blink/renderer/core/BUILD.gn
 +++ b/third_party/blink/renderer/core/BUILD.gn
-@@ -410,6 +410,7 @@ component("core") {
+@@ -408,6 +408,7 @@ component("core") {
+     ":make_deprecation_info",
+     ":xml_ffi",
      "//base",
-     "//components/attribution_reporting",
-     "//components/attribution_reporting:mojom_blink",
 +    "//components/lobium_fp:lobium_fp",
      "//components/paint_preview/common",
      "//components/performance_manager/public/mojom:mojom_blink",
      "//components/shared_highlighting/core/common",
 diff --git a/third_party/blink/renderer/modules/BUILD.gn b/third_party/blink/renderer/modules/BUILD.gn
-index fecd5c279e..be0d717a5d 100644
 --- a/third_party/blink/renderer/modules/BUILD.gn
 +++ b/third_party/blink/renderer/modules/BUILD.gn
 @@ -202,6 +202,7 @@ component("modules") {
@@ -62,14 +112,3 @@ index fecd5c279e..be0d717a5d 100644
      "//components/webrtc:thread_wrapper",
      "//gin",
      "//net",
-diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
---- a/content/renderer/BUILD.gn
-+++ b/content/renderer/BUILD.gn
-@@ -235,6 +235,7 @@ target(link_target_type, "renderer") {
-     "//components/discardable_memory/client",
-     "//components/history/core/browser:features",
-     "//components/input",
-+    "//components/lobium_fp",
-     "//components/metrics",
-     "//components/metrics:single_sample_metrics",
-     "//components/performance_manager/scenario_api",

@@ -1,0 +1,20 @@
+Lobium - apply the persona timezone inside the engine, not through the environment.
+
+The launcher sets TZ/LANG/LC_ALL before spawning the browser, which is how the persona timezone
+reaches ICU on Linux. On Windows that route does not exist: ICU reads the timezone from the registry
+and ignores TZ entirely, so the profile's timezone silently did not apply at all - Date, Intl and
+every timezone-derived value reported the HOST zone while the persona claimed another, which a page
+compares against the proxy exit IP in one line of JavaScript.
+
+Hook point: TimeZoneController::OnTimeZoneChange, deliberately.
+
+An earlier attempt hooked RenderThreadImpl::Init to adopt the persona zone at renderer startup. That
+does not survive: the browser's device::TimeZoneMonitor pushes the HOST zone to every renderer
+shortly after start, overwriting whatever was adopted earlier. OnTimeZoneChange is the receiving end
+of that push, so overriding there is applied both at startup and on every subsequent host change,
+and no later notification can undo it.
+
+The explicit override path (HasTimeZoneOverride, used by DevTools emulation) is left in control when
+it is active: an operator emulating a zone in DevTools should see the zone they asked for.
+
+Hook point: third_party/blink/renderer/core/timezone/timezone_controller.cc

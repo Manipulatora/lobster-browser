@@ -3,7 +3,16 @@ Lobium — native clientRects farbling (seeds.clientRects).
 Perturbs Element::getClientRects / GetBoundingClientRect by a stable sub-pixel delta so float
 geometry fingerprints differ per profile without changing layout. Guarded on seeds.clientRects != 0.
 
+The kernel keys the delta on the rect's own VALUES, not on a call index. That matters: honest Chrome
+returns exactly equal doubles whenever geometry coincides — a child that fills its parent, one
+element's bottom against the next one's top, two identically laid-out elements. Index keying gave
+those independent nudges and broke every such equality, which is a handful of lines of JS to detect.
+Value keying gives equal inputs equal outputs, so the relations survive; it also makes the two call
+sites below agree by construction rather than by both happening to pass index 0.
+
 diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
 @@ -26,6 +26,9 @@
  
  #include "third_party/blink/renderer/core/dom/element.h"
@@ -26,7 +35,7 @@ diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/
 +      float y = rects[i].y();
 +      float w = rects[i].width();
 +      float h = rects[i].height();
-+      lobium::FarbleClientRect(&x, &y, &w, &h, static_cast<uint32_t>(i),
++      lobium::FarbleClientRect(&x, &y, &w, &h,
 +                               cfg->seeds.client_rects);
 +      rects[i].SetRect(x, y, w, h);
 +    }
@@ -47,7 +56,7 @@ diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/
 +    float y = result.y();
 +    float w = result.width();
 +    float h = result.height();
-+    lobium::FarbleClientRect(&x, &y, &w, &h, 0u, cfg->seeds.client_rects);
++    lobium::FarbleClientRect(&x, &y, &w, &h, cfg->seeds.client_rects);
 +    result.SetRect(x, y, w, h);
 +  }
 +  return DOMRect::FromRectF(result);

@@ -1,0 +1,152 @@
+Lobium - WebGL vendor/renderer, scalar caps, and pixel farbling (seeds.webgl).
+
+Split out of core/config-channel.patch. Two further WebGL patches build on this one and must apply
+AFTER it: fingerprint/host-gpu-profile.patch (version / shadingLanguageVersion / extensions /
+shaderPrecision) and fingerprint/webgl-runtime-safety.patch (never advertise a capability the
+active backend cannot execute).
+
+  * UNMASKED_VENDOR_WEBGL / UNMASKED_RENDERER_WEBGL, overridden as an ATOMIC PAIR so a persona can
+    never report one real and one spoofed half.
+  * The scalar MAX_* capability set, so the numbers agree with the claimed renderer string instead
+    of leaking the real (or software) backend's limits.
+  * Per-profile WebGL PIXEL FARBLING. gl.readPixels returns a BOTTOM-UP buffer, while the WebGL
+    toDataURL/toBlob snapshot is top-down; both are farbled on a shared TOP-DOWN key
+    (FarbleCanvasRgbaFlippedRows for the former), so two profiles on the same GPU get
+    distinct-but-stable WebGL pixel hashes AND a detector cross-checking readPixels against the
+    encoded image sees consistent noise rather than a contradiction.
+    Scope: default framebuffer, RGBA/UNSIGNED_BYTE, default pack state.
+
+Hook point: third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc.
+
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index a977030857..7bd229ffd4 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -27,6 +27,7 @@
+ 
+ #include <inttypes.h>
+ 
++#include <algorithm>
+ #include <memory>
+ #include <utility>
+ 
+@@ -45,6 +45,8 @@
+ #include "base/trace_event/memory_dump_manager.h"
+ #include "base/trace_event/trace_event.h"
+ #include "build/build_config.h"
++#include "components/lobium_fp/lobium_farble.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "components/viz/common/gpu/raster_context_provider.h"
+ #include "components/viz/common/resources/shared_image_format_utils.h"
+ #include "device/vr/buildflags/buildflags.h"
+@@ -3982,6 +3984,51 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+                                                     GLenum pname) {
+   if (isContextLost())
+     return ScriptValue::CreateNull(script_state->GetIsolate());
++  // Lobium: override the numeric GPU limits (ENG-8) so MAX_* / viewport / aliased ranges agree with the
++  // spoofed UNMASKED_RENDERER string instead of leaking the real (or software) backend's caps - a
++  // SwiftShader-shaped cap next to a real-GPU renderer is a direct cross-check tell. Only config-provided
++  // caps are intercepted; every other pname falls through to the normal driver query below.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->webgl.caps.present) {
++    const auto& caps = cfg->webgl.caps;
++    switch (pname) {
++      case GL_MAX_TEXTURE_SIZE:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_texture_size));
++      case GL_MAX_CUBE_MAP_TEXTURE_SIZE:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_cube_map_texture_size));
++      case GL_MAX_RENDERBUFFER_SIZE:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_renderbuffer_size));
++      case GL_MAX_VERTEX_ATTRIBS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_vertex_attribs));
++      case GL_MAX_VERTEX_UNIFORM_VECTORS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_vertex_uniform_vectors));
++      case GL_MAX_FRAGMENT_UNIFORM_VECTORS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_fragment_uniform_vectors));
++      case GL_MAX_VARYING_VECTORS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_varying_vectors));
++      case GL_MAX_TEXTURE_IMAGE_UNITS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_texture_image_units));
++      case GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_vertex_texture_image_units));
++      case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
++        return WebGLAny(script_state, static_cast<GLint>(caps.max_combined_texture_image_units));
++      case GL_MAX_VIEWPORT_DIMS: {
++        const GLint dims[2] = {static_cast<GLint>(caps.max_viewport_dims[0]),
++                               static_cast<GLint>(caps.max_viewport_dims[1])};
++        return WebGLAny(script_state, DOMInt32Array::Create(base::span(dims)));
++      }
++      case GL_ALIASED_LINE_WIDTH_RANGE: {
++        const GLfloat r[2] = {caps.aliased_line_width_range[0], caps.aliased_line_width_range[1]};
++        return WebGLAny(script_state, DOMFloat32Array::Create(base::span(r)));
++      }
++      case GL_ALIASED_POINT_SIZE_RANGE: {
++        const GLfloat r[2] = {caps.aliased_point_size_range[0], caps.aliased_point_size_range[1]};
++        return WebGLAny(script_state, DOMFloat32Array::Create(base::span(r)));
++      }
++      default:
++        break;  // not a capped param - fall through to the normal driver query.
++    }
++  }
+   const int kIntZero = 0;
+   switch (pname) {
+     case GL_ACTIVE_TEXTURE:
+@@ -4191,6 +4238,16 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        // Lobium: report the per-profile GPU renderer natively. The real driver string leaks ONLY
++        // through this unmasked param (the masked GL_RENDERER stays Chrome's generic "WebKit WebGL"),
++        // and it cannot be spoofed cleanly from JS/CDP - a getParameter override is itself detectable.
++        // Override the vendor+renderer PAIR atomically (both configured or neither) so a partial persona
++        // can never pair a spoofed vendor with the host renderer - an obvious cross-check tell.
++        if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++            cfg && !cfg->webgl.unmasked_vendor.empty() &&
++            !cfg->webgl.unmasked_renderer.empty()) {
++          return WebGLAny(script_state, String::FromUtf8(cfg->webgl.unmasked_renderer));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_RENDERER)));
+       }
+@@ -4200,6 +4257,13 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        // Lobium: report the per-profile GPU vendor natively (unmasked-only, same rationale as above;
++        // paired atomically with the renderer so the two are never sourced from different origins).
++        if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++            cfg && !cfg->webgl.unmasked_vendor.empty() &&
++            !cfg->webgl.unmasked_renderer.empty()) {
++          return WebGLAny(script_state, String::FromUtf8(cfg->webgl.unmasked_vendor));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_VENDOR)));
+       }
+@@ -5347,6 +5411,27 @@ void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
+     }
+     ContextGL()->ReadPixels(x, y, width, height, format, type, data);
+   }
++
++  // Lobium: seeded WebGL pixel farbling (unlinkability). Perturb ONLY the fingerprinting-canonical
++  // readback - the DEFAULT framebuffer read as RGBA/UNSIGNED_BYTE with default pack state - so two
++  // profiles on the same real GPU get distinct-but-stable WebGL pixel hashes instead of an identical,
++  // linkable one. Keyed on seeds.webgl with a FLIPPED-ROW mapping (readPixels rows are bottom-up) so it
++  // stays coherent with the top-down WebGL toDataURL/toBlob snapshot farble. User-FBO reads and
++  // non-RGBA8 / non-default-pack layouts are left untouched (no snapshot counterpart / different stride).
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->seeds.webgl && framebuffer == nullptr && format == GL_RGBA &&
++      type == GL_UNSIGNED_BYTE && width > 0 && height > 0 && GetDrawingBuffer()) {
++    const WebGLImageConversion::PixelStoreParams pack = GetPackPixelStoreParams();
++    if (pack.row_length == 0 && pack.skip_pixels == 0 && pack.skip_rows == 0) {
++      const int fb_height = GetDrawingBuffer()->Size().height();
++      const size_t align = static_cast<size_t>(pack.alignment > 0 ? pack.alignment : 4);
++      const size_t row_bytes =
++          (static_cast<size_t>(width) * 4u + align - 1u) & ~(align - 1u);
++      lobium::FarbleCanvasRgbaFlippedRows(data, width, height, row_bytes,
++                                          /*origin_x=*/x, /*top_origin_y=*/fb_height - 1 - y,
++                                          cfg->seeds.webgl);
++    }
++  }
+ }
+ 
+ void WebGLRenderingContextBase::RenderbufferStorageImpl(

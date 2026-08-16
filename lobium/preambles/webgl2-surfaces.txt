@@ -1,0 +1,32 @@
+Lobium - WebGL2 limits that must agree with the WebGL1 limits the persona already reports.
+
+WebGL2 exposes several of the same driver limits as WebGL1, counted in scalar COMPONENTS instead of
+4-component VECTORS. Spoofing only the WebGL1 view lets one page contradict itself: a persona
+reporting 1024 vertex uniform vectors in a WebGL1 context, next to the host's real component count in
+a WebGL2 context, is caught by dividing by four.
+
+The x4 relation is not an assumption. ANGLE's D3D11 renderer derives them that way itself, in
+third_party/angle/src/libANGLE/renderer/d3d/d3d11/renderer11_utils.cpp:
+
+    maxShaderUniformComponents[Vertex]   = maxVertexUniformVectors   * 4
+    maxShaderUniformComponents[Fragment] = maxFragmentUniformVectors * 4
+    maxVaryingComponents                 = maxVaryingVectors         * 4
+
+so reproducing the identity keeps the pair consistent for any persona value, with no per-GPU data to
+capture and nothing invented.
+
+DELIBERATELY NOT SPOOFED: MAX_3D_TEXTURE_SIZE, MAX_ARRAY_TEXTURE_LAYERS, MAX_DRAW_BUFFERS,
+MAX_COLOR_ATTACHMENTS and MAX_TEXTURE_LOD_BIAS. On D3D11 those are functions of the FEATURE LEVEL,
+not of the GPU - GetMaximum3DTextureSize and friends switch on D3D_FEATURE_LEVEL alone - so every
+real Windows machine reports the same values and overriding them could only introduce a difference
+where none exists.
+
+Clamped against the backend for the same reason as the WebGL1 caps block: advertising a limit the GL
+implementation cannot satisfy makes content allocate resources that then fail, which shows up as
+missing 3D or a lost context rather than as a fingerprint win.
+
+The WebGL2 EXTENSION list is a separate concern and lives with the WebGL1 one in
+fingerprint/webgl-surfaces.patch, since both go through getSupportedExtensions in the shared base
+class.
+
+Hook point: third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc

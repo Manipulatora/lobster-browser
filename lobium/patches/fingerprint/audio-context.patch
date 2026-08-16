@@ -49,8 +49,9 @@ Proven on Chromium 152.0.7928.0 (SwiftShader, headless):
 Two hook points touch existing files (this patch); the kernel + BUILD.gn wiring are added files:
   1. third_party/blink/renderer/modules/webaudio/offline_audio_context.cc — offline result farble (Hook A).
   2. third_party/blink/renderer/modules/webaudio/realtime_analyser.cc — analyser float paths (Hooks B, C).
+
 diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
-index aed92e0ec4..7e4f98c9dd 100644
+index aed92e0ec46ad..576daeb189deb 100644
 --- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
 +++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
 @@ -25,8 +25,11 @@
@@ -82,7 +83,7 @@ index aed92e0ec4..7e4f98c9dd 100644
 +    // event runs exactly once per context; the render thread already posted NotifyComplete before this
 +    // runs, so nothing else aliases these buffers now. We perturb the finished RESULT backing store in
 +    // place, once, keyed per (seed, channel, sample index). getChannelData(), copyFromChannel(), and
-+    // event.renderedBuffer all read THIS same store, so every readback path agrees by construction — no
++    // event.renderedBuffer all read THIS same store, so every readback path agrees by construction - no
 +    // per-call compounding, object identity preserved. This buffer is a readback artifact (the output
 +    // of startRendering()); we never touch the realtime graph or any playback source. This is the #1
 +    // audio fingerprint vector (OfflineAudioContext + DynamicsCompressor -> sample sum/hash).
@@ -91,14 +92,14 @@ index aed92e0ec4..7e4f98c9dd 100644
 +      const unsigned channels = rendered_buffer->numberOfChannels();
 +      for (unsigned ch = 0; ch < channels; ++ch) {
 +        base::span<float> data = rendered_buffer->getChannelData(ch)->AsSpan();
-+        // Use the SAME (seed, sample index) key for every channel — NOT a per-channel seed fold.
++        // Use the SAME (seed, sample index) key for every channel - NOT a per-channel seed fold.
 +        // Honest Chrome upmixes a mono source to bit-identical L/R channels; a per-channel seed would
 +        // make them diverge, which `channelData(0)[k] === channelData(1)[k]` detects as a cheap farble
 +        // oracle. Applying one eps sequence to all channels keeps identical channels identical (the
 +        // (1+eps) factor cancels in channel0[k]/channel1[k], matching the honest ratio) while genuinely
 +        // distinct channels still farble distinctly (different underlying samples). It also removes the
 +        // channel-fold-hits-zero-sentinel edge case that could leave one channel unfarbled.
-+        lobium::FarbleAudioSamples(data.data(), data.size(), /*base_index=*/0, cfg->seeds.audio);
++        lobium::FarbleAudioSamples(data.data(), data.size(), cfg->seeds.audio);
 +      }
 +    }
 +
@@ -106,11 +107,14 @@ index aed92e0ec4..7e4f98c9dd 100644
      // promise too.
      DispatchEvent(*OfflineAudioCompletionEvent::Create(rendered_buffer));
 diff --git a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
-index d0b1bd6401..b808229cf8 100644
+index d0b1bd640131d..277774dc29890 100644
 --- a/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
 +++ b/third_party/blink/renderer/modules/webaudio/realtime_analyser.cc
-@@ -32,6 +32,8 @@
+@@ -30,8 +30,11 @@
+ #include <algorithm>
+ #include <bit>
  #include <complex>
++#include <vector>
  
  #include "base/compiler_specific.h"
 +#include "components/lobium_fp/lobium_audio_farble.h"
@@ -118,7 +122,7 @@ index d0b1bd6401..b808229cf8 100644
  #include "media/base/audio_bus.h"
  #include "third_party/blink/renderer/platform/audio/audio_bus.h"
  #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
-@@ -119,6 +121,13 @@ void RealtimeAnalyser::GetFloatFrequencyData(DOMFloat32Array* destination_array,
+@@ -119,6 +122,13 @@ void RealtimeAnalyser::GetFloatFrequencyData(DOMFloat32Array* destination_array,
        const double db_mag = audio_utilities::LinearToDecibels(linear_value);
        destination[i] = static_cast<float>(db_mag);
      }
@@ -127,12 +131,42 @@ index d0b1bd6401..b808229cf8 100644
 +    // stay intact. Negative-dB domain; the relative (1+eps) nudge keeps values plausibly negative.
 +    if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +        cfg && cfg->seeds.audio) {
-+      lobium::FarbleAudioSamples(destination.data(), len, /*base_index=*/0, cfg->seeds.audio);
++      lobium::FarbleAudioSamples(destination.data(), len, cfg->seeds.audio);
 +    }
    }
  }
  
-@@ -186,6 +195,13 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
+@@ -147,14 +157,25 @@ void RealtimeAnalyser::GetByteFrequencyData(DOMUint8Array* destination_array,
+     const double min_decibels = min_decibels_;
+ 
+     base::span<unsigned char> destination = destination_array->AsSpan();
++    // Lobium: compute the float dB values, farble them IDENTICALLY to GetFloatFrequencyData (same
++    // seed + index), THEN quantize to byte - so getByteFrequencyData stays the exact byte-quantization
++    // of the farbled float path (an invariant honest Chrome holds) AND carries the same per-profile
++    // perturbation. Without this the byte path leaks the pristine host audio fingerprint (a coverage
++    // hole that makes two profiles on one host linkable via the common getByteFrequencyData probe).
++    std::vector<float> db(len);
++    for (unsigned i = 0; i < len; ++i) {
++      db[i] = static_cast<float>(
++          audio_utilities::LinearToDecibels(magnitude_buffer_[i]));
++    }
++    if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++        cfg && cfg->seeds.audio) {
++      lobium::FarbleAudioSamples(db.data(), len, cfg->seeds.audio);
++    }
+     for (unsigned i = 0; i < len; ++i) {
+-      const float linear_value = magnitude_buffer_[i];
+-      const double db_mag = audio_utilities::LinearToDecibels(linear_value);
+-
+       // The range m_minDecibels to m_maxDecibels will be scaled to byte values
+       // from 0 to UCHAR_MAX.
+       const double scaled_value =
+-          UCHAR_MAX * (db_mag - min_decibels) * range_scale_factor;
++          UCHAR_MAX * (db[i] - min_decibels) * range_scale_factor;
+ 
+       // Clip to valid range.
+       destination[i] =
+@@ -186,6 +207,13 @@ void RealtimeAnalyser::GetFloatTimeDomainData(
  
        destination[i] = value;
      }
@@ -141,8 +175,36 @@ index d0b1bd6401..b808229cf8 100644
 +    // relative (1+eps) nudge is sign/range preserving.
 +    if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +        cfg && cfg->seeds.audio) {
-+      lobium::FarbleAudioSamples(destination.data(), len, /*base_index=*/0, cfg->seeds.audio);
++      lobium::FarbleAudioSamples(destination.data(), len, cfg->seeds.audio);
 +    }
    }
  }
  
+@@ -203,14 +231,22 @@ void RealtimeAnalyser::GetByteTimeDomainData(DOMUint8Array* destination_array) {
+     const unsigned write_index = GetWriteIndex();
+ 
+     base::span<unsigned char> destination = destination_array->AsSpan();
++    // Lobium: same model as GetByteFrequencyData - gather the time-domain PCM, farble it identically to
++    // GetFloatTimeDomainData, then quantize to byte, so the byte path is the exact quantization of the
++    // farbled float path and never exposes the pristine host waveform.
++    std::vector<float> pcm(len);
+     for (unsigned i = 0; i < len; ++i) {
+       // Buffer access is protected due to modulo operation.
+-      const float value =
+-          input_buffer_[(i + write_index - fft_size + kInputBufferSize) %
+-                        kInputBufferSize];
+-
++      pcm[i] = input_buffer_[(i + write_index - fft_size + kInputBufferSize) %
++                             kInputBufferSize];
++    }
++    if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++        cfg && cfg->seeds.audio) {
++      lobium::FarbleAudioSamples(pcm.data(), len, cfg->seeds.audio);
++    }
++    for (unsigned i = 0; i < len; ++i) {
+       // Scale from nominal -1 -> +1 to unsigned byte.
+-      const double scaled_value = 128 * (value + 1);
++      const double scaled_value = 128 * (pcm[i] + 1);
+ 
+       // Clip to valid range.
+       destination[i] =

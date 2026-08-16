@@ -1,0 +1,19 @@
+Lobium - navigator.gpu adapter identity.
+
+WebGPU and WebGL are two independent descriptions of the same physical GPU, readable from one page in
+two calls. Until this patch WebGL reported the persona's GPU while WebGPU reported the REAL one,
+which is strictly worse than leaving either alone: a mismatch between them is a positive signal that
+something is rewriting the first, whereas an honest pair is merely a host fingerprint.
+
+GPUAdapterInfo fields are overridden from the config, which derives them from the same renderer
+string the WebGL hooks report, so the two cannot name different hardware.
+
+adapter_type_ is included in the override, and not only for completeness: CreateAdapterInfoForAdapter
+derives isFallbackAdapter from it. A persona claiming a discrete GeForce while reporting a fallback
+adapter contradicts itself inside a single object read, so the type has to move with the rest.
+
+Chrome exposes vendor, architecture, subgroup sizes and isFallbackAdapter by default; device,
+description and driver appear with WebGPU developer features enabled. All are set, because a
+fingerprinter with those features enabled is exactly the caller worth being consistent for.
+
+Hook point: third_party/blink/renderer/modules/webgpu/gpu_adapter.cc

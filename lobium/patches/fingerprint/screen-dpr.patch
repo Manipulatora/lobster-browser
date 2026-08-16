@@ -66,9 +66,9 @@ index 0d60244742..5b0f34d0a7 100644
 +  // Lobium: route the persona DPR through the CSS media-query resolution path too, so
 +  // matchMedia('(resolution: Xdppx)') / '(-webkit-device-pixel-ratio)' AGREE with
 +  // window.devicePixelRatio (overridden in LocalDOMWindow::devicePixelRatio). Without this the two
-+  // disagree for any persona whose DPR != host DPR (e.g. a 2x retina persona on a 1x host) — a
++  // disagree for any persona whose DPR != host DPR (e.g. a 2x retina persona on a 1x host) - a
 +  // guaranteed, no-permission, trivially-scriptable lie a detector cross-checks. Hooking here (not
-+  // LocalFrame::DevicePixelRatio) keeps real raster/layout scale untouched — only the queried value.
++  // LocalFrame::DevicePixelRatio) keeps real raster/layout scale untouched - only the queried value.
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +      cfg && cfg->screen.device_pixel_ratio > 0) {
 +    return static_cast<float>(cfg->screen.device_pixel_ratio);
@@ -93,7 +93,7 @@ index 6aa773e59b..910a3b3612 100644
      return 0.0;
    }
 +  // Lobium: report the persona's DPR so window.devicePixelRatio matches its screen class (e.g. a 2x
-+  // retina Mac). NOTE: CSS resolution media queries still reflect the real DPR — full DPR coherence
++  // retina Mac). NOTE: CSS resolution media queries still reflect the real DPR - full DPR coherence
 +  // (matchMedia) is a documented follow-up; this covers the JS getter fingerprinters read.
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +      cfg && cfg->screen.device_pixel_ratio > 0) {
@@ -132,13 +132,13 @@ index 69ffc2b05f..cda8982346 100644
      return gfx::Rect();
 +  // Lobium: report the persona's screen geometry (CSS px) rather than the host display's. This is the
 +  // single shared source for width()/height()/availWidth()/availHeight()/availLeft()/availTop(), so one
-+  // hook keeps them all coherent — and it removes the headless-default 800x600 tell (and, headful, the
++  // hook keeps them all coherent - and it removes the headless-default 800x600 tell (and, headful, the
 +  // host monitor's real size) so screen.* matches the profile. availLeft/Top become 0 (a full-screen
 +  // available rect), the common real-desktop case.
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +      cfg && cfg->screen.width > 0 && cfg->screen.height > 0) {
 +    // The available rect is inset by the persona's OS chrome. availLeft/availTop carry the origin so a
-+    // macOS persona reports availTop>0 (top menu bar) rather than a Windows-style (0,0) origin — the
++    // macOS persona reports availTop>0 (top menu bar) rather than a Windows-style (0,0) origin - the
 +    // coherence the review flagged. Absent (Windows/Linux) => (0,0).
 +    return available ? gfx::Rect(cfg->screen.avail_left, cfg->screen.avail_top,
 +                                 cfg->screen.avail_width, cfg->screen.avail_height)

@@ -26,14 +26,18 @@ LobiumFpConfig::Current() is safe to call from the worklet render thread: it is 
 static (thread-safe init guard), immutable after init, with thread-safe init inputs (CommandLine
 singleton + pure base64), and it is initialized early on the main thread before any worklet runs.
 
-Keyed identically to the OfflineAudioContext result hook (one key per (seed, absolute frame) across all
-channels of a quantum): base_index = the worklet render frame (currentFrame) / the SPN playback frame
-(playback_time*sampleRate), seed = cfg->seeds.audio. seed 0 (or realtime) => passthrough.
+No index is involved any more, and that is the point. These taps used to key the perturbation on an
+absolute frame number — the worklet's currentFrame, and for the SPN a dispatch frame computed as
+playback_time*sampleRate through a lossy double round-trip that was offset from the true frame by
+2*bufferSize - renderQuantum. Two consequences, both detectable: the same sample read through a tap
+and through the offline result buffer was perturbed DIFFERENTLY, and a pass-through worklet or SPN
+feeding the destination got the perturbation applied TWICE — (1+eps)^2 on that route against (1+eps)
+on a direct one, a contradiction honest Chrome cannot produce.
 
-Proven on Chromium 152.0.7928.0 (SwiftShader): offline worklet input-sum and offline SPN input-sum are
-both host-differing, stable-per-seed, and distinct-per-seed (~0.001% imperceptible shift). No regression:
-the main offline result farble is unchanged (gcd=235885ed), user-created AudioBuffers stay bit-exact
-under a seed (playback safety), and the detector gate holds at 9/9 surfaces / sannysoft 0-fail.
+The kernel now keys on each sample's VALUE and is idempotent, so both problems disappear by
+construction: every route agrees, and a second application is a no-op. seed = cfg->seeds.audio;
+seed 0 (or a realtime context) is passthrough. See lobium_audio_farble.h for the full rationale and
+the residual it concedes.
 
 Four hook points touch existing files (this patch); no added files, no BUILD.gn change (all in the wired
 blink modules component), no config change (seeds.audio already parsed):
@@ -42,7 +46,7 @@ blink modules component), no config change (seeds.audio already parsed):
   3. modules/webaudio/audio_worklet_processor.cc — farbles the offline worklet's JS inputs.
   4. modules/webaudio/script_processor_node.cc — farbles the offline SPN's inputBuffer.
 diff --git a/third_party/blink/renderer/modules/webaudio/audio_worklet_global_scope.h b/third_party/blink/renderer/modules/webaudio/audio_worklet_global_scope.h
-index db95810f7c..73038f832c 100644
+index db95810f7c3e8..73038f832c1e2 100644
 --- a/third_party/blink/renderer/modules/webaudio/audio_worklet_global_scope.h
 +++ b/third_party/blink/renderer/modules/webaudio/audio_worklet_global_scope.h
 @@ -100,6 +100,12 @@ class MODULES_EXPORT AudioWorkletGlobalScope final : public WorkletGlobalScope {
@@ -69,30 +73,29 @@ index db95810f7c..73038f832c 100644
  
    // Gets set when the processor construction is invoked, and cleared out after
 diff --git a/third_party/blink/renderer/modules/webaudio/audio_worklet_processor.cc b/third_party/blink/renderer/modules/webaudio/audio_worklet_processor.cc
-index 4b35cc4adc..c3b9063a12 100644
+index 63ed10c6ab379..a69700354fa53 100644
 --- a/third_party/blink/renderer/modules/webaudio/audio_worklet_processor.cc
 +++ b/third_party/blink/renderer/modules/webaudio/audio_worklet_processor.cc
-@@ -8,6 +8,8 @@
+@@ -9,6 +9,8 @@
  
  #include "base/compiler_specific.h"
  #include "base/containers/span.h"
 +#include "components/lobium_fp/lobium_audio_farble.h"
 +#include "components/lobium_fp/lobium_fp_config.h"
+ #include "third_party/blink/public/common/features.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_microtasks_scope.h"
  #include "third_party/blink/renderer/bindings/core/v8/worker_or_worklet_script_controller.h"
- #include "third_party/blink/renderer/bindings/modules/v8/v8_blink_audio_worklet_process_callback.h"
-@@ -204,7 +206,9 @@ bool ClonePortTopology(v8::Isolate* isolate,
+@@ -207,7 +209,8 @@ bool ClonePortTopology(v8::Isolate* isolate,
  // be identical.
  void CopyPortToArrayBuffers(v8::Isolate* isolate,
                              const Vector<scoped_refptr<AudioBus>>& audio_port,
 -                            BackingArrayBuffers& array_buffers) {
 +                            BackingArrayBuffers& array_buffers,
-+                            uint32_t farble_seed = 0,
-+                            uint64_t farble_base_index = 0) {
++                            uint32_t farble_seed = 0) {
    DCHECK_EQ(audio_port.size(), array_buffers.size());
  
    for (uint32_t bus_index = 0; bus_index < audio_port.size(); ++bus_index) {
-@@ -218,10 +222,19 @@ void CopyPortToArrayBuffers(v8::Isolate* isolate,
+@@ -221,10 +224,19 @@ void CopyPortToArrayBuffers(v8::Isolate* isolate,
                                 .Get(isolate)
                                 ->GetBackingStore();
        DCHECK_EQ(backing_store->ByteLength(), bus_length * sizeof(float));
@@ -106,17 +109,17 @@ index 4b35cc4adc..c3b9063a12 100644
 +              .first(bus_length);
 +      dst.copy_from(audio_bus->Channel(channel_index)->Span());
 +      // Lobium: farble the JS-visible worklet INPUT for offline fingerprint reads (seed 0 =
-+      // disabled/realtime — realtime worklet DSP is left untouched). Same kernel + keying as the
-+      // OfflineAudioContext result: one key for every channel/bus (base_index = the render frame), so
-+      // an AudioWorkletProcessor.process() tap reads a stable, host-differing, per-profile value.
++      // disabled/realtime - realtime worklet DSP is left untouched). The kernel keys on each
++      // sample's VALUE, so no frame index is needed and, because it is idempotent, a pass-through
++      // worklet feeding the farbled destination buffer perturbs a sample once rather than twice -
++      // the (1+eps)^2 contradiction the old index-keyed kernel produced on that route.
 +      if (farble_seed) {
-+        lobium::FarbleAudioSamples(dst.data(), bus_length, farble_base_index,
-+                                   farble_seed);
++        lobium::FarbleAudioSamples(dst.data(), bus_length, farble_seed);
 +      }
      }
    }
  }
-@@ -491,8 +504,19 @@ bool AudioWorkletProcessor::Process(
+@@ -506,8 +518,16 @@ bool AudioWorkletProcessor::Process(
    DCHECK_EQ(inputs_.Get(isolate)->Length(), inputs.size());
    DCHECK_EQ(input_array_buffers_.size(), inputs.size());
  
@@ -125,21 +128,18 @@ index 4b35cc4adc..c3b9063a12 100644
 +  // Copies `inputs` to the internal `input_array_buffers_`. Lobium: for an OFFLINE worklet (the only
 +  // deterministic, fingerprintable case), farble the JS-visible inputs; realtime worklets pass seed 0.
 +  uint32_t farble_seed = 0;
-+  uint64_t farble_base_index = 0;
 +  if (global_scope_->IsOfflineContext()) {
 +    if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +        cfg && cfg->seeds.audio) {
 +      farble_seed = cfg->seeds.audio;
-+      farble_base_index = global_scope_->currentFrame();
 +    }
 +  }
-+  CopyPortToArrayBuffers(isolate, inputs, input_array_buffers_, farble_seed,
-+                         farble_base_index);
++  CopyPortToArrayBuffers(isolate, inputs, input_array_buffers_, farble_seed);
  
    // 2nd JS arg `outputs_`. Compare `outputs` and `outputs_`. Then allocates the
    // data container if necessary.
 diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_worklet_thread.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_worklet_thread.cc
-index bd2958443a..56e11a98af 100644
+index bd2958443ae45..56e11a98af663 100644
 --- a/third_party/blink/renderer/modules/webaudio/offline_audio_worklet_thread.cc
 +++ b/third_party/blink/renderer/modules/webaudio/offline_audio_worklet_thread.cc
 @@ -68,8 +68,12 @@ WorkerOrWorkletGlobalScope* OfflineAudioWorkletThread::CreateWorkerGlobalScope(
@@ -157,7 +157,7 @@ index bd2958443a..56e11a98af 100644
  
  }  // namespace blink
 diff --git a/third_party/blink/renderer/modules/webaudio/script_processor_node.cc b/third_party/blink/renderer/modules/webaudio/script_processor_node.cc
-index f797aa6484..f61f726b41 100644
+index d1b2f43e05c0a..327da4b9cd145 100644
 --- a/third_party/blink/renderer/modules/webaudio/script_processor_node.cc
 +++ b/third_party/blink/renderer/modules/webaudio/script_processor_node.cc
 @@ -29,6 +29,8 @@
@@ -169,28 +169,29 @@ index f797aa6484..f61f726b41 100644
  #include "services/metrics/public/cpp/ukm_builders.h"
  #include "third_party/blink/public/platform/platform.h"
  #include "third_party/blink/public/platform/task_type.h"
-@@ -301,6 +303,27 @@ void ScriptProcessorNode::DispatchEvent(double playback_time,
+@@ -311,6 +313,28 @@ void ScriptProcessorNode::DispatchEvent(double playback_time,
          external_input_buffer_->getChannelData(channel)->AsSpan().copy_from(
              backing_input_buffer->getChannelData(channel)->AsSpan());
        }
-+      // Lobium: farble the JS-visible AudioProcessingEvent.inputBuffer for OFFLINE contexts only — the
++      // Lobium: farble the JS-visible AudioProcessingEvent.inputBuffer for OFFLINE contexts only - the
 +      // deterministic fingerprint path. Realtime SPN dispatch is timing-jittery (not a stable
 +      // fingerprint), and external_input_buffer_ is a readback artifact (playback flows through
-+      // external_output_buffer_), so real audio output is untouched. `base` is the dispatch frame
-+      // (deterministic offline, so the farble is stable across re-renders) used only as per-read keying
-+      // material — it is NOT claimed to index-align with the offline result buffer; the SPN tap is an
-+      // independent fingerprint surface (nothing cross-checks its samples against getChannelData).
++      // external_output_buffer_), so real audio output is untouched.
++      //
++      // The kernel keys on each sample's VALUE, so this tap no longer needs a frame index. That
++      // removed a real defect as well as a parameter: the index it used to pass was the dispatch
++      // frame computed through a lossy double round-trip and offset from the true frame by
++      // 2*bufferSize - renderQuantum, so the same sample read through the SPN tap and through the
++      // offline result buffer was perturbed differently. Value keying makes the two agree by
++      // construction, and makes the double application on this route a no-op.
 +      if (!context()->HasRealtimeConstraint()) {
 +        if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +            cfg && cfg->seeds.audio) {
-+          const size_t base = static_cast<size_t>(
-+              playback_time * external_input_buffer_->sampleRate());
 +          for (unsigned ch = 0; ch < external_input_buffer_->numberOfChannels();
 +               ++ch) {
 +            base::span<float> s =
 +                external_input_buffer_->getChannelData(ch)->AsSpan();
-+            lobium::FarbleAudioSamples(s.data(), s.size(), base,
-+                                       cfg->seeds.audio);
++            lobium::FarbleAudioSamples(s.data(), s.size(), cfg->seeds.audio);
 +          }
 +        }
 +      }
