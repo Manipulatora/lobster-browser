@@ -244,6 +244,17 @@ struct FontPackManifest {
     personas: FontPackPersonas,
 }
 
+/// Sentinel for "no pack is installed", as distinct from "a pack is installed and is broken".
+///
+/// The caller has to tell those apart. An ABSENT pack is the normal state on Windows, where font
+/// isolation is native (the engine filters DirectWrite/FontDataService against the persona list) and
+/// the pack only supplies families the host lacks. A BROKEN pack - unreadable, wrong version, unsafe
+/// path, missing the physical families it claims - is a real defect and must keep blocking, because
+/// it means the pack cannot back what the persona advertises.
+///
+/// Returned as a stable code rather than prose so the UI branches on identity, not on message text.
+pub const FONT_PACK_ABSENT: &str = "FONT_PACK_ABSENT";
+
 /// Return the complete sourced persona catalog after proving its physical fallback pack is present.
 #[tauri::command]
 fn list_font_families(app: tauri::AppHandle, os: String) -> Result<Vec<String>, String> {
@@ -254,10 +265,18 @@ fn list_font_families(app: tauri::AppHandle, os: String) -> Result<Vec<String>, 
     if let Some(resources) = app_resource_dir(&app) {
         candidates.push(resources.join("fonts"));
     }
+    // The engine runtime carries its own pack beside chrome.exe, which is where
+    // package-lobium-runtime.ps1 -FontPack writes it. Checking here too means a pack provisioned
+    // with the engine is found by the UI as well, not only by the launcher.
+    if let Some(bin) = std::env::var_os("LOBSTER_LOBIUM_BIN") {
+        if let Some(parent) = PathBuf::from(bin).parent() {
+            candidates.push(parent.join("fonts"));
+        }
+    }
     let pack = candidates
         .into_iter()
         .find(|path| path.join("font-pack.manifest.json").is_file())
-        .ok_or("Lobium open-font pack is not installed")?;
+        .ok_or(FONT_PACK_ABSENT)?;
     let bytes = std::fs::read(pack.join("font-pack.manifest.json"))
         .map_err(|error| format!("cannot read font pack manifest: {error}"))?;
     let manifest: FontPackManifest = serde_json::from_slice(&bytes)

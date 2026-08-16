@@ -618,6 +618,9 @@ export function NewProfileForm({
   const [showValidation, setShowValidation] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fontCatalogError, setFontCatalogError] = useState<string | null>(null);
+  // Distinct from an error: no pack is installed. Windows does not need one - font isolation there
+  // is native, and the pack only adds families the host lacks - so this is a notice, not a blocker.
+  const [fontPackAbsent, setFontPackAbsent] = useState(false);
   const [fontCatalogLoading, setFontCatalogLoading] = useState(Boolean(loadFontFamilies));
   const [extensionSource, setExtensionSource] =
     useState<BrowserExtensionRef['source']>('chrome_web_store');
@@ -629,6 +632,7 @@ export function NewProfileForm({
     let current = true;
     setFontCatalogLoading(true);
     setFontCatalogError(null);
+    setFontPackAbsent(false);
     void loadFontFamilies(form.os)
       .then((available) => {
         if (!current) return;
@@ -641,7 +645,20 @@ export function NewProfileForm({
       })
       .catch((cause: unknown) => {
         if (!current) return;
-        setFontCatalogError(cause instanceof Error ? cause.message : String(cause));
+        const message = cause instanceof Error ? cause.message : String(cause);
+        // FONT_PACK_ABSENT means no pack is installed, which is not the same as a broken one and
+        // must not block creating a profile. On Windows the engine filters font lookups against the
+        // persona list natively, so the profile is still font-isolated; what a pack would add is
+        // families this host does not have installed. The persona still advertises the full OS
+        // catalog either way, so the picker below is correct with or without a pack.
+        //
+        // Every other failure - unreadable manifest, wrong version, unsafe path, physical families
+        // missing - means the pack cannot back what the persona claims, and still blocks.
+        if (message.includes('FONT_PACK_ABSENT')) {
+          setFontPackAbsent(true);
+        } else {
+          setFontCatalogError(message);
+        }
         setFontCatalogLoading(false);
       });
     return () => {
@@ -1389,13 +1406,21 @@ export function NewProfileForm({
                         Font pack unavailable: {fontCatalogError}
                       </p>
                     ) : (
-                      <FontMultiSelect
-                        options={form.fonts.available}
-                        selected={form.fonts.selected}
-                        onChange={(selected) =>
-                          setForm((prev) => ({ ...prev, fonts: { ...prev.fonts, selected } }))
-                        }
-                      />
+                      <>
+                        {fontPackAbsent ? (
+                          <p className="field-hint" role="status">
+                            No font pack installed — the profile still reports only the fonts listed
+                            here, but families this machine does not have will not render.
+                          </p>
+                        ) : null}
+                        <FontMultiSelect
+                          options={form.fonts.available}
+                          selected={form.fonts.selected}
+                          onChange={(selected) =>
+                            setForm((prev) => ({ ...prev, fonts: { ...prev.fonts, selected } }))
+                          }
+                        />
+                      </>
                     )}
                   </div>
                 </>
