@@ -28,19 +28,51 @@ enum Role {
 }
 
 // Mirrors shared-types `PlanTier`.
+//
+// `free` is the pre-purchase state every team starts in, not a sellable package. The four
+// sellable packages are priced and sized in ONE place, `PLAN_CATALOG` in
+// `@lobster/shared-types`; nothing here encodes a price or a profile count. See
+// `Subscription.profileLimit` for why the purchased limit is still copied onto the row.
 enum PlanTier {
   free
+  light
+  plus
   pro
-  team
-  enterprise
+  max
 }
 
 // Mirrors shared-types `Subscription.status`.
+//
+// `past_due` is the renewal-failed state: the period ended, Credit was short, and the team is
+// read-only (existing profiles keep working, new ones are refused) until a deposit lands. It is
+// deliberately distinct from `canceled`, which is the user's own decision and does not retry.
 enum SubscriptionStatus {
   active
   past_due
   canceled
   trialing
+}
+
+// What moved Credit, for the append-only ledger. Every balance change carries exactly one of
+// these, so the ledger reads as a history rather than a set of opaque deltas.
+enum CreditTxKind {
+  deposit    // crypto payment confirmed on-chain and credited
+  purchase   // user bought a package
+  renewal    // monthly auto-renew charge
+  refund     // credit returned (proration, support action)
+  adjustment // manual correction by an operator; always carries a reason in `metadata`
+}
+
+// Lifecycle of an inbound crypto payment.
+//
+// `confirming` means seen on-chain but below the provider's confirmation threshold: real, not yet
+// spendable. Crediting happens exactly once, on the transition into `confirmed`.
+enum DepositStatus {
+  pending
+  confirming
+  confirmed
+  failed
+  expired
 }
 
 // --- Models ----------------------------------------------------------------
@@ -55,8 +87,9 @@ model User {
   createdAt    DateTime @default(now())
 
   // Relations
-  ownedTeams  Team[]       @relation("TeamOwner")
-  memberships Membership[]
+  ownedTeams        Team[]             @relation("TeamOwner")
+  memberships       Membership[]
+  desktopAuthGrants DesktopAuthGrant[]
 
   @@map("users")
 }
@@ -75,6 +108,8 @@ model Team {
   apiKeys      ApiKey[]
   subscription Subscription?
   auditLogs    AuditLog[]
+  wallet       Wallet?
+  deposits     Deposit[]
 
   @@index([ownerUserId])
   @@map("teams")
@@ -175,18 +210,183 @@ model AuditLog {
 }
 
 // Mirrors shared-types `Subscription`. One per team.
+//
+// Billing is Credit-only: a purchase or renewal debits `Wallet.balanceCents`. There is no card on
+// file and no external billing customer, so there is no `stripeCustomerId` here — the previous
+// Stripe-shaped fields were removed rather than left dormant.
 model Subscription {
-  teamId           String             @id
-  tier             PlanTier           @default(free)
+  teamId       String             @id
+  tier         PlanTier           @default(free)
   // Metered limit — number of profiles allowed on this plan (see ProfilesService).
-  profileLimit     Int                @default(5)
-  status           SubscriptionStatus @default(trialing)
-  stripeCustomerId String?
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
+  //
+  // Copied from PLAN_CATALOG at purchase time rather than derived from `tier` on read. A team that
+  // bought Pro at 200 profiles keeps 200 even if Pro is later re-sized, and support can grant a
+  // one-off higher limit without inventing a tier.
+  //
+  // The default must equal `FREE_PLAN_PROFILE_LIMIT` in @lobster/shared-types, so a team behaves
+  // identically before and after a Subscription row exists.
+  profileLimit Int                @default(5)
+  status       SubscriptionStatus @default(trialing)
+
+  // What the next renewal will cost, in USD cents. Also snapshotted at purchase, for the same
+  // reason as `profileLimit`: a price change must not silently re-price existing subscribers.
+  priceCents   Int                @default(0)
+
+  // Renewal clock. `currentPeriodEnd` is the instant the renewal job becomes eligible to charge;
+  // null while the team is on `free`. The job selects on it, hence the index.
+  currentPeriodEnd DateTime?
+  autoRenew        Boolean   @default(true)
+  lastRenewalAt    DateTime?
+  // Why the last renewal attempt failed (e.g. "insufficient_credit"), for the dashboard banner.
+  lastFailureCode  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // Relations
   team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
+  @@index([status, currentPeriodEnd])
   @@map("subscriptions")
+}
+
+// --- Credit / wallet -------------------------------------------------------
+//
+// MONEY REPRESENTATION. Every USD amount in this schema is an integer count of CENTS, never a
+// float. $10.00 is 1000. Floats cannot represent 0.1 exactly, and a balance that is repeatedly
+// credited and debited would drift away from the ledger it is supposed to summarise.
+//
+// Crypto amounts are `Decimal(38, 18)` instead: 18 decimal places is the ETH/BEP20 wei precision,
+// and 38 significant digits holds any realistic amount at that scale. A float would lose the low
+// digits of a wei-denominated value outright.
+
+// A team's Credit balance. Created lazily on first read so pre-existing teams don't need a backfill.
+//
+// `balanceCents` is a CACHED PROJECTION of `CreditTransaction`, not the source of truth. It exists
+// because every profile-launch path would otherwise sum the whole ledger. It is only ever written
+// inside the same transaction as the ledger row that justifies it, so the two cannot diverge; a
+// reconciliation query (sum of amounts vs balance) is therefore a real integrity check.
+model Wallet {
+  teamId       String   @id
+  balanceCents Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  team         Team                @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  transactions CreditTransaction[]
+
+  @@map("wallets")
+}
+
+// Append-only Credit ledger. Rows are INSERTed and read, never updated or deleted.
+//
+// `amountCents` is SIGNED: deposits and refunds are positive, purchases and renewals negative.
+// `balanceAfterCents` records the resulting balance so a statement can be rendered without
+// re-summing, and so a divergence can be traced to the exact row that introduced it.
+model CreditTransaction {
+  id                String       @id @default(uuid())
+  teamId            String
+  kind              CreditTxKind
+  amountCents       Int
+  balanceAfterCents Int
+  // Human-readable one-liner for the statement, e.g. "Pro package — 200 profiles".
+  description       String
+  // Non-secret context: plan tier, deposit id, operator reason for adjustments.
+  metadata          Json         @default("{}")
+  createdAt         DateTime     @default(now())
+
+  // Relations
+  wallet Wallet @relation(fields: [teamId], references: [teamId], onDelete: Cascade)
+
+  @@index([teamId, createdAt])
+  @@map("credit_transactions")
+}
+
+// An inbound crypto payment, from address issuance through to credited.
+//
+// IDEMPOTENCY. `providerPaymentId` is UNIQUE, and that constraint is the thing that makes webhook
+// delivery safe. Processors retry aggressively and deliver out of order, so "confirmed" arrives
+// more than once as a matter of course. Crediting is guarded by a null-check on `creditedAt`
+// inside the same transaction that writes the ledger row, so a duplicate delivery finds the
+// deposit already credited and becomes a no-op instead of minting Credit twice.
+model Deposit {
+  id                String        @id @default(uuid())
+  teamId            String
+  // Which processor produced this (e.g. "cryptomus"). Stored per-row, not assumed globally, so a
+  // processor swap leaves historical rows correctly attributed and both can run at once.
+  provider          String
+  // The processor's own id for the payment. Unique across providers by construction (each
+  // provider's ids are namespaced into this column as `<provider>:<id>`).
+  providerPaymentId String        @unique
+  status            DepositStatus @default(pending)
+
+  // What the user actually sent.
+  chain        String // "BSC", "TRON", "POLYGON", …
+  asset        String // "USDT", "USDC", …
+  amountCrypto Decimal? @db.Decimal(38, 18)
+  address      String?
+  txHash       String?
+
+  // What it became, in USD cents, after the processor's conversion and fees. Null until confirmed.
+  creditedCents Int?
+  creditedAt    DateTime?
+
+  // Raw provider payload of the last webhook, kept for dispute resolution. Non-secret: it holds
+  // amounts, hashes and statuses, never API keys.
+  providerPayload Json     @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, createdAt])
+  @@index([status])
+  @@map("deposits")
+}
+
+// --- Desktop authorisation -------------------------------------------------
+
+// One-time authorisation code for the desktop launcher's loopback handoff (RFC 8252).
+//
+// FLOW. The launcher starts a listener on 127.0.0.1:<random port>, opens the browser at
+// lobrowser.com/login?desktop=<state>&port=<port>, and waits. After the user authenticates, the
+// site POSTs for a grant and redirects to http://127.0.0.1:<port>/callback?code=…, which the
+// launcher exchanges for real tokens over HTTPS.
+//
+// WHY A CODE AND NOT THE TOKEN ITSELF. The redirect URL travels through the browser: it lands in
+// history, and any other local process could have raced for the port. A code that is single-use,
+// expires in minutes, and is redeemable only by the client that created it limits what capturing
+// that URL is worth. `state` is bound at creation and re-checked at redemption, so a code minted
+// for one launcher instance cannot be redeemed by another.
+//
+// PKCE (RFC 7636), AND WHY IT IS NOT OPTIONAL HERE. A loopback redirect has a hole the state
+// parameter does not close: any local process can bind 127.0.0.1 on a port and receive the
+// callback, and the OS offers no way for the browser to tell which process it reached. A hostile
+// local listener would capture the code and redeem it for the user's session.
+//
+// So the launcher generates a random `verifier`, keeps it in memory, and sends only
+// `codeChallenge = base64url(SHA256(verifier))` through the browser. Redemption requires the
+// verifier itself, over HTTPS, directly from the launcher. A captured code is then worth nothing:
+// the challenge is a one-way image of a secret that never entered the browser at all.
+model DesktopAuthGrant {
+  id        String   @id @default(uuid())
+  // Opaque high-entropy code, stored HASHED — a database read must not yield a redeemable secret.
+  codeHash  String   @unique
+  // Echoed back to the launcher and re-checked on redemption (CSRF binding).
+  state     String
+  // base64url(SHA256(verifier)). See the PKCE note above.
+  codeChallenge String
+  userId    String
+  expiresAt DateTime
+  // Set the instant the code is redeemed; a second redemption finds it non-null and is refused.
+  redeemedAt DateTime?
+  createdAt DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("desktop_auth_grants")
 }

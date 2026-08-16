@@ -1,7 +1,9 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
+import { authClient, type CloudUser } from './api/auth';
 import { isDesktopRuntime, profilesClient } from './api/tauri';
+import { AuthScreen } from './features/auth/AuthScreen';
 import { ProfilesView } from './features/profiles/ProfilesView';
 import { ProxiesView } from './features/proxies/ProxiesView';
 import { TemplatesView } from './features/templates/TemplatesView';
@@ -37,7 +39,55 @@ function ActiveView({
   }
 }
 
+/**
+ * Root: the authentication gate, then the launcher dashboard.
+ *
+ * WHAT COUNTS AS "LET THEM IN". A verified cloud session does, obviously. So does a held-but-
+ * unverifiable one — `offline` — and that case is the reason this is a three-state check rather
+ * than `if (user)`. Profiles, proxies and launches are entirely local; locking someone out of them
+ * because the API was briefly unreachable would break the product's core function over something
+ * unrelated to it. The gate exists to establish an account, not to police day-to-day use.
+ */
 export function App(): JSX.Element {
+  const [user, setUser] = useState<CloudUser | null>(null);
+  const [offline, setOffline] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void authClient
+      .status()
+      .then((state) => {
+        if (cancelled) return;
+        setUser(state.user);
+        setOffline(state.offline);
+      })
+      .catch(() => {
+        // Unreachable keychain or IPC failure. Fall through to the sign-in screen, which is the
+        // only actionable state — an error dialog here would just be a dead end.
+        if (!cancelled) setUser(null);
+      })
+      .finally(() => {
+        if (!cancelled) setAuthChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Hold the first paint until the check resolves. Flashing the sign-in screen at an already
+  // signed-in user on every launch reads as having been logged out.
+  if (!authChecked) return <div className="app-boot" aria-busy="true" />;
+
+  if (!user && !offline) {
+    return <AuthScreen onAuthenticated={setUser} />;
+  }
+
+  return <Dashboard />;
+}
+
+/** The launcher dashboard, shown once the auth gate is satisfied. */
+function Dashboard(): JSX.Element {
   const [active, setActive] = useState<NavKey>('profiles');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);

@@ -1,15 +1,49 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 
 import { AuthModule } from '../auth/auth.module';
+import { PrismaService } from '../prisma/prisma.service';
+import { BILLING_REPOSITORY } from './billing.repository';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
+import { InMemoryBillingRepository } from './in-memory-billing.repository';
+import { NowPaymentsProvider } from './payments/nowpayments.provider';
+import { PAYMENT_PROVIDER } from './payments/payment-provider';
+import { PrismaBillingRepository } from './prisma-billing.repository';
+import { RenewalService } from './renewal.service';
 
-// Imports AuthModule for the shared `JwtAuthGuard` (checkout auth) and `TEAMS_REPOSITORY`
-// (resolving the caller's team instead of trusting the request body).
+/**
+ * Credit, deposits and packages.
+ *
+ * Imports AuthModule for the shared `JwtAuthGuard` and `TEAMS_REPOSITORY` (resolving the caller's
+ * team rather than trusting the request body — on a billing endpoint that distinction is what
+ * stops one team spending another's Credit).
+ *
+ * `BILLING_REPOSITORY` is exported so ProfilesModule can read a team's `profileLimit` from the
+ * subscription without depending on BillingService.
+ */
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, ConfigModule],
   controllers: [BillingController],
-  providers: [BillingService],
-  exports: [BillingService],
+  providers: [
+    BillingService,
+    RenewalService,
+    {
+      provide: BILLING_REPOSITORY,
+      inject: [ConfigService, PrismaService],
+      useFactory: (config: ConfigService, prisma: PrismaService) =>
+        config.get<string>('DATABASE_URL')
+          ? new PrismaBillingRepository(prisma)
+          : new InMemoryBillingRepository(),
+    },
+    {
+      // One provider, bound behind a token. The rest of the codebase never names a processor, so
+      // adding or swapping one is a change to ./payments and this binding.
+      provide: PAYMENT_PROVIDER,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => new NowPaymentsProvider(config),
+    },
+  ],
+  exports: [BillingService, BILLING_REPOSITORY],
 })
 export class BillingModule {}

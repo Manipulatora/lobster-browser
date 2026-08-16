@@ -34,10 +34,12 @@
     "gate:engine": "node --test ci/validation/patch-series.test.mjs ci/validation/version-coherence.test.mjs ci/validation/source-hygiene.test.mjs",
     "gate:series": "node lobium/verify-series.mjs",
     "gate:kernels": "powershell -NoProfile -ExecutionPolicy Bypass -File lobium/test/run.ps1",
+    "gate:migrations": "node ci/validation/migration-gate.mjs",
     "gate:oracles": "node ci/validation/audit-oracles.mjs",
     "gate:fonts": "node ci/validation/font-isolation-gate.mjs"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.5",
     "@playwright/test": "^1.61.1",
     "@types/node": "^22.9.0",
     "openai": "^6.47.0",

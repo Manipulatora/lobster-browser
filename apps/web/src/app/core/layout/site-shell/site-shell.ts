@@ -1,16 +1,21 @@
-import { ChangeDetectionStrategy, Component } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { RouterOutlet } from '@angular/router';
 
+import { AuthStore } from '../../auth/auth.store';
+import { AuthModal } from '../../../features/auth/auth-modal';
 import { SiteHeader } from '../site-header/site-header';
 import { SiteFooter } from '../site-footer/site-footer';
 
 /**
- * Marketing shell: header + routed page + footer. Auth pages deliberately bypass this so they
- * render without site chrome.
+ * Marketing shell: header + routed page + footer.
+ *
+ * Also the single mounting point for the auth modal, so every route can open it without each one
+ * rendering its own copy — two live dialogs would fight over the focus trap and the body scroll
+ * lock.
  */
 @Component({
   selector: 'app-site-shell',
-  imports: [RouterOutlet, SiteHeader, SiteFooter],
+  imports: [RouterOutlet, SiteHeader, SiteFooter, AuthModal],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     <div class="flex min-h-dvh flex-col">
@@ -28,7 +33,17 @@ import { SiteFooter } from '../site-footer/site-footer';
         <router-outlet />
       </main>
       <app-site-footer />
+      <app-auth-modal />
     </div>
   `,
 })
-export class SiteShell {}
+export class SiteShell {
+  private readonly auth = inject(AuthStore);
+
+  constructor() {
+    // Turn a persisted token back into a session on first load. Deliberately fire-and-forget: the
+    // shell must paint immediately, and `AuthStore.restore` is a no-op on the server and whenever
+    // there is no token, so this costs nothing in the common case.
+    void this.auth.restore();
+  }
+}

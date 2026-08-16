@@ -54,13 +54,143 @@ export interface AuditLog {
   createdAt: string;
 }
 
-export type PlanTier = 'free' | 'pro' | 'team' | 'enterprise';
+/**
+ * `free` is the state every team starts in, not a sellable package — see {@link PLAN_CATALOG}
+ * for the four that are.
+ */
+export type PlanTier = 'free' | 'light' | 'plus' | 'pro' | 'max';
+
+/** The four sellable packages, in ascending order. Excludes `free`. */
+export type PaidPlanTier = Exclude<PlanTier, 'free'>;
+
+export interface PlanDefinition {
+  tier: PaidPlanTier;
+  /** Display name, e.g. "Pro". */
+  name: string;
+  /** Monthly price in USD CENTS. See the money note on {@link Wallet}. */
+  priceCents: number;
+  /** Number of profiles the package allows. */
+  profileLimit: number;
+}
+
+/**
+ * THE pricing table. Every price and profile count in the product resolves here — the web pricing
+ * page, the purchase endpoint, the renewal job and the desktop launcher all read this constant.
+ *
+ * Deliberately not in the database: a price is a product decision that ships with a release and
+ * belongs under code review, not a row an operator can edit into an inconsistent state. Purchased
+ * subscriptions snapshot `priceCents`/`profileLimit` onto their own row at purchase time, so
+ * changing a price here re-prices the storefront WITHOUT re-pricing existing subscribers.
+ */
+export const PLAN_CATALOG: readonly PlanDefinition[] = [
+  { tier: 'light', name: 'Light', priceCents: 1_000, profileLimit: 10 },
+  { tier: 'plus', name: 'Plus', priceCents: 6_000, profileLimit: 100 },
+  { tier: 'pro', name: 'Pro', priceCents: 10_000, profileLimit: 200 },
+  { tier: 'max', name: 'Max', priceCents: 20_000, profileLimit: 1_000 },
+] as const;
+
+/**
+ * Profile allowance for a team that has never bought a package.
+ *
+ * THE single definition. The Prisma default on `Subscription.profileLimit` and
+ * `ProfilesService.DEFAULT_FREE_PROFILE_LIMIT` are both aligned to this value, so a team behaves
+ * identically before and after a Subscription row exists.
+ */
+export const FREE_PLAN_PROFILE_LIMIT = 5;
+
+export function planByTier(tier: PaidPlanTier): PlanDefinition {
+  const plan = PLAN_CATALOG.find((p) => p.tier === tier);
+  // Unreachable while `tier` is typed, but this is also the runtime guard for values that arrive
+  // over the wire from a client we do not control.
+  if (!plan) throw new Error(`unknown plan tier: ${tier}`);
+  return plan;
+}
+
+export type SubscriptionStatus = 'active' | 'past_due' | 'canceled' | 'trialing';
 
 export interface Subscription {
   teamId: string;
   tier: PlanTier;
   /** Metered limit — number of profiles allowed on this plan. */
   profileLimit: number;
-  stripeCustomerId?: string;
-  status: 'active' | 'past_due' | 'canceled' | 'trialing';
+  /** What the next renewal will cost, in USD cents; snapshotted at purchase. */
+  priceCents: number;
+  status: SubscriptionStatus;
+  /** ISO instant the current period ends and auto-renew becomes eligible; absent on `free`. */
+  currentPeriodEnd?: string;
+  autoRenew: boolean;
+  /** Why the last renewal attempt failed, e.g. `insufficient_credit`. */
+  lastFailureCode?: string;
+}
+
+// --- Credit / wallet -------------------------------------------------------
+
+/**
+ * A team's Credit balance.
+ *
+ * MONEY REPRESENTATION. Every USD amount crossing this API is an integer count of CENTS, never a
+ * float — $10.00 is `1000`. Floats cannot represent 0.1 exactly, so a balance that is repeatedly
+ * credited and debited drifts away from the ledger that is supposed to explain it. Formatting to
+ * "$10.00" is a presentation concern and happens at the edge.
+ */
+export interface Wallet {
+  teamId: string;
+  balanceCents: number;
+}
+
+export type CreditTxKind = 'deposit' | 'purchase' | 'renewal' | 'refund' | 'adjustment';
+
+/**
+ * One entry in the append-only Credit ledger. `amountCents` is SIGNED: deposits and refunds are
+ * positive, purchases and renewals negative.
+ */
+export interface CreditTransaction {
+  id: string;
+  teamId: string;
+  kind: CreditTxKind;
+  amountCents: number;
+  balanceAfterCents: number;
+  description: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
+export type DepositStatus = 'pending' | 'confirming' | 'confirmed' | 'failed' | 'expired';
+
+/** An inbound crypto payment, from address issuance through to credited. */
+export interface Deposit {
+  id: string;
+  teamId: string;
+  provider: string;
+  status: DepositStatus;
+  chain: string;
+  asset: string;
+  /** Exact decimal string — crypto amounts exceed float precision and must not round-trip a Number. */
+  amountCrypto?: string;
+  address?: string;
+  txHash?: string;
+  /** USD cents credited; absent until confirmed. */
+  creditedCents?: number;
+  createdAt: string;
+}
+
+/**
+ * A chain the user can deposit on, with the typical cost of SENDING on it.
+ *
+ * `networkFeeUsd` is the cost the USER pays their wallet to broadcast — it is not our fee and not
+ * the processor's. It is surfaced because the spread is enormous and invisible at the moment of
+ * choosing: a USDT transfer costs fractions of a cent on BSC and over a dollar on Tron, and that
+ * is a property of the chains themselves, identical at every processor. Showing it moves most
+ * users to a cheap rail for free.
+ */
+export interface DepositChainOption {
+  /** Processor currency code, e.g. `usdtbsc`. */
+  code: string;
+  /** Chain display name, e.g. "BNB Smart Chain (BEP20)". */
+  chain: string;
+  asset: string;
+  /** Indicative sending cost in USD. Order of magnitude, not a quote — it moves with gas prices. */
+  networkFeeUsd: number;
+  /** Cheap rails are offered first and one is preselected. */
+  recommended: boolean;
 }

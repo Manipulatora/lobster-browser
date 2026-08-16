@@ -1,0 +1,124 @@
+@if (mode()) {
+  <!-- Backdrop. Click-to-dismiss lives here; the panel below stops propagation by identity check. -->
+  <div
+    class="fixed inset-0 z-[100] flex items-start justify-center overflow-y-auto bg-ink/60 px-4 py-8 backdrop-blur-sm sm:items-center"
+    (click)="onBackdrop($event)"
+    (keydown.escape)="close()"
+  >
+    <!-- cdkTrapFocus keeps Tab inside the dialog and restores focus to the trigger on close, which
+         is the part of modal a11y that is tedious to hand-roll and easy to get subtly wrong. -->
+    <div
+      cdkTrapFocus
+      [cdkTrapFocusAutoCapture]="true"
+      role="dialog"
+      aria-modal="true"
+      [attr.aria-label]="isSignUp() ? 'Create your account' : 'Sign in'"
+      class="card relative w-full max-w-[26rem] p-7 sm:p-8"
+    >
+      <button
+        type="button"
+        class="absolute right-4 top-4 flex size-9 items-center justify-center rounded-lg text-muted transition-colors hover:bg-brand-50 hover:text-ink"
+        aria-label="Close"
+        (click)="close()"
+      >
+        <span class="icon text-[20px]">close</span>
+      </button>
+
+      <h2 class="text-2xl tracking-[-0.02em] text-ink">
+        {{ isSignUp() ? 'Create account' : 'Sign in' }}
+      </h2>
+      <p class="mt-1.5 text-[0.875rem] text-muted">
+        {{
+          isSignUp()
+            ? 'Start with 5 free profiles. No card — top up with crypto when you need more.'
+            : 'Welcome back.'
+        }}
+      </p>
+
+      <form [formGroup]="form" (ngSubmit)="submit()" class="mt-7" novalidate>
+        <div>
+          <label class="field-label" for="auth-email">Email</label>
+          <input
+            id="auth-email"
+            type="email"
+            class="field-input"
+            formControlName="email"
+            autocomplete="email"
+            [attr.aria-invalid]="invalid('email') ? 'true' : null"
+            [attr.aria-describedby]="invalid('email') ? 'auth-email-error' : null"
+          />
+          @if (invalid('email')) {
+            <p id="auth-email-error" class="field-error">Enter a valid email address.</p>
+          }
+        </div>
+
+        <div class="mt-5">
+          <label class="field-label" for="auth-password">Password</label>
+          <div class="relative">
+            <input
+              id="auth-password"
+              [type]="showPassword() ? 'text' : 'password'"
+              class="field-input pr-11"
+              formControlName="password"
+              [attr.autocomplete]="isSignUp() ? 'new-password' : 'current-password'"
+              [attr.minlength]="minPassword"
+              [attr.aria-invalid]="invalid('password') ? 'true' : null"
+              aria-describedby="auth-password-hint"
+            />
+            <button
+              type="button"
+              class="absolute inset-y-0 right-0 flex w-11 items-center justify-center rounded-r-xl text-muted transition-colors hover:text-ink"
+              [attr.aria-label]="showPassword() ? 'Hide password' : 'Show password'"
+              (click)="togglePassword()"
+            >
+              <span class="icon text-[20px]">{{
+                showPassword() ? 'visibility_off' : 'visibility'
+              }}</span>
+            </button>
+          </div>
+          @if (invalid('password')) {
+            <p id="auth-password-hint" class="field-error">
+              At least {{ minPassword }} characters.
+            </p>
+          } @else {
+            <p id="auth-password-hint" class="mt-1.5 text-xs text-faint">
+              At least {{ minPassword }} characters.
+            </p>
+          }
+        </div>
+
+        @if (error()) {
+          <!-- aria-live so the failure is announced: a screen-reader user who submits and hears
+               nothing has no way to tell the request was rejected. -->
+          <p role="alert" aria-live="polite" class="field-error mt-4">{{ error() }}</p>
+        }
+
+        <button
+          type="submit"
+          class="btn btn-md btn-primary mt-7 w-full"
+          [disabled]="submitting()"
+          [attr.aria-busy]="submitting() ? 'true' : null"
+        >
+          {{
+            submitting()
+              ? 'Please wait…'
+              : isSignUp()
+                ? 'Create account'
+                : 'Sign in'
+          }}
+        </button>
+      </form>
+
+      <p class="mt-7 text-center text-[0.875rem] text-muted">
+        {{ isSignUp() ? 'Already have an account?' : "Don't have an account?" }}
+        <button
+          type="button"
+          class="text-brand-600 transition-colors hover:text-brand-700"
+          (click)="switchMode()"
+        >
+          {{ isSignUp() ? 'Sign in' : 'Create one' }}
+        </button>
+      </p>
+    </div>
+  </div>
+}

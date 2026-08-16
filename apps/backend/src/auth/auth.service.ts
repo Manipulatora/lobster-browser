@@ -100,9 +100,21 @@ export class AuthService {
     return resolveJwtSecret(this.config);
   }
 
-  private signToken(user: StoredUser): string {
-    const payload: JwtPayload = { sub: user.id, email: user.email };
+  /**
+   * Issue a bearer token for an already-authenticated identity.
+   *
+   * Public so the desktop loopback handoff can mint a token after redeeming an authorisation code
+   * — at that point the user has been authenticated by the website, but there is no `StoredUser`
+   * in hand and no password to re-verify. It performs NO authentication of its own: callers must
+   * have established the identity first.
+   */
+  issueTokenFor(userId: string, email: string): string {
+    const payload: JwtPayload = { sub: userId, email };
     return this.jwt.sign(payload, { secret: this.jwtSecret, expiresIn: TOKEN_TTL });
+  }
+
+  private signToken(user: StoredUser): string {
+    return this.issueTokenFor(user.id, user.email);
   }
 
   /** Canonical email form: trimmed + lowercased. The single normalization point for auth. */

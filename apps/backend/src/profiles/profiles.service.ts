@@ -9,6 +9,7 @@ import {
   NotFoundException,
   PayloadTooLargeException,
 } from '@nestjs/common';
+import { FREE_PLAN_PROFILE_LIMIT } from '@lobster/shared-types';
 import type { Profile, ProfileExport, ProfileExportBundle } from '@lobster/shared-types';
 
 import { AuditService } from '../audit/audit.service';
@@ -52,14 +53,15 @@ export interface SyncResult {
 }
 
 /**
- * Default per-team profile limit for teams without a Subscription row (free tier). A team with a
- * Subscription uses its `profileLimit` instead (read via the repository).
+ * Per-team profile limit for teams without a Subscription row — i.e. before any package is bought.
+ * A team with a Subscription uses its own `profileLimit` instead (read via the repository).
  *
- * MUST match the free-tier default in prisma/schema.prisma (`Subscription.profileLimit @default(5)`)
- * so a team behaves identically before and after a Subscription row exists.
+ * RE-EXPORTED, NOT REDEFINED. This used to be a local `5` with a comment asking whoever edited it
+ * to remember to also edit `Subscription.profileLimit @default(...)` in schema.prisma. Two
+ * constants and a comment is not a single source of truth: the value now lives once, in
+ * `PLAN_CATALOG`'s neighbour `FREE_PLAN_PROFILE_LIMIT`, which the schema default is aligned to.
  */
-/** Default free-tier profile limit (must match prisma Subscription.profileLimit default). */
-export const DEFAULT_FREE_PROFILE_LIMIT = 5;
+export const DEFAULT_FREE_PROFILE_LIMIT = FREE_PLAN_PROFILE_LIMIT;
 
 /**
  * BE-3: max CLIENT-encrypted blob size per push (bytes). 25 MiB covers a typical user-data

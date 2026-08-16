@@ -18,5 +18,5 @@ import { RouterLink } from '@angular/router';
   `,
 })
 export class ShinyCta {
-  readonly link = input<string>('/auth/sign-up');
+  readonly link = input<string>('/signup');
 }

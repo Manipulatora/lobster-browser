@@ -54,7 +54,7 @@
             }
           </ul>
 
-          <a class="button" [routerLink]="plan.link">{{ plan.cta }}</a>
+          <button type="button" class="button" (click)="choose()">{{ plan.cta }}</button>
         </div>
       }
     </div>

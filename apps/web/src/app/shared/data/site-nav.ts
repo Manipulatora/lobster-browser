@@ -39,8 +39,8 @@ export const FOOTER_NAV: readonly NavGroup[] = [
   {
     title: 'Account',
     links: [
-      { label: 'Sign in', path: '/auth/sign-in' },
-      { label: 'Create account', path: '/auth/sign-up' },
+      { label: 'Sign in', path: '/login' },
+      { label: 'Create account', path: '/signup' },
     ],
   },
   {

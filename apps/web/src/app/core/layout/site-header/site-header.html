@@ -37,13 +37,35 @@
         </nav>
       </div>
 
-      <div class="hidden items-center lg:flex">
-        <a
-          routerLink="/auth/sign-in"
-          class="nav-link text-[0.9375rem]"
-          [class]="onDarkBackdrop() ? 'on-scene text-white' : ''"
-          >Log in</a
-        >
+      <div class="hidden items-center gap-4 lg:flex">
+        @if (isAuthenticated()) {
+          <a
+            routerLink="/account/billing"
+            class="nav-link text-[0.9375rem]"
+            [class]="onDarkBackdrop() ? 'on-scene text-white' : ''"
+            >Account</a
+          >
+          <button
+            type="button"
+            class="nav-link text-[0.9375rem]"
+            [class]="onDarkBackdrop() ? 'on-scene text-white' : ''"
+            (click)="signOut()"
+          >
+            Sign out
+          </button>
+        } @else {
+          <button
+            type="button"
+            class="nav-link text-[0.9375rem]"
+            [class]="onDarkBackdrop() ? 'on-scene text-white' : ''"
+            (click)="openAuth('sign-in')"
+          >
+            Log in
+          </button>
+          <button type="button" class="btn btn-sm btn-primary" (click)="openAuth('sign-up')">
+            Sign up
+          </button>
+        }
       </div>
 
       <button
@@ -80,9 +102,23 @@
           </a>
         }
         <div class="rule mt-3 flex flex-col gap-2 pt-4">
-          <a routerLink="/auth/sign-in" (click)="closeMenu()" class="btn btn-md btn-secondary">
-            Log in
-          </a>
+          @if (isAuthenticated()) {
+            <a routerLink="/account/billing" (click)="closeMenu()" class="btn btn-md btn-secondary">
+              Account
+            </a>
+            <button type="button" class="btn btn-md btn-ghost" (click)="signOut()">Sign out</button>
+          } @else {
+            <button
+              type="button"
+              class="btn btn-md btn-secondary"
+              (click)="openAuth('sign-in')"
+            >
+              Log in
+            </button>
+            <button type="button" class="btn btn-md btn-primary" (click)="openAuth('sign-up')">
+              Sign up
+            </button>
+          }
         </div>
       </nav>
     </div>

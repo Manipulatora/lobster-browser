@@ -1,5 +1,7 @@
 import { Routes } from '@angular/router';
 
+import { authGuard } from './core/auth/auth.guard';
+
 /**
  * Top-level routing.
  *
@@ -28,8 +30,41 @@ export const routes: Routes = [
         title: 'Pricing — Lobster Browser',
         data: {
           description:
-            'Simple plans metered on profile count. Start free with 5 profiles; scale to Pro, Team, or Enterprise.',
+            'Four packages, priced per profile and paid in crypto from your Credit balance. Start free with 5 profiles.',
         },
+      },
+
+      // Authentication is a MODAL, not a page — but /signup and /login must still be real URLs:
+      // the desktop launcher opens them directly, and they are what people paste and bookmark.
+      // Both resolve to a backdrop that opens the modal over it. See AuthRoutePage.
+      {
+        path: 'signup',
+        loadComponent: () => import('./features/auth/auth-route-page').then((m) => m.AuthRoutePage),
+        data: { mode: 'sign-up' },
+        title: 'Create your account — Lobster Browser',
+      },
+      {
+        path: 'login',
+        loadComponent: () => import('./features/auth/auth-route-page').then((m) => m.AuthRoutePage),
+        data: { mode: 'sign-in' },
+        title: 'Sign in — Lobster Browser',
+      },
+
+      // Where the launcher's browser lands when its loopback listener could not be reached.
+      {
+        path: 'auth/desktop',
+        loadComponent: () =>
+          import('./features/auth/pages/desktop-authorized-page').then(
+            (m) => m.DesktopAuthorizedPage,
+          ),
+        title: 'Signed in — Lobster Browser',
+      },
+
+      {
+        path: 'account/billing',
+        canActivate: [authGuard],
+        loadComponent: () => import('./features/billing/billing-page').then((m) => m.BillingPage),
+        title: 'Credit and packages — Lobster Browser',
       },
     ],
   },

@@ -1,0 +1,332 @@
+<div class="container-page py-12 sm:py-16">
+  <header class="mb-10">
+    <p class="eyebrow">Account</p>
+    <h1 class="section-title mt-2">Credit &amp; packages</h1>
+  </header>
+
+  @if (loading() && !balanceCents()) {
+    <p class="text-muted">Loading…</p>
+  }
+
+  @if (error()) {
+    <div role="alert" class="card-soft mb-8 border-l-4 border-l-red-500 p-5">
+      <p class="text-ink">{{ error() }}</p>
+    </div>
+  }
+
+  <!-- ── Balance ─────────────────────────────────────────────────────────── -->
+  <section class="card p-7 sm:p-8">
+    <div class="flex flex-wrap items-end justify-between gap-6">
+      <div>
+        <p class="field-label mb-1">Credit balance</p>
+        <p class="text-[2.75rem] leading-none tracking-[-0.03em] text-ink">
+          {{ formatUsd(balanceCents()) }}
+        </p>
+      </div>
+
+      @if (subscription(); as sub) {
+        <div class="text-right">
+          <p class="field-label mb-1">Current package</p>
+          <p class="text-lg text-ink">
+            {{ sub.tier === 'free' ? 'Free' : (sub.tier | titlecase) }}
+            <span class="text-muted">· {{ sub.profileLimit }} profiles</span>
+          </p>
+          @if (sub.currentPeriodEnd && sub.tier !== 'free') {
+            <p class="mt-0.5 text-xs text-faint">
+              {{ sub.autoRenew ? 'Renews' : 'Ends' }}
+              {{ sub.currentPeriodEnd | date: 'mediumDate' }}
+            </p>
+          }
+        </div>
+      }
+    </div>
+
+    @if (isPastDue()) {
+      <!-- The one state that needs explaining: nothing was cancelled, and nothing is owed. -->
+      <div role="alert" class="mt-6 rounded-xl bg-amber-50 p-4 text-[0.9375rem] text-amber-900">
+        <strong>Your package is paused.</strong> There was not enough Credit at the last renewal, so
+        new profiles are on hold — your existing profiles are untouched. Top up and it resumes
+        automatically; there is nothing else to do.
+      </div>
+    }
+
+    @if (subscription(); as sub) {
+      @if (sub.tier !== 'free') {
+        <div class="rule mt-6 flex items-center justify-between pt-5">
+          <div>
+            <p class="text-[0.9375rem] text-ink">Auto-renew</p>
+            <p class="text-xs text-faint">
+              Deducts {{ formatUsd(sub.priceCents) }} from Credit every 30 days.
+            </p>
+          </div>
+          <button type="button" class="btn btn-sm btn-secondary" (click)="toggleAutoRenew()">
+            {{ sub.autoRenew ? 'Turn off' : 'Turn on' }}
+          </button>
+        </div>
+      }
+    }
+  </section>
+
+  <!-- ── Top up ──────────────────────────────────────────────────────────── -->
+  <section class="mt-8">
+    <h2 class="text-xl tracking-[-0.02em] text-ink">Add Credit</h2>
+    <p class="mt-1 text-[0.9375rem] text-muted">
+      Crypto only. Deposit any amount, any time — it stays as Credit until you spend it.
+    </p>
+
+    @if (instruction(); as inst) {
+      <!-- Payment instructions. Shown in place of the form so there is one thing to do. -->
+      <div class="card mt-5 p-7">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <p class="field-label mb-1">Send exactly</p>
+            <p class="text-2xl tracking-[-0.02em] text-ink">
+              {{ inst.amountCrypto }} {{ inst.asset }}
+            </p>
+            <p class="mt-1 text-[0.875rem] text-muted">
+              on {{ inst.chain }} · credits {{ formatUsd(inst.amountCents) }}
+            </p>
+          </div>
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost"
+            aria-label="Dismiss payment instructions"
+            (click)="dismissInstruction()"
+          >
+            <span class="icon text-[20px]">close</span>
+          </button>
+        </div>
+
+        <div class="mt-6">
+          <p class="field-label mb-1.5">To this address</p>
+          <div class="flex items-center gap-2">
+            <code
+              class="flex-1 overflow-x-auto rounded-xl bg-brand-50 px-4 py-3 font-mono text-[0.8125rem] text-ink"
+              >{{ inst.address }}</code
+            >
+            <button
+              type="button"
+              class="btn btn-sm btn-secondary shrink-0"
+              (click)="copy(inst.address, 'address')"
+            >
+              {{ copied() === 'address' ? 'Copied' : 'Copy' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- The two mistakes that actually lose money on a deposit address. -->
+        <div class="mt-5 rounded-xl bg-amber-50 p-4 text-[0.875rem] text-amber-900">
+          Send <strong>{{ inst.asset }} on {{ inst.chain }}</strong> only. A different coin, or the
+          right coin on a different network, will not arrive and cannot be recovered.
+        </div>
+
+        <p class="mt-5 text-[0.875rem] text-muted">
+          Credit appears automatically once the network confirms — usually a minute or two. You can
+          close this page; it will still land.
+        </p>
+
+        @if (inst.hostedUrl) {
+          <a
+            [href]="inst.hostedUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="btn btn-md btn-secondary mt-5"
+          >
+            Open payment page
+          </a>
+        }
+      </div>
+    } @else {
+      <div class="card mt-5 p-7">
+        <!-- Amount -->
+        <p class="field-label mb-2">Amount</p>
+        <div class="flex flex-wrap gap-2">
+          @for (preset of presets; track preset) {
+            <button
+              type="button"
+              class="chip"
+              [class]="amountCents() === preset ? 'bg-brand-600 text-white' : ''"
+              (click)="setPreset(preset)"
+            >
+              {{ formatUsd(preset) }}
+            </button>
+          }
+        </div>
+
+        <div class="relative mt-3 max-w-[12rem]">
+          <span class="absolute inset-y-0 left-3.5 flex items-center text-muted">$</span>
+          <input
+            type="number"
+            min="5"
+            step="0.01"
+            class="field-input pl-7"
+            aria-label="Deposit amount in US dollars"
+            [value]="amountDollars()"
+            (input)="onAmountInput($any($event.target).value)"
+          />
+        </div>
+
+        <!-- Network. The point of this whole block is the fee column. -->
+        <p class="field-label mb-2 mt-7">Pay with</p>
+        <p class="mb-3 text-[0.875rem] text-muted">
+          The fee below is what <em>your</em> wallet pays the network to send — not our charge. It
+          differs by hundreds of times between chains, so the cheap ones are listed first.
+        </p>
+
+        <div class="grid gap-2 sm:grid-cols-2">
+          @for (chain of recommendedChains(); track chain.code) {
+            <button
+              type="button"
+              class="flex items-center justify-between rounded-xl border p-4 text-left transition-colors"
+              [class]="
+                chainCode() === chain.code
+                  ? 'border-brand-600 bg-brand-50'
+                  : 'border-black/10 hover:border-black/20'
+              "
+              (click)="chainCode.set(chain.code)"
+            >
+              <span>
+                <span class="block text-[0.9375rem] text-ink">{{ chain.asset }}</span>
+                <span class="block text-xs text-muted">{{ chain.chain }}</span>
+              </span>
+              <span class="text-xs text-emerald-700">{{ formatFee(chain.networkFeeUsd) }}</span>
+            </button>
+          }
+        </div>
+
+        @if (otherChains().length) {
+          <button
+            type="button"
+            class="mt-3 text-[0.875rem] text-brand-600 transition-colors hover:text-brand-700"
+            (click)="showAllChains.set(!showAllChains())"
+          >
+            {{ showAllChains() ? 'Hide' : 'Show' }} other networks ({{ otherChains().length }})
+          </button>
+
+          @if (showAllChains()) {
+            <div class="mt-3 grid gap-2 sm:grid-cols-2">
+              @for (chain of otherChains(); track chain.code) {
+                <button
+                  type="button"
+                  class="flex items-center justify-between rounded-xl border p-4 text-left transition-colors"
+                  [class]="
+                    chainCode() === chain.code
+                      ? 'border-brand-600 bg-brand-50'
+                      : 'border-black/10 hover:border-black/20'
+                  "
+                  (click)="chainCode.set(chain.code)"
+                >
+                  <span>
+                    <span class="block text-[0.9375rem] text-ink">{{ chain.asset }}</span>
+                    <span class="block text-xs text-muted">{{ chain.chain }}</span>
+                  </span>
+                  <span class="text-xs text-amber-700">{{ formatFee(chain.networkFeeUsd) }}</span>
+                </button>
+              }
+            </div>
+          }
+        }
+
+        @if (depositError()) {
+          <p role="alert" class="field-error mt-4">{{ depositError() }}</p>
+        }
+
+        <button
+          type="button"
+          class="btn btn-md btn-primary mt-7"
+          [disabled]="creatingDeposit() || !chainCode()"
+          (click)="createDeposit()"
+        >
+          {{ creatingDeposit() ? 'Getting address…' : 'Get deposit address' }}
+        </button>
+      </div>
+    }
+  </section>
+
+  <!-- ── Packages ────────────────────────────────────────────────────────── -->
+  <section class="mt-12">
+    <h2 class="text-xl tracking-[-0.02em] text-ink">Packages</h2>
+    <p class="mt-1 text-[0.9375rem] text-muted">
+      Monthly, paid from Credit. Change or cancel any time.
+    </p>
+
+    @if (purchaseError()) {
+      <p role="alert" class="field-error mt-4">{{ purchaseError() }}</p>
+    }
+
+    <div class="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      @for (plan of plans(); track plan.tier) {
+        <div
+          class="card flex flex-col p-6"
+          [class]="planIsCurrent(plan) ? 'ring-2 ring-brand-600' : ''"
+        >
+          <p class="text-[0.9375rem] text-muted">{{ plan.name }}</p>
+          <p class="mt-1 text-3xl tracking-[-0.02em] text-ink">
+            {{ formatUsd(plan.priceCents) }}<span class="text-base text-muted">/mo</span>
+          </p>
+          <p class="mt-2 text-[0.9375rem] text-ink">{{ plan.profileLimit }} profiles</p>
+
+          <div class="mt-auto pt-6">
+            @if (planIsCurrent(plan)) {
+              <button type="button" class="btn btn-md btn-secondary w-full" disabled>
+                Current package
+              </button>
+            } @else if (canAfford(plan)) {
+              <button
+                type="button"
+                class="btn btn-md btn-primary w-full"
+                [disabled]="purchasing() !== null"
+                (click)="purchase(plan)"
+              >
+                {{ purchasing() === plan.tier ? 'Purchasing…' : 'Choose' }}
+              </button>
+            } @else {
+              <!-- Not disabled-and-silent: say exactly how much more is needed. -->
+              <button type="button" class="btn btn-md btn-secondary w-full" disabled>
+                {{ formatUsd(shortfall(plan)) }} more needed
+              </button>
+            }
+          </div>
+        </div>
+      }
+    </div>
+  </section>
+
+  <!-- ── Statement ───────────────────────────────────────────────────────── -->
+  @if (transactions().length) {
+    <section class="mt-12">
+      <h2 class="text-xl tracking-[-0.02em] text-ink">Credit history</h2>
+      <div class="card mt-5 overflow-x-auto">
+        <table class="w-full text-left text-[0.9375rem]">
+          <thead class="text-xs uppercase tracking-wide text-faint">
+            <tr>
+              <th scope="col" class="px-6 py-4 font-normal">Date</th>
+              <th scope="col" class="px-6 py-4 font-normal">Description</th>
+              <th scope="col" class="px-6 py-4 text-right font-normal">Amount</th>
+              <th scope="col" class="px-6 py-4 text-right font-normal">Balance</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (tx of transactions(); track tx.id) {
+              <tr class="border-t border-black/5">
+                <td class="whitespace-nowrap px-6 py-4 text-muted">
+                  {{ tx.createdAt | date: 'mediumDate' }}
+                </td>
+                <td class="px-6 py-4 text-ink">{{ tx.description }}</td>
+                <td
+                  class="whitespace-nowrap px-6 py-4 text-right"
+                  [class]="tx.amountCents >= 0 ? 'text-emerald-700' : 'text-ink'"
+                >
+                  {{ tx.amountCents >= 0 ? '+' : '−' }}{{ formatUsd(abs(tx.amountCents)) }}
+                </td>
+                <td class="whitespace-nowrap px-6 py-4 text-right text-muted">
+                  {{ formatUsd(tx.balanceAfterCents) }}
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
+  }
+</div>

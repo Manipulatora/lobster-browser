@@ -8,6 +8,12 @@ import { PrismaTeamsRepository } from '../teams/prisma-teams.repository';
 import { TEAMS_REPOSITORY } from '../teams/teams.repository';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { DesktopAuthService } from './desktop-auth.service';
+import {
+  DESKTOP_AUTH_REPOSITORY,
+  InMemoryDesktopAuthRepository,
+  PrismaDesktopAuthRepository,
+} from './desktop-auth.repository';
 import { InMemoryUsersRepository } from './in-memory-users.repository';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { PrismaUsersRepository } from './prisma-users.repository';
@@ -29,7 +35,16 @@ import { USERS_REPOSITORY } from './users.repository';
   controllers: [AuthController],
   providers: [
     AuthService,
+    DesktopAuthService,
     JwtAuthGuard,
+    {
+      provide: DESKTOP_AUTH_REPOSITORY,
+      inject: [ConfigService, PrismaService],
+      useFactory: (config: ConfigService, prisma: PrismaService) =>
+        config.get<string>('DATABASE_URL')
+          ? new PrismaDesktopAuthRepository(prisma)
+          : new InMemoryDesktopAuthRepository(),
+    },
     // The real data layer: persist to Postgres (Prisma*Repository) when DATABASE_URL is set;
     // otherwise fall back to the in-memory store for local dev / tests (no DB required to boot).
     //

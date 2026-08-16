@@ -2315,3 +2315,137 @@ code {
 .engine-gate__error {
   width: 100%;
 }
+
+/* ── Authentication gate ──────────────────────────────────────────────────────
+   The first screen on a fresh install: two centred buttons that hand off to the
+   browser. Deliberately plain — it is on screen once, and anything elaborate here
+   is weight every launch pays to parse for a view most sessions never render. */
+
+.app-boot {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.auth-screen {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 32px;
+  background: var(--bg);
+}
+
+.auth-screen__panel {
+  width: 100%;
+  max-width: 380px;
+  padding: 40px 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 14px);
+  background: var(--surface);
+  box-shadow: var(--shadow-md, 0 8px 24px rgba(18, 23, 34, 0.06));
+  text-align: center;
+}
+
+.auth-screen__logo {
+  height: 26px;
+  width: auto;
+  margin: 0 auto 28px;
+}
+
+.auth-screen__title {
+  margin: 0 0 8px;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.auth-screen__lede {
+  margin: 0 0 28px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text-muted, var(--n-500));
+}
+
+/* Stacked, full width, equal weight: the two paths are equally likely on a first
+   run, so neither is visually demoted. */
+.auth-screen__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.auth-screen__button {
+  width: 100%;
+  min-height: 38px;
+}
+
+.auth-screen__error {
+  margin: 20px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--danger);
+  /* The browser-launch failure path prints the URL to visit by hand, which must not
+     be truncated or run off the panel. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.auth-screen__waiting {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin: 8px 0 24px;
+}
+
+.auth-screen__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand-400);
+  animation: auth-pulse 1.4s ease-in-out infinite;
+}
+
+.auth-screen__dot:nth-child(2) {
+  animation-delay: 0.18s;
+}
+
+.auth-screen__dot:nth-child(3) {
+  animation-delay: 0.36s;
+}
+
+@keyframes auth-pulse {
+  0%,
+  100% {
+    opacity: 0.28;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* A ten-minute wait with three pulsing dots is exactly the kind of thing that
+   triggers vestibular discomfort, and it conveys nothing the aria-live text does
+   not already say. */
+@media (prefers-reduced-motion: reduce) {
+  .auth-screen__dot {
+    animation: none;
+    opacity: 0.55;
+  }
+}
+
+.auth-screen__link {
+  margin-top: 4px;
+  border: 0;
+  background: none;
+  color: var(--text-muted, var(--n-500));
+  font-size: 12.5px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.auth-screen__link:hover {
+  color: var(--text);
+}

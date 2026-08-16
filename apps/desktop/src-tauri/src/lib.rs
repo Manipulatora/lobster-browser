@@ -12,6 +12,7 @@
 
 mod agent_secrets;
 mod blob_crypto;
+mod cloud_auth;
 mod engine_provision;
 mod keychain;
 mod local_api;
@@ -52,6 +53,94 @@ struct AppState {
 #[tauri::command]
 fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+// --- Cloud sign-in -----------------------------------------------------------
+
+/// Who is signed in, if anyone.
+///
+/// Distinguishes three outcomes the UI must treat differently, which a bare `Option` cannot:
+/// signed in, signed out, and "we could not tell" (offline). The last one must NOT show the
+/// sign-in screen — a user on a flaky connection would be locked out of local profiles that need
+/// no network at all.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthState {
+    user: Option<cloud_auth::CloudUser>,
+    /// True when a token exists but could not be verified because the API was unreachable.
+    offline: bool,
+}
+
+#[tauri::command]
+async fn auth_status() -> Result<AuthState, String> {
+    match cloud_auth::current_user().await {
+        Ok(user) => Ok(AuthState {
+            user,
+            offline: false,
+        }),
+        Err(_) if cloud_auth::load_token().is_some() => {
+            // A token is held but unverifiable. Treat the previous session as still good rather
+            // than signing the user out because their wifi dropped.
+            Ok(AuthState {
+                user: None,
+                offline: true,
+            })
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Open the browser at the sign-up or sign-in page and wait for the loopback callback.
+///
+/// One long-running command rather than a start/poll pair: the whole flow is a single await, and
+/// splitting it would mean holding the PendingSignIn (with its listener and PKCE verifier) in
+/// shared state, where an abandoned attempt leaks a bound port.
+#[tauri::command]
+async fn auth_sign_in(mode: String) -> Result<cloud_auth::CloudUser, String> {
+    let (handle, pending) = cloud_auth::begin(&mode).await.map_err(|e| e.to_string())?;
+
+    open_in_browser(&handle.url).map_err(|e| {
+        format!(
+            "could not open your browser. Visit this address to sign in:\n{}\n\n({e})",
+            handle.url
+        )
+    })?;
+
+    pending.wait().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn auth_sign_out() {
+    cloud_auth::clear_token();
+}
+
+/// Hand a URL to the OS default browser.
+///
+/// Done with a direct spawn rather than by adding an opener plugin: this is the only URL the app
+/// ever opens, and a plugin would add a capability surface for it.
+///
+/// The Windows form is `cmd /c start "" <url>`. The empty quoted argument is required — `start`
+/// treats a leading quoted argument as the WINDOW TITLE, so omitting it makes a quoted URL vanish
+/// into the title and open nothing.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", url])
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn().map(|_| ())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+    }
 }
 
 /// Strip Windows' extended-length (`\\?\`) verbatim prefix from a path.
@@ -1379,6 +1468,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_version,
+            auth_status,
+            auth_sign_in,
+            auth_sign_out,
             engine_status,
             provision_engine,
             list_font_families,

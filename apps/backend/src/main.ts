@@ -18,7 +18,15 @@ import { configureBodyLimit } from './body-limit';
 async function bootstrap(): Promise<void> {
   // Disable Nest's built-in body parser so the raised-limit parsers below are the only ones that
   // run; the default ~100kb limit would otherwise 413 realistic encrypted profile blobs on sync.
-  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
+  //
+  // `rawBody: true` additionally retains the undecoded request bytes as `req.rawBody`. The payment
+  // processor's IPN signature is an HMAC over the payload it sent, so verifying it requires the
+  // exact bytes — a parsed-and-re-serialised object is not the same string and would never match.
+  // Without this, every crypto deposit callback would be rejected and no Credit would ever land.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bodyParser: false,
+    rawBody: true,
+  });
   configureBodyLimit(app);
 
   // SEC-3b / SEC-6: baseline hardening — helmet headers + per-IP rate limit.

@@ -5,33 +5,23 @@ import { AuthLayout } from './auth-layout';
 /**
  * Auth area routing.
  *
- * The whole area is one lazy chunk (loaded by `loadChildren` from the root routes), so the shared
- * layout is imported eagerly here while each page still gets its own `loadComponent` split.
+ * SIGN-IN AND SIGN-UP ARE NO LONGER PAGES. Authentication happens in a modal over whatever the
+ * visitor was already reading (see AuthModal), reached at `/login` and `/signup`. The two routes
+ * here are kept as redirects rather than deleted: they were the public URLs, so they are in
+ * bookmarks, in old emails, and on any page not yet updated. Removing them would turn all of that
+ * into a wildcard redirect to the landing page, silently dropping people who were trying to sign in.
+ *
+ * `forgot-password` stays a real page. It is a separate flow the modal does not cover, and it is
+ * reached rarely enough that taking over the screen is the right treatment.
  */
 export const authRoutes: Routes = [
+  { path: 'sign-in', pathMatch: 'full', redirectTo: '/login' },
+  { path: 'sign-up', pathMatch: 'full', redirectTo: '/signup' },
   {
     path: '',
     component: AuthLayout,
     children: [
-      { path: '', pathMatch: 'full', redirectTo: 'sign-in' },
-      {
-        path: 'sign-in',
-        loadComponent: () => import('./pages/sign-in-page').then((m) => m.SignInPage),
-        title: 'Sign in — Lobster Browser',
-        data: {
-          description:
-            'Sign in to Lobster Browser to manage your profiles, proxies and encrypted profile sync.',
-        },
-      },
-      {
-        path: 'sign-up',
-        loadComponent: () => import('./pages/sign-up-page').then((m) => m.SignUpPage),
-        title: 'Create your account — Lobster Browser',
-        data: {
-          description:
-            'Create a Lobster Browser account. The free plan includes 5 profiles and needs no credit card.',
-        },
-      },
+      { path: '', pathMatch: 'full', redirectTo: '/login' },
       {
         path: 'forgot-password',
         loadComponent: () =>
