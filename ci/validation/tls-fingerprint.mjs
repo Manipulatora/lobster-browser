@@ -103,19 +103,65 @@ async function run(os) {
   }
 }
 
+/**
+ * Can the third-party echo actually be reached from here?
+ *
+ * Checked before launching a browser, because the alternative is a 60s CDP timeout thrown from inside
+ * `withCdpSession` — which is how an outage used to present itself: an unhandled rejection, exit 1, and
+ * `regression-gate.mjs` recording FAIL. Exit 2 (BLOCKED) is the contract for "cannot run here"; only a
+ * ClientHello we actually read and judged may fail this gate.
+ */
+async function echoReachable() {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 15_000);
+  try {
+    const res = await fetch(ECHO, { signal: abort.signal, cache: 'no-store' });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Report an environmental block and leave the gate un-reddened. */
+function blocked(reason) {
+  console.log(`TLS GATE: SKIPPED — ${reason}`);
+  process.exit(2);
+}
+
 // This gate reads a REAL ClientHello, so it needs the real engine. Say so plainly instead of failing
 // deep inside `spawn(undefined, …)` — regression-gate surfaces this line as the check's detail, and a
 // cryptic ENOENT there is exactly how a broken harness stays broken.
 if (!LOBIUM) {
-  console.log('TLS GATE: SKIPPED — no Lobium binary (set LOBSTER_LOBIUM_BIN, or SKIP_TLS=1 to skip).');
-  process.exit(2);
+  blocked('no Lobium binary (set LOBSTER_LOBIUM_BIN, or SKIP_TLS=1 to skip).');
+}
+
+// The ClientHello has to be echoed back by someone. That someone is a third party we do not run, so its
+// availability is an environment fact, not a property of our TLS stack.
+if (!(await echoReachable())) {
+  blocked(`echo endpoint unreachable: ${ECHO} (set TLS_ECHO_URL to a reachable equivalent, or SKIP_TLS=1).`);
 }
 
 let ok = true;
+let judged = 0;
 for (const os of (process.env.OSES || 'windows').split(',')) {
-  const r = await run(os);
+  let r;
+  try {
+    r = await run(os);
+  } catch (err) {
+    // Launch/CDP/navigation failure: we never obtained a ClientHello, so there is nothing to judge.
+    blocked(`${os}: ${err?.message ?? err}`);
+  }
   console.log(JSON.stringify(r, null, 1));
+  // A response we could not parse is the echo misbehaving (an error page, a captive portal), not
+  // evidence that our JA4 drifted. Blocking here keeps "we could not measure" distinct from "we
+  // measured, and it was wrong" — the distinction the whole gate exists to make.
+  if (r.error) blocked(`${os}: ${r.error}`);
+  judged += 1;
   if (!r.chromeShapedJa4) ok = false;
 }
+if (judged === 0) blocked('no persona produced a readable ClientHello.');
+
 console.log(ok ? '\nTLS GATE: PASS — JA4 is Chrome-family (t13d…h2)' : '\nTLS GATE: FAIL — JA4 not Chrome-shaped');
 process.exit(ok ? 0 : 1);
