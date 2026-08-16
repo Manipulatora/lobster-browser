@@ -30,6 +30,37 @@ Deploying component `.so` over an official install breaks with `libui_ozone.so: 
 Branding assets (icons, tab/product logos, mono-dark favicon) are rendered by
 `scripts/apply-lobium-branding.mjs`.
 
+### 1.1 Bumping the Chrome version
+
+Three files pin the version and must never disagree: `lobium/build.sh` (`CHROMIUM_REF`, what is built),
+`packages/fingerprint/src/pools.ts` (`ENGINE_CHROME`, what every persona's UA claims), and
+`apps/desktop/src-tauri/resources/engine-manifest.json` (which tarball first-run provisioning installs).
+Never edit them by hand:
+
+```bash
+node scripts/track-upstream.mjs                      # is a bump due? exits non-zero if action needed
+node scripts/bump-engine-version.mjs 152.0.7977.42   # or --latest-stable; moves build.sh + ENGINE_CHROME
+bash lobium/rebase.sh 152.0.7977.42 --run            # re-applies the quilt series (does the bump for you)
+bash lobium/build.sh --run                           # ~8-12h on the build host
+bash scripts/package-lobium-runtime.sh               # produces lobium-linux-x64.tar.gz
+# upload the tarball to the GitHub release, then finalize the manifest against the REAL digest:
+node scripts/bump-engine-version.mjs 152.0.7977.42 --tarball dist/lobium-linux-x64.tar.gz
+node scripts/track-upstream.mjs                      # must exit 0
+node --test ci/validation/version-coherence.test.mjs
+```
+
+**Pin a RELEASED build, never a canary.** `getHighEntropyValues(['fullVersionList'])` returns the real
+build, so a nightly nobody runs is close to a globally unique identifier — and a `.0` patch component
+advertises it as a branch-point build. Both the bump script and the coherence test refuse one. (The repo
+sat on canary `152.0.7928.0` until 2026-08-14 because the old tracker compared version ordering only and
+reported the canary as "UP TO DATE".)
+
+**The manifest moves last, and only against a real artifact.** Pointing it at a version whose tarball is
+not uploaded does not prepare anything — the URL 404s or the SHA-256 mismatches and first-run
+provisioning fails for every user. Between the source bump and the rebuild the manifest carries a
+`rebuildPending` block; the coherence test requires that declaration and requires it to stay inside the
+same milestone.
+
 ## 2. Package & install the product
 
 The desktop app bundles the React UI, the Node sidecar, the font pack, the built Lobee extension, and
@@ -84,6 +115,99 @@ also the file that must gain per-platform selection before any non-Linux build c
 prerender produced an `index.html`, `rsync --delete`s to `/var/www/lobster`, reloads nginx, and curls
 `/`, `/pricing`, `/auth/sign-in` expecting 200. It runs on the web host itself; there is no remote step.
 
+### 2.3 Windows build (desktop app only)
+
+Builds natively on Windows — no WSL, no reboot. WSL cannot help here anyway: Windows Chromium cannot be
+built from WSL, and Chromium cannot be cross-compiled from Linux to Windows.
+
+Prerequisites: Node `>=22.12 <25`, the Rust MSVC toolchain (`rustup`, host `x86_64-pc-windows-msvc`),
+VS Build Tools with the **Desktop development with C++** workload + Windows SDK, and WebView2 (the
+installer ships a bootstrapper for machines without it).
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows-product.ps1
+```
+
+It stages the resources a fresh clone lacks — bundles the sidecar, downloads and SHA256-verifies the
+official win-x64 `node.exe` (never copies the build host's interpreter), rebuilds Lobee — then runs
+`tauri build --bundles nsis`. Output: `apps\desktop\src-tauri\target\release\bundle\nsis\*.exe`.
+
+**What it can and cannot do.** The installer carries the UI, Rust core, local automation API, the
+SQLite profile/proxy/template stores, the sidecar and Lobee. It cannot launch a profile until a
+`win-x64` engine archive is published — see below, and [`STATUS.md`](STATUS.md) §2. `startProfile`
+refuses any engine but Lobium, so a launch attempt fails closed with a clear error rather than
+falling back to an unprotected browser.
+
+#### Packaging the Windows engine runtime
+
+The engine itself is built separately (§1) and packaged with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package-lobium-runtime.ps1
+```
+
+Not a port of the Linux script — the two platforms ship genuinely different file sets, and copying
+the Linux list produces a runtime that does not start. `chrome.exe` on Windows is a ~4 MB stub and
+essentially the whole browser is `chrome.dll`; `chrome_elf.dll` must sit beside the exe because it is
+loaded before anything else and resolved by directory; `d3dcompiler_47.dll` is what makes WebGL work,
+and its absence does not fail loudly — `getContext('webgl')` simply returns null, which renders WebGL
+sites blank and is itself a headless signal. Every load-bearing file is a hard error if missing rather
+than a warning.
+
+> **The packaged sidecar could not start, on any platform.** `scripts/bundle-sidecar.mjs` copies a
+> HAND-MAINTAINED list of third-party packages, and `copyPkg` only *warns* when one is absent — so
+> when `@lobster/agent` gained a `tldts` dependency, the bundle kept being produced and kept being
+> shipped. The installed app opened normally, reported nothing, and died with
+> `ERR_MODULE_NOT_FOUND: Cannot find package 'tldts'` before its first RPC, leaving a live app wired
+> to a dead sidecar in which every profile launch fails. Unit tests could not catch it: they run
+> against the workspace, where the dependency is hoisted and resolves fine.
+>
+> The bundler now **starts the bundle it just produced and round-trips a `ping`**, with a bare
+> environment, and fails the build if that does not work. A dependency check would only catch what it
+> knows to look for; running the artifact catches anything that stops it starting.
+
+Two of those were found by running the script rather than by reading it, and both produce errors that
+name neither the missing file nor the real cause:
+
+- **`<version>.manifest`** (e.g. `152.0.7977.42.manifest`). `chrome.exe`'s embedded manifest declares
+  a dependency on that side-by-side assembly, and without the file the loader refuses to start the
+  process with *"the application has failed to start because its side-by-side configuration is
+  incorrect"* — before any Chromium code runs.
+- **`msvcp140.dll` / `vcruntime140.dll` / `vcruntime140_1.dll`.** The build links the VC++ runtime
+  dynamically. They are present on a developer machine and frequently absent on a user's, so this
+  fails only after distribution.
+
+The script finishes by running `--lobium-fingerprint-capabilities` against the packaged binary and
+checking the hooks the product requires. A runtime that fails there would have failed at profile
+launch anyway; finding out at packaging time is cheaper.
+
+Then compress `dist-win\lobium-runtime`, upload it to the engine release, and register it:
+
+```powershell
+node scripts\bump-engine-version.mjs 152.0.7977.42 --platform win-x64 --archive <lobium-win-x64.zip>
+```
+
+`engine-manifest.json` is a per-platform map, and the `win-x64` entry is deliberately absent until
+that archive exists. A URL published ahead of its artifact means every Windows first run 404s after
+an ~840 MB download; an absent entry fails immediately and says why.
+
+**Fonts on Windows.** `provision-open-fonts.mjs` shells out to `fc-scan`, which does not exist on
+Windows, so the pack is provisioned on a Linux host (or by any environment with fontconfig) and
+carried into the runtime directory by the packaging script above. The pack is consumed differently
+per platform: Linux points `FONTCONFIG_FILE` at it, while on Windows the engine sideloads the faces
+into its DirectWrite collection from the `fontPackDir` in the profile config. Both need the files
+physically present.
+
+Font isolation itself is native on Windows and works without the pack — the engine filters font
+lookups against the persona list — but filtering can only *subtract*. Without a pack the measurable
+set is host ∩ persona: narrower than the persona claims, never wider than the host. Degraded, not
+leaking, which is why this path fails open where the Linux one fails closed.
+
+Bundle targets live in platform configs (`tauri.windows.conf.json` → `nsis`,
+`tauri.linux.conf.json` → `deb` + the font pack), which Tauri merges over `tauri.conf.json`. Note the
+merge is per-key for objects: a platform config **adds to** `bundle.resources`, it cannot remove an
+entry — which is why the font pack had to move out of the base config rather than being overridden.
+
 ### Profiles data
 
 - DB: `~/.local/share/com.lobster.browser/profiles.sqlite` (tables: `profiles`, `proxies`,
@@ -102,6 +226,16 @@ headless/Xvfb hosts; without it, cookies become undecryptable on the next launch
 ```bash
 # Software gate (runs anywhere; no GPU, proxy, or engine binary needed)
 node ci/validation/regression-gate.mjs    # in-process coherence/diversity floors + fingerprint units
+npm run gate:engine                       # patch-series structure + version/manifest coherence
+node scripts/track-upstream.mjs           # online: pin is released + not behind stable
+
+# Engine-source gates (need the Chromium checkout; no browser launch)
+npm run gate:series                       # the series REPRODUCES the checkout, file for file
+npm run gate:kernels                      # compile the shipping canvas/audio kernels, assert the oracles
+
+# In-browser gates (need the native binary; these catch what source review cannot)
+LOBSTER_LOBIUM_BIN=/path/to/chrome npm run gate:oracles   # the ENGINE_AUDIT oracles, in the page
+LOBSTER_LOBIUM_BIN=/path/to/chrome npm run gate:fonts     # does the font filter actually engage?
 
 # Real-browser agent fixtures (needs an engine; no model, no credentials, no network)
 node ci/validation/e2e/agent-browser-e2e.mjs             # interim Chromium: browser-integration evidence

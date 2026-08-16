@@ -19,7 +19,8 @@ top-1%. Updated 2026-08-10.
 
 ## 2. The native engine (Lobium)
 
-Lobium is a **Chromium 152.0.7928.0** fork. Custom code lives in `components/lobium_fp/` (config parser +
+Lobium is a **Chromium 152.0.7977.42** fork (see §5 W4 for the version-pin contract; the previously
+pinned 152.0.7928.0 was a canary nightly). Custom code lives in `components/lobium_fp/` (config parser +
 appliers) and a small quilt patch series (`lobium/patches/series`). The launcher passes one JSON file per
 profile via `--lobium-fp-config`; `LobiumFpConfig` parses it and applies each field at the relevant Blink
 surface. Notable surfaces:
@@ -32,8 +33,13 @@ surface. Notable surfaces:
   shaderPrecision), intersected/clamped to the live backend so the reported surface is coherent. The
   masked `VENDOR`/`RENDERER` stay Chrome's constants ("WebKit"/"WebKit WebGL").
 - **canvas / audio**: deterministic per-seed farbling (stable within a profile, distinct across profiles).
-- **fonts**: isolated via a private font pack + `FONTCONFIG_FILE`, so the observable font set follows the
-  persona OS rather than the host. **Metric fidelity is partial and is a known tell.** The pack carries
+- **fonts**: isolated so the observable font set follows the persona OS rather than the host, through
+  a different mechanism per platform. Linux uses a private font pack + `FONTCONFIG_FILE`. Windows has
+  no fontconfig, so the engine filters font lookups natively in the browser process — the
+  FontDataService family/local-font/enumeration entry points plus the DirectWrite proxy — and
+  sideloads the same pack into its DirectWrite collection. Filtering can only subtract, so the pack is
+  what supplies families the host lacks; see `lobium/hooks.md`.
+  **Metric fidelity is partial and is a known tell.** The pack carries
   ~33 open faces, and a claimed family is aliased onto a metric clone where one exists (Arial→Liberation
   Sans, Times New Roman→Liberation Serif, Courier New→Liberation Mono, Calibri→Carlito,
   Cambria→Caladea). Everything else falls back to its serif/sans/mono class face, so on a Windows
@@ -42,7 +48,10 @@ surface. Notable surfaces:
   Sans MS six different ones. A width-probing detector can see that. Closing it needs metric-compatible
   faces in the pack for those families, not another mapping rule; `packages/engine-runner/src/fonts.ts`
   emits no alias it cannot back with a physically present face.
-- **timezone / locale / geolocation**: applied natively; derived from proxy geo.
+- **timezone / locale / geolocation**: applied natively; derived from proxy geo. Timezone is applied
+  inside the engine (`TimeZoneController::OnTimeZoneChange`), not through the `TZ` environment
+  variable: `TZ` is POSIX-only and ICU ignores it on Windows, where it reads the registry instead —
+  so the environment route silently applied nothing on the Windows target.
 - **WebRTC**: policy controls prevent local-IP leaks.
 - **device emulation** (mobile profiles): a native device-frame view renders a phone/tablet; scrolling a
   zoomed device clips it under the toolbar (no chrome overlap).
@@ -125,11 +134,29 @@ construction, and the loopback proxy adapter tunnels TLS rather than terminating
 reference Chrome per release and gate on it. Per-persona rotation within Chrome-legal space is a later,
 high-risk BoringSSL enhancement, only if a detector ever forces it.
 
-### W4 — Chrome-version tracking cadence — PLANNED (tooling, no hardware)
-`scripts/track-upstream.mjs` queries the Chromium stable feed and flags when the pinned version lags;
-harden `lobium/rebase.sh` to apply the patch series onto the new ref and fail loudly on rejects;
-`scripts/bump-engine-version.mjs` updates `ENGINE_CHROME` + UA pins in lockstep; a version-coherence test
-asserts UA major == build major. The rebase/build step needs the build host; the tooling is buildable now.
+### W4 — Chrome-version tracking cadence — DONE (tooling) / REBUILD PENDING (2026-08-14)
+The tooling exists and is wired into CI:
+
+- `scripts/track-upstream.mjs` — online. Compares the pin to the latest stable **and verifies channel
+  membership** against the Chrome version-history API. Runs non-blocking in `ci.yml`.
+- `ci/validation/version-coherence.test.mjs` — offline, blocking on every PR. Asserts
+  `build.sh CHROMIUM_REF == ENGINE_CHROME.full`, that `major`/`reduced` follow it, that the pin has no
+  `.0` patch component, and that `engine-manifest.json` either matches or carries an explicit
+  `rebuildPending` declaration within the same milestone.
+- `scripts/bump-engine-version.mjs` — moves all three pins in one command; refuses an unreleased build
+  and refuses to touch the manifest without a real tarball digest.
+- `lobium/rebase.sh` delegates the pin edit to that script, so a rebase can no longer desync the UA.
+
+**Ordering matters more than freshness.** The pin was `152.0.7928.0` — a **canary nightly**. Because
+canary is numerically ahead of stable, the old `behind = cmp(latest, pinned) > 0` check reported
+"UP TO DATE" and exited 0, so version drift into an unreleased build was invisible to the tool built to
+catch it. A canary build is a worse fingerprint than a stale one: `fullVersionList` returns the real
+build, so a nightly nobody runs is close to a globally unique identifier, and its `.0` patch component
+advertises it as a branch-point build. Both halves are now checked.
+
+Current pin is `152.0.7977.42` (M152 beta-frozen; beta @ 100%, stable @ 0.5%, M152 scheduled stable
+2026-08-25). The published engine tarball is still the old build — `engine-manifest.json` declares that
+as `rebuildPending` and is finalized by re-running the bump script with `--tarball` after the build.
 
 ### W5 — Continuous detection regression on real-GPU — IN PROGRESS (infra) / HW-GATED (run)
 Software tier (`regression-gate.mjs`) runs everywhere and covers coherence + catalog-diversity floors +
