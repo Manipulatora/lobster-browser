@@ -43,6 +43,11 @@ struct NavigatorConfig {
   std::string ua_full_version;
   std::string ua_model;
   bool ua_mobile = false;
+  // Sec-CH-UA-Form-Factors, exactly one of "Desktop" | "Mobile" | "Tablet" (empty = derive from
+  // ua_mobile). A tablet needs this stated: it reports uaMobile=false because real tablet Chrome
+  // omits the "Mobile" UA token, so the mobile-bit derivation would label it "Desktop" next to a
+  // tablet Sec-CH-UA-Model and an Android platform.
+  std::string ua_form_factor;
   // Sec-CH-UA brand list (name, version).
   std::vector<std::pair<std::string, std::string>> ua_brands;
 };
@@ -114,8 +119,36 @@ struct WebGlConfig {
   // backs getShaderPrecisionFormat().
   std::string version;
   std::string shading_language_version;
+  // getSupportedExtensions() for a WebGL1 context, in Chrome's registration order.
   std::vector<std::string> extensions;
+  // ...and for a WebGL2 context, which is a genuinely DIFFERENT list rather than a superset: WebGL2
+  // folds instanced arrays, VAOs, depth texture, draw buffers and the float texture extensions into
+  // core, so they must not be advertised, while EXT_color_buffer_float and friends only exist there.
+  // Two lists are required because the hook matches configured names against the context's own
+  // registered extensions: feeding the WebGL1 list to a WebGL2 context silently intersects down to
+  // the handful of names common to both, which is shorter than any real browser reports.
+  std::vector<std::string> extensions2;
   ShaderPrecisionProfile shader_precision;
+};
+
+// navigator.gpu adapter identity. `present` gates the hook.
+//
+// WebGPU is a second, independent GPU identity surface next to WebGL, and leaving it unhooked is
+// worse than either alone: adapter.info would name the REAL device while WebGL names the persona's,
+// which is a contradiction a page reads in two calls. By default Chrome exposes only vendor,
+// architecture, subgroup sizes and isFallbackAdapter here (the reduced-entropy set); device,
+// description and driver appear when WebGPU developer features are enabled, so they are carried too.
+struct WebGpuConfig {
+  bool present = false;
+  std::string vendor;         // e.g. "nvidia" - lowercase token, matching Dawn's own convention
+  std::string architecture;   // e.g. "ada-lovelace"
+  std::string device;         // hex device id string, e.g. "0x2782"
+  std::string description;    // human-readable device name
+  std::string driver;         // driver description string
+  // "discrete" | "integrated" | "cpu". Drives adapter.isFallbackAdapter, which is true only for a
+  // CPU adapter. A software backend (SwiftShader, the only option on a GPU-less host) reports CPU,
+  // so a persona claiming real silicon must say so or the fallback bit contradicts its own renderer.
+  std::string adapter_type;
 };
 
 struct LocaleConfig {
@@ -163,8 +196,17 @@ struct LobiumFpConfig {
   NavigatorConfig navigator;
   ScreenConfig screen;
   WebGlConfig webgl;
+  WebGpuConfig webgpu;
   LocaleConfig locale;
   std::vector<std::string> fonts;
+  // Directory holding the profile's font pack, as an absolute native path. On Windows the browser
+  // process sideloads every face in it into the DirectWrite collection, so the persona can advertise
+  // fonts the HOST does not have installed — filtering alone can only ever subtract. Empty means no
+  // pack was provisioned and only the host's own fonts are available (still filtered by `fonts`).
+  //
+  // Linux reaches the same end through FONTCONFIG_FILE, written per profile by the launcher, so this
+  // field is consumed only by the Windows DWrite path.
+  std::string font_pack_dir;
   FarblingSeeds seeds;
   MediaDevicesConfig media_devices;
   NetConfig net;
@@ -177,6 +219,25 @@ struct LobiumFpConfig {
   // the process. Returns nullptr when the switch is absent (Lobium behaves like stock Chromium).
   static const LobiumFpConfig* Current();
 };
+
+// Return `config_json` with the keys only the BROWSER process uses removed.
+//
+// The browser reads lobium-fp.json from disk, but a sandboxed renderer cannot, so the browser
+// forwards the contents base64-encoded on the renderer command line - where Windows caps the ENTIRE
+// CreateProcess line at 32767 characters. Exceeding the guard makes the browser skip the switch
+// altogether, and a renderer with no config reports the HOST's platform, hardware concurrency and
+// screen: total spoofing failure, triggered by a field the renderer never even reads.
+//
+// `fonts` is exactly that field. A Windows persona lists several hundred families and macOS
+// historically listed thousands, while every font hook - DirectWrite family lookup, Local Font
+// Access, the pack sideload - runs browser-side. Same for `fontPackDir`. Dropping them keeps the
+// renderer payload small enough that the guard never trips, so the font list can be complete on the
+// side that actually consumes it.
+//
+// Returns `config_json` unchanged if it cannot be parsed: an unparseable config is already handled
+// (and logged) downstream, and silently substituting an empty document here would turn a loud
+// failure into a quiet host leak.
+std::string StripBrowserOnlyKeys(const std::string& config_json);
 
 }  // namespace lobium
 

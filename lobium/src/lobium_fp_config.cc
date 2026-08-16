@@ -11,6 +11,7 @@
 #include "base/command_line.h"
 #include "base/files/file_util.h"
 #include "base/json/json_reader.h"
+#include "base/json/json_writer.h"
 #include "base/logging.h"
 #include "base/no_destructor.h"
 #include "base/values.h"
@@ -58,6 +59,7 @@ void ReadNavigator(const base::DictValue& dict, NavigatorConfig& nav) {
   if (const std::string* s = dict.FindString("uaFullVersion")) nav.ua_full_version = *s;
   if (const std::string* s = dict.FindString("uaModel")) nav.ua_model = *s;
   nav.ua_mobile = dict.FindBool("uaMobile").value_or(false);
+  if (const std::string* s = dict.FindString("uaFormFactor")) nav.ua_form_factor = *s;
   if (const base::ListValue* brands = dict.FindList("uaBrands")) {
     for (const base::Value& b : *brands) {
       const base::DictValue* bd = b.GetIfDict();
@@ -115,6 +117,7 @@ void ReadWebGl(const base::DictValue& dict, WebGlConfig& w) {
   if (const std::string* s = dict.FindString("shadingLanguageVersion"))
     w.shading_language_version = *s;
   w.extensions = ReadStringList(dict.FindList("extensions"));
+  w.extensions2 = ReadStringList(dict.FindList("extensions2"));
   if (const base::DictValue* prec = dict.FindDict("shaderPrecision")) {
     w.shader_precision.present = true;
     ReadPrecisionStage(prec->FindDict("vertex"), w.shader_precision.vertex);
@@ -146,6 +149,16 @@ void ReadWebGl(const base::DictValue& dict, WebGlConfig& w) {
       caps.aliased_point_size_range[1] = static_cast<float>((*ps)[1].GetIfDouble().value_or(0));
     }
   }
+}
+
+void ReadWebGpu(const base::DictValue& dict, WebGpuConfig& g) {
+  g.present = true;
+  if (const std::string* s = dict.FindString("vendor")) g.vendor = *s;
+  if (const std::string* s = dict.FindString("architecture")) g.architecture = *s;
+  if (const std::string* s = dict.FindString("device")) g.device = *s;
+  if (const std::string* s = dict.FindString("description")) g.description = *s;
+  if (const std::string* s = dict.FindString("driver")) g.driver = *s;
+  if (const std::string* s = dict.FindString("adapterType")) g.adapter_type = *s;
 }
 
 void ReadLocale(const base::DictValue& dict, LocaleConfig& l) {
@@ -182,8 +195,10 @@ std::optional<LobiumFpConfig> ParseConfig(std::string_view contents) {
   if (const base::DictValue* d = root.FindDict("navigator")) ReadNavigator(*d, cfg.navigator);
   if (const base::DictValue* d = root.FindDict("screen")) ReadScreen(*d, cfg.screen);
   if (const base::DictValue* d = root.FindDict("webgl")) ReadWebGl(*d, cfg.webgl);
+  if (const base::DictValue* d = root.FindDict("webgpu")) ReadWebGpu(*d, cfg.webgpu);
   if (const base::DictValue* d = root.FindDict("locale")) ReadLocale(*d, cfg.locale);
   cfg.fonts = ReadStringList(root.FindList("fonts"));
+  if (const std::string* p = root.FindString("fontPackDir")) cfg.font_pack_dir = *p;
   if (const base::DictValue* seeds = root.FindDict("seeds")) {
     cfg.seeds.canvas = static_cast<uint32_t>(seeds->FindDouble("canvas").value_or(0));
     cfg.seeds.webgl = static_cast<uint32_t>(seeds->FindDouble("webgl").value_or(0));
@@ -262,6 +277,26 @@ const LobiumFpConfig* LobiumFpConfig::Current() {
         return std::nullopt;
       }());
   return instance->has_value() ? &instance->value() : nullptr;
+}
+
+std::string StripBrowserOnlyKeys(const std::string& config_json) {
+  // Same parse mode as ParseConfig, so a document this accepts is exactly one the renderer will also
+  // accept - stripping must never be the step that changes whether the config is valid.
+  std::optional<base::DictValue> parsed =
+      base::JSONReader::ReadDict(config_json, base::JSON_PARSE_RFC);
+  if (!parsed) {
+    // Leave it alone. The renderer-side parse will fail and log, which is the correct loud failure;
+    // returning an empty document here would look like a valid config with nothing in it.
+    return config_json;
+  }
+  parsed->Remove("fonts");
+  parsed->Remove("fontPackDir");
+
+  std::string out;
+  if (!base::JSONWriter::Write(*parsed, &out)) {
+    return config_json;
+  }
+  return out;
 }
 
 }  // namespace lobium

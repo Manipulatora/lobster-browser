@@ -10,13 +10,25 @@ source_set("lobium_fp") {
   sources = [
     "lobium_audio_farble.cc",
     "lobium_audio_farble.h",
+    "lobium_capabilities.cc",
+    "lobium_capabilities.h",
     "lobium_farble.cc",
     "lobium_farble.h",
+    "lobium_fonts.cc",
+    "lobium_fonts.h",
     "lobium_fp_config.cc",
     "lobium_fp_config.h",
+    "lobium_media_devices.cc",
+    "lobium_media_devices.h",
   ]
 
   # public_deps: lobium_fp_config.h exposes base::FilePath (Load()) + includes base/files/file_path.h,
   # so //base is part of this target's public interface and must be re-exported to consumers.
   public_deps = [ "//base" ]
+
+  # deps (not public_deps): lobium_media_devices.cc computes the persona deviceId with the same
+  # HMAC-SHA256 construction Chrome uses in content/browser/media/media_devices_util.cc. //crypto is
+  # an implementation detail - the header exposes only std::string - so consumers do not inherit it
+  # and no Blink DEPS include-rule is needed.
+  deps = [ "//crypto" ]
 }
