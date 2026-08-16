@@ -281,7 +281,14 @@ function linuxGpu(vendor: 'Intel' | 'AMD' | 'NVIDIA', renderer: string): DeviceP
 const LINUX: OsTemplate = {
   platform: 'Linux x86_64',
   uaPlatform: 'Linux',
-  uaPlatformVersion: '6.8.0',
+  // Real Chrome on Linux sends Sec-CH-UA-Platform-Version as an EMPTY string, always. Chromium has
+  // no Linux platform-version source: `GetUserAgentPlatformVersion()` returns "" for
+  // BUILDFLAG(IS_LINUX), because a kernel release is not a platform version any site could use and
+  // it would be high-entropy. A Linux persona reporting a kernel-shaped "6.8.0" is therefore a value
+  // no real Chrome has ever emitted — a single `getHighEntropyValues(['platformVersion'])` call
+  // unmasks it. Empty here is not "unset": the native UA-CH hook assigns platform_version straight
+  // through, so an empty string is faithfully emitted rather than falling back to the host.
+  uaPlatformVersion: '',
   osToken: 'X11; Linux x86_64',
   fonts: [
     'DejaVu Sans',
@@ -689,11 +696,20 @@ export const ANDROID_TEMPLATE: AndroidTemplate = {
  * which returns the REAL build the CDP UA override does not mask — catches any mismatch as a lie. (This
  * was a real tell: a persona claiming Chrome 151 leaked `Chromium 152.0.7928.0` via fullVersionList.)
  *
- * So we pin to the running engine (Lobium = 152.0.7928.0) rather than a diverse pool — every profile
+ * So we pin to the running engine (Lobium = 152.0.7977.42) rather than a diverse pool — every profile
  * runs the SAME binary, so they must all claim ITS version; cross-profile version diversity would be a
  * lie the moment a detector feature-probes the engine. Chrome caps `navigator.userAgent` at
  * `major.0.0.0` (UA reduction), while the high-entropy `uaFullVersion` / `fullVersionList` carry the
  * full build — so we track both forms.
+ *
+ * The build MUST additionally be one Google actually RELEASED. The pin was previously 152.0.7928.0, a
+ * canary nightly: numerically ahead of stable, but a build essentially no real user runs, so
+ * `fullVersionList` returned a near-unique string and the `.0` patch component advertised it as a
+ * branch-point build rather than a release. Population matters as much as freshness here — see
+ * `scripts/track-upstream.mjs`, which now verifies channel membership and refuses an unreleased pin.
+ *
+ * Keep this in lockstep with `lobium/build.sh` CHROMIUM_REF and the engine manifest; the coherence test
+ * in `ci/validation/version-coherence.test.mjs` fails the build if they drift.
  *
  * `deriveFingerprint({ browserVersion })` overrides this when the sidecar knows a different engine build.
  */
@@ -702,11 +718,94 @@ export const ENGINE_CHROME = {
   /** navigator.userAgent form (UA-reduced to major.0.0.0). */
   reduced: '152.0.0.0',
   /** getHighEntropyValues(['uaFullVersion'|'fullVersionList']) form (real build). */
-  full: '152.0.7928.0',
+  full: '152.0.7977.42',
 } as const;
 
-/** Split a full Chrome build (e.g. "152.0.7928.0") into the UA-reduced + major forms it must present. */
+/** Split a full Chrome build (e.g. "152.0.7977.42") into the UA-reduced + major forms it must present. */
 export function chromeVersionForms(full: string): { major: string; reduced: string; full: string } {
   const major = full.split('.')[0] ?? ENGINE_CHROME.major;
   return { major, reduced: `${major}.0.0.0`, full };
+}
+
+/**
+ * Build the Sec-CH-UA brand list EXACTLY as Chromium does.
+ *
+ * This is not a free-form list. Chromium derives all three entries — including the "GREASE" decoy
+ * brand and the ORDER they appear in — deterministically from a single seed, and that seed is the UA
+ * major version (`version_info::GetMajorVersionNumber()`), so the output changes every release.
+ * Verified against `components/embedder_support/user_agent_utils.cc` at tag 152.0.7977.42:
+ *
+ *   greasey_chars      = {" ","(",":","-",".","/",")",";","=","?","_"}          (line 554)
+ *   greasey_brand      = "Not" + chars[seed%11] + "A" + chars[(seed+1)%11] + "Brand"   (559-561)
+ *   greasey_version    = {"8","99","24"}[seed%3]                                (556, 562)
+ *   orders             = {{0,1,2},{0,2,1},{1,0,2},{1,2,0},{2,0,1},{2,1,0}}      (246-247)
+ *   ShuffleBrandList   : shuffled[order[i]] = list[i], list = [GREASE, Chromium, Google Chrome] (265-278)
+ *
+ * The previous hardcoded `[Chromium, Google Chrome, Not_A Brand]` was wrong on TWO counts for Chrome
+ * 152: the decoy token (`Not_A Brand` — that is the M131 spelling) and its position. Sec-CH-UA is a
+ * LOW-ENTROPY hint, so it rides every single HTTP request including worker fetches; any edge that keeps
+ * a Chrome-major → expected-brand-string table sees a token no Chrome 152 has ever emitted. It is the
+ * cheapest possible UA-CH cross-check and it fired on every profile.
+ *
+ * `major` must be the UA major as a decimal string; anything else throws rather than silently emitting
+ * a brand list that does not correspond to any real Chrome.
+ */
+const GREASE_CHARS = [' ', '(', ':', '-', '.', '/', ')', ';', '=', '?', '_'] as const;
+const GREASE_VERSIONS = ['8', '99', '24'] as const;
+const GREASE_ORDERS = [
+  [0, 1, 2],
+  [0, 2, 1],
+  [1, 0, 2],
+  [1, 2, 0],
+  [2, 0, 1],
+  [2, 1, 0],
+] as const;
+
+export interface ChromeBrandOptions {
+  /**
+   * `true` (default) emits the Google-Chrome-branded three-entry list a Chrome build sends.
+   * `false` emits the two-entry list an UNBRANDED Chromium build sends — Chromium's own
+   * `GenerateBrandVersionList` takes the product brand as an optional, and with it absent the list is
+   * just [GREASE, Chromium], shuffled by `GetRandomOrder(seed, 2)` = `{seed%2, (seed+1)%2}`.
+   * Both shapes are legitimate; only a list that matches NEITHER is impossible.
+   */
+  branded?: boolean;
+}
+
+export function buildChromeBrands(
+  major: string,
+  opts: ChromeBrandOptions = {},
+): Array<{ brand: string; version: string }> {
+  // Validate the STRING shape, not just Number(major): `Number('')` is 0, which is a perfectly good
+  // non-negative integer, so an empty major would have produced a brand list whose real entries carry
+  // version "" — an impossible header emitted with no error at all.
+  if (!/^\d+$/.test(major)) {
+    throw new Error(`buildChromeBrands: invalid Chrome major version ${JSON.stringify(major)}`);
+  }
+  const branded = opts.branded !== false;
+  const seed = Number(major);
+  const greaseBrand = `Not${GREASE_CHARS[seed % GREASE_CHARS.length]}A${
+    GREASE_CHARS[(seed + 1) % GREASE_CHARS.length]
+  }Brand`;
+  // Source order is always [GREASE, Chromium, <brand>?]; the shuffle then scatters it.
+  const source = [
+    { brand: greaseBrand, version: GREASE_VERSIONS[seed % GREASE_VERSIONS.length] as string },
+    { brand: 'Chromium', version: major },
+    ...(branded ? [{ brand: 'Google Chrome', version: major }] : []),
+  ];
+  const order: readonly number[] = branded
+    ? (GREASE_ORDERS[seed % GREASE_ORDERS.length] as readonly number[])
+    : [seed % 2, (seed + 1) % 2];
+  const shuffled: Array<{ brand: string; version: string }> = new Array(source.length);
+  order.forEach((position, index) => {
+    shuffled[position] = source[index] as { brand: string; version: string };
+  });
+  return shuffled;
+}
+
+/** Canonical `"brand";v="version", …` rendering, used for exact brand-list comparison. */
+export function renderChromeBrands(
+  list: ReadonlyArray<{ brand: string; version: string }>,
+): string {
+  return list.map((b) => `"${b.brand}";v="${b.version}"`).join(', ');
 }

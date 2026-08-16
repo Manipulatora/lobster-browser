@@ -1,3 +1,4 @@
+import { buildChromeBrands, renderChromeBrands } from './pools.js';
 import type {
   AndroidFingerprint,
   Fingerprint,
@@ -635,6 +636,29 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
     if (!nav.uaBrands.some((b) => CHROME_UA_BRANDS.has(b.brand))) {
       issues.push('Sec-CH-UA has no "Google Chrome"/"Chromium" brand for a Chrome UA');
     }
+    // STRICT conformance: Chromium derives the whole brand list — decoy spelling, decoy version and
+    // the order of all three entries — from the UA major. The checks above only prove the list is
+    // "Chrome-shaped", which a stale hardcoded list also is: `Not_A Brand` is the M131 decoy and
+    // passes every loose test while being flatly wrong for 152. Sec-CH-UA is low-entropy and rides
+    // every request, so an edge with a Chrome-major -> brand-string table catches it for free.
+    // Compare against the algorithm itself; anything else is a lie the persona tells on every hop.
+    // Two list shapes are legitimate: the Google-Chrome-branded three-entry list, and the two-entry
+    // list an unbranded Chromium build sends. Accept either, but require an EXACT algorithmic match to
+    // whichever shape is present — that is what separates a real Chromium persona from a stale
+    // hardcoded one.
+    try {
+      const actual = renderChromeBrands(nav.uaBrands);
+      const branded = renderChromeBrands(buildChromeBrands(chromeMajor));
+      const chromiumOnly = renderChromeBrands(buildChromeBrands(chromeMajor, { branded: false }));
+      if (actual !== branded && actual !== chromiumOnly) {
+        issues.push(
+          `Sec-CH-UA brand list is not one Chrome ${chromeMajor} can emit — got ${actual}; ` +
+            `expected ${branded} (Chrome) or ${chromiumOnly} (unbranded Chromium)`,
+        );
+      }
+    } catch {
+      issues.push(`Sec-CH-UA brand list cannot be validated for UA major "${chromeMajor}"`);
+    }
     // uaFullVersion (e.g. "131.0.6778.86") must be present and share the UA major.
     const fullMajor = nav.uaFullVersion.split('.')[0] ?? '';
     if (!nav.uaFullVersion) {
@@ -660,6 +684,20 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
     }
   }
 
+  // --- Sec-CH-UA-Platform-Version --------------------------------------------------------------------
+  // Chromium's GetUserAgentPlatformVersion() has no Linux source and returns an EMPTY string there,
+  // so every real Chrome on Linux answers getHighEntropyValues(['platformVersion']) with "". A
+  // kernel-shaped value like "6.8.0" is one no Chrome has ever emitted, and reading it costs a single
+  // call. Windows and macOS conversely always report a version, so an empty one is equally wrong.
+  if (fp.os === 'linux' && nav.uaPlatformVersion !== '') {
+    issues.push(
+      `Sec-CH-UA-Platform-Version must be empty on Linux (real Chrome reports no platform version there), got "${nav.uaPlatformVersion}"`,
+    );
+  }
+  if ((fp.os === 'windows' || fp.os === 'macos') && !nav.uaPlatformVersion) {
+    issues.push(`Sec-CH-UA-Platform-Version must be set on ${fp.os}`);
+  }
+
   // --- Form factor ---------------------------------------------------------------------------------
   // A desktop profile must not advertise itself as mobile, and touch points must match the form factor.
   if (nav.uaMobile) {
@@ -667,6 +705,14 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
   }
   if (!nav.uaMobile && nav.maxTouchPoints !== 0) {
     issues.push(`maxTouchPoints (${nav.maxTouchPoints}) must be 0 for a non-mobile profile`);
+  }
+  // Sec-CH-UA-Form-Factors must be stated and must be Desktop here. Leaving it unset makes the engine
+  // fall back to a binary Mobile/Desktop split off the mobile bit, which is right for desktop but
+  // silently mislabels a tablet — so requiring it explicitly keeps the two paths honest.
+  if (nav.uaFormFactor !== 'Desktop') {
+    issues.push(
+      `Sec-CH-UA-Form-Factors must be "Desktop" for a desktop profile, got ${JSON.stringify(nav.uaFormFactor)}`,
+    );
   }
 
   // --- Hardware realism ----------------------------------------------------------------------------

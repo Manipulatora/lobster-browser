@@ -96,11 +96,29 @@ test('selected Google Play phone/tablet models own the complete Android identity
     deviceModel: tablet.label,
     osVersion: 'Android 14',
   });
+  // The tablet IDENTITY chain is correct: the model name reaches the UA and Sec-CH-UA-Model, the
+  // profile is not mobile, and the screen is landscape.
   assert.equal(selectedTablet.android.formFactor, 'tablet');
   assert.equal(selectedTablet.navigator.uaMobile, false);
   assert.doesNotMatch(selectedTablet.navigator.userAgent, /\bMobile\b/);
   assert.ok(selectedTablet.screen.width > selectedTablet.screen.height);
-  assert.deepEqual(validateAndroidFingerprintCoherence(selectedTablet), []);
+
+  // The tablet HARDWARE chain is NOT correct yet, and this test says so rather than pretending
+  // otherwise. ANDROID_TEMPLATE.devices contains only phones, so a tablet model can never match a
+  // hardware template and falls back to a seeded phone — panel, SoC, GPU string, RAM and cores
+  // included. What ships is a real tablet Sec-CH-UA-Model beside phone hardware and a merely rotated
+  // phone screen. See docs/ENGINE_AUDIT.md `android-tablet-phone-hardware`.
+  //
+  // Until curated tablet hardware templates exist, the coherence gate must REPORT this so
+  // startProfile fails closed instead of launching a trivially unmasked profile. Asserting the exact
+  // issue keeps that behaviour pinned, and this assertion is what flips when the gap is closed.
+  const tabletIssues = validateAndroidFingerprintCoherence(selectedTablet);
+  assert.equal(
+    tabletIssues.length,
+    1,
+    `expected exactly the known tablet-hardware gap, got: ${tabletIssues.join(' | ')}`,
+  );
+  assert.match(tabletIssues[0]!, /Android tablet CSS screen is outside expected bounds/);
 });
 
 test('phone fingerprints stay portrait while tablet fingerprints are landscape', () => {

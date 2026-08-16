@@ -7,7 +7,7 @@ import {
   validateFingerprintCoherence,
 } from './coherence.js';
 import { deriveFingerprint, deriveFromPools } from './derive.js';
-import { DEVICE_TEMPLATES } from './pools.js';
+import { buildChromeBrands, DEVICE_TEMPLATES } from './pools.js';
 import { generateSeed } from './seed.js';
 
 const OSES: OsFamily[] = ['windows', 'macos', 'linux'];
@@ -216,15 +216,15 @@ test('EVERY catalog device class is coherent (exhaustive, not sampled)', () => {
           hardwareConcurrency: device.hardwareConcurrency,
           deviceMemory: device.deviceMemory,
           maxTouchPoints: 0,
-          uaBrands: [
-            { brand: 'Chromium', version: '152' },
-            { brand: 'Google Chrome', version: '152' },
-            { brand: 'Not_A Brand', version: '24' },
-          ],
+          // Mirrors derive.ts, which builds this with Chrome's own seeded GREASE algorithm rather
+          // than a literal. Hardcoding it here would re-introduce the exact staleness the algorithm
+          // exists to prevent (the old literal was the M131 decoy, wrong for 152).
+          uaBrands: buildChromeBrands('152'),
           uaPlatform: tpl.uaPlatform,
           uaPlatformVersion: tpl.uaPlatformVersion,
           uaMobile: false,
           uaFullVersion: '152.0.0.0',
+          uaFormFactor: 'Desktop' as const,
         },
         screen: {
           width: device.screen.width,

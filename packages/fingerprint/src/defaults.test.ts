@@ -61,3 +61,45 @@ test('macOS Support font names normalize without inventing families', () => {
     ),
   );
 });
+
+test('the Windows font catalog contains every family Blink resolves a CSS generic to', () => {
+  // The native font filter blocks families the persona does not claim. If the catalog omitted one of
+  // these, `font-family: monospace` would stop resolving Consolas and code would render in a
+  // proportional face - visibly broken, and a tell in its own right, since no real Windows Chrome
+  // does that.
+  //
+  // The engine also hard-allows these regardless of config (lobium/src/lobium_fonts.cc,
+  // kAlwaysAllowed), so this is defence in depth rather than the only guard. It exists because a
+  // failure here has a clear cause and a clear fix, whereas the same defect discovered through the
+  // engine looks like "text renders wrong".
+  const fonts = new Set(defaultFontsForOs('windows').map((f) => f.toLowerCase()));
+  const generics = [
+    'Times New Roman', // standard + serif
+    'Arial',           // sans-serif
+    'Consolas',        // monospace
+    'Courier New',     // monospace fallback
+    'Comic Sans MS',   // cursive
+    'Impact',          // fantasy
+    'Cambria Math',    // math
+  ];
+  const missing = generics.filter((f) => !fonts.has(f.toLowerCase()));
+  assert.deepEqual(missing, [], 'Windows persona font catalog is missing generic-family defaults');
+});
+
+test('every OS font catalog is free of duplicates and blank entries', () => {
+  // A duplicate is measurable: enumeration APIs would report the same family twice, which no real
+  // machine does. A blank entry is worse - it reaches the engine as an empty allow-prefix, and an
+  // empty prefix matches every unique name, silently disabling the local() filter.
+  for (const os of ['windows', 'macos', 'linux'] as const) {
+    const list = defaultFontsForOs(os);
+    const seen = new Set<string>();
+    const dupes: string[] = [];
+    for (const f of list) {
+      const key = f.toLowerCase();
+      if (seen.has(key)) dupes.push(f);
+      seen.add(key);
+    }
+    assert.deepEqual(dupes, [], `${os} font catalog has duplicates`);
+    assert.equal(list.filter((f) => f.trim() === '').length, 0, `${os} font catalog has blank entries`);
+  }
+});

@@ -33,7 +33,7 @@ function host(): HostCalibrationProfile {
     capturedAt: '2026-07-08T12:00:00.000Z',
     os: 'linux',
     arch: 'x86_64',
-    browserVersion: '152.0.7928.0',
+    browserVersion: '152.0.7977.42',
     navigator: {
       platform: 'Linux x86_64',
       languages: ['de-DE', 'de', 'en-US'],
@@ -103,7 +103,7 @@ test('deriveFingerprintFromHost inherits captured host hardware while keeping Ch
   assert.deepEqual(fp.webgl.shaderPrecision, precision);
   assert.deepEqual(fp.fonts, ['DejaVu Sans', 'Liberation Sans', 'Noto Sans']);
   assert.match(fp.navigator.userAgent, /Chrome\/152\.0\.0\.0/);
-  assert.equal(fp.navigator.uaFullVersion, '152.0.7928.0');
+  assert.equal(fp.navigator.uaFullVersion, '152.0.7977.42');
   assert.deepEqual(validateFingerprintCoherence(fp), []);
 });
 
@@ -157,4 +157,21 @@ test('validateHostCalibrationProfile rejects partial GPU evidence', () => {
   const issues = validateHostCalibrationProfile(h);
   assert.ok(issues.includes('host WebGL numeric capabilities are required'));
   assert.ok(issues.includes('host WebGL shader-precision profile is required'));
+});
+
+test('a touch-capable host does not give a desktop persona touch points', () => {
+  // Regression: the derivation used to copy the host's raw navigator.maxTouchPoints into a desktop
+  // persona. The coherence gate then rejected it ("maxTouchPoints must be 0 for a non-mobile
+  // profile") and startProfile refused to launch — so on any Surface, 2-in-1 or touch laptop, all
+  // of which report 10, the product could not open a single desktop profile. Even with the gate
+  // relaxed it would be a lie: the same non-zero count on every profile is a linkage signal, and a
+  // desktop UA advertising touch while matchMedia says (pointer: fine) is incoherent.
+  const h = host();
+  h.navigator.maxTouchPoints = 10;
+
+  const fp = deriveFingerprintFromHost('touch-host-seed', h, { engine: 'lobium' });
+
+  assert.equal(fp.navigator.maxTouchPoints, 0);
+  assert.equal(fp.navigator.uaMobile, false);
+  assert.deepEqual(validateFingerprintCoherence(fp), []);
 });

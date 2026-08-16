@@ -24,6 +24,14 @@ export interface NavigatorFingerprint {
   uaFullVersion: string;
   /** Sec-CH-UA-Model / high-entropy model. Empty or omitted on desktop; real device model on Android. */
   uaModel?: string;
+  /**
+   * Sec-CH-UA-Form-Factors, exactly one of these. Omit to let the engine derive it from `uaMobile`.
+   *
+   * A TABLET must state it. Real tablet Chrome omits the "Mobile" UA token, so a tablet persona sets
+   * `uaMobile: false` — and the mobile-bit derivation would then announce "Desktop" alongside a
+   * tablet Sec-CH-UA-Model and an Android platform, which is a one-call contradiction.
+   */
+  uaFormFactor?: 'Desktop' | 'Mobile' | 'Tablet';
 }
 
 /** screen / window / matchMedia surface. */
@@ -103,10 +111,46 @@ export interface WebGlFingerprint {
   version?: string;
   /** `gl.SHADING_LANGUAGE_VERSION` captured from the real host backend. */
   shadingLanguageVersion?: string;
-  /** `getSupportedExtensions()` captured from the host. Order is kept stable. */
+  /**
+   * `getSupportedExtensions()` for a WebGL1 context, in Chrome's REGISTRATION order (not sorted —
+   * an alphabetised list is a shape no real browser emits).
+   */
   extensions?: string[];
+  /**
+   * The same for a WebGL2 context. Required separately, not derivable from `extensions`: WebGL2
+   * folds several WebGL1 extensions into core and adds its own, and the engine matches configured
+   * names against the context's own registrations — so a WebGL1 list handed to a WebGL2 context
+   * collapses to the few names common to both.
+   */
+  extensions2?: string[];
   /** `getShaderPrecisionFormat()` buckets captured from the host. */
   shaderPrecision?: WebGlShaderPrecisionProfile;
+}
+
+/**
+ * `navigator.gpu` adapter identity (`GPUAdapterInfo`).
+ *
+ * Not part of {@link WebGlFingerprint} even though both describe one GPU: WebGL reports marketing
+ * strings through an ANGLE wrapper, WebGPU reports Dawn's lowercase vendor/architecture slugs. They
+ * are DERIVED from the same renderer at fingerprint-build time so they cannot disagree, but the two
+ * wire shapes are genuinely different and flattening them would lose that.
+ */
+export interface WebGpuFingerprint {
+  /** Dawn vendor slug, lowercase — "nvidia", "amd", "intel", "apple". */
+  vendor: string;
+  /** Dawn GPU-family slug, lowercase — "ada-lovelace", "rdna-3", "gen-9". */
+  architecture: string;
+  /** PCI device id formatted as Chrome formats it, e.g. "0x2503". */
+  device: string;
+  /** Human-readable adapter name, e.g. "NVIDIA GeForce RTX 3060". */
+  description: string;
+  driver: string;
+  /**
+   * Drives `adapter.isFallbackAdapter`, which Chrome derives from the adapter type — only a `cpu`
+   * adapter is a fallback. A persona claiming a discrete GPU while reporting a fallback adapter
+   * contradicts itself in a single object read.
+   */
+  adapterType: 'discrete' | 'integrated' | 'cpu';
 }
 
 /** Locale/timezone/geolocation cluster — derived from the proxy exit IP. */
@@ -176,6 +220,12 @@ export interface Fingerprint {
   navigator: NavigatorFingerprint;
   screen: ScreenFingerprint;
   webgl: WebGlFingerprint;
+  /**
+   * Optional so snapshots persisted before WebGPU support still load. When absent the engine leaves
+   * `navigator.gpu` reporting the host adapter, which on a persona claiming a different GPU is a
+   * contradiction — so derivation always populates it; only old stored fingerprints lack it.
+   */
+  webgpu?: WebGpuFingerprint;
   locale: LocaleFingerprint;
   /** Font families the profile exposes, matched to the claimed OS. */
   fonts: string[];

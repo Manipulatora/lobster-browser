@@ -152,7 +152,23 @@ export function deriveFingerprintFromHost(
       languages: [...languages],
       hardwareConcurrency: clampInt(host.navigator.hardwareConcurrency, 1, 128),
       deviceMemory: normalizeDeviceMemory(host.navigator.deviceMemory),
-      maxTouchPoints: Math.max(0, Math.round(host.navigator.maxTouchPoints)),
+      // Never inherit the host's touch-point count into a DESKTOP persona.
+      //
+      // Two reasons, one fatal. (1) The coherence gate requires maxTouchPoints === 0 whenever
+      // uaMobile is false, so on any touch-capable Windows host — a Surface, most 2-in-1s, plenty
+      // of ordinary laptops, all of which report 10 — the derived profile fails validation and
+      // startProfile refuses to launch. The product simply does not run on those machines.
+      // (2) Even with the gate relaxed it would be a lie: a desktop UA advertising touch points
+      // while matchMedia reports `(pointer: fine)` and `(hover: hover)` is incoherent, and the
+      // identical non-zero count on every profile is a cross-profile linkage signal.
+      //
+      // A mobile persona is not derived through this path (it goes through deriveAndroidFingerprint),
+      // so clamping to 0 for non-mobile is the whole story here. The native
+      // NavigatorEvents::maxTouchPoints hook stores an optional precisely so a configured 0
+      // overrides the host rather than reading as "unset".
+      maxTouchPoints: base.navigator.uaMobile
+        ? Math.max(0, Math.round(host.navigator.maxTouchPoints))
+        : 0,
     },
     screen: normalizeHostScreen(host.os, host.screen, base.screen),
     webgl: cloneHostWebgl(host.webgl),

@@ -6,7 +6,7 @@ import type {
   NavigatorFingerprint,
 } from '@lobster/shared-types';
 import { DEVICE_MEMORY_VALUES, languagesToAcceptLanguage } from './coherence.js';
-import { ANDROID_TEMPLATE, ENGINE_CHROME, chromeVersionForms } from './pools.js';
+import { ANDROID_TEMPLATE, buildChromeBrands, ENGINE_CHROME, chromeVersionForms } from './pools.js';
 import { SeededRandom } from './prng.js';
 import {
   ANDROID_PHONE_MODEL_CATALOG,
@@ -25,12 +25,10 @@ export interface DeriveAndroidOptions {
   osVersion?: string;
 }
 
+// Same algorithm as desktop — the brand list depends only on the UA major, not the platform.
+// This was a second verbatim copy of the stale hardcoded list; both are now one implementation.
 function buildBrands(major: string): NavigatorFingerprint['uaBrands'] {
-  return [
-    { brand: 'Chromium', version: major },
-    { brand: 'Google Chrome', version: major },
-    { brand: 'Not_A Brand', version: '24' },
-  ];
+  return buildChromeBrands(major);
 }
 
 function buildAndroidUserAgent(
@@ -131,6 +129,10 @@ export function deriveAndroidFingerprint(
       uaMobile: mobile,
       uaFullVersion: ver.full,
       uaModel: model,
+      // Stated explicitly rather than derived. A tablet sets uaMobile=false (real tablet Chrome omits
+      // the "Mobile" UA token), and the engine's mobile-bit fallback would then label it "Desktop"
+      // next to a tablet Sec-CH-UA-Model and Sec-CH-UA-Platform "Android".
+      uaFormFactor: mobile ? ('Mobile' as const) : ('Tablet' as const),
     },
     screen: {
       width: screenWidth,
@@ -210,6 +212,15 @@ export function validateAndroidFingerprintCoherence(fp: AndroidFingerprint): str
   if (nav.uaMobile !== (fp.android.formFactor === 'phone')) {
     issues.push(`Android uaMobile does not match ${fp.android.formFactor} form factor`);
   }
+  // Sec-CH-UA-Form-Factors must be stated for Android, because the engine's fallback derives it from
+  // the mobile bit and a tablet (uaMobile:false) would come out as "Desktop" beside a tablet
+  // Sec-CH-UA-Model and Sec-CH-UA-Platform "Android" — a contradiction one call reveals.
+  const wantFormFactor = fp.android.formFactor === 'phone' ? 'Mobile' : 'Tablet';
+  if (nav.uaFormFactor !== wantFormFactor) {
+    issues.push(
+      `Sec-CH-UA-Form-Factors must be "${wantFormFactor}" for an Android ${fp.android.formFactor}, got ${JSON.stringify(nav.uaFormFactor)}`,
+    );
+  }
   if (nav.maxTouchPoints < 1) {
     issues.push(`Android maxTouchPoints must be >0, got ${nav.maxTouchPoints}`);
   }
@@ -287,11 +298,37 @@ export function validateAndroidFingerprintCoherence(fp: AndroidFingerprint): str
       `Android tablet screen must be landscape by default: ${fp.screen.width}x${fp.screen.height}`,
     );
   }
+  // Per-form-factor CSS screen bounds.
+  //
+  // A single phone-shaped range let tablet personas through with phone geometry, which is the
+  // visible half of a deeper problem: ANDROID_TEMPLATE.devices contains only phones, so a tablet
+  // model name from the catalog can never find a matching hardware template and falls back to a
+  // seeded PHONE — panel, SoC, GPU string, RAM and core count included. The result is a real tablet
+  // Sec-CH-UA-Model next to phone hardware and a merely rotated phone screen: an 11-inch Galaxy Tab
+  // reporting 915x412 at dpr 2.625 with an Adreno it never shipped. Any vendor with a
+  // device-model -> (panel, SoC, OS version) table — DataDome and Kasada both keep one — resolves
+  // that in a single lookup.
+  //
+  // The real fix is genuine tablet hardware templates, which needs curated per-device data this
+  // catalog does not yet carry (docs/ENGINE_AUDIT.md: android-tablet-phone-hardware). Until then,
+  // FAIL CLOSED: reject the incoherent persona at derivation instead of shipping it. A profile that
+  // refuses to launch is recoverable; one that launches and is trivially unmasked is not.
   const minSide = Math.min(fp.screen.width, fp.screen.height);
   const maxSide = Math.max(fp.screen.width, fp.screen.height);
-  if (minSide < 320 || minSide > 600 || maxSide < 600 || maxSide > 1100) {
+  const bounds =
+    fp.android.formFactor === 'tablet'
+      ? { minLo: 600, minHi: 1024, maxLo: 960, maxHi: 1600 }
+      : { minLo: 320, minHi: 600, maxLo: 600, maxHi: 1100 };
+  if (
+    minSide < bounds.minLo ||
+    minSide > bounds.minHi ||
+    maxSide < bounds.maxLo ||
+    maxSide > bounds.maxHi
+  ) {
     issues.push(
-      `Android CSS screen is outside expected bounds: ${fp.screen.width}x${fp.screen.height}`,
+      `Android ${fp.android.formFactor} CSS screen is outside expected bounds ` +
+        `(${bounds.minLo}-${bounds.minHi} x ${bounds.maxLo}-${bounds.maxHi}): ` +
+        `${fp.screen.width}x${fp.screen.height}`,
     );
   }
   if (fp.screen.colorDepth !== 24) {

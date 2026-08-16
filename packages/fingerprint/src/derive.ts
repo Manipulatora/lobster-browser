@@ -9,9 +9,15 @@ import type {
 } from '@lobster/shared-types';
 import { SeededRandom } from './prng.js';
 import { languagesToAcceptLanguage } from './coherence.js';
-import { ENGINE_CHROME, chromeVersionForms, DEVICE_TEMPLATES } from './pools.js';
+import { buildChromeBrands, ENGINE_CHROME, chromeVersionForms, DEVICE_TEMPLATES } from './pools.js';
 import { deriveCoherentDevice } from './device-tiers.js';
 import { defaultFontsForOs } from './defaults.js';
+import {
+  isAppleSiliconRenderer,
+  webgl1ExtensionsFor,
+  webgl2ExtensionsFor,
+} from './webgl-extensions.js';
+import { webgpuIdentityFor } from './webgpu-identity.js';
 
 export interface DeriveOptions {
   os: OsFamily;
@@ -19,7 +25,7 @@ export interface DeriveOptions {
   engine: EngineKind;
   arch?: CpuArch;
   /**
-   * The full Chrome build the running engine actually is (e.g. "152.0.7928.0"). The UA version MUST
+   * The full Chrome build the running engine actually is (e.g. "152.0.7977.42"). The UA version MUST
    * match the engine or a feature-probe / fullVersionList read catches it as a lie, so this is pinned
    * to the engine — never a random pool. Defaults to the Lobium build ({@link ENGINE_CHROME}).
    */
@@ -49,12 +55,10 @@ function buildUserAgent(osToken: string, reducedVersion: string): string {
   return `Mozilla/5.0 (${osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${reducedVersion} Safari/537.36`;
 }
 
+// Chrome derives the brand list (decoy token AND order) from the UA major; see buildChromeBrands.
+// Never hardcode it — the GREASE spelling rotates every release and a stale one is a free tell.
 function buildBrands(major: string): NavigatorFingerprint['uaBrands'] {
-  return [
-    { brand: 'Chromium', version: major },
-    { brand: 'Google Chrome', version: major },
-    { brand: 'Not_A Brand', version: '24' },
-  ];
+  return buildChromeBrands(major);
 }
 
 /**
@@ -113,6 +117,7 @@ export function deriveFromPools(
     uaPlatformVersion: tpl.uaPlatformVersion,
     uaMobile: false,
     uaFullVersion: ver.full,
+    uaFormFactor: 'Desktop',
   };
 
   // Available rect = screen minus OS chrome, laid out per-OS so screen.availTop is COHERENT with the
@@ -142,7 +147,28 @@ export function deriveFromPools(
     arch: deviceArch,
     navigator,
     screen: screenFp,
-    webgl: { ...device.webgl },
+    // The deep WebGL surfaces, not just vendor/renderer/caps. Without these four the engine falls
+    // back to the HOST for version, GLSL version and the extension list — so a persona claiming one
+    // GPU shipped another GPU's extension set, which is precisely the cross-check a detector runs.
+    //
+    // VERSION and SHADING_LANGUAGE_VERSION are Chromium's own constants, identical on every desktop
+    // platform and GPU (they describe the WebGL/GLSL level, not the driver), so pinning them costs
+    // no plausibility and removes any backend-dependent variance — notably a software renderer,
+    // which would otherwise report a different string here than the persona's GPU implies.
+    webgl: {
+      ...device.webgl,
+      version: 'WebGL 1.0 (OpenGL ES 2.0 Chromium)',
+      shadingLanguageVersion: 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)',
+      extensions: webgl1ExtensionsFor(os, {
+        appleSilicon: isAppleSiliconRenderer(device.webgl.renderer),
+      }),
+      extensions2: webgl2ExtensionsFor(os, {
+        appleSilicon: isAppleSiliconRenderer(device.webgl.renderer),
+      }),
+    },
+    // Derived from the WebGL renderer above rather than stored alongside it, so the two GPU
+    // descriptions a page can read cannot name different hardware.
+    webgpu: webgpuIdentityFor(device.webgl),
     locale: {
       timezone: 'America/New_York',
       locale: primaryLocale,

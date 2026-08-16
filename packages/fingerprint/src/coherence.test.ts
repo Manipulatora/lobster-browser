@@ -11,6 +11,7 @@ import {
 } from './coherence.js';
 import { applyOverrides } from './overrides.js';
 import { deriveFingerprint } from './derive.js';
+import { buildChromeBrands } from './pools.js';
 
 /** A coherent, freshly derived Windows fingerprint to mutate in the rule tests below. */
 function coherentBase(): Fingerprint {
@@ -197,11 +198,28 @@ test('flags a Chrome UA with no Chrome/Chromium brand at all (only a grease plac
 test('accepts a Chromium-only brand set (real Linux Chromium ships no "Google Chrome" brand)', () => {
   const fp = coherentBase();
   const major = /Chrome\/(\d+)\./.exec(fp.navigator.userAgent)?.[1] ?? '131';
-  fp.navigator.uaBrands = [
-    { brand: 'Not_A Brand', version: '99' },
-    { brand: 'Chromium', version: major },
-  ];
+  // An unbranded Chromium sends the same seeded list minus the product brand. It must still MATCH
+  // that algorithm: the previous literal here paired an arbitrary decoy token and version with an
+  // arbitrary order, which no Chromium of any version emits.
+  fp.navigator.uaBrands = buildChromeBrands(major, { branded: false });
   assert.deepEqual(validateFingerprintCoherence(fp), []);
+});
+
+test('rejects a stale GREASE decoy that is right for a DIFFERENT Chrome major', () => {
+  // The regression that motivated the algorithmic check: "Not_A Brand" is the M131 decoy. On a 152
+  // persona it is wrong in both spelling and position, and Sec-CH-UA rides every request.
+  const fp = coherentBase();
+  const major = /Chrome\/(\d+)\./.exec(fp.navigator.userAgent)?.[1] ?? '152';
+  fp.navigator.uaBrands = [
+    { brand: 'Chromium', version: major },
+    { brand: 'Google Chrome', version: major },
+    { brand: 'Not_A Brand', version: '24' },
+  ];
+  const issues = validateFingerprintCoherence(fp);
+  assert.ok(
+    issues.some((i) => /Sec-CH-UA brand list is not one Chrome/.test(i)),
+    `expected a brand-conformance issue, got: ${JSON.stringify(issues)}`,
+  );
 });
 
 test('accepts a greased "Not A;Brand" placeholder in any punctuation', () => {
