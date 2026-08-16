@@ -7,14 +7,31 @@
 // a build predating thread ids, Stop and New Chat, so the source tests proved nothing about what the
 // installed product actually ran.
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..');
 const app = join(repo, 'packages/lobee-app');
 
-const r = spawnSync('node', ['node_modules/.bin/vite', 'build'], { cwd: app, stdio: 'inherit' });
+// Resolve vite's real JS entry, not the node_modules/.bin shim. On POSIX that shim is a symlink to the
+// script and `node .bin/vite` happens to work; on Windows npm writes a SHELL script there (plus
+// vite.cmd / vite.ps1), so handing it to node is a syntax error and the whole extension build dies.
+// Workspaces hoist, so check the package root first and fall back to the local install.
+const viteEntry = [
+  join(repo, 'node_modules/vite/bin/vite.js'),
+  join(app, 'node_modules/vite/bin/vite.js'),
+].find((candidate) => existsSync(candidate));
+if (!viteEntry) {
+  console.error('[build-lobee] cannot find vite/bin/vite.js — run npm install first');
+  process.exit(1);
+}
+
+const r = spawnSync(process.execPath, [viteEntry, 'build'], { cwd: app, stdio: 'inherit' });
+if (r.error) {
+  console.error(`[build-lobee] cannot run vite: ${r.error.message}`);
+  process.exit(1);
+}
 if (r.status !== 0) process.exit(r.status ?? 1);
 
 const targets = [join(repo, 'packages/lobee'), join(repo, 'apps/desktop/src-tauri/resources/lobee')];
