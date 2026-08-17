@@ -1,6 +1,9 @@
 [package]
 name = "lobster-desktop"
-version = "0.0.0"
+# Must match `version` in tauri.conf.json. The bundler takes its version from the config, but the
+# in-app `app_version` command reports CARGO_PKG_VERSION — so a mismatch ships an installer that
+# says 1.0.0 while the app's own About reads something else.
+version = "1.0.0"
 description = "Lobster Browser desktop agent (Tauri 2 core + Axum local automation API)."
 authors = ["Lobster Browser"]
 edition = "2021"

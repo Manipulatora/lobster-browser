@@ -1,0 +1,6 @@
+﻿# Debug output from scripts/gen-installer-art.ps1 -Preview.
+#
+# The BMPs beside this file ARE committed: the Windows bundler consumes them, and requiring every
+# build machine to run PowerShell + System.Drawing first would make a clean checkout unbuildable.
+# These PNGs are only for looking at the result, and regenerate in a second.
+*.preview.png

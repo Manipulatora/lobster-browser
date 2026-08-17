@@ -1,0 +1,145 @@
+LOBSTER BROWSER — END USER LICENCE AGREEMENT
+
+Last updated: 17 August 2026
+
+Please read this agreement before installing. By installing or using Lobster Browser ("the
+Software") you agree to be bound by it. If you do not agree, do not install the Software.
+
+
+1. LICENCE GRANTED
+
+Subject to this agreement and to your account remaining in good standing, Lobster Browser ("we",
+"us") grants you a personal, non-exclusive, non-transferable, revocable licence to install and use
+the Software on devices you own or control, for the number of browser profiles included in the plan
+associated with your account.
+
+This is a licence, not a sale. We retain all right, title and interest in the Software.
+
+
+2. YOUR ACCOUNT
+
+Certain features require an account at lobrowser.com. You are responsible for the accuracy of your
+registration details, for keeping your credentials secure, and for all activity that occurs under
+your account. Notify us promptly if you believe your account has been compromised.
+
+
+3. PLANS, CREDIT AND PAYMENT
+
+Paid plans are purchased with Credit, a prepaid balance denominated in United States dollars and
+funded by cryptocurrency deposit. We do not accept payment cards or bank transfers.
+
+  (a) Deposits are credited once the relevant network confirms the transaction and the payment
+      processor settles it. Network fees are paid by you to the network and are not received by us.
+
+  (b) Choosing a plan deducts its price from your Credit balance immediately.
+
+  (c) Plans renew every thirty days by deducting the same amount from your Credit balance. You may
+      disable renewal at any time; the plan then remains active until the end of the paid period.
+
+  (d) If your balance is insufficient at renewal, the plan pauses. Existing profiles remain
+      accessible; new profiles cannot be created until the balance is topped up, at which point the
+      plan resumes automatically.
+
+  (e) Changing plan mid-period credits the unused remainder of the current period toward the new
+      plan.
+
+  (f) CRYPTOCURRENCY TRANSACTIONS ARE IRREVERSIBLE. Credit is not redeemable for cash and is not
+      refundable except where required by law or where we determine, at our discretion, that a
+      refund is warranted. Funds sent to the wrong address, on the wrong network, or in an
+      unsupported asset cannot be recovered by us.
+
+
+4. ACCEPTABLE USE
+
+The Software gives each browser profile a distinct and coherent device identity. That capability
+has legitimate uses — privacy, security research, quality assurance, and managing multiple accounts
+you are entitled to hold — and it can be misused. You agree not to use the Software to:
+
+  (a) access any computer system, account or data without authorisation;
+
+  (b) commit fraud, impersonate another person, or misrepresent your identity in order to obtain
+      money, credit, goods or services;
+
+  (c) create or operate accounts in breach of a third party's terms of service where doing so is
+      unlawful, or to evade a lawful ban or enforcement action;
+
+  (d) distribute malware, conduct denial-of-service attacks, or send unsolicited bulk messages;
+
+  (e) infringe intellectual property rights, or process personal data unlawfully; or
+
+  (f) breach any applicable law, sanctions regime or export control.
+
+You are solely responsible for your use of the Software and for compliance with the terms of any
+website or service you access with it. We may suspend or terminate accounts we reasonably believe
+are being used in breach of this section.
+
+
+5. PRIVACY AND YOUR DATA
+
+Browser profile data may be encrypted and stored on our servers so that it is available on your
+other devices. Encryption keys associated with your account are held on our servers in order to
+make that possible; this means we are technically capable of accessing profile contents, and we
+access them only where necessary to operate the service, to comply with a lawful request, or with
+your consent.
+
+Do not store data in the Software that you are not permitted to entrust to a third-party service.
+
+Our privacy notice at lobrowser.com governs what we collect and why, and forms part of this
+agreement.
+
+
+6. THIRD-PARTY AND OPEN SOURCE COMPONENTS
+
+The Software incorporates a modified build of the Chromium open source project and other third-party
+components, each licensed under its own terms. Those terms govern those components and, where they
+conflict with this agreement in respect of a component, they prevail for that component. Attribution
+and licence texts are available from within the Software and on request.
+
+
+7. UPDATES
+
+We may provide updates, and may modify, add or remove features. Some updates may be required for the
+Software to continue functioning, particularly where they track changes in the underlying browser
+engine.
+
+
+8. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING WITHOUT LIMITATION THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NON-INFRINGEMENT.
+
+WE DO NOT WARRANT THAT THE SOFTWARE WILL PREVENT ANY PARTICULAR PARTY FROM IDENTIFYING, LINKING,
+DETECTING OR BLOCKING YOU. Detection methods change continuously and outside our control. Nothing in
+the Software should be relied upon as a guarantee of anonymity.
+
+
+9. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, WE WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL,
+CONSEQUENTIAL OR PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE, DATA, ACCOUNTS OR GOODWILL,
+ARISING OUT OF OR RELATED TO THE SOFTWARE.
+
+OUR TOTAL AGGREGATE LIABILITY ARISING OUT OF OR RELATED TO THIS AGREEMENT WILL NOT EXCEED THE
+GREATER OF (i) THE AMOUNTS YOU PAID US IN THE TWELVE MONTHS PRECEDING THE EVENT GIVING RISE TO THE
+CLAIM, OR (ii) ONE HUNDRED UNITED STATES DOLLARS.
+
+Nothing in this agreement excludes or limits liability that cannot lawfully be excluded or limited,
+including liability for death or personal injury caused by negligence, or for fraud.
+
+
+10. TERMINATION
+
+You may stop using the Software and uninstall it at any time. We may suspend or terminate your
+licence if you materially breach this agreement. On termination your right to use the Software ends
+and you must uninstall it; sections 3(f), 4, 5, 8, 9 and 11 survive.
+
+
+11. GENERAL
+
+This agreement is the entire agreement between us regarding the Software and supersedes any prior
+understanding on that subject. If any provision is held unenforceable, the remainder continues in
+force. Our failure to enforce a provision is not a waiver of it. You may not assign this agreement
+without our consent.
+
+Questions about this agreement: legal@lobrowser.com

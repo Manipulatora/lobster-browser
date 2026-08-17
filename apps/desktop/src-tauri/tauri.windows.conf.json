@@ -4,7 +4,19 @@
     "targets": ["nsis"],
     "windows": {
       "webviewInstallMode": {
-        "type": "downloadBootstrapper"
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "installer/installer-header.bmp",
+        "uninstallerHeaderImage": "installer/installer-header.bmp",
+        "sidebarImage": "installer/installer-sidebar.bmp",
+        "startMenuFolder": "Lobster Browser"
       }
     }
   }
