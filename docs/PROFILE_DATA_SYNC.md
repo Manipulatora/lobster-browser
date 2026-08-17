@@ -763,3 +763,55 @@ parked, and refuses on any blocking difference:
 
 `force` overrides a blocking refusal, for the one legitimate case — a user who knowingly rebuilt the
 persona and wants the cookies anyway. It is never the default, and mismatches are reported either way.
+
+## Phase 3 as built: cross-OS secret portability
+
+Every parameter below was read from the fork source, not recalled, because a wrong constant here logs
+users out silently rather than failing.
+
+| Platform | Key source | Cipher | Value layout |
+|---|---|---|---|
+| Linux | Fixed constant `fd621fe5a2b402539dfa147ca9272778` — PBKDF2-HMAC-SHA1(1 iter, "peanuts", "saltysalt") | AES-128-CBC, IV = 16 × `0x20` | `v10 ‖ ciphertext` |
+| Windows | `Local State` → `os_crypt.encrypted_key`, base64 of `"DPAPI" ‖ CryptProtectData(key)`; unwrap with `CryptUnprotectData`, must be exactly 32 bytes | AES-256-GCM | `v10 ‖ nonce(12) ‖ ciphertext ‖ tag(16)`, empty AAD |
+| macOS | Keychain generic password, service `Chromium Safe Storage` / account `Chromium`; PBKDF2-HMAC-SHA1(**1003** iters, salt `saltysalt`) → 16 bytes | AES-128-CBC | `v10 ‖ ciphertext` |
+
+**Cookie values are domain-bound.** At cookie schema v24 the plaintext is `SHA256(host_key) ‖ value`.
+Verified on disk: **873 of 873** real encrypted values across nine profiles carry that prefix. The
+codec therefore strips it at capture and *recomputes it for the target host* on re-seal — a naive
+implementation that carried the prefix verbatim would produce cookies Chromium rejects. The same
+property is used as a key oracle: a candidate key is accepted only when its output starts with the
+correct domain hash, so a wrong key, a tampered row, or a row transplanted from another host all
+reject by construction instead of yielding a plausible-looking wrong value.
+
+**Windows is v10, not v20.** `GetAppBoundEncryptionSupportLevel` returns `kNotSystemLevel` unless
+`IsSystemInstall()` and `kNotUsingDefaultUserDataDir` when the data dir is overridden. Lobster is a
+per-user NSIS install that always passes `--user-data-dir`, so either condition alone forces
+`UseForEncryption()` false. No v20 value is ever written by our build, and a v20 value encountered on
+import is the named hard error `OSCRYPT_APP_BOUND_UNSUPPORTED` rather than a silent skip.
+
+**When the target key is unreachable**, behaviour differs by artifact because the fork's fallbacks do:
+
+- **Cookies** fall back to the plaintext `value` column with `encrypted_value` empty. This was
+  confirmed loadable in the fork rather than assumed, and the manifest records `atRest: plaintext` so
+  the state is legible rather than hidden.
+- **Passwords and autofill** are **not written at all** and reported as skipped. There is no plaintext
+  fallback for them, and writing source-key ciphertext cross-OS causes blanking or purging — so the
+  honest outcome is to leave the target untouched and say so.
+
+**The macOS `--use-mock-keychain` trap** is guarded. Chromium matches ciphertext by provider tag
+prefix; the mock key and the real Keychain key both use tag `v10`; a tag match with a key failure is a
+*permanent* failure with no alternate-key retry, and the cookie row is then dropped. The flag is
+therefore refused for any profile still holding real-Keychain ciphertext, and a per-profile
+`oscrypt_mode` (`keychain` | `mock` | `pending-migration`) records where a profile is in that
+migration.
+
+### Proven, not asserted
+
+- **873 / 873** real cookie values decrypt under the host key.
+- **873 / 873** survive a change of platform key: captured under Linux AES-128-CBC, re-sealed under an
+  AES-256-GCM key (the Windows shape), each proven *unreadable* under the source key and byte-identical
+  in plaintext under the target. That is the cross-machine move, executed on real data.
+- All **9** real profiles round-trip capture → destroy → restore.
+- Test scratch directories are removed on panic and early return via a `Drop` guard. This is a
+  security control, not tidiness: the real-profile tests copy a live user-data-dir into `/tmp`, the
+  Linux key is a public constant, and one such directory was found holding 181 real cookie values.

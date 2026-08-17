@@ -25,7 +25,26 @@ use serde::{Deserialize, Serialize};
 
 /// Manifest schema version. Bumped when the on-disk layout or artifact encoding changes in a way an
 /// older build could misread; [`SnapshotManifest::decode`] refuses anything newer than it knows.
-pub const MANIFEST_VERSION: u32 = 1;
+///
+/// v2 (Phase 3): the three OSCrypt-bearing artifacts (`cookies`, `passwords`, `autofill`) now carry a
+/// PORTABLE payload — the verbatim database PLUS a sidecar of values decrypted from the host's OSCrypt
+/// key — so a snapshot restores logged-in across OSes. A v1-only build reading a v2 manifest would
+/// write those databases verbatim and, cross-OS, hand Chromium ciphertext it cannot decrypt (which
+/// razes whole eTLD groups). Refusing to read v2 in an old build is therefore the safe outcome, which
+/// is exactly what the version gate does.
+pub const MANIFEST_VERSION: u32 = 2;
+
+/// Which OSCrypt-bearing store a portable artifact is, so a restore knows how to re-seal its values.
+/// The re-encrypt formula differs: cookies prepend `SHA256(host_key)` and have a plaintext-`value`
+/// fallback; passwords and autofill are bare OSCrypt with NO fallback (an unreachable target key means
+/// they are reported not-restored, never written wrong).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PortableKind {
+    Cookies,
+    Logins,
+    Autofill,
+}
 
 /// How an artifact's bytes are produced and applied. The kind, not the path, decides the codec —
 /// which is why a LevelDB DOM store and a SQLite one can share the artifact id `localstorage`.
@@ -65,6 +84,11 @@ pub struct ArtifactSpec {
     /// and yields a store Chromium may raze on open. These are captured only when the browser is
     /// provably stopped, and carried forward by digest otherwise.
     pub quiesced_only: bool,
+    /// Set on the three OSCrypt-bearing SQLite artifacts. Capture additionally decrypts every
+    /// encrypted cell under the HOST key and seals the plaintext into the artifact; restore re-seals
+    /// under the TARGET key. `None` = carried verbatim (the correct answer for `history`, whose
+    /// contents are not key-bound, and for the non-SQLite kinds).
+    pub portable: Option<PortableKind>,
 }
 
 /// THE allowlist. Verified against nine real profiles on this machine: `Cookies`, `LocalStorage`,
@@ -77,42 +101,49 @@ pub const ARTIFACTS: &[ArtifactSpec] = &[
         sources: &["Default/Cookies"],
         kind: ArtifactKind::SqliteVacuum,
         quiesced_only: false,
+        portable: Some(PortableKind::Cookies),
     },
     ArtifactSpec {
         id: "localstorage",
         sources: &["Default/LocalStorage"],
         kind: ArtifactKind::DomStorage,
         quiesced_only: false,
+        portable: None,
     },
     ArtifactSpec {
         id: "sessionstorage",
         sources: &["Default/SessionStorage"],
         kind: ArtifactKind::DomStorage,
         quiesced_only: false,
+        portable: None,
     },
     ArtifactSpec {
         id: "indexeddb",
         sources: &["Default/IndexedDB"],
         kind: ArtifactKind::IndexedDb,
         quiesced_only: false,
+        portable: None,
     },
     ArtifactSpec {
         id: "passwords",
         sources: &["Default/Login Data", "Default/Login Data For Account"],
         kind: ArtifactKind::SqliteVacuum,
         quiesced_only: false,
+        portable: Some(PortableKind::Logins),
     },
     ArtifactSpec {
         id: "autofill",
         sources: &["Default/Web Data", "Default/Account Web Data"],
         kind: ArtifactKind::SqliteVacuum,
         quiesced_only: false,
+        portable: Some(PortableKind::Autofill),
     },
     ArtifactSpec {
         id: "history",
         sources: &["Default/History"],
         kind: ArtifactKind::SqliteVacuum,
         quiesced_only: false,
+        portable: None,
     },
     ArtifactSpec {
         id: "extension-state",
@@ -125,6 +156,7 @@ pub const ARTIFACTS: &[ArtifactSpec] = &[
         ],
         kind: ArtifactKind::DirTar,
         quiesced_only: true,
+        portable: None,
     },
     // Both directories under one id, deliberately. They are two halves of one SNSS session: the
     // plaintext side names the tabs, the encrypted side holds their state, and restoring one
@@ -134,18 +166,21 @@ pub const ARTIFACTS: &[ArtifactSpec] = &[
         sources: &["Default/Sessions", "Default/Sessions_Encrypted"],
         kind: ArtifactKind::DirTar,
         quiesced_only: true,
+        portable: None,
     },
     ArtifactSpec {
         id: "bookmarks",
         sources: &["Default/Bookmarks"],
         kind: ArtifactKind::RawJson,
         quiesced_only: false,
+        portable: None,
     },
     ArtifactSpec {
         id: "prefs-subset",
         sources: &["Default/Preferences"],
         kind: ArtifactKind::PrefsSubset,
         quiesced_only: false,
+        portable: None,
     },
 ];
 
@@ -195,6 +230,22 @@ pub struct ArtifactRecord {
     /// Milliseconds since the capture's first artifact started, so the coherence window is
     /// attributable to a specific pair rather than only reported as a total.
     pub offset_ms: u64,
+    /// Present iff this artifact was captured in portable form: which store it is, and the OSCrypt
+    /// scheme its values were decrypted FROM. Its presence is how [`crate::snapshot`]'s restore knows
+    /// the payload carries a plaintext sidecar to re-seal, rather than a database to write verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable: Option<Portable>,
+}
+
+/// The portability facts a restore needs, recorded at capture time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Portable {
+    pub kind: PortableKind,
+    /// The scheme the values were decrypted from on the capture host — `v10-aes128cbc`
+    /// (Linux/macOS) or `v10-aes256gcm` (Windows). Informational on restore, which always re-seals
+    /// under the TARGET key, but it is what lets the UI say "captured on Windows, restoring on Linux".
+    pub source_scheme: String,
 }
 
 /// Which capture modes are mutually consistent, and which are honest about not being.
@@ -693,6 +744,7 @@ mod tests {
                 counts: vec![("rows".into(), 181)],
                 captured_in_version: 3,
                 offset_ms: 0,
+                portable: None,
             }],
             absent: vec!["bookmarks".into()],
             skipped: vec![("sessions".into(), "browser is running".into())],

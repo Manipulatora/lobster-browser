@@ -41,7 +41,19 @@ argon2 = "0.5"
 password-hash = { version = "0.5", features = ["rand_core"] }
 
 # SEC-12: authenticated at-rest encryption (AES-256-GCM) for secrets in the SQLite stores.
+# Also the Windows-side (v10 DPAPI) Chromium cookie value cipher — "v10"‖nonce(12)‖ct‖tag(16).
 aes-gcm = "0.10"
+# Phase 3 OSCrypt codec: the Linux/macOS Chromium cookie value cipher is AES-128-CBC with a fixed
+# 16×0x20 IV and PKCS#7 padding (`snapshot::oscrypt`). `aes` gives the raw block cipher, `cbc` the
+# vetted mode — the same RustCrypto primitives Chromium's own values were sealed with, which is what
+# makes the known-answer vectors meaningful rather than a re-derivation of our own arithmetic.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+# Chromium's OSCrypt key derivation is PBKDF2-HMAC-SHA1 (Linux 1 iter / macOS 1003 iters). SHA-1 is
+# used ONLY as the KDF's PRF here, never as an integrity primitive — that is BLAKE3 (blob) and
+# SHA-256 (the cookie domain-hash oracle) elsewhere.
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha1 = "0.10"
 # Encoding for ciphertext blobs + the persisted key file.
 base64 = "0.22"
 # SEC-2: OS keychain wrap for the Local Store Key (LSK) — Secret Service / DPAPI / Keychain.
@@ -82,6 +94,23 @@ tracing-subscriber = "0.3"
 # local-API port / SQLite. Desktop-only plugin (no mobile support).
 [target."cfg(not(any(target_os = \"android\", target_os = \"ios\")))".dependencies]
 tauri-plugin-single-instance = "2"
+
+# Windows OSCrypt v10 key custody (`snapshot::oscrypt::windows`): the 32-byte AES-256-GCM key is
+# `base64("DPAPI" ‖ CryptProtectData(rawKey))` in Local State. CryptProtectData/CryptUnprotectData
+# with no entropy bind the blob to the current user, so our own process both reads and creates it.
+# Target-gated so a Linux `cargo test --lib` never pulls or compiles it; the pure v10 GCM value
+# format in `oscrypt` is cfg-independent and unit-tested with an injected key on Linux.
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+# macOS OSCrypt v10 key custody (`snapshot::oscrypt::macos`): the v10 key is
+# PBKDF2-HMAC-SHA1(1003, "saltysalt", <Keychain generic password>). Reading that generic password
+# ("Chromium Safe Storage" / account "Chromium") is a Keychain access, gated behind explicit
+# one-time consent at the call site. Target-gated for the same reason as the Windows dep; the mock
+# key derivation and the --use-mock-keychain guard live in `oscrypt` cfg-independently and ARE
+# unit-tested on Linux.
+[target."cfg(target_os = \"macos\")".dependencies]
+security-framework = "2"
 
 [features]
 # Enabled by tauri-cli in production builds; keeps custom-protocol assets embedded.

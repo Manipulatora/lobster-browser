@@ -294,6 +294,7 @@ mod tests {
             counts: Vec::new(),
             captured_in_version: 1,
             offset_ms: 0,
+            portable: None,
         }
     }
 

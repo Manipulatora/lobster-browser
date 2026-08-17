@@ -35,6 +35,7 @@ pub mod dir_tar;
 pub mod dom_storage;
 pub mod idb;
 pub mod manifest;
+pub mod oscrypt;
 pub mod prefs;
 pub mod sqlite_copy;
 pub mod vault;
@@ -49,9 +50,32 @@ use dom_storage::{DomBackend, DomRecords, DomStore};
 use idb::IdbRecords;
 use manifest::{
     digest_hex, resolve_source, ArtifactKind, ArtifactRecord, CaptureMode, Coherence, Fidelity,
-    Identity, IdentityMismatch, SnapshotManifest, ARTIFACTS, MANIFEST_VERSION,
+    Identity, IdentityMismatch, Portable, SnapshotManifest, ARTIFACTS, MANIFEST_VERSION,
 };
+use oscrypt::transcode::{self, AtRest, PortableArtifact};
+use oscrypt::{host_keyring, KeyringContext, OsCryptKeyring, OscryptMode};
 use vault::SnapshotVault;
+
+/// Build the [`KeyringContext`] for a user-data-dir. `allow_key_creation` is the one thing that
+/// differs between capture (false — a jar with no key is nothing to decrypt) and restore (true — a
+/// fresh target dir needs a key generated before we can seal values under it).
+///
+/// macOS consent defaults to `true` here because capture and restore are user-initiated actions the
+/// command layer already gates; the OS Keychain prompt is the actual consent surface. Report to the
+/// command agent: if a profile is `oscrypt_mode != mock`, the capture/restore command MUST show its
+/// own consent copy before calling in, and may set this false to refuse the read outright.
+fn keyring_context(local_state: &Path, allow_key_creation: bool) -> KeyringContext<'_> {
+    KeyringContext {
+        local_state,
+        // Capture/restore in this module always read/seal under the profile's ambient key. The
+        // mock-vs-keychain SELECTION and the --use-mock-keychain FLAG are the launcher's job, gated by
+        // `oscrypt::mock_keychain_flag_allowed`; here we default to the real key, which is correct for
+        // every profile that has not been explicitly migrated to mock.
+        oscrypt_mode: OscryptMode::Keychain,
+        keychain_consent: true,
+        allow_key_creation,
+    }
+}
 
 /// Highest `meta.version` we know how to read for each schema-versioned artifact, from the fork:
 /// Cookies 24/24, Login Data 43/40, Web Data 152/151, History 70/16. Read but not enforced as a
@@ -82,6 +106,10 @@ struct Captured {
     fidelity: Fidelity,
     backend: Option<String>,
     counts: Vec<(String, u64)>,
+    /// Set for the three OSCrypt-bearing artifacts: which store, and the scheme its values were
+    /// decrypted from. Its presence in the manifest is how a restore knows the payload is a portable
+    /// [`PortableArtifact`] rather than a verbatim [`FileSet`].
+    portable: Option<Portable>,
 }
 
 /// One or more whole files carried verbatim, keyed by their path relative to the user-data-dir.
@@ -124,6 +152,36 @@ pub fn capture(
     identity: &Identity,
     options: &CaptureOptions,
 ) -> Result<SnapshotManifest> {
+    // The host keyring decrypts the OSCrypt-bearing artifacts into their portable form. On every
+    // shipping platform this resolves (Linux fixed key, Windows DPAPI as the same user, macOS Keychain
+    // with consent); if it cannot, the portable artifacts cannot be made and capture fails clearly
+    // rather than writing a jar that only restores on the same OS while claiming to be portable.
+    let local_state = udd.join("Local State");
+    let ctx = keyring_context(&local_state, /* allow_key_creation = */ false);
+    let keyring = host_keyring(&ctx)
+        .context("resolving the host OSCrypt key to capture cookies/passwords/autofill portably")?;
+    capture_with_keyring(
+        vault,
+        udd,
+        profile_id,
+        mode,
+        identity,
+        options,
+        keyring.as_ref(),
+    )
+}
+
+/// Capture under an explicit keyring. The public [`capture`] resolves the host keyring and calls this;
+/// tests inject a keyring to exercise a specific cipher path without a platform key source.
+pub fn capture_with_keyring(
+    vault: &SnapshotVault,
+    udd: &Path,
+    profile_id: &str,
+    mode: CaptureMode,
+    identity: &Identity,
+    options: &CaptureOptions,
+    keyring: &dyn OsCryptKeyring,
+) -> Result<SnapshotManifest> {
     if !udd.is_dir() {
         bail!(
             "profile {profile_id} has no user-data-dir at {} — nothing to capture",
@@ -162,6 +220,7 @@ pub fn capture(
         options,
         previous.as_ref(),
         &scratch,
+        keyring,
     );
     let _ = std::fs::remove_dir_all(&scratch);
     match result {
@@ -198,6 +257,7 @@ fn capture_artifacts(
     options: &CaptureOptions,
     previous: Option<&SnapshotManifest>,
     scratch: &Path,
+    keyring: &dyn OsCryptKeyring,
 ) -> Result<SnapshotManifest> {
     std::fs::create_dir_all(scratch)?;
     let started = Instant::now();
@@ -245,7 +305,7 @@ fn capture_artifacts(
         }
 
         let offset_ms = started.elapsed().as_millis() as u64;
-        let captured = match capture_artifact(udd, spec, &scratch.join(spec.id)) {
+        let captured = match capture_artifact(udd, spec, &scratch.join(spec.id), keyring) {
             Ok(Some(captured)) => captured,
             Ok(None) => {
                 absent.push(spec.id.to_string());
@@ -274,6 +334,7 @@ fn capture_artifacts(
             counts: captured.counts,
             captured_in_version: version,
             offset_ms,
+            portable: captured.portable,
         });
     }
 
@@ -298,11 +359,15 @@ fn capture_artifact(
     udd: &Path,
     spec: &manifest::ArtifactSpec,
     scratch: &Path,
+    keyring: &dyn OsCryptKeyring,
 ) -> Result<Option<Captured>> {
     match spec.kind {
         ArtifactKind::SqliteVacuum => {
             std::fs::create_dir_all(scratch)?;
-            let mut files = Vec::new();
+            // The VACUUM outputs stay on disk in `scratch` only long enough to read their bytes (and,
+            // for portable artifacts, decrypt their cells IN MEMORY). Their encrypted cells hold
+            // OSCrypt ciphertext, never plaintext, so nothing unsealed touches disk here.
+            let mut staged_files: Vec<(String, PathBuf)> = Vec::new();
             for (index, source) in spec.sources.iter().enumerate() {
                 let path = resolve_source(udd, source)?;
                 if !path.is_file() {
@@ -314,26 +379,60 @@ fn capture_artifact(
                     let conn = sqlite_copy::open_read_write(&staged)?;
                     sqlite_copy::meta_version(&conn, COOKIES_MAX_VERSION)?;
                 }
-                files.push(FileEntry {
-                    rel: (*source).to_string(),
-                    bytes: std::fs::read(&staged)?,
-                });
-                let _ = std::fs::remove_file(&staged);
+                staged_files.push(((*source).to_string(), staged));
             }
-            if files.is_empty() {
+            if staged_files.is_empty() {
                 return Ok(None);
             }
-            files.sort_by(|a, b| a.rel.cmp(&b.rel));
-            let counts = files
-                .iter()
-                .map(|f| (f.rel.clone(), f.bytes.len() as u64))
-                .collect();
-            Ok(Some(Captured {
-                payload: FileSet { files }.encode()?,
-                fidelity: Fidelity::Full,
-                backend: None,
-                counts,
-            }))
+            staged_files.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let captured = match spec.portable {
+                // PORTABLE — decrypt every OSCrypt cell under the host key and carry the plaintext in
+                // the sealed payload, so restore can re-seal it under a DIFFERENT machine's key.
+                Some(kind) => {
+                    let artifact =
+                        transcode::capture(&staged_files, kind, keyring).with_context(|| {
+                            format!("making `{}` portable at capture time", spec.id)
+                        })?;
+                    let counts = portable_capture_counts(&artifact);
+                    let source_scheme = artifact.scheme.clone();
+                    Captured {
+                        payload: artifact.encode()?,
+                        fidelity: Fidelity::Full,
+                        backend: None,
+                        counts,
+                        portable: Some(Portable {
+                            kind,
+                            source_scheme,
+                        }),
+                    }
+                }
+                // VERBATIM — `history` and any other non-key-bound SQLite artifact ride as-is.
+                None => {
+                    let mut files = Vec::new();
+                    for (rel, staged) in &staged_files {
+                        files.push(FileEntry {
+                            rel: rel.clone(),
+                            bytes: std::fs::read(staged)?,
+                        });
+                    }
+                    let counts = files
+                        .iter()
+                        .map(|f| (f.rel.clone(), f.bytes.len() as u64))
+                        .collect();
+                    Captured {
+                        payload: FileSet { files }.encode()?,
+                        fidelity: Fidelity::Full,
+                        backend: None,
+                        counts,
+                        portable: None,
+                    }
+                }
+            };
+            for (_, staged) in &staged_files {
+                let _ = std::fs::remove_file(staged);
+            }
+            Ok(Some(captured))
         }
         ArtifactKind::DomStorage => {
             let store = DomStore::from_artifact_id(spec.id)
@@ -363,6 +462,7 @@ fn capture_artifact(
                         fidelity: Fidelity::Full,
                         backend: Some(backend.label().to_string()),
                         counts,
+                        portable: None,
                     }))
                 }
                 DomBackend::LevelDb => {
@@ -380,6 +480,7 @@ fn capture_artifact(
                         fidelity: Fidelity::Opaque,
                         backend: Some(backend.label().to_string()),
                         counts,
+                        portable: None,
                     }))
                 }
             }
@@ -402,6 +503,7 @@ fn capture_artifact(
                 fidelity: Fidelity::Full,
                 backend: None,
                 counts,
+                portable: None,
             }))
         }
         ArtifactKind::DirTar => {
@@ -425,6 +527,7 @@ fn capture_artifact(
                 fidelity: Fidelity::Opaque,
                 backend: None,
                 counts,
+                portable: None,
             }))
         }
         ArtifactKind::RawJson => {
@@ -450,6 +553,7 @@ fn capture_artifact(
                 fidelity: Fidelity::Full,
                 backend: None,
                 counts,
+                portable: None,
             }))
         }
         ArtifactKind::PrefsSubset => {
@@ -468,9 +572,21 @@ fn capture_artifact(
                 fidelity: Fidelity::Full,
                 backend: None,
                 counts,
+                portable: None,
             }))
         }
     }
+}
+
+/// Per-file portable-cell counts for the manifest/UI: how many encrypted values each database in the
+/// artifact carried. `cookies` (rel `Default/Cookies`) reads as the count of session cookies made
+/// portable, which is the number a "restore still logged in" check cares about.
+fn portable_capture_counts(artifact: &PortableArtifact) -> Vec<(String, u64)> {
+    artifact
+        .dbs
+        .iter()
+        .map(|db| (db.rel.clone(), db.cells.len() as u64))
+        .collect()
 }
 
 /// The top-level tar prefix for a directory source: its last path component, so
@@ -670,6 +786,49 @@ pub fn restore(
     target: &Identity,
     force: bool,
 ) -> Result<RestoreReport> {
+    // Resolve the TARGET machine's key to re-seal portable values under. Unlike capture this is
+    // allowed to FAIL: a denied macOS Keychain, an unwritable Local State. An unreachable key is not a
+    // restore failure — cookies fall back to the plaintext `value` column, and passwords/autofill are
+    // reported not-restored. A keyring whose `key_for_encrypt` errors is exactly that signal, so a
+    // failure here becomes a no-encrypt-key keyring rather than an early return.
+    let local_state = udd.join("Local State");
+    let ctx = keyring_context(&local_state, /* allow_key_creation = */ true);
+    let resolved = host_keyring(&ctx);
+    let keyring: Box<dyn OsCryptKeyring> = match resolved {
+        Ok(keyring) => keyring,
+        Err(err) => {
+            tracing::warn!(
+                profile_id,
+                version,
+                %err,
+                "target OSCrypt key unreachable; cookies will restore as plaintext and \
+                 passwords/autofill will be reported not-restored"
+            );
+            Box::new(oscrypt::InjectedKeyring::decrypt_only(Vec::new()))
+        }
+    };
+    restore_with_keyring(
+        vault,
+        udd,
+        profile_id,
+        version,
+        target,
+        force,
+        keyring.as_ref(),
+    )
+}
+
+/// Restore under an explicit keyring. The public [`restore`] resolves the target host keyring and
+/// calls this; tests inject a keyring to drive a specific target-key or unreachable-key path.
+pub fn restore_with_keyring(
+    vault: &SnapshotVault,
+    udd: &Path,
+    profile_id: &str,
+    version: u64,
+    target: &Identity,
+    force: bool,
+    keyring: &dyn OsCryptKeyring,
+) -> Result<RestoreReport> {
     let manifest = vault.manifest(profile_id, version)?;
 
     // IDENTITY BEFORE BYTES. Checked before anything is staged or parked, so a refusal costs nothing
@@ -739,14 +898,16 @@ pub fn restore(
     // rollback at all.
     let mut staged = Vec::new();
     for record in &manifest.artifacts {
-        match stage_artifact(vault, udd, profile_id, record, &stage_root) {
-            Ok(Some(item)) => staged.push(item),
-            Ok(None) => report.artifacts.push(RestoredArtifact {
-                id: record.id.clone(),
-                status: RestoreStatus::Skipped,
-                counts: Vec::new(),
-                detail: Some("nothing to apply".into()),
-            }),
+        match stage_artifact(vault, udd, profile_id, record, &stage_root, keyring) {
+            Ok(StageOutcome::Ready(item)) => staged.push(item),
+            Ok(StageOutcome::Skipped { counts, detail }) => {
+                report.artifacts.push(RestoredArtifact {
+                    id: record.id.clone(),
+                    status: RestoreStatus::Skipped,
+                    counts,
+                    detail: Some(detail),
+                })
+            }
             Err(err) => {
                 let detail = format!("{err:#}");
                 tracing::error!(profile_id, version, artifact = %record.id, %detail, "staging failed");
@@ -829,13 +990,26 @@ pub fn restore(
 
 /// Decrypt, digest-check, materialise and read back one artifact. `Ok(None)` when there is nothing to
 /// apply on this machine.
+/// The result of staging one artifact: either a verified [`Staged`] ready to swap in, or a deliberate
+/// skip with a reason. A skip is NOT a failure — it is a portable password/autofill store whose target
+/// key is unreachable (left as-is rather than blanked), or an artifact with nothing to apply on this
+/// machine.
+enum StageOutcome {
+    Ready(Staged),
+    Skipped {
+        counts: Vec<(String, u64)>,
+        detail: String,
+    },
+}
+
 fn stage_artifact(
     vault: &SnapshotVault,
     udd: &Path,
     profile_id: &str,
     record: &ArtifactRecord,
     stage_root: &Path,
-) -> Result<Option<Staged>> {
+    keyring: &dyn OsCryptKeyring,
+) -> Result<StageOutcome> {
     let payload = vault.get_artifact(
         profile_id,
         record.captured_in_version,
@@ -852,6 +1026,13 @@ fn stage_artifact(
     }
     let stage = stage_root.join(&record.id);
     std::fs::create_dir_all(&stage)?;
+
+    // PORTABLE — a cookie/password/autofill store whose values were sealed under the CAPTURE host's
+    // key. Re-seal them under the TARGET key (or the plaintext-value fallback), and read back through
+    // the decrypt path before the swap. This must precede the verbatim SqliteVacuum arm.
+    if record.portable.is_some() {
+        return stage_portable_artifact(record, &payload, &stage, udd, keyring);
+    }
 
     match record.kind {
         ArtifactKind::SqliteVacuum | ArtifactKind::RawJson => {
@@ -885,7 +1066,7 @@ fn stage_artifact(
                 &record.plain_digest,
                 &FileSet { files: readback }.encode()?,
             )?;
-            Ok(Some(Staged {
+            Ok(StageOutcome::Ready(Staged {
                 id: record.id.clone(),
                 placements,
                 counts,
@@ -929,7 +1110,7 @@ fn stage_artifact(
                     sqlite_copy::integrity_check(&staged_path)?;
                     let reread = dom_storage::read_records(&staged_path, store)?;
                     assert_readback(&record.id, &record.plain_digest, &reread.encode()?)?;
-                    Ok(Some(Staged {
+                    Ok(StageOutcome::Ready(Staged {
                         id: record.id.clone(),
                         placements: vec![(live, staged_path)],
                         counts: vec![
@@ -967,7 +1148,7 @@ fn stage_artifact(
                         &record.plain_digest,
                         &dir_tar::tar_dirs(&[(prefix, staged_path.clone())])?,
                     )?;
-                    Ok(Some(Staged {
+                    Ok(StageOutcome::Ready(Staged {
                         id: record.id.clone(),
                         placements: vec![(live, staged_path)],
                         counts: vec![("files".to_string(), files)],
@@ -985,7 +1166,7 @@ fn stage_artifact(
             sync_path(&staged_path)?;
             let reread = idb::read_records(&staged_path, &records)?;
             assert_readback(&record.id, &record.plain_digest, &reread.encode()?)?;
-            Ok(Some(Staged {
+            Ok(StageOutcome::Ready(Staged {
                 id: record.id.clone(),
                 placements: vec![(live, staged_path)],
                 counts: vec![
@@ -1016,14 +1197,17 @@ fn stage_artifact(
                 placements.push((resolve_source(udd, source)?, staged_path));
             }
             if placements.is_empty() {
-                return Ok(None);
+                return Ok(StageOutcome::Skipped {
+                    counts: Vec::new(),
+                    detail: "nothing to apply".into(),
+                });
             }
             assert_readback(
                 &record.id,
                 &record.plain_digest,
                 &dir_tar::tar_dirs(&roots)?,
             )?;
-            Ok(Some(Staged {
+            Ok(StageOutcome::Ready(Staged {
                 id: record.id.clone(),
                 placements,
                 counts: vec![
@@ -1058,7 +1242,7 @@ fn stage_artifact(
                      not reproduce the captured subset"
                 );
             }
-            Ok(Some(Staged {
+            Ok(StageOutcome::Ready(Staged {
                 id: record.id.clone(),
                 placements: vec![(live, staged_path)],
                 counts: vec![("keysApplied".to_string(), applied.len() as u64)],
@@ -1066,6 +1250,120 @@ fn stage_artifact(
             }))
         }
     }
+}
+
+/// Stage a portable cookie/password/autofill store: write each verbatim database, re-seal its cells
+/// under the TARGET key (or the plaintext-value fallback), and read every re-sealed cell back through
+/// the decrypt path BEFORE the swap. The read-back is load-bearing, not belt-and-braces: a cookie the
+/// target cannot decrypt makes Chromium delete its whole eTLD group on load, and a wrong-key autofill
+/// value blanks silently — both are caught here, with the live profile still untouched.
+fn stage_portable_artifact(
+    record: &ArtifactRecord,
+    payload: &[u8],
+    stage: &Path,
+    udd: &Path,
+    keyring: &dyn OsCryptKeyring,
+) -> Result<StageOutcome> {
+    let artifact = PortableArtifact::decode(payload)
+        .with_context(|| format!("decoding portable payload for `{}`", record.id))?;
+    let kind = record
+        .portable
+        .as_ref()
+        .map(|p| p.kind)
+        .expect("stage_portable_artifact called only when record.portable is set");
+    if artifact.kind != kind {
+        bail!(
+            "PORTABLE_KIND_MISMATCH: `{}` manifest says {:?} but its payload carries {:?}",
+            record.id,
+            kind,
+            artifact.kind
+        );
+    }
+
+    let mut placements = Vec::new();
+    let mut counts = Vec::new();
+    let mut at_rest_seen: Option<AtRest> = None;
+
+    for file in &artifact.files {
+        let live = resolve_source(udd, &file.rel)?;
+        let staged_path = stage.join(&file.rel);
+        if let Some(parent) = staged_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        write_and_sync(&staged_path, &file.bytes)?;
+        // The verbatim database must be structurally sound before we UPDATE cells into it — a
+        // truncated blob fails here rather than when Chromium opens it and razes the store.
+        sqlite_copy::integrity_check(&staged_path)?;
+
+        // The decrypted cells for this file. A file with no cells (only plaintext-value cookies, or
+        // logins with empty passwords) has none, which restore_cells handles as a verbatim write.
+        let db = artifact
+            .dbs
+            .iter()
+            .find(|d| d.rel == file.rel)
+            .cloned()
+            .unwrap_or(transcode::PortableDb {
+                rel: file.rel.clone(),
+                cells: Vec::new(),
+            });
+
+        let outcome =
+            transcode::restore_cells(&staged_path, kind, &db, keyring).with_context(|| {
+                format!(
+                    "re-sealing `{}` ({}) under the target key",
+                    record.id, file.rel
+                )
+            })?;
+
+        if outcome.skip_artifact {
+            // Passwords/autofill with an unreachable target key: leave the whole artifact unapplied so
+            // the target keeps its own store, rather than write a partial or blanked one.
+            return Ok(StageOutcome::Skipped {
+                counts: Vec::new(),
+                detail: outcome
+                    .reason
+                    .unwrap_or_else(|| "not restored: target OSCrypt key unreachable".into()),
+            });
+        }
+
+        transcode::verify_cells(&staged_path, kind, &db, keyring, outcome.at_rest).with_context(
+            || format!("reading `{}` ({}) back after re-seal", record.id, file.rel),
+        )?;
+
+        sync_path(&staged_path)?;
+        counts.push((file.rel.clone(), outcome.applied));
+        at_rest_seen = Some(match at_rest_seen {
+            // Plaintext is the more-degraded of the two; if any file fell back, report the artifact as
+            // plaintext so the UI surfaces it (only cookies can reach this).
+            Some(AtRest::Plaintext) => AtRest::Plaintext,
+            _ => outcome.at_rest,
+        });
+        placements.push((live, staged_path));
+    }
+
+    if placements.is_empty() {
+        return Ok(StageOutcome::Skipped {
+            counts: Vec::new(),
+            detail: "nothing to apply".into(),
+        });
+    }
+
+    let detail = match at_rest_seen {
+        Some(AtRest::Plaintext) => Some(format!(
+            "atRest=plaintext — the target OSCrypt key was unreachable, so `{}` values were written to \
+             the plaintext `value` column (loadable, and shown as plaintext in the UI)",
+            record.id
+        )),
+        Some(AtRest::Encrypted) => Some("atRest=encrypted".to_string()),
+        _ => None,
+    };
+
+    Ok(StageOutcome::Ready(Staged {
+        id: record.id.clone(),
+        placements,
+        counts,
+        detail,
+    }))
 }
 
 fn assert_readback(id: &str, expected_digest: &str, readback: &[u8]) -> Result<()> {
@@ -1179,11 +1477,45 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
 
-    fn temp_root(tag: &str) -> PathBuf {
+    /// A scratch directory that removes itself, INCLUDING on panic or an early `return`.
+    ///
+    /// This is not tidiness. The real-profile tests copy an actual user-data-dir in here, and the
+    /// Linux OSCrypt key is a fixed public constant — so a leaked scratch directory is a copy of the
+    /// user's live session tokens sitting outside the profile. A trailing `remove_dir_all(...).ok()`
+    /// does not run when an assertion fires or when a gated test returns early, and that is exactly
+    /// how one real profile's 181 encrypted cookie values were found still in /tmp.
+    struct TempRoot(PathBuf);
+
+    impl std::ops::Deref for TempRoot {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for TempRoot {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl TempRoot {
+        fn join(&self, p: impl AsRef<Path>) -> PathBuf {
+            self.0.join(p)
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_root(tag: &str) -> TempRoot {
         let dir =
             std::env::temp_dir().join(format!("lobster-snapshot-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        TempRoot(dir)
     }
 
     fn vault_at(root: &Path) -> SnapshotVault {
@@ -1364,6 +1696,230 @@ mod tests {
             r.get(0)
         })
         .unwrap()
+    }
+
+    /// A realistic v24 cookie jar whose one session cookie is ENCRYPTED under `seal` (all 20 NOT NULL
+    /// columns present), plus a `logins` row whose password is encrypted under `seal`. These values
+    /// are key-bound, so a verbatim cross-OS copy would be undecryptable — which is exactly what the
+    /// portable transcode exists to fix.
+    fn build_encrypted_profile(
+        udd: &Path,
+        seal: &oscrypt::OsKey,
+        host: &str,
+        cookie_value: &[u8],
+        password: &[u8],
+    ) {
+        let default = udd.join("Default");
+        std::fs::create_dir_all(&default).unwrap();
+
+        let cookies = Connection::open(default.join("Cookies")).unwrap();
+        cookies
+            .pragma_update(None, "journal_mode", "delete")
+            .unwrap();
+        cookies
+            .execute_batch(
+                "CREATE TABLE meta(key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+                 INSERT INTO meta VALUES('version','24'),('last_compatible_version','24');
+                 CREATE TABLE cookies(creation_utc INTEGER NOT NULL, host_key TEXT NOT NULL,\
+                     top_frame_site_key TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,\
+                     encrypted_value BLOB NOT NULL, path TEXT NOT NULL, expires_utc INTEGER NOT NULL,\
+                     is_secure INTEGER NOT NULL, is_httponly INTEGER NOT NULL,\
+                     last_access_utc INTEGER NOT NULL, has_expires INTEGER NOT NULL,\
+                     is_persistent INTEGER NOT NULL, priority INTEGER NOT NULL, samesite INTEGER NOT NULL,\
+                     source_scheme INTEGER NOT NULL, source_port INTEGER NOT NULL,\
+                     last_update_utc INTEGER NOT NULL, source_type INTEGER NOT NULL,\
+                     has_cross_site_ancestor INTEGER NOT NULL);
+                 CREATE UNIQUE INDEX cookies_unique_index ON cookies(host_key, top_frame_site_key,\
+                     has_cross_site_ancestor, name, path, source_scheme, source_port);",
+            )
+            .unwrap();
+        let ev = oscrypt::encrypt_cookie_value(seal, host, cookie_value).unwrap();
+        cookies
+            .execute(
+                "INSERT INTO cookies VALUES(13429403387583785, ?1, '', 'sid', '', ?2, '/', 0,1,1,0,0,1,1,0,2,443,0,0,0)",
+                rusqlite::params![host, ev],
+            )
+            .unwrap();
+        drop(cookies);
+
+        let login = Connection::open(default.join("Login Data")).unwrap();
+        login
+            .execute_batch(
+                "CREATE TABLE meta(key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+                 INSERT INTO meta VALUES('version','43'),('last_compatible_version','40');
+                 CREATE TABLE logins(origin_url VARCHAR NOT NULL, username_value VARCHAR,\
+                     password_value BLOB, signon_realm VARCHAR NOT NULL, date_created INTEGER NOT NULL,\
+                     blacklisted_by_user INTEGER NOT NULL, scheme INTEGER NOT NULL);",
+            )
+            .unwrap();
+        let pw = oscrypt::encrypt_value(seal, password).unwrap();
+        login
+            .execute(
+                "INSERT INTO logins VALUES('https://x/','alice',?1,'https://x/',0,0,0)",
+                rusqlite::params![pw],
+            )
+            .unwrap();
+        drop(login);
+    }
+
+    /// THE Phase-3 proof at the mod.rs level: capture a jar sealed under key A (a Linux CBC key), wipe,
+    /// restore under key B (a Windows-style GCM key). The session cookie and the password survive,
+    /// decrypt-verified under B — a snapshot captured on one OS restores logged-in on another.
+    #[test]
+    fn portable_restore_across_oscrypt_keys_keeps_the_session() {
+        let root = temp_root("xos");
+        let udd = root.join("prf_test");
+        let key_a = oscrypt::OsKey::Aes128Cbc(oscrypt::linux::LINUX_V10_KEY);
+        build_encrypted_profile(
+            &udd,
+            &key_a,
+            "1procard.com",
+            b"SID=cross-os-session",
+            b"hunter2",
+        );
+        let vault = vault_at(&root);
+
+        let ring_a = oscrypt::InjectedKeyring::single(oscrypt::OsKey::Aes128Cbc(
+            oscrypt::linux::LINUX_V10_KEY,
+        ));
+        let manifest = capture_with_keyring(
+            &vault,
+            &udd,
+            "prf_test",
+            CaptureMode::Quiesced,
+            &Identity::fixture(),
+            &CaptureOptions::default(),
+            &ring_a,
+        )
+        .unwrap();
+        // The manifest records that cookies are portable and under which source scheme.
+        let ck = manifest.artifact("cookies").unwrap();
+        assert_eq!(ck.portable.as_ref().unwrap().source_scheme, "v10-aes128cbc");
+        assert_eq!(manifest.manifest_version, 2);
+
+        std::fs::remove_dir_all(&udd).unwrap();
+
+        // Restore under a DIFFERENT key — the target machine.
+        let ring_b = oscrypt::InjectedKeyring::single(oscrypt::OsKey::Aes256Gcm([0x5au8; 32]));
+        let report = restore_with_keyring(
+            &vault,
+            &udd,
+            "prf_test",
+            1,
+            &Identity::fixture(),
+            false,
+            &ring_b,
+        )
+        .unwrap();
+        assert!(report.ok, "{:?}", report.failure);
+
+        // The cookie is now sealed under B, decrypts to the original value, and its plaintext column
+        // was cleared (a row with both populated is dropped by Chromium).
+        let conn = Connection::open(udd.join("Default").join("Cookies")).unwrap();
+        let ev: Vec<u8> = conn
+            .query_row(
+                "SELECT encrypted_value FROM cookies WHERE name='sid'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            oscrypt::decrypt_cookie_value(&ring_b, "1procard.com", &ev).unwrap(),
+            b"SID=cross-os-session"
+        );
+        let val: String = conn
+            .query_row("SELECT value FROM cookies WHERE name='sid'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(val, "");
+        drop(conn);
+
+        // The password is re-sealed under B and decrypts back.
+        let login = Connection::open(udd.join("Default").join("Login Data")).unwrap();
+        let pw: Vec<u8> = login
+            .query_row("SELECT password_value FROM logins", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(oscrypt::decrypt_value(&ring_b, &pw).unwrap(), b"hunter2");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The unreachable-target-key path at the mod.rs level: cookies fall back to the plaintext `value`
+    /// column with `atRest=plaintext` surfaced, and passwords are reported NOT restored (the store is
+    /// left absent) rather than blanked.
+    #[test]
+    fn portable_restore_with_unreachable_key_degrades_honestly() {
+        let root = temp_root("unreach");
+        let udd = root.join("prf_test");
+        let key_a = oscrypt::OsKey::Aes128Cbc(oscrypt::linux::LINUX_V10_KEY);
+        build_encrypted_profile(&udd, &key_a, "1procard.com", b"SID=keep-me", b"pw");
+        let vault = vault_at(&root);
+        let ring_a = oscrypt::InjectedKeyring::single(oscrypt::OsKey::Aes128Cbc(
+            oscrypt::linux::LINUX_V10_KEY,
+        ));
+        capture_with_keyring(
+            &vault,
+            &udd,
+            "prf_test",
+            CaptureMode::Quiesced,
+            &Identity::fixture(),
+            &CaptureOptions::default(),
+            &ring_a,
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&udd).unwrap();
+
+        // A keyring with no encrypt key — the denied-Keychain target shape.
+        let unreachable = oscrypt::InjectedKeyring::decrypt_only(Vec::new());
+        let report = restore_with_keyring(
+            &vault,
+            &udd,
+            "prf_test",
+            1,
+            &Identity::fixture(),
+            false,
+            &unreachable,
+        )
+        .unwrap();
+        assert!(report.ok, "{:?}", report.failure);
+
+        // Cookies loaded, as a plaintext value with an empty encrypted_value.
+        let conn = Connection::open(udd.join("Default").join("Cookies")).unwrap();
+        let (val, enc_len): (String, i64) = conn
+            .query_row(
+                "SELECT value, length(encrypted_value) FROM cookies WHERE name='sid'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(val, "SID=keep-me");
+        assert_eq!(enc_len, 0);
+        drop(conn);
+        let cookies_row = report.artifacts.iter().find(|a| a.id == "cookies").unwrap();
+        assert!(
+            cookies_row
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("atRest=plaintext"),
+            "{:?}",
+            cookies_row.detail
+        );
+
+        // Passwords: reported skipped, and NOT written — the target keeps whatever it had (nothing).
+        let pw_row = report
+            .artifacts
+            .iter()
+            .find(|a| a.id == "passwords")
+            .unwrap();
+        assert_eq!(pw_row.status, RestoreStatus::Skipped);
+        assert!(
+            !udd.join("Default").join("Login Data").exists(),
+            "passwords must not be written under an unreachable key"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2020,6 +2576,133 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// THE CROSS-OS CLAIM, on a REAL profile. Gated on `LOBSTER_SNAPSHOT_REAL_PROFILE`.
+    ///
+    /// Captures under the host's real OSCrypt key and restores under a DIFFERENT key — an AES-256-GCM
+    /// key, i.e. the Windows DPAPI shape rather than Linux's AES-128-CBC — which is exactly the move a
+    /// user makes carrying a profile from Linux to Windows. Then it decrypts every restored cookie
+    /// under the target key and asserts the plaintext DIGEST matches what the source jar held, and
+    /// that the `SHA256(host_key)` domain prefix was correctly recomputed rather than carried over.
+    ///
+    /// Digests only: these are the user's live session tokens and must never be materialised into a
+    /// test's output.
+    #[test]
+    fn a_real_profile_survives_a_change_of_platform_key() {
+        let Ok(source) = std::env::var("LOBSTER_SNAPSHOT_REAL_PROFILE") else {
+            eprintln!(
+                "skipping: set LOBSTER_SNAPSHOT_REAL_PROFILE=<path to a profile user-data-dir>"
+            );
+            return;
+        };
+        let source = PathBuf::from(source);
+        let jar = source.join("Default").join("Cookies");
+        if !jar.is_file() {
+            eprintln!("skipping: {} has no cookie jar", source.display());
+            return;
+        }
+
+        let root = temp_root("xos-real");
+        let udd = root.join("prf_xos");
+        copy_tree(&source, &udd);
+        let vault = vault_at(&root);
+
+        // Ground truth from the SOURCE jar, under the host key: rowid -> digest of the value with the
+        // domain prefix stripped, which is what must survive the platform change.
+        let host = oscrypt::InjectedKeyring::single(oscrypt::OsKey::Aes128Cbc(
+            oscrypt::linux::LINUX_V10_KEY,
+        ));
+        let mut expected: Vec<(i64, String)> = Vec::new();
+        {
+            let conn = Connection::open(udd.join("Default").join("Cookies")).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT rowid, host_key, encrypted_value FROM cookies WHERE length(encrypted_value) > 0")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                    ))
+                })
+                .unwrap();
+            for row in rows {
+                let (rowid, host_key, sealed) = row.unwrap();
+                let body = oscrypt::decrypt_cookie_value(&host, &host_key, &sealed).unwrap();
+                expected.push((rowid, manifest::digest_hex(&body)));
+            }
+        }
+        if expected.is_empty() {
+            eprintln!(
+                "skipping: no encrypted cookie values in {}",
+                source.display()
+            );
+            std::fs::remove_dir_all(root).ok();
+            return;
+        }
+
+        let manifest = capture_with_keyring(
+            &vault,
+            &udd,
+            "prf_xos",
+            CaptureMode::Quiesced,
+            &Identity::fixture(),
+            &CaptureOptions::default(),
+            &host,
+        )
+        .unwrap();
+
+        // A different platform's key shape entirely: AES-256-GCM, as Windows DPAPI yields.
+        let target = oscrypt::InjectedKeyring::single(oscrypt::OsKey::Aes256Gcm([0x5Au8; 32]));
+
+        std::fs::remove_dir_all(&udd).unwrap();
+        let report = restore_with_keyring(
+            &vault,
+            &udd,
+            "prf_xos",
+            manifest.version,
+            &Identity::fixture(),
+            false,
+            &target,
+        )
+        .unwrap();
+        assert!(report.ok, "cross-key restore failed: {:?}", report.failure);
+
+        let conn = Connection::open(udd.join("Default").join("Cookies")).unwrap();
+        let mut checked = 0usize;
+        for (rowid, want) in &expected {
+            let (host_key, sealed): (String, Vec<u8>) = conn
+                .query_row(
+                    "SELECT host_key, encrypted_value FROM cookies WHERE rowid = ?1",
+                    [rowid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(
+                !sealed.is_empty(),
+                "row {rowid} lost its encrypted_value across the platform change"
+            );
+            // Readable under the TARGET key only — proof it was genuinely re-sealed, not copied.
+            // The oracle also proves the domain prefix was recomputed for THIS host_key, since it
+            // rejects any plaintext not prefixed with SHA256(host_key).
+            assert!(
+                oscrypt::decrypt_cookie_value(&host, &host_key, &sealed).is_err(),
+                "row {rowid} is still readable under the SOURCE key; it was not re-sealed"
+            );
+            let body = oscrypt::decrypt_cookie_value(&target, &host_key, &sealed).unwrap();
+            assert_eq!(
+                &manifest::digest_hex(&body),
+                want,
+                "row {rowid}'s value changed across the platform change"
+            );
+            checked += 1;
+        }
+        eprintln!("cross-platform-key: {checked} real cookie values survived intact");
+        assert_eq!(checked, expected.len());
+        drop(conn);
+        std::fs::remove_dir_all(root).ok();
+    }
+
     /// Round-trip a REAL profile directory, gated on `LOBSTER_SNAPSHOT_REAL_PROFILE`.
     ///
     /// The synthetic fixtures above are built to the shapes verified on disk, but a fixture can only
@@ -2134,6 +2817,13 @@ mod tests {
         // each time (see `sqlite_copy::vacuum_into`). Reading the restored artifacts back through the
         // capture codec is the claim that is actually true and actually matters.
         for record in &manifest.artifacts {
+            // Portable artifacts do NOT round-trip byte-for-byte — they are re-encrypted under the
+            // TARGET key, and VACUUM changes bytes regardless. Their claim is value survival, verified
+            // separately below. `live_readback` would also mis-`FileSet::decode` their PortableArtifact
+            // payload, so they must be skipped here.
+            if record.portable.is_some() {
+                continue;
+            }
             let payload = vault
                 .get_artifact(
                     "prf_real",
@@ -2150,14 +2840,13 @@ mod tests {
                 record.id
             );
         }
-        // And for the artifacts that are carried as whole files, assert plain byte equality of the file
-        // on disk against the bytes the ledger holds — no codec in the middle at all.
+        // For the NON-portable whole-file artifacts (`history`, `bookmarks`), assert plain byte
+        // equality of the file on disk against the bytes the ledger holds — no codec in the middle.
         let mut files_compared = 0;
-        for record in manifest
-            .artifacts
-            .iter()
-            .filter(|a| matches!(a.kind, ArtifactKind::SqliteVacuum | ArtifactKind::RawJson))
-        {
+        for record in manifest.artifacts.iter().filter(|a| {
+            a.portable.is_none()
+                && matches!(a.kind, ArtifactKind::SqliteVacuum | ArtifactKind::RawJson)
+        }) {
             let payload = vault
                 .get_artifact(
                     "prf_real",
@@ -2176,8 +2865,61 @@ mod tests {
                 files_compared += 1;
             }
         }
-        assert!(files_compared >= 4, "expected several whole-file artifacts");
+        assert!(
+            files_compared >= 1,
+            "expected at least the history whole-file artifact"
+        );
         eprintln!("byte-compared {files_compared} whole files against the ledger");
+
+        // THE portability claim on REAL data: every value the portable artifacts carried is
+        // recoverable from the restored, re-encrypted databases under the host key — proven by digest,
+        // never by printing a value. This is the decrypt→re-encrypt→decrypt cycle the brief requires,
+        // run against the actual on-disk cookie/password/autofill ciphertext.
+        let host = host_keyring(&keyring_context(&udd.join("Local State"), false)).unwrap();
+        let mut cells_verified = 0u64;
+        for record in manifest.artifacts.iter().filter(|a| a.portable.is_some()) {
+            let payload = vault
+                .get_artifact(
+                    "prf_real",
+                    record.captured_in_version,
+                    &record.id,
+                    &record.sealed_digest,
+                )
+                .unwrap();
+            let artifact = PortableArtifact::decode(&payload).unwrap();
+            for db in &artifact.dbs {
+                let conn = Connection::open(resolve_source(&udd, &db.rel).unwrap()).unwrap();
+                for cell in &db.cells {
+                    let stored: Vec<u8> = conn
+                        .query_row(
+                            &format!(
+                                "SELECT {} FROM {} WHERE rowid = ?1",
+                                cell.column, cell.table
+                            ),
+                            [cell.rowid],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    let recovered = match &cell.host_key {
+                        Some(host_key) => {
+                            oscrypt::decrypt_cookie_value(host.as_ref(), host_key, &stored).unwrap()
+                        }
+                        None => oscrypt::decrypt_value(host.as_ref(), &stored).unwrap(),
+                    };
+                    // Digests only — a mismatch names the cell, never the value.
+                    assert_eq!(
+                        digest_hex(&recovered),
+                        digest_hex(&cell.plaintext),
+                        "portable value {}.{} rowid {} did not survive the round trip",
+                        cell.table,
+                        cell.column,
+                        cell.rowid
+                    );
+                    cells_verified += 1;
+                }
+            }
+        }
+        eprintln!("re-decrypted {cells_verified} portable values back to their captured digests");
         std::fs::remove_dir_all(root).unwrap();
     }
 
