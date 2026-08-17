@@ -11,6 +11,7 @@ import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProfilesModule } from './profiles/profiles.module';
 import { TeamsModule } from './teams/teams.module';
+import { VaultModule } from './vault/vault.module';
 
 /**
  * Root module. Wires the feature modules together.
@@ -27,6 +28,7 @@ import { TeamsModule } from './teams/teams.module';
     HealthModule,
     AuthModule,
     TeamsModule,
+    VaultModule,
     ProfilesModule,
     ApiKeysModule,
     AuditModule,
