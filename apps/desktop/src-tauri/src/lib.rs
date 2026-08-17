@@ -23,6 +23,7 @@ mod secrets;
 mod sidecar;
 mod snapshot;
 mod template_store;
+mod vault_key;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "A vault enrollment produced by the TypeScript side, unlocked by the Rust desktop in",
+    "apps/desktop/src-tauri/src/vault_key.rs. This is the actual cross-machine path: the web enrolls,",
+    "the desktop unlocks with the password or the printed recovery code and must reach the SAME",
+    "Team Data Key. Argon2id cost is the accepted floor (m=8MiB t=2 p=1) so the test stays fast.",
+    "Recovery code for these vectors: ABCDE-FGHJK-MNPQR-STVWX-YZ234-56789; password: interop-password."
+  ],
+  "teamDataKeyHex": "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+  "passwordSalt": "AQEBAQEBAQEBAQEBAQEBAQ==",
+  "recoverySalt": "AgICAgICAgICAgICAgICAg==",
+  "wrappedByPassword": "TEt3MaiQEkzm4X8L5pzuzlGdawoo/YaQgn/puPPea2OOHu5d+IT0Q/oJ8I0QFxYWHYhUfttevXeF06PPT7bRjQ==",
+  "wrappedByRecovery": "TEt3MSqC0dydrzs4k9hxTlTX1ZV4uNLuiKjKPZzbH4nmxmWRfZM+g0OQOFRF1qgWYWkwccKNVc+hsATqLMwz3Q==",
+  "pckForProfile1": "32519d24b14eab8e2b6b24728a88d6e9a45c38930431d4bef8d95daa473fae30"
+}

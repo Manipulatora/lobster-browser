@@ -88,7 +88,10 @@ fn web_origin() -> String {
     std::env::var("LOBSTER_WEB_ORIGIN").unwrap_or_else(|_| DEFAULT_WEB_ORIGIN.to_string())
 }
 
-fn api_origin() -> String {
+/// API origin for cloud calls. `pub(crate)` so the sync client targets the same host as sign-in —
+/// two modules resolving it independently is how a desktop ends up authenticating against one
+/// deployment and syncing to another.
+pub(crate) fn api_origin() -> String {
     std::env::var("LOBSTER_API_ORIGIN").unwrap_or_else(|_| DEFAULT_API_ORIGIN.to_string())
 }
 
