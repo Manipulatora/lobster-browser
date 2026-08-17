@@ -244,6 +244,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::manifest::Identity;
     use super::*;
     use crate::snapshot::manifest::{
         ArtifactKind, ArtifactRecord, CaptureMode, Coherence, Fidelity, MANIFEST_VERSION,
@@ -267,6 +268,7 @@ mod tests {
             version,
             captured_at: "2026-08-17T12:00:00Z".into(),
             capture_mode: CaptureMode::Quiesced,
+            identity: Identity::fixture(),
             coherence: Coherence::new(CaptureMode::Quiesced, 12),
             artifacts: vec![record],
             absent: Vec::new(),

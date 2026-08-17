@@ -252,6 +252,163 @@ impl Coherence {
     }
 }
 
+/// The browser identity a snapshot belongs to.
+///
+/// WHY THIS IS IN THE MANIFEST AT ALL. The artifacts are the session; this is the browser that
+/// session was established from, and for an anti-detect product the two are inseparable. Restoring
+/// a cookie jar into a profile that presents a different canvas/WebGL persona, a different OS
+/// family, or a different exit IP is not a recovery — it is the same account arriving as a visibly
+/// different device, which is precisely the event the product exists to avoid.
+///
+/// It is captured from the PROFILE ROW, not from the user-data-dir, because that is where identity
+/// actually lives: `writeLobiumConfig` rewrites `lobium-fp.json` from the row's seed, overrides and
+/// proxy geo on EVERY launch (packages/engine-runner/src/lobium-config.ts), so whatever the snapshot
+/// copied out of the directory would be overwritten before the browser ever read it.
+///
+/// `proxy_present` is separate from the proxy's identity on purpose. `lobium-config.ts:186-187`
+/// derives `webrtcPolicy` from whether a proxy exists — with none it falls back to
+/// `default_public_interface_only`, which exposes host ICE candidates while the persona still
+/// asserts its original timezone. So a restore that quietly loses the proxy does not merely change
+/// the exit IP: it turns on a host-IP leak. That case must be refused, not warned about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Identity {
+    pub engine: String,
+    pub os: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    pub fingerprint_seed: String,
+    /// Digest of the canonical fingerprint-overrides JSON rather than the document, so a manifest
+    /// never carries persona detail and a comparison is still exact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint_overrides_digest: Option<String>,
+    /// Whether a proxy was bound at capture time. See the WebRTC note above.
+    pub proxy_present: bool,
+    /// The proxy's non-secret coordinates, for reporting WHICH proxy a mismatch is about. Never
+    /// credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_endpoint: Option<String>,
+    /// The engine build the session was established under. A cookie DB written by a newer Chromium
+    /// is razed by an older one, so a downgrade has to be refusable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_build: Option<String>,
+}
+
+/// How a snapshot's identity differs from the profile it is being restored into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityMismatch {
+    /// Refuse: the restored browser would present a different device.
+    Persona { field: &'static str },
+    /// Refuse: the proxy is gone, so WebRTC would fall back to leaking host candidates.
+    ProxyLost,
+    /// Report: same persona, different proxy endpoint. The user may genuinely have rotated it.
+    ProxyChanged { from: String, to: String },
+    /// Refuse: restoring into an older engine, which razes a too-new database.
+    EngineDowngrade { from: String, to: String },
+}
+
+impl IdentityMismatch {
+    /// Whether this difference must block a restore rather than merely be reported.
+    ///
+    /// A changed proxy endpoint is the one difference a user can legitimately have caused (rotating
+    /// a residential exit is routine), so it informs rather than blocks. Everything else means the
+    /// restored profile is not the browser the session came from.
+    pub fn blocks_restore(&self) -> bool {
+        !matches!(self, IdentityMismatch::ProxyChanged { .. })
+    }
+}
+
+impl Identity {
+    /// A fixed identity for tests, so a construction site does not have to restate seven fields.
+    #[cfg(test)]
+    pub fn fixture() -> Self {
+        Self {
+            engine: "lobium".to_string(),
+            os: "windows".to_string(),
+            os_version: Some("10".to_string()),
+            fingerprint_seed: "0123456789abcdef0123456789abcdef".to_string(),
+            fingerprint_overrides_digest: None,
+            proxy_present: true,
+            proxy_endpoint: Some("proxy.example:8080".to_string()),
+            engine_build: Some("152.0.7300.10".to_string()),
+        }
+    }
+
+    /// Compare a snapshot's identity against the profile it would be restored into.
+    pub fn diff(&self, target: &Identity) -> Vec<IdentityMismatch> {
+        let mut out = Vec::new();
+        for (field, a, b) in [
+            ("engine", &self.engine, &target.engine),
+            ("os", &self.os, &target.os),
+            (
+                "fingerprintSeed",
+                &self.fingerprint_seed,
+                &target.fingerprint_seed,
+            ),
+        ] {
+            if a != b {
+                out.push(IdentityMismatch::Persona { field });
+            }
+        }
+        if self.os_version != target.os_version {
+            out.push(IdentityMismatch::Persona { field: "osVersion" });
+        }
+        if self.fingerprint_overrides_digest != target.fingerprint_overrides_digest {
+            out.push(IdentityMismatch::Persona {
+                field: "fingerprintOverrides",
+            });
+        }
+        if self.proxy_present && !target.proxy_present {
+            out.push(IdentityMismatch::ProxyLost);
+        } else if self.proxy_present && target.proxy_present {
+            match (&self.proxy_endpoint, &target.proxy_endpoint) {
+                (Some(from), Some(to)) if from != to => out.push(IdentityMismatch::ProxyChanged {
+                    from: from.clone(),
+                    to: to.clone(),
+                }),
+                _ => {}
+            }
+        }
+        // A NEWER engine on the target is fine — Chromium migrates its own databases forward. Only
+        // the downgrade direction destroys data.
+        if let (Some(from), Some(to)) = (&self.engine_build, &target.engine_build) {
+            if build_is_older(to, from) {
+                out.push(IdentityMismatch::EngineDowngrade {
+                    from: from.clone(),
+                    to: to.clone(),
+                });
+            }
+        }
+        out
+    }
+}
+
+/// Compare two engine build strings by their dotted numeric components.
+///
+/// Unknown or unparseable shapes compare as NOT older, so a build string we do not understand can
+/// never manufacture a downgrade refusal out of nothing.
+fn build_is_older(candidate: &str, reference: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split('.')
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let (c, r) = (parts(candidate), parts(reference));
+    if c.iter().all(|n| *n == 0) || r.iter().all(|n| *n == 0) {
+        return false;
+    }
+    for i in 0..c.len().max(r.len()) {
+        let (cv, rv) = (
+            c.get(i).copied().unwrap_or(0),
+            r.get(i).copied().unwrap_or(0),
+        );
+        if cv != rv {
+            return cv < rv;
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotManifest {
@@ -262,6 +419,9 @@ pub struct SnapshotManifest {
     pub captured_at: String,
     pub capture_mode: CaptureMode,
     pub coherence: Coherence,
+    /// The browser this session belongs to. See {@link Identity}: a restore that reinstates the data
+    /// without it produces a working session on a visibly different device.
+    pub identity: Identity,
     pub artifacts: Vec<ArtifactRecord>,
     /// Artifacts the registry knows but this profile does not have. Recorded because "absent" and
     /// "we failed to look" must be distinguishable when a restore later comes up short — and
@@ -346,6 +506,102 @@ pub fn resolve_source(udd: &Path, source: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// The refusals are the point of the identity block, so each one is asserted explicitly.
+    #[test]
+    fn a_different_persona_blocks_a_restore() {
+        let snap = Identity::fixture();
+
+        for mutate in [
+            (|i: &mut Identity| i.engine = "chromium".into()) as fn(&mut Identity),
+            |i: &mut Identity| i.os = "macos".into(),
+            |i: &mut Identity| i.os_version = Some("11".into()),
+            |i: &mut Identity| i.fingerprint_seed = "ffffffffffffffffffffffffffffffff".into(),
+            |i: &mut Identity| i.fingerprint_overrides_digest = Some("deadbeef".into()),
+        ] {
+            let mut target = Identity::fixture();
+            mutate(&mut target);
+            let diff = snap.diff(&target);
+            assert!(!diff.is_empty(), "a changed persona field must be detected");
+            assert!(
+                diff.iter().any(|m| m.blocks_restore()),
+                "a changed persona field must BLOCK: {diff:?}"
+            );
+        }
+
+        assert!(
+            snap.diff(&Identity::fixture()).is_empty(),
+            "identical is clean"
+        );
+    }
+
+    /// Losing the proxy is not merely a different exit IP: `lobium-config.ts` derives webrtcPolicy
+    /// from whether a proxy exists, so a proxy-less restore turns on a host-IP leak while the persona
+    /// still claims its original timezone. It must block.
+    #[test]
+    fn losing_the_proxy_blocks_because_webrtc_would_leak() {
+        let snap = Identity::fixture();
+        let mut target = Identity::fixture();
+        target.proxy_present = false;
+        target.proxy_endpoint = None;
+
+        let diff = snap.diff(&target);
+        assert_eq!(diff, vec![IdentityMismatch::ProxyLost]);
+        assert!(diff[0].blocks_restore());
+    }
+
+    /// A rotated endpoint is the one difference a user legitimately causes, so it reports rather than
+    /// blocks — otherwise every residential rotation would lock them out of their own session.
+    #[test]
+    fn a_rotated_proxy_endpoint_reports_but_does_not_block() {
+        let snap = Identity::fixture();
+        let mut target = Identity::fixture();
+        target.proxy_endpoint = Some("proxy.example:9090".to_string());
+
+        let diff = snap.diff(&target);
+        assert_eq!(
+            diff,
+            vec![IdentityMismatch::ProxyChanged {
+                from: "proxy.example:8080".to_string(),
+                to: "proxy.example:9090".to_string(),
+            }]
+        );
+        assert!(!diff[0].blocks_restore());
+    }
+
+    /// Chromium migrates its own databases forward but RAZES one that is too new, so only the
+    /// downgrade direction is refused — and an unparseable build string must not invent a refusal.
+    #[test]
+    fn only_an_engine_downgrade_blocks() {
+        let snap = Identity::fixture(); // 152.0.7300.10
+        let older = Identity {
+            engine_build: Some("151.0.7000.1".to_string()),
+            ..Identity::fixture()
+        };
+        assert!(
+            snap.diff(&older)
+                .iter()
+                .any(|m| matches!(m, IdentityMismatch::EngineDowngrade { .. })),
+            "restoring into an older engine must block"
+        );
+
+        let newer = Identity {
+            engine_build: Some("153.0.1.0".to_string()),
+            ..Identity::fixture()
+        };
+        assert!(snap.diff(&newer).is_empty(), "a newer engine is fine");
+
+        for junk in ["", "unknown", "dev-build"] {
+            let odd = Identity {
+                engine_build: Some(junk.to_string()),
+                ..Identity::fixture()
+            };
+            assert!(
+                snap.diff(&odd).is_empty(),
+                "an unparseable build ({junk:?}) must not manufacture a downgrade"
+            );
+        }
+    }
+
     #[test]
     fn registry_ids_are_unique_and_filename_safe() {
         let mut seen = Vec::new();
@@ -423,6 +679,7 @@ mod tests {
             version: 3,
             captured_at: "2026-08-17T00:00:00Z".into(),
             capture_mode: CaptureMode::Quiesced,
+            identity: Identity::fixture(),
             coherence: Coherence::new(CaptureMode::Quiesced, 41),
             artifacts: vec![ArtifactRecord {
                 id: "cookies".into(),
@@ -457,6 +714,7 @@ mod tests {
             version: 1,
             captured_at: "2026-08-17T00:00:00Z".into(),
             capture_mode: CaptureMode::Dirty,
+            identity: Identity::fixture(),
             coherence: Coherence::new(CaptureMode::Dirty, 0),
             artifacts: Vec::new(),
             absent: Vec::new(),

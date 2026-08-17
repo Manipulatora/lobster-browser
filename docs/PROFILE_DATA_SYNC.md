@@ -736,3 +736,30 @@ Landed for Phase 1: the `cross-platform` job in `.github/workflows/ci.yml` (matr
 The snapshot round-trip itself is a real, blocking step in the `cross-platform` job today that reports `PENDING` and exits 0 while `ci/validation/snapshot-roundtrip.mjs` does not exist. Committing that file turns the gate on with no workflow edit. Until then, and this is the honest state of Phase 1: **nothing proves that a captured profile restores on Windows or macOS** — the OSCrypt asymmetry in §4 and the `Local State` finding in the taxonomy remain unmeasured, as do `asserts/paths.mjs`, `asserts/oscrypt.mjs`, `asserts/dom-backend.mjs`, `asserts/prefs.mjs` and the MinIO `S3BlobStore` job.
 
 **What is unverified in the runners themselves.** GitHub Actions cannot be executed from the development box, so every step was reasoned about against the real code and, where possible, executed locally on Linux (the suite script runs green with nothing skipped, and its Windows-exclusion, missing-capability and stale-exclusion paths were each exercised by forcing them). What remains genuinely unproven until the first run: whether `npm install` resolves the platform-specific optional binaries from a Linux-generated lockfile on both images, whether the Windows runner grants symlink privilege, whether `cargo check` finds a usable MSVC/WebView2 and Xcode toolchain, and whether `cargo test --lib` passes on macOS. The first red run of this job is expected to be about one of those, not about profile data.
+
+## Identity: what makes a restore a recovery rather than a new device
+
+Added after the Phase 2 verification found that the manifest recorded the session but not the browser
+it came from — the design's only `required: YES` artifact was missing, so a restore reinstated the
+data while proving nothing about the device presenting it.
+
+**Identity lives in the profile ROW, not the user-data-dir.** `writeLobiumConfig` rewrites
+`lobium-fp.json` from the row's seed, overrides and proxy geo on *every* launch
+(`packages/engine-runner/src/lobium-config.ts`), so anything a snapshot copied out of the directory
+would be overwritten before the browser read it. The manifest therefore carries an `identity` block
+built from the row: engine, OS, OS version, fingerprint seed, a *digest* of the overrides (so the
+manifest proves sameness without carrying persona detail), whether a proxy was bound, the proxy's
+host:port, and the engine build.
+
+`restore` compares that against the profile it is restoring *into*, before anything is staged or
+parked, and refuses on any blocking difference:
+
+| Difference | Behaviour | Why |
+|---|---|---|
+| engine, OS, OS version, seed, or overrides digest | **Refuse** | The restored profile would present a different device for the same account. |
+| Proxy present at capture, absent now | **Refuse** | `lobium-config.ts:186-187` derives `webrtcPolicy` from proxy presence: with none it falls back to `default_public_interface_only`, exposing host ICE candidates while the persona still asserts its original timezone. Losing the proxy turns on a host-IP leak, not merely a different exit. |
+| Proxy endpoint changed | **Report** | Rotating a residential exit is routine and user-initiated. Blocking it would lock people out of their own sessions. |
+| Restoring into an *older* engine build | **Refuse** | Chromium migrates its own databases forward but razes one that is too new. A newer target is fine. An unparseable build string never manufactures a refusal. |
+
+`force` overrides a blocking refusal, for the one legitimate case — a user who knowingly rebuilt the
+persona and wants the cookies anyway. It is never the default, and mismatches are reported either way.

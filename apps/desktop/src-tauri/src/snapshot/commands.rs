@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 use tauri::State;
 
-use super::manifest::{CaptureMode, SnapshotManifest};
+use super::manifest::{digest_hex, CaptureMode, Identity, SnapshotManifest};
 use super::vault::SnapshotVault;
 use super::{CaptureOptions, RestoreReport, VerifyReport};
 use crate::AppState;
@@ -99,6 +99,47 @@ pub fn snapshot_list(
     Ok(out)
 }
 
+/// Build the snapshot's [`Identity`] from the PROFILE ROW.
+///
+/// The row is the authority, not the user-data-dir: `writeLobiumConfig` rewrites `lobium-fp.json`
+/// from the row's seed, overrides and proxy on every launch, so anything the snapshot copied out of
+/// the directory would be overwritten before the browser read it.
+///
+/// The overrides are digested rather than stored: the manifest then proves the persona is the same
+/// one without carrying persona detail, and the comparison is still exact. `proxy_endpoint` is
+/// host:port only — never the credentials, which the row holds encrypted and which have no business
+/// in a manifest.
+fn identity_of(state: &State<'_, AppState>, profile_id: &str) -> Result<Identity, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let profile = crate::profile_store::get(&conn, &state.cipher, profile_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("profile {profile_id} not found"))?;
+
+    let overrides_digest = profile.fingerprint_overrides.as_ref().map(|value| {
+        // Serialized through serde_json, whose Value is a BTreeMap-backed map in this build's
+        // feature set, so key order is stable and the digest is comparable across machines.
+        digest_hex(serde_json::to_string(value).unwrap_or_default().as_bytes())
+    });
+
+    let proxy_endpoint = profile.proxy.as_ref().and_then(|proxy| {
+        let host = proxy.get("host").and_then(|v| v.as_str())?;
+        let port = proxy.get("port").and_then(|v| v.as_u64())?;
+        Some(format!("{host}:{port}"))
+    });
+
+    Ok(Identity {
+        engine: profile.engine,
+        os: profile.os,
+        os_version: profile.os_version,
+        fingerprint_seed: profile.fingerprint_seed,
+        fingerprint_overrides_digest: overrides_digest,
+        // Presence, not the endpoint, is what drives the WebRTC policy — see Identity's docs.
+        proxy_present: profile.proxy.is_some() || profile.proxy_id.is_some(),
+        proxy_endpoint,
+        engine_build: None,
+    })
+}
+
 #[tauri::command]
 pub fn snapshot_capture(
     state: State<'_, AppState>,
@@ -108,11 +149,13 @@ pub fn snapshot_capture(
 ) -> Result<SnapshotManifest, String> {
     let vault = open_vault(&state)?;
     let udd = state.profiles_dir.join(&profile_id);
+    let identity = identity_of(&state, &profile_id)?;
     super::capture(
         &vault,
         &udd,
         &profile_id,
         parse_mode(mode.as_deref().unwrap_or("quiesced"))?,
+        &identity,
         &options.unwrap_or_default(),
     )
     .map_err(|e| format!("{e:#}"))
@@ -123,6 +166,7 @@ pub fn snapshot_restore(
     state: State<'_, AppState>,
     profile_id: String,
     version: Option<u64>,
+    force: bool,
 ) -> Result<RestoreReport, String> {
     let vault = open_vault(&state)?;
     let version = match version {
@@ -151,7 +195,8 @@ pub fn snapshot_restore(
             ))
         }
     }
-    super::restore(&vault, &udd, &profile_id, version).map_err(|e| format!("{e:#}"))
+    let target = identity_of(&state, &profile_id)?;
+    super::restore(&vault, &udd, &profile_id, version, &target, force).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]

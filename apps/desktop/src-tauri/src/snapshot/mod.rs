@@ -49,7 +49,7 @@ use dom_storage::{DomBackend, DomRecords, DomStore};
 use idb::IdbRecords;
 use manifest::{
     digest_hex, resolve_source, ArtifactKind, ArtifactRecord, CaptureMode, Coherence, Fidelity,
-    SnapshotManifest, ARTIFACTS, MANIFEST_VERSION,
+    Identity, IdentityMismatch, SnapshotManifest, ARTIFACTS, MANIFEST_VERSION,
 };
 use vault::SnapshotVault;
 
@@ -113,11 +113,15 @@ impl FileSet {
 }
 
 /// Capture `udd` into the vault as a new version. Returns the committed manifest.
+/// `identity` is a required parameter rather than a field on [`CaptureOptions`] deliberately: it
+/// cannot be defaulted, and a new call site that forgets it must fail to compile rather than write a
+/// snapshot that cannot prove which browser it came from.
 pub fn capture(
     vault: &SnapshotVault,
     udd: &Path,
     profile_id: &str,
     mode: CaptureMode,
+    identity: &Identity,
     options: &CaptureOptions,
 ) -> Result<SnapshotManifest> {
     if !udd.is_dir() {
@@ -154,6 +158,7 @@ pub fn capture(
         profile_id,
         version,
         mode,
+        identity,
         options,
         previous.as_ref(),
         &scratch,
@@ -189,6 +194,7 @@ fn capture_artifacts(
     profile_id: &str,
     version: u64,
     mode: CaptureMode,
+    identity: &Identity,
     options: &CaptureOptions,
     previous: Option<&SnapshotManifest>,
     scratch: &Path,
@@ -279,6 +285,7 @@ fn capture_artifacts(
         captured_at: chrono::Utc::now().to_rfc3339(),
         capture_mode: mode,
         coherence: Coherence::new(mode, window_ms),
+        identity: identity.clone(),
         artifacts,
         absent,
         skipped,
@@ -648,13 +655,60 @@ struct Staged {
     detail: Option<String>,
 }
 
+/// `target` is the identity of the profile being restored INTO, and `force` overrides a blocking
+/// mismatch.
+///
+/// Restoring a session into a profile that no longer presents the same browser is not a recovery —
+/// it is the same account arriving as a different device. `force` exists because there is one case a
+/// user can legitimately want (they knowingly rebuilt the persona and want the cookies anyway), but
+/// it is never the default and the mismatches are always reported.
 pub fn restore(
     vault: &SnapshotVault,
     udd: &Path,
     profile_id: &str,
     version: u64,
+    target: &Identity,
+    force: bool,
 ) -> Result<RestoreReport> {
     let manifest = vault.manifest(profile_id, version)?;
+
+    // IDENTITY BEFORE BYTES. Checked before anything is staged or parked, so a refusal costs nothing
+    // and cannot leave the profile half-restored.
+    let mismatches = manifest.identity.diff(target);
+    let blocking: Vec<&IdentityMismatch> =
+        mismatches.iter().filter(|m| m.blocks_restore()).collect();
+    if !blocking.is_empty() && !force {
+        let detail = blocking
+            .iter()
+            .map(|m| match m {
+                IdentityMismatch::Persona { field } => format!("{field} differs"),
+                IdentityMismatch::ProxyLost => {
+                    "the proxy is gone, which would flip WebRTC to expose host candidates"
+                        .to_string()
+                }
+                IdentityMismatch::ProxyChanged { .. } => unreachable!("not blocking"),
+                IdentityMismatch::EngineDowngrade { from, to } => {
+                    format!("engine downgrade {from} -> {to} would raze a newer database")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!(
+            "IDENTITY_MISMATCH: snapshot {version} of {profile_id} was taken from a different \
+             browser — {detail}. Restoring it would present this session as a different device. \
+             Re-run with force to override."
+        );
+    }
+    for m in &mismatches {
+        if let IdentityMismatch::ProxyChanged { from, to } = m {
+            tracing::warn!(
+                profile_id,
+                version,
+                %from, %to,
+                "restoring a session whose proxy endpoint has changed — the exit IP will differ"
+            );
+        }
+    }
     if !udd.is_dir() {
         std::fs::create_dir_all(udd)
             .with_context(|| format!("creating user-data-dir {}", udd.display()))?;
@@ -1324,6 +1378,7 @@ mod tests {
             &udd,
             "prf_test",
             CaptureMode::Quiesced,
+            &Identity::fixture(),
             &CaptureOptions::default(),
         )
         .unwrap();
@@ -1353,7 +1408,7 @@ mod tests {
 
         // Wipe the user-data-dir the way a reinstall or a corrupt-profile purge would.
         std::fs::remove_dir_all(&udd).unwrap();
-        let report = restore(&vault, &udd, "prf_test", 1).unwrap();
+        let report = restore(&vault, &udd, "prf_test", 1, &Identity::fixture(), false).unwrap();
         assert!(report.ok, "{:?}", report.failure);
         assert!(!report.rolled_back);
 
@@ -1436,6 +1491,7 @@ mod tests {
             &udd,
             "prf_test",
             CaptureMode::Quiesced,
+            &Identity::fixture(),
             &CaptureOptions::default(),
         )
         .unwrap();
@@ -1458,7 +1514,7 @@ mod tests {
         bytes[last] ^= 0xff;
         std::fs::write(&blob, &bytes).unwrap();
 
-        let report = restore(&vault, &udd, "prf_test", 1).unwrap();
+        let report = restore(&vault, &udd, "prf_test", 1, &Identity::fixture(), false).unwrap();
         assert!(!report.ok, "a corrupted artifact must not report success");
         assert!(report.failure.unwrap().contains("passwords"));
 
@@ -1503,6 +1559,87 @@ mod tests {
             unrelated.join("Login Data").exists(),
             "only .lobster-pre-restore-* dirs are eligible"
         );
+    }
+
+    #[test]
+    fn a_restore_into_a_different_browser_is_refused_before_anything_is_touched() {
+        let root = temp_root("identityguard");
+        let udd = root.join("prf_test");
+        build_profile(&udd, "original-token", "ls-original");
+        let cookies_path = udd.join("Default").join("Cookies");
+
+        let vault = SnapshotVault::with_key(&root.join("ledger"), &[9u8; 32]).unwrap();
+        let captured = capture(
+            &vault,
+            &udd,
+            "prf_test",
+            CaptureMode::Quiesced,
+            &Identity::fixture(),
+            &CaptureOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(captured.identity, Identity::fixture());
+        assert!(
+            captured.artifact("cookies").is_some(),
+            "the fixture must actually produce a cookies artifact, or this test proves nothing"
+        );
+
+        // The session has moved on since the capture (a new token in the live jar), and the profile
+        // has been rebuilt on a different persona.
+        {
+            let conn = Connection::open(&cookies_path).unwrap();
+            conn.execute(
+                "UPDATE cookies SET value = 'new-persona-token' WHERE name = 'authToken'",
+                [],
+            )
+            .unwrap();
+        }
+        let before = std::fs::read(&cookies_path).unwrap();
+
+        let mut moved_on = Identity::fixture();
+        moved_on.fingerprint_seed = "ffffffffffffffffffffffffffffffff".to_string();
+
+        let err = restore(&vault, &udd, "prf_test", captured.version, &moved_on, false)
+            .expect_err("a persona change must refuse");
+        let text = format!("{err:#}");
+        assert!(text.contains("IDENTITY_MISMATCH"), "{text}");
+        assert!(text.contains("fingerprintSeed differs"), "{text}");
+
+        // Refused BEFORE anything was staged or parked: the live jar is byte-identical and no
+        // scratch directory was left behind.
+        assert_eq!(std::fs::read(&cookies_path).unwrap(), before);
+        let strays: Vec<_> = std::fs::read_dir(&udd)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".lobster-stage-") || name.starts_with(".lobster-pre-restore-")
+            })
+            .collect();
+        assert!(strays.is_empty(), "a refusal must leave no scratch dirs");
+
+        // A matching identity restores, which is what proves the refusal above was the identity check
+        // and not some unrelated failure.
+        let ok = restore(
+            &vault,
+            &udd,
+            "prf_test",
+            captured.version,
+            &Identity::fixture(),
+            false,
+        )
+        .unwrap();
+        assert!(ok.ok, "an identical identity restores: {:?}", ok.failure);
+        let conn = Connection::open(&cookies_path).unwrap();
+        let restored: String = conn
+            .query_row(
+                "SELECT value FROM cookies WHERE name = 'authToken'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored, "original-token", "the captured session came back");
     }
 
     #[test]
@@ -1582,6 +1719,7 @@ mod tests {
             &udd,
             "prf_test",
             CaptureMode::Quiesced,
+            &Identity::fixture(),
             &CaptureOptions::default(),
         )
         .unwrap();
@@ -1598,7 +1736,7 @@ mod tests {
             DomBackend::LevelDb
         );
 
-        let report = restore(&vault, &target, "prf_test", 1).unwrap();
+        let report = restore(&vault, &target, "prf_test", 1, &Identity::fixture(), false).unwrap();
         assert!(!report.ok);
         let failure = report.failure.unwrap();
         assert!(failure.contains("DOM_BACKEND_MISMATCH"), "{failure}");
@@ -1626,6 +1764,7 @@ mod tests {
             &udd,
             "prf_leveldb",
             CaptureMode::Quiesced,
+            &Identity::fixture(),
             &CaptureOptions::default(),
         )
         .unwrap();
@@ -1635,7 +1774,7 @@ mod tests {
         assert_eq!(record.fidelity, Fidelity::Opaque);
 
         std::fs::remove_dir_all(udd.join("Default").join("Local Storage")).unwrap();
-        let report = restore(&vault, &udd, "prf_leveldb", 1).unwrap();
+        let report = restore(&vault, &udd, "prf_leveldb", 1, &Identity::fixture(), false).unwrap();
         assert!(report.ok, "{:?}", report.failure);
         assert_eq!(
             std::fs::read(leveldb.join("000003.log")).unwrap(),
@@ -1666,6 +1805,7 @@ mod tests {
             &udd,
             "prf_test",
             CaptureMode::Quiesced,
+            &Identity::fixture(),
             &CaptureOptions::default(),
         )
         .unwrap_err()
@@ -1678,6 +1818,7 @@ mod tests {
             &udd,
             "prf_test",
             CaptureMode::Dirty,
+            &Identity::fixture(),
             &CaptureOptions::default(),
         )
         .unwrap();
@@ -1699,6 +1840,7 @@ mod tests {
             &udd,
             "prf_test",
             CaptureMode::Quiesced,
+            &Identity::fixture(),
             &CaptureOptions::default(),
         )
         .unwrap();
@@ -1708,6 +1850,7 @@ mod tests {
             &udd,
             "prf_test",
             CaptureMode::Live,
+            &Identity::fixture(),
             &CaptureOptions::default(),
         )
         .unwrap();
@@ -1724,7 +1867,7 @@ mod tests {
         // And the carried-forward reference still resolves, both to verify and to restore.
         assert!(verify(&vault, "prf_test", 2).unwrap().ok);
         std::fs::remove_dir_all(&udd).unwrap();
-        let report = restore(&vault, &udd, "prf_test", 2).unwrap();
+        let report = restore(&vault, &udd, "prf_test", 2, &Identity::fixture(), false).unwrap();
         assert!(report.ok, "{:?}", report.failure);
         assert!(udd
             .join("Default")
@@ -1797,12 +1940,13 @@ mod tests {
             &udd,
             "prf_test",
             CaptureMode::Quiesced,
+            &Identity::fixture(),
             &CaptureOptions::default(),
         )
         .unwrap();
         drop(keep_alive);
         std::fs::remove_dir_all(&udd).unwrap();
-        let report = restore(&vault, &udd, "prf_test", 1).unwrap();
+        let report = restore(&vault, &udd, "prf_test", 1, &Identity::fixture(), false).unwrap();
         assert!(report.ok, "{:?}", report.failure);
         assert_eq!(read_local_storage_token(&udd), b"\x01wal-only".to_vec());
         std::fs::remove_dir_all(root).unwrap();
@@ -1819,6 +1963,7 @@ mod tests {
             &udd,
             "prf_test",
             CaptureMode::Quiesced,
+            &Identity::fixture(),
             &CaptureOptions::default(),
         )
         .unwrap();
@@ -1856,6 +2001,7 @@ mod tests {
             &udd,
             "prf_test",
             CaptureMode::Quiesced,
+            &Identity::fixture(),
             &CaptureOptions {
                 exclude: vec!["history".into(), "sessionstorage".into()],
             },
@@ -1909,6 +2055,7 @@ mod tests {
             &udd,
             "prf_real",
             CaptureMode::Quiesced,
+            &Identity::fixture(),
             &CaptureOptions::default(),
         )
         .or_else(|err| {
@@ -1918,6 +2065,7 @@ mod tests {
                 &udd,
                 "prf_real",
                 CaptureMode::Dirty,
+                &Identity::fixture(),
                 &CaptureOptions::default(),
             )
         })
@@ -1977,7 +2125,7 @@ mod tests {
         // Destroy the copy the way a corrupt-profile purge or a fresh machine would, then restore into
         // an empty directory.
         std::fs::remove_dir_all(&udd).unwrap();
-        let report = restore(&vault, &udd, "prf_real", 1).unwrap();
+        let report = restore(&vault, &udd, "prf_real", 1, &Identity::fixture(), false).unwrap();
         assert!(report.ok, "{:?}", report.failure);
 
         // The byte-level equivalence claim, made against the LIVE paths after the swap rather than the
