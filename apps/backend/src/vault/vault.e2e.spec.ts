@@ -73,6 +73,11 @@ async function register(email: string): Promise<string> {
 
 before(async () => {
   process.env.DATABASE_URL = ''; // force in-memory repos — see the note in audit.e2e.spec.ts
+  // Same leak, same fix: requiring @prisma/client auto-loads .env, which in a real deployment sets
+  // BLOB_STORE_PATH — the blob store would then be the PRODUCTION directory, and running the suite
+  // wrote real files into it. Emptied, not deleted, for the reason above.
+  process.env.BLOB_STORE_PATH = '';
+  process.env.S3_BUCKET = '';
   process.env.NODE_ENV = 'test';
 
   const moduleRef = await Test.createTestingModule({

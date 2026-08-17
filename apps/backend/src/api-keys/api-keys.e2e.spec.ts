@@ -31,7 +31,13 @@ async function registerToken(email: string): Promise<string> {
 }
 
 before(async () => {
-  process.env.DATABASE_URL = ''; // force in-memory repos. NOT `delete`: requiring @prisma/client
+  process.env.DATABASE_URL = '';
+  // Same leak, same fix: requiring @prisma/client auto-loads .env, which in a real
+  // deployment sets BLOB_STORE_PATH — and the blob store would then be the PRODUCTION
+  // directory, so running the suite wrote real files into it. Emptied, not deleted, for
+  // the reason above.
+  process.env.BLOB_STORE_PATH = '';
+  process.env.S3_BUCKET = ''; // force in-memory repos. NOT `delete`: requiring @prisma/client
   // auto-loads .env and re-injects DATABASE_URL, so a deleted var comes back and the suite
   // silently runs against whatever database .env points at. dotenv never overwrites a var that
   // is already set, so an empty string (falsy) survives and PrismaService picks in-memory.

@@ -89,6 +89,7 @@ export const DEFAULT_BLOB_TEAM_QUOTA_BYTES = 250 * 1024 * 1024;
 export class ProfilesService {
   /** Bucket the active blob store writes to, or '' when the in-memory store is bound. */
   private readonly blobBucket: string;
+  private readonly blobStorePath: string;
   /** Key namespace inside that bucket (`S3_KEY_PREFIX`), normalised exactly as the store does. */
   private readonly blobKeyPrefix: string;
 
@@ -100,6 +101,7 @@ export class ProfilesService {
     config: ConfigService,
   ) {
     this.blobBucket = config.get<string>('S3_BUCKET') ?? '';
+    this.blobStorePath = config.get<string>('BLOB_STORE_PATH') ?? '';
     this.blobKeyPrefix = normalizeKeyPrefix(config.get<string>('S3_KEY_PREFIX'));
   }
 
@@ -438,12 +440,19 @@ export class ProfilesService {
    * to return `s3://lobster-profiles/…` unconditionally, so every ref handed to a client and
    * written to the audit log named a bucket that may not exist, dropped `S3_KEY_PREFIX`, and
    * claimed S3 durability even when the in-memory store was bound. Support and recovery tooling
-   * can only follow a ref that matches the real object key — hence `memory://` when there is no
-   * bucket, which is the honest answer rather than a fabricated one.
+   * can only follow a ref that matches the real object key, so the scheme names the store that
+   * actually holds the bytes: `s3://` for a bucket, `file://` for the server's own disk, and
+   * `memory://` only when the bytes really are in a process-local Map that a restart will empty.
    */
   private blobRef(teamId: string, profileId: string, version: number): string {
     const objectKey = blobObjectKey(this.blobKeyPrefix, this.blobKey(teamId, profileId), version);
-    return this.blobBucket ? `s3://${this.blobBucket}/${objectKey}` : `memory://${objectKey}`;
+    if (this.blobBucket) return `s3://${this.blobBucket}/${objectKey}`;
+    // The filesystem store lays each version out as `<root>/<key>/vNNNNNNNNNN.blob`, so the ref is
+    // the path an operator can actually `ls` — not the S3-shaped `<key>/<n>.enc` key.
+    if (this.blobStorePath) {
+      return `file://${this.blobStorePath}/${this.blobKey(teamId, profileId)}/v${String(version).padStart(10, '0')}.blob`;
+    }
+    return `memory://${objectKey}`;
   }
 
   /**

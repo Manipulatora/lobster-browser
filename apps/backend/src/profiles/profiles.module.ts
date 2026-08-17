@@ -5,6 +5,7 @@ import { AuditModule } from '../audit/audit.module';
 import { AuthModule } from '../auth/auth.module';
 import { PrismaService } from '../prisma/prisma.service';
 import { BLOB_STORE, type BlobStore } from './blob/blob-store';
+import { FilesystemBlobStore } from './blob/filesystem-blob-store';
 import { InMemoryBlobStore } from './blob/in-memory-blob-store';
 import { S3BlobStore } from './blob/s3-blob-store';
 import { InMemoryProfilesRepository } from './in-memory-profiles.repository';
@@ -30,24 +31,30 @@ export function resolveBlobStore(config: ConfigService): BlobStore {
   if (config.get<string>('S3_BUCKET')) {
     return new S3BlobStore(config);
   }
+  // A directory on the server's own disk is a first-class choice, not a fallback. The blobs are
+  // encrypted by the client before upload, so the server stores opaque bytes either way — durability
+  // and atomicity are all that is required of the store, and a backed-up filesystem provides both
+  // without an external dependency or a set of credentials.
+  if (config.get<string>('BLOB_STORE_PATH')) {
+    return new FilesystemBlobStore(config);
+  }
   const env = config.get<string>('NODE_ENV') ?? process.env.NODE_ENV ?? 'development';
   if (env === 'production') {
     // ACKNOWLEDGED, NOT ACCIDENTAL. The failure this guard exists to prevent is a deployment that
-    // silently promises durable storage; it is not a problem to run without object storage while
-    // no client pushes a blob at all, which is the case until the sync client of Phase 5 ships
-    // (see docs/PROFILE_DATA_SYNC.md). So the ephemeral store stays reachable in production, but
-    // only for an operator who wrote the words down — an unset variable still refuses to start,
-    // which is what stops it being reached by forgetting.
+    // silently promises durable storage while the store is a process-local Map that empties on
+    // restart. Now that BLOB_STORE_PATH is available, running ephemeral in production has no good
+    // reason left — but an operator who writes the words down can still do it, and an unset variable
+    // still refuses to start, which is what stops it being reached by forgetting.
     if (config.get<string>('ALLOW_EPHEMERAL_BLOB_STORE') !== '1') {
       throw new Error(
-        'S3_BUCKET is required in production. Refusing to start with the in-memory blob store, ' +
-          'which loses every synced profile blob on restart. Set S3_BUCKET, or set ' +
-          'ALLOW_EPHEMERAL_BLOB_STORE=1 to acknowledge that profile blobs are not durable yet.',
+        'no durable blob storage configured. Set BLOB_STORE_PATH (a directory on this server) or ' +
+          'S3_BUCKET. Refusing to start with the in-memory blob store, which loses every synced ' +
+          'profile blob on restart. Set ALLOW_EPHEMERAL_BLOB_STORE=1 to acknowledge that anyway.',
       );
     }
     logger.warn(
-      'BLOB STORAGE IS EPHEMERAL: ALLOW_EPHEMERAL_BLOB_STORE=1 and no S3_BUCKET. Any profile blob ' +
-        'pushed to this instance is lost on restart. This must be removed before profile sync ships.',
+      'BLOB STORAGE IS EPHEMERAL: ALLOW_EPHEMERAL_BLOB_STORE=1 with no BLOB_STORE_PATH or S3_BUCKET. ' +
+        'Any profile blob pushed to this instance is lost on restart.',
     );
   }
   return new InMemoryBlobStore();

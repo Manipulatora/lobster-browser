@@ -815,3 +815,44 @@ migration.
 - Test scratch directories are removed on panic and early return via a `Drop` guard. This is a
   security control, not tidiness: the real-profile tests copy a live user-data-dir into `/tmp`, the
   Linux key is a public constant, and one such directory was found holding 181 real cookie values.
+
+## Blob storage: this server's own disk
+
+Phase 5 was briefly written off as blocked on S3 credentials. That was too narrow a reading of the
+problem. The backend depends on a four-method `BlobStore` interface over **opaque bytes** — the
+desktop client encrypts before upload, so the server could not read a blob if it wanted to. Object
+storage was never a requirement; durability and atomicity were. A directory on the server provides
+both, with no external dependency and no credentials to manage.
+
+`FilesystemBlobStore` is therefore a first-class production choice, selected by `BLOB_STORE_PATH`.
+Precedence is `S3_BUCKET` → `BLOB_STORE_PATH` → refuse to boot in production (unless
+`ALLOW_EPHEMERAL_BLOB_STORE=1` is written down), so a migration to object storage later has one
+obvious direction.
+
+**The filesystem performs the compare-and-set.** Each version is its own file, `v0000000001.blob`. A
+conditional push targets exactly `expectedVersion + 1` and creates it with `link()`, which fails with
+`EEXIST` if that version already exists. That single syscall *is* the CAS: atomic on any POSIX
+filesystem, valid across processes rather than only within one event loop, and with no lock that can
+leak if a process dies holding it.
+
+`link()` rather than an exclusive `open()` because it also gives durability. Bytes go to a temp file
+and are fsync'd **first**, and only then linked into place — so a crash mid-write cannot publish a
+torn file at a version number readers already consider live. The directory is fsync'd too, or the new
+entry can be lost even though the file's contents were durable.
+
+**Every version is retained**, unlike the in-memory store which keeps only the latest. That is what
+makes point-in-time recovery possible ("my session broke, give me yesterday's cookies"). Pruning is a
+policy decision that belongs above this layer, so there is deliberately no silent retention limit.
+
+Verified against the live API on this server: push → version 1, push → version 2 (both files on
+disk), a stale `baseVersion` → `409 stale base version`, pull → the exact bytes back. `blobRef` now
+names the store that actually holds them (`file://…`, resolving to a path an operator can `ls`),
+because a ref support cannot follow is worse than no ref.
+
+### One defect this introduced, and its fix
+
+Turning on `BLOB_STORE_PATH` made the backend test suite write **8 real files per run into production
+blob storage** — the same `.env` leak that once made tests hit the live database, since requiring
+`@prisma/client` auto-loads `.env`. Every e2e spec now empties `BLOB_STORE_PATH` and `S3_BUCKET`
+alongside `DATABASE_URL`, and the delta is asserted at zero. Back up `/var/lib/lobster/blobs`
+alongside the database: losing it loses every snapshot with no local copy left.
