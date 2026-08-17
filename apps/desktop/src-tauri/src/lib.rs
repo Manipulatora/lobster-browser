@@ -79,6 +79,24 @@ struct AuthState {
     offline: bool,
 }
 
+/// The signed-in state WITHOUT touching the network.
+///
+/// First paint used to wait on `auth_status`, which calls `/auth/me` with a 15-second timeout — so a
+/// slow or unreachable network made a cold start look like a hung app, while the profile list it was
+/// waiting to show was already available locally in about 2 ms. This answers instantly from the
+/// cached identity; the UI paints from it and verifies in the background.
+///
+/// `verified: false` is the honest part: this says who was signed in last time it was checked, not
+/// who is signed in now. A revoked token is caught by the background verification a moment later.
+#[tauri::command]
+fn auth_status_cached() -> AuthState {
+    AuthState {
+        user: cloud_auth::cached_user(),
+        // Unknown rather than asserted: nothing has been asked of the network yet.
+        offline: false,
+    }
+}
+
 #[tauri::command]
 async fn auth_status() -> Result<AuthState, String> {
     match cloud_auth::current_user().await {
@@ -1504,6 +1522,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             snapshot::commands::snapshot_push,
             snapshot::commands::snapshot_pull,
+            auth_status_cached,
             vault_status,
             app_version,
             auth_status,
@@ -1626,5 +1645,33 @@ mod lifecycle_tests {
             assert!(other.exists());
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    /// The boot path must not contain a network call.
+    ///
+    /// `auth_status_cached` exists so first paint answers from local state; if someone later routes
+    /// it through `current_user` (or any HTTP client) the 15-second `/auth/me` timeout is back on the
+    /// critical path and a cold start looks like a hung app again — a regression that is invisible on
+    /// a fast connection and only shows up for users on a bad one.
+    #[test]
+    fn the_cached_auth_status_makes_no_network_call() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn auth_status_cached()")
+            .expect("auth_status_cached must exist");
+        let body_end = source[start..]
+            .find("\n}")
+            .expect("function body must terminate");
+        let body = &source[start..start + body_end];
+
+        for forbidden in ["current_user", "reqwest", "await", ".send("] {
+            assert!(
+                !body.contains(forbidden),
+                "auth_status_cached must stay local, but its body mentions `{forbidden}`"
+            );
+        }
     }
 }

@@ -18,7 +18,7 @@ change is explained where it happened.
 | 4 — Account key | **Done, simplified** | `GET /vault/key`. No password derivation, no recovery code — see the Correction section. |
 | 5 — Cloud sync | **Server + client done; not wired to the UI** | Durable filesystem blob store on the server, push/pull with compare-and-set, conflict refusal. **No UI calls it yet, and capture still seals under the per-install key** — so it is not yet a feature a user can use. |
 | 6 — Leases | **Done (server)** | `GET/POST/DELETE /profiles/:id/lease`. Hard block like Octo, plus a 150s expiry so a crashed machine frees itself — which Octo requires an operator to do. Not yet called by the desktop launch path. |
-| 7 — Startup performance | Next | Baseline measured: local profile read **2.1 ms**, `/auth/me` blocks up to **15 s** on the boot path. The work is local-first paint, not faster queries. |
+| 7 — Startup performance | **Done (boot path)** | First paint no longer waits on the network. `auth_status_cached` answers from a local identity cache; `/auth/me` verifies behind the painted UI and is the only thing that may sign someone out. |
 | 8 — Extensions | Blocked on a decision | Needs a fork patch exempting extensions **by ID**; the obvious path-based approach changes extension IDs and destroys their stored data. |
 
 ### Known gaps, stated rather than implied
@@ -939,3 +939,37 @@ Verified live: machine A claims it, machine B is refused with the message above.
 
 **Not yet wired:** the desktop launch path does not call this. Until it does, the block exists on the
 server but nothing enforces it at launch.
+
+## Phase 7 as built: first paint stops waiting for the network
+
+**The defect.** `App.tsx` held first paint until `auth_status()` resolved, and that command calls
+`/auth/me` with a **15-second timeout**. On a slow or unreachable network a cold start showed an empty
+`div` for up to fifteen seconds — while the profile list the user actually wanted was readable from
+local SQLite in single-digit milliseconds. The comment explaining the block was sound about *why*
+(flashing the sign-in screen at a signed-in user reads as having been logged out); it was the
+mechanism that was wrong.
+
+**The fix.** A local identity cache, written only after a successful verification, so it tracks
+reality:
+
+```
+paint  ──▶ auth_status_cached()   local keychain read, no network, immediate
+verify ──▶ auth_status()          /auth/me behind the painted UI
+```
+
+Only the verified answer may sign someone **out** — the cached one is a memory, not proof. Sign-out
+clears the cache too, or the next cold start would flash a name that is signed out.
+
+| | Before | After |
+|---|---|---|
+| First paint waits on | `/auth/me` | a keychain read |
+| Healthy network | ~21 ms | immediate |
+| Slow / unreachable | **up to 15 s of blank screen** | immediate; offline state resolves behind the UI |
+
+**Guarded against regression.** A test reads the body of `auth_status_cached` and fails if it ever
+mentions `current_user`, `reqwest`, `await` or `.send(` — because routing it back through the network
+puts the 15-second timeout back on the critical path, and that is invisible on a fast connection and
+only hurts the users already having a bad time.
+
+**Not addressed here:** the profile list re-polls every 8 seconds and there is no virtualisation, so
+this covers the boot path rather than every startup cost named in the original plan.

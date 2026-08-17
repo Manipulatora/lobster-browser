@@ -291,6 +291,38 @@ async fn exchange(code: &str, state: &str, verifier: &str) -> Result<ExchangeDat
 // always be obtained again by signing in. Writing it to disk to save the user one sign-in would
 // trade a real, permanent exposure for a small convenience.
 
+/// Keychain account holding the last verified user, so the app can paint before the network answers.
+const USER_ACCOUNT: &str = "cloud-user";
+
+/// Remember who the token belongs to.
+///
+/// NOT a security control — the token is the credential and it is stored beside this. It exists so a
+/// cold start can render the signed-in UI immediately instead of holding first paint on `/auth/me`,
+/// which has a 15-second timeout and therefore made a slow network look like a hung app.
+pub fn cache_user(user: &CloudUser) {
+    let Ok(entry) = keyring::Entry::new(TOKEN_SERVICE, USER_ACCOUNT) else {
+        return;
+    };
+    if let Ok(json) = serde_json::to_string(user) {
+        // Best-effort: a machine with no usable keychain still works, it just paints a little later.
+        let _ = entry.set_password(&json);
+    }
+}
+
+/// The last verified user, if one was cached. Purely local — never a network call.
+pub fn cached_user() -> Option<CloudUser> {
+    let entry = keyring::Entry::new(TOKEN_SERVICE, USER_ACCOUNT).ok()?;
+    let json = entry.get_password().ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+/// Forget the cached identity. Called on sign-out so the next start does not flash a stale name.
+pub fn clear_cached_user() {
+    if let Ok(entry) = keyring::Entry::new(TOKEN_SERVICE, USER_ACCOUNT) {
+        let _ = entry.delete_credential();
+    }
+}
+
 pub fn store_token(token: &str) -> Result<()> {
     let entry = keyring::Entry::new(TOKEN_SERVICE, TOKEN_ACCOUNT)
         .context("no OS keychain available to store the sign-in")?;
@@ -312,6 +344,8 @@ pub fn clear_token() {
     if let Ok(entry) = keyring::Entry::new(TOKEN_SERVICE, TOKEN_ACCOUNT) {
         let _ = entry.delete_credential();
     }
+    // ...and the cached identity with it, or the next cold start paints a name that is signed out.
+    clear_cached_user();
 }
 
 /// Resolve the stored token to a user, confirming it is still valid.
@@ -338,7 +372,15 @@ pub async fn current_user() -> Result<Option<CloudUser>> {
                 data: Option<CloudUser>,
             }
             match serde_json::from_str::<MeEnvelope>(&body) {
-                Ok(env) if env.code == 0 => Ok(env.data),
+                Ok(env) if env.code == 0 => {
+                    // Remember who this is, so the next cold start can paint before the network
+                    // answers. The cache tracks reality because it is only written here, after a
+                    // successful verification.
+                    if let Some(user) = env.data.as_ref() {
+                        cache_user(user);
+                    }
+                    Ok(env.data)
+                }
                 _ => Ok(None),
             }
         }

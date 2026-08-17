@@ -55,6 +55,23 @@ export function App(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false;
+
+    // PAINT FROM LOCAL STATE FIRST. This resolves without touching the network, so a cold start is
+    // not held behind `/auth/me` and its 15-second timeout — which used to mean a slow connection
+    // looked like a hung app, while the profile list the user wanted was already readable locally in
+    // about 2 ms.
+    void authClient
+      .statusCached()
+      .then((cached) => {
+        if (!cancelled) setUser(cached.user);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setAuthChecked(true);
+      });
+
+    // ...then confirm with the server behind the already-painted UI, and correct it if the token has
+    // been revoked. Only this answer may sign someone OUT: the cached one is a memory, not proof.
     void authClient
       .status()
       .then((state) => {
@@ -63,20 +80,21 @@ export function App(): JSX.Element {
         setOffline(state.offline);
       })
       .catch(() => {
-        // Unreachable keychain or IPC failure. Fall through to the sign-in screen, which is the
-        // only actionable state — an error dialog here would just be a dead end.
-        if (!cancelled) setUser(null);
+        // Unreachable keychain or IPC failure. The cached answer above already decided what to
+        // show; an error dialog here would just be a dead end.
       })
       .finally(() => {
         if (!cancelled) setAuthChecked(true);
       });
+
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // Hold the first paint until the check resolves. Flashing the sign-in screen at an already
-  // signed-in user on every launch reads as having been logged out.
+  // Only the local read is awaited, so this is a frame or two rather than a network round trip.
+  // Flashing the sign-in screen at an already signed-in user still has to be avoided — that reads as
+  // having been logged out — which is exactly what the cached identity prevents.
   if (!authChecked) return <div className="app-boot" aria-busy="true" />;
 
   if (!user && !offline) {

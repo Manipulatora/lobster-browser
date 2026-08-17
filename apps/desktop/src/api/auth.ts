@@ -25,10 +25,19 @@ export interface AuthClient {
   /** Opens the browser and resolves when the loopback callback completes. Rejects on timeout. */
   signIn(mode: 'signup' | 'login'): Promise<CloudUser>;
   signOut(): Promise<void>;
+  /**
+   * The signed-in state from local cache only — no network, answers immediately.
+   *
+   * First paint reads this so a cold start is not held behind `/auth/me` and its 15-second timeout.
+   * It reports who was signed in when last verified, not who is signed in now; `status()` runs behind
+   * it and corrects the answer if the token has since been revoked.
+   */
+  statusCached(): Promise<AuthState>;
 }
 
 const tauriAuth: AuthClient = {
   status: () => invoke<AuthState>('auth_status'),
+  statusCached: () => invoke<AuthState>('auth_status_cached'),
   signIn: (mode) => invoke<CloudUser>('auth_sign_in', { mode }),
   signOut: () => invoke<void>('auth_sign_out'),
 };
@@ -42,6 +51,10 @@ const tauriAuth: AuthClient = {
  */
 const mockAuth: AuthClient = {
   status: async () => ({
+    user: { id: 'dev-user', email: 'dev@localhost', displayName: 'Dev' },
+    offline: false,
+  }),
+  statusCached: async () => ({
     user: { id: 'dev-user', email: 'dev@localhost', displayName: 'Dev' },
     offline: false,
   }),
