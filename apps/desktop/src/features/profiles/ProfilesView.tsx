@@ -398,7 +398,7 @@ export function ProfilesView({
       anchor.download = `${(target?.name ?? id).replace(/[^a-z0-9._-]+/gi, '_')}-cookies.json`;
       anchor.click();
       URL.revokeObjectURL(url);
-      toast.success('Live cookies exported locally.');
+      toast.success('Cookies exported locally.');
     } catch (e: unknown) {
       toast.error(`Cookie export failed: ${errMessage(e)}`);
     }

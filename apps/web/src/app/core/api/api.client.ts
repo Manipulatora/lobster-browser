@@ -83,8 +83,9 @@ export class ApiClient {
 /**
  * Pull a human-usable message out of an error response.
  *
- * Nest's exception filter returns `{ message }` (a string, or an array of strings from the
- * validation pipe). The envelope's `msg` is used when the backend answered in its own format.
+ * The backend's global filter now answers errors in the same `{ code, data, msg }` envelope as
+ * successes, so `msg` is the normal path. The `message` branches remain for the responses that never
+ * reach that filter — body-parser's own 413, and anything a proxy generates in front of Nest.
  */
 function extractMessage(err: HttpErrorResponse): string {
   const body = err.error as { message?: string | string[]; msg?: string } | null;

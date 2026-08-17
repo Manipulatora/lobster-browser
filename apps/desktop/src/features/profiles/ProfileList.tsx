@@ -499,6 +499,14 @@ export function ProfileList({
                   Connection details
                 </button>
               ) : null}
+              {/* GATED ON RUNNING because export really does need a live browser: it resolves to
+                  `Network.getAllCookies` over CDP (engine-runner composite.exportCookies -> the
+                  launcher's exportCookies -> withCdpSession), so on a stopped profile it can only
+                  fail. That is the wrong shape — the profile whose session most needs to come out
+                  is precisely the one that will not launch — but the fix is an offline reader for
+                  the profile's own cookie jar, with per-platform OSCrypt handling, which is Phase 3
+                  of docs/PROFILE_DATA_SYNC.md. Until that exists, offering the item on a stopped
+                  profile only produces a guaranteed error toast. */}
               {openProfile.status === 'running' ? (
                 <button
                   type="button"
@@ -509,7 +517,7 @@ export function ProfileList({
                     onExportCookies(openProfile.id);
                   }}
                 >
-                  Export live cookies
+                  Export cookies
                 </button>
               ) : null}
               <button

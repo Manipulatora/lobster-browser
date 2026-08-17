@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readdirSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,11 +11,12 @@ import {
 } from '../lobium-capabilities.js';
 import { LOBIUM_CONFIG_FILENAME } from '../lobium-config.js';
 import { CHROMIUM_BINARY_NAME, writeFakeBinary } from '../test-fake-binary.js';
+import { LOBEE_EXTENSION_ID } from '../extensions.js';
 import {
   buildLobiumLaunchArgs,
   buildNativeLobiumProcessArgs,
   createLobiumLauncher,
-  ensureChromiumPersonaPreferences,
+  ensureChromiumLaunchPreferences,
   isLobiumAvailable,
   lobiumBinaryCandidates,
   proxySummaryFromServer,
@@ -261,18 +263,91 @@ test('buildLobiumLaunchArgs writes profile policy into the native config', async
   }
 });
 
-test('ensureChromiumPersonaPreferences persists language sources for main frames and workers', async () => {
+test('ensureChromiumLaunchPreferences persists language sources for main frames and workers', async () => {
   const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-persona-prefs-'));
   try {
     const ctx = ctxWith(userDataDir);
     ctx.fingerprint.navigator.languages = ['ja-JP', 'ja'];
     ctx.fingerprint.locale.locale = 'ja-JP';
-    ensureChromiumPersonaPreferences(ctx);
+    ensureChromiumLaunchPreferences(ctx);
     const prefs = JSON.parse(await readFile(join(userDataDir, 'Default', 'Preferences'), 'utf8'));
     assert.equal(prefs.intl.accept_languages, 'ja-JP,ja');
     assert.equal(prefs.intl.selected_languages, 'ja-JP,ja');
     const localState = JSON.parse(await readFile(join(userDataDir, 'Local State'), 'utf8'));
     assert.equal(localState.intl.app_locale, 'ja-JP');
+  } finally {
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('ensureChromiumLaunchPreferences replaces Preferences exactly once, by rename, keeping user state', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-prefs-atomic-'));
+  const prevLobee = process.env.LOBSTER_LOBEE_DIR;
+  try {
+    process.env.LOBSTER_LOBEE_DIR = join(userDataDir, 'lobee');
+    const prefsPath = join(userDataDir, 'Default', 'Preferences');
+    await mkdir(join(userDataDir, 'Default'), { recursive: true });
+    // ~40 KB of real Chromium state stands in for what a launch must never drop.
+    await writeFile(
+      prefsPath,
+      JSON.stringify({
+        profile: { content_settings: { exceptions: { notifications: { 'https://a.test,*': {} } } } },
+        partition: { per_host_zoom_levels: { x: { 'a.test': 1.5 } } },
+        extensions: { pinned_extensions: ['aaaabbbbccccddddeeeeffffgggghhhh'] },
+      }),
+      { mode: 0o600 },
+    );
+    const before = statSync(prefsPath);
+
+    const ctx = ctxWith(userDataDir);
+    ctx.profileName = 'Shopper 4';
+    ensureChromiumLaunchPreferences(ctx);
+
+    const after = statSync(prefsPath);
+    // A rename publishes a NEW inode; an in-place writeFileSync would keep the old one. This is what
+    // proves the launch cannot leave a truncated Preferences behind.
+    assert.notEqual(after.ino, before.ino, 'Preferences must be replaced by temp+rename');
+    assert.equal(after.mode & 0o777, 0o600);
+    assert.deepEqual(
+      readdirSync(join(userDataDir, 'Default')).filter((name) => name !== 'Preferences'),
+      [],
+      'no temp file may be left behind',
+    );
+
+    const prefs = JSON.parse(await readFile(prefsPath, 'utf8'));
+    // Every one of the collapsed writes landed, in one file …
+    assert.equal(prefs.profile.name, 'Your Lobium');
+    assert.equal(prefs.profile.name_truncated, true);
+    assert.equal(prefs.intl.accept_languages, fp.navigator.languages.join(','));
+    assert.deepEqual(prefs.extensions.pinned_extensions, [
+      LOBEE_EXTENSION_ID,
+      'aaaabbbbccccddddeeeeffffgggghhhh',
+    ]);
+    // … the user's unrelated state survived …
+    assert.ok(prefs.profile.content_settings.exceptions.notifications['https://a.test,*']);
+    assert.equal(prefs.partition.per_host_zoom_levels.x['a.test'], 1.5);
+    // … and session.restore_on_startup is NOT written: kRestoreOnStartup is a tracked/protected pref, so
+    // writing it without a matching MAC resets the startup prefs on Windows/macOS. --restore-last-session
+    // carries session restore instead.
+    assert.equal(prefs.session, undefined);
+  } finally {
+    if (prevLobee === undefined) delete process.env.LOBSTER_LOBEE_DIR;
+    else process.env.LOBSTER_LOBEE_DIR = prevLobee;
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('ensureChromiumLaunchPreferences never replaces an unparseable Preferences file', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-prefs-corrupt-'));
+  try {
+    const prefsPath = join(userDataDir, 'Default', 'Preferences');
+    await mkdir(join(userDataDir, 'Default'), { recursive: true });
+    // A half-written file from a crash. Replacing it with a fresh object would DISCARD the profile's
+    // real preferences; the launch instead relies on --lobium-profile-name / --lang.
+    const truncated = '{"profile":{"content_settings":{"exce';
+    await writeFile(prefsPath, truncated, { mode: 0o600 });
+    ensureChromiumLaunchPreferences(ctxWith(userDataDir));
+    assert.equal(await readFile(prefsPath, 'utf8'), truncated);
   } finally {
     await rm(userDataDir, { recursive: true, force: true });
   }

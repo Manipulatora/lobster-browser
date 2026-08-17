@@ -14,6 +14,7 @@ import helmet from 'helmet';
 
 import { AppModule } from './app.module';
 import { configureBodyLimit } from './body-limit';
+import { ApiExceptionFilter } from './common/api-exception.filter';
 
 async function bootstrap(): Promise<void> {
   // Disable Nest's built-in body parser so the raised-limit parsers below are the only ones that
@@ -31,6 +32,12 @@ async function bootstrap(): Promise<void> {
 
   // SEC-3b / SEC-6: baseline hardening — helmet headers + per-IP rate limit.
   app.use(helmet({ contentSecurityPolicy: false }));
+  // Trust exactly ONE proxy hop, so `req.ip` is the client address from X-Forwarded-For rather than
+  // the proxy's. In production nginx proxies to 127.0.0.1:8080, so without this every request in
+  // the world shares a single rate-limit bucket keyed on the loopback address: one bulk flow (a
+  // restore is one pull per profile) 429s every other user, including sign-in. `1` — not `true` —
+  // because trusting the whole chain would let a client spoof its own key via X-Forwarded-For.
+  app.set('trust proxy', 1);
   const windowMs = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000);
   const max = Number(process.env.RATE_LIMIT_MAX ?? 120);
   app.use(
@@ -41,6 +48,9 @@ async function bootstrap(): Promise<void> {
       legacyHeaders: false,
     }),
   );
+
+  // Every error answers in the same `{ code, data, msg }` envelope as every success.
+  app.useGlobalFilters(new ApiExceptionFilter());
 
   // Global request validation. `whitelist` strips properties not declared on the DTO,
   // and `transform` coerces payloads into their DTO class instances.

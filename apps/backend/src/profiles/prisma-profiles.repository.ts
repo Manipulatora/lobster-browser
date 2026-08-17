@@ -84,20 +84,20 @@ export class PrismaProfilesRepository implements ProfilesRepository {
   }
 
   async findById(teamId: string, id: string): Promise<Profile | null> {
-    const row = await this.prisma.profile.findFirst({ where: { id, ownerTeamId: teamId } });
+    const row = await this.prisma.profile.findFirst({ where: this.liveScope(teamId, id) });
     return row ? this.toProfile(row) : null;
   }
 
   async findAllByTeam(teamId: string): Promise<Profile[]> {
     const rows = await this.prisma.profile.findMany({
-      where: { ownerTeamId: teamId },
+      where: this.liveScope(teamId),
       orderBy: { createdAt: 'asc' },
     });
     return rows.map((row) => this.toProfile(row));
   }
 
   async update(teamId: string, id: string, patch: UpdateProfileRecord): Promise<Profile | null> {
-    const existing = await this.prisma.profile.findFirst({ where: { id, ownerTeamId: teamId } });
+    const existing = await this.prisma.profile.findFirst({ where: this.liveScope(teamId, id) });
     if (!existing) {
       return null;
     }
@@ -145,19 +145,35 @@ export class PrismaProfilesRepository implements ProfilesRepository {
     return this.toProfile(row);
   }
 
+  /**
+   * Soft-delete: stamp a tombstone instead of removing the row. A hard DELETE leaves an offline
+   * machine no way to learn the profile is gone (on its next sync a missing row reads as "never
+   * synced from here", so it re-uploads and resurrects it). The row stays invisible to every read
+   * because they all go through {@link liveScope}, so a tombstone never shows up in a list and
+   * never counts toward the team's profile limit. Re-deleting an already-tombstoned profile
+   * returns false, exactly as a second hard delete did.
+   */
   async remove(teamId: string, id: string): Promise<boolean> {
-    const existing = await this.prisma.profile.findFirst({ where: { id, ownerTeamId: teamId } });
+    const existing = await this.prisma.profile.findFirst({ where: this.liveScope(teamId, id) });
     if (!existing) {
       return false;
     }
-    // TODO(Day 2): also delete the encrypted blob from S3 (Profile.encryptedBlobRef).
-    await this.prisma.profile.delete({ where: { id } });
+    await this.prisma.profile.update({ where: { id }, data: { deletedAt: new Date() } });
     return true;
   }
 
   async getProfileLimit(teamId: string): Promise<number | null> {
     const subscription = await this.prisma.subscription.findUnique({ where: { teamId } });
     return subscription ? subscription.profileLimit : null;
+  }
+
+  /**
+   * Team scope for every read. `deletedAt: null` is NOT optional on any of them: a tombstone that
+   * still matched a read would come back from the list API and, worse, keep counting against the
+   * plan's profile limit forever — a deleted profile permanently consuming the allowance.
+   */
+  private liveScope(teamId: string, id?: string): Prisma.ProfileWhereInput {
+    return { ...(id !== undefined ? { id } : {}), ownerTeamId: teamId, deletedAt: null };
   }
 
   private readMetadata(value: Prisma.JsonValue): ProfileMetadata {

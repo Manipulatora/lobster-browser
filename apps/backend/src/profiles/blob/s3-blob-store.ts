@@ -25,6 +25,22 @@ import {
 const MAX_PUT_ATTEMPTS = 5;
 
 /**
+ * Normalise an `S3_KEY_PREFIX` into '' or a `…/`-terminated namespace, and build the object key for
+ * one stored version. Both are EXPORTED so `ProfilesService` derives the `blobRef` URIs it hands
+ * out from the same rules this store actually writes under — a second copy of the layout is how a
+ * ref starts pointing at a key that does not exist.
+ */
+export function normalizeKeyPrefix(raw: string | undefined): string {
+  const prefix = raw ?? '';
+  return prefix && !prefix.endsWith('/') ? `${prefix}/` : prefix;
+}
+
+/** Object key for one immutable stored version, e.g. `<prefix><teamId>/<profileId>/3.enc`. */
+export function blobObjectKey(keyPrefix: string, key: string, version: number): string {
+  return `${keyPrefix}${key}/${version}.enc`;
+}
+
+/**
  * True when an S3 error is a conditional-write rejection: HTTP 412 `PreconditionFailed` (the
  * object already exists so `If-None-Match: *` failed) or HTTP 409 `ConditionalRequestConflict`
  * (S3 detected a concurrent conditional write on the same key). Both mean "another writer got
@@ -82,8 +98,7 @@ export class S3BlobStore implements BlobStore {
       throw new Error('S3BlobStore requires S3_BUCKET to be configured');
     }
     this.bucket = bucket;
-    const rawPrefix = config.get<string>('S3_KEY_PREFIX') ?? '';
-    this.keyPrefix = rawPrefix && !rawPrefix.endsWith('/') ? `${rawPrefix}/` : rawPrefix;
+    this.keyPrefix = normalizeKeyPrefix(config.get<string>('S3_KEY_PREFIX'));
 
     if (client) {
       this.client = client;
@@ -120,8 +135,12 @@ export class S3BlobStore implements BlobStore {
             // The atomic compare-and-set: S3 rejects this put (412) unless it CREATES the
             // object, so exactly one writer can ever own a given version number.
             IfNoneMatch: '*',
-            // Non-secret tagging for auditing/lifecycle rules; never the blob plaintext.
-            Metadata: { 'team-id': meta.teamId, 'profile-id': meta.profileId },
+            // Encrypt at rest with the bucket-managed key. The bytes are ALREADY client-encrypted,
+            // so this is defence in depth (and what a bucket policy denying unencrypted PUTs
+            // requires) — never the primary protection.
+            ServerSideEncryption: 'AES256',
+            // No object Metadata: the key already carries <teamId>/<profileId>, and duplicating the
+            // topology in metadata only widened what a bucket-listing attacker learns for free.
           }),
         );
         return { version: nextVersion };
@@ -196,9 +215,8 @@ export class S3BlobStore implements BlobStore {
     } while (continuationToken);
   }
 
-  /** Object key for one immutable stored version, e.g. `<prefix><teamId>/<profileId>/3.enc`. */
   private objectKey(key: string, version: number): string {
-    return `${this.keyPrefix}${key}/${version}.enc`;
+    return blobObjectKey(this.keyPrefix, key, version);
   }
 
   /**

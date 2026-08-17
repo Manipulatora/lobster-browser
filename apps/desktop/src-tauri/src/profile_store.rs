@@ -6,7 +6,8 @@
 //!
 //! SEC-12: secret material is encrypted at rest with the per-install AES-256-GCM key
 //! (`crate::secrets`): proxy credentials inside the `proxy` JSON, and the whole `cookies_import`
-//! payload (imported cookies are live session secrets). Legacy plaintext rows still read fine.
+//! payload (imported cookies are live session secrets). SEC-19: a cell that cannot be decrypted
+//! fails the read — it is never substituted, because the substitute gets written back.
 //! LATER: rows sync to the backend for team sharing. This module owns schema + CRUD.
 
 use std::path::Path;
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     proxy_id               TEXT,
     template_id            TEXT,
     cookies_import         TEXT,                   -- JSON: CookieImportDraft
+    cookies_import_applied_at TEXT,                -- ISO-8601: import already in the cookie jar
     extensions             TEXT,                   -- JSON: BrowserExtensionRef[]
     tags                   TEXT NOT NULL DEFAULT '[]', -- JSON: string[]
     folder                 TEXT,
@@ -96,6 +98,11 @@ pub struct Profile {
     pub template_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cookies_import: Option<serde_json::Value>,
+    /// When the pending import was applied to the browser's cookie jar. The payload above is KEPT
+    /// once applied — see [`mark_cookie_import_applied`] — so this timestamp, not a NULL cell, is
+    /// what stops the next launch re-injecting it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cookies_import_applied_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extensions: Option<serde_json::Value>,
     pub tags: Vec<String>,
@@ -109,6 +116,16 @@ pub struct Profile {
     pub trashed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Columns whose stored value could not be decrypted or parsed on this machine.
+    ///
+    /// DEGRADED, NOT FATAL. A single unreadable cell used to fail the whole row mapping, which fails
+    /// the whole `list` — the user gets an empty, unexplained profile list and no route back. The
+    /// row is returned instead with the affected field left `None` and named here, so the UI can say
+    /// which profile is damaged and in what way. [`update`] then REFUSES to write such a row, which
+    /// is what preserves the original point: a cell we could not read must never be overwritten by
+    /// the `None` we substituted for it.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub unreadable_secrets: Vec<String>,
 }
 
 /// Fields accepted when creating a profile (mirrors shared-types `CreateProfileInput`).
@@ -219,6 +236,11 @@ fn migrate(conn: &Connection) -> Result<()> {
     )?;
     ensure_column(
         conn,
+        "cookies_import_applied_at",
+        "ALTER TABLE profiles ADD COLUMN cookies_import_applied_at TEXT",
+    )?;
+    ensure_column(
+        conn,
         "extensions",
         "ALTER TABLE profiles ADD COLUMN extensions TEXT",
     )?;
@@ -242,17 +264,61 @@ fn row_to_profile(cipher: &SecretCipher, row: &Row) -> rusqlite::Result<Profile>
     let extensions_json: Option<String> = row.get("extensions")?;
     let tags_json: String = row.get("tags")?;
     let password_hash: Option<String> = row.get("password_hash")?;
+
     // SEC-12: decrypt at the store boundary — proxy credentials are field-encrypted inside the
-    // JSON; the cookies_import cell is encrypted as a whole (legacy plaintext passes through).
-    let proxy = proxy_json
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .map(|mut value| {
-            cipher.decrypt_json_fields(&mut value, PROXY_SECRET_FIELDS);
-            value
-        });
-    let cookies_import = cookies_json
-        .map(|s| cipher.decrypt_str(&s))
-        .and_then(|s| serde_json::from_str(&s).ok());
+    // JSON; the cookies_import cell is encrypted as a whole. SEC-19: an undecryptable or malformed
+    // cell must NOT be silently replaced by `None`, because `update()` then persisted that `None` as
+    // NULL and destroyed the cell. It is recorded in `unreadable_secrets` and the row is still
+    // returned — failing the mapping outright fails the entire `list` and blanks the app.
+    let mut unreadable_secrets: Vec<String> = Vec::new();
+
+    let proxy =
+        proxy_json.and_then(
+            |stored| match serde_json::from_str::<serde_json::Value>(&stored) {
+                Ok(mut value) => {
+                    match cipher.decrypt_json_fields(&mut value, PROXY_SECRET_FIELDS) {
+                        Ok(()) => Some(value),
+                        Err(_) => {
+                            unreadable_secrets.push("proxy".to_string());
+                            None
+                        }
+                    }
+                }
+                Err(_) => {
+                    unreadable_secrets.push("proxy".to_string());
+                    None
+                }
+            },
+        );
+
+    let cookies_import = cookies_json.and_then(|stored| match cipher.decrypt_strict(&stored) {
+        Ok(plaintext) => match serde_json::from_str(&plaintext) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                unreadable_secrets.push("cookies_import".to_string());
+                None
+            }
+        },
+        Err(_) => {
+            unreadable_secrets.push("cookies_import".to_string());
+            None
+        }
+    });
+
+    let fingerprint_overrides = overrides_json.and_then(|stored| {
+        serde_json::from_str(&stored).ok().or_else(|| {
+            unreadable_secrets.push("fingerprint_overrides".to_string());
+            None
+        })
+    });
+
+    let extensions = extensions_json.and_then(|stored| {
+        serde_json::from_str(&stored).ok().or_else(|| {
+            unreadable_secrets.push("extensions".to_string());
+            None
+        })
+    });
+
     Ok(Profile {
         id: row.get("id")?,
         name: row.get("name")?,
@@ -260,12 +326,13 @@ fn row_to_profile(cipher: &SecretCipher, row: &Row) -> rusqlite::Result<Profile>
         os: row.get("os")?,
         os_version: row.get("os_version")?,
         fingerprint_seed: row.get("fingerprint_seed")?,
-        fingerprint_overrides: overrides_json.and_then(|s| serde_json::from_str(&s).ok()),
+        fingerprint_overrides,
         proxy,
         proxy_id: row.get("proxy_id")?,
         template_id: row.get("template_id")?,
         cookies_import,
-        extensions: extensions_json.and_then(|s| serde_json::from_str(&s).ok()),
+        cookies_import_applied_at: row.get("cookies_import_applied_at")?,
+        extensions,
         tags: serde_json::from_str(&tags_json).unwrap_or_default(),
         folder: row.get("folder")?,
         notes: row.get("notes")?,
@@ -274,6 +341,7 @@ fn row_to_profile(cipher: &SecretCipher, row: &Row) -> rusqlite::Result<Profile>
         trashed_at: row.get("trashed_at")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        unreadable_secrets,
     })
 }
 
@@ -403,6 +471,19 @@ pub fn update(
         None => return Ok(None),
     };
 
+    // The write is refused rather than allowed to clobber. Every field below falls back to
+    // `existing.<field>`, and for an unreadable cell that fallback is the `None` substituted during
+    // the read — so saving would replace the cell with NULL and destroy the only copy. Refusing is
+    // the whole point of SEC-19; the read was made non-fatal so the user can SEE the profile, not so
+    // that editing it silently discards a session we merely failed to decrypt.
+    if !existing.unreadable_secrets.is_empty() {
+        anyhow::bail!(
+            "profile {id} has values this machine cannot decrypt ({}); saving would overwrite them. \
+             Re-enter the affected values to replace them, or restore this profile's secrets key.",
+            existing.unreadable_secrets.join(", ")
+        );
+    }
+
     let name = patch.name.unwrap_or(existing.name);
     let engine = patch.engine.unwrap_or(existing.engine);
     let os = patch.os.unwrap_or_else(|| existing.os.clone());
@@ -436,10 +517,23 @@ pub fn update(
     } else {
         existing.template_id
     };
+    // An applied import is kept, so "already applied" is a timestamp rather than a NULL cell. The
+    // edit form round-trips rawText and therefore re-submits the SAME draft on every save; only a
+    // genuinely DIFFERENT draft may re-arm the import, or every unrelated profile edit would
+    // re-inject a stale session on the next launch.
+    let cookies_import_changed = patch
+        .cookies_import
+        .as_ref()
+        .is_some_and(|next| Some(next) != existing.cookies_import.as_ref());
     let cookies_import = if patch.cookies_import.is_some() {
         patch.cookies_import
     } else {
         existing.cookies_import
+    };
+    let cookies_import_applied_at = if cookies_import_changed {
+        None
+    } else {
+        existing.cookies_import_applied_at
     };
     let extensions = if patch.extensions.is_some() {
         patch.extensions
@@ -461,8 +555,8 @@ pub fn update(
 
     conn.execute(
         "UPDATE profiles SET name = ?2, engine = ?3, os = ?4, os_version = ?5, fingerprint_overrides = ?6, \
-         proxy = ?7, proxy_id = ?8, template_id = ?9, cookies_import = ?10, extensions = ?11, \
-         tags = ?12, folder = ?13, notes = ?14, updated_at = ?15 WHERE id = ?1",
+         proxy = ?7, proxy_id = ?8, template_id = ?9, cookies_import = ?10, cookies_import_applied_at = ?11, \
+         extensions = ?12, tags = ?13, folder = ?14, notes = ?15, updated_at = ?16 WHERE id = ?1",
         params![
             id,
             name,
@@ -474,6 +568,7 @@ pub fn update(
             proxy_id,
             template_id,
             cookies_to_text(cipher, &cookies_import)?,
+            cookies_import_applied_at,
             to_text(&extensions),
             serde_json::to_string(&tags)?,
             folder,
@@ -570,12 +665,17 @@ pub fn set_status(conn: &Connection, id: &str, status: &str) -> Result<bool> {
     )? > 0)
 }
 
-/// Consume a pending one-shot import only after the sidecar confirms CDP application.
-pub fn clear_cookie_import(conn: &Connection, id: &str) -> Result<bool> {
+/// Stamp a pending import as applied, only after the sidecar confirms CDP application.
+///
+/// The payload is PRESERVED. Nulling it (what this replaces) destroyed the only durable record of
+/// the profile's session on its first successful launch: nothing snapshots the live cookie jar, so
+/// afterwards the edit form showed an empty cookie box for a logged-in profile and a backup would
+/// have had nothing to send. The launch path skips an import that carries this timestamp.
+pub fn mark_cookie_import_applied(conn: &Connection, id: &str) -> Result<bool> {
     let now = chrono::Utc::now().to_rfc3339();
     Ok(conn.execute(
-        "UPDATE profiles SET cookies_import = NULL, updated_at = ?2 \
-         WHERE id = ?1 AND cookies_import IS NOT NULL",
+        "UPDATE profiles SET cookies_import_applied_at = ?2, updated_at = ?2 \
+         WHERE id = ?1 AND cookies_import IS NOT NULL AND cookies_import_applied_at IS NULL",
         params![id, now],
     )? > 0)
 }
@@ -647,6 +747,24 @@ mod tests {
             cookies_import: None,
             extensions: None,
             tags: Some(vec!["a".to_string()]),
+            folder: None,
+            notes: None,
+        }
+    }
+
+    fn patch_with_cookies(cookies_import: Option<serde_json::Value>) -> UpdateProfilePatch {
+        UpdateProfilePatch {
+            name: None,
+            engine: None,
+            os: None,
+            os_version: None,
+            fingerprint_overrides: None,
+            proxy: None,
+            proxy_id: None,
+            template_id: None,
+            cookies_import,
+            extensions: None,
+            tags: None,
             folder: None,
             notes: None,
         }
@@ -837,6 +955,53 @@ mod tests {
         assert!(list_trashed(&conn, &cipher).unwrap().is_empty());
     }
 
+    /// The `cookies_import_applied_at` migration has to be safe on the profiles.sqlite already on
+    /// users' disks. Every other test here builds a fresh DB from the current `SCHEMA`, so the ALTER
+    /// chain in `migrate` is otherwise unexercised — one missed column and the profile list fails to
+    /// load for every existing install.
+    #[test]
+    fn init_migrates_a_database_created_before_the_applied_at_column() {
+        let dir =
+            std::env::temp_dir().join(format!("lobster-migrate-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("profiles.sqlite");
+        let cipher = test_cipher();
+        {
+            let legacy_schema = SCHEMA
+                .lines()
+                .filter(|line| !line.contains("cookies_import_applied_at"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let legacy = Connection::open(&db_path).unwrap();
+            legacy.execute_batch(&legacy_schema).unwrap();
+            legacy
+                .execute(
+                    "INSERT INTO profiles \
+                     (id, name, engine, os, fingerprint_seed, cookies_import, tags, status, created_at, updated_at) \
+                     VALUES ('prf_legacy', 'Existing', 'lobium', 'windows', 'deadbeef', ?1, '[]', 'idle', ?2, ?2)",
+                    params![
+                        cipher
+                            .encrypt_str(&serde_json::json!({ "mode": "merge" }).to_string())
+                            .unwrap(),
+                        "2025-01-01T00:00:00Z"
+                    ],
+                )
+                .unwrap();
+        }
+
+        let conn = init(&db_path).unwrap();
+        let listed = list(&conn, &cipher).unwrap();
+        assert_eq!(listed.len(), 1, "existing rows must survive the migration");
+        assert!(listed[0].cookies_import.is_some());
+        assert!(
+            listed[0].cookies_import_applied_at.is_none(),
+            "a pre-migration import is still pending, not silently applied"
+        );
+        assert!(mark_cookie_import_applied(&conn, "prf_legacy").unwrap());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// SEC-12: profile proxy credentials and the cookie-import payload must be ciphertext in the
     /// raw SQLite cells, while the store API round-trips the original plaintext.
     #[test]
@@ -917,13 +1082,128 @@ mod tests {
         .unwrap();
         assert!(updated.proxy.is_none());
         assert_eq!(updated.proxy_id.as_deref(), Some("px_current"));
-        assert!(clear_cookie_import(&conn, &created.id).unwrap());
-        assert!(!clear_cookie_import(&conn, &created.id).unwrap());
-        assert!(get(&conn, &cipher, &created.id)
+        assert!(mark_cookie_import_applied(&conn, &created.id).unwrap());
+        assert!(!mark_cookie_import_applied(&conn, &created.id).unwrap());
+        let applied = get(&conn, &cipher, &created.id).unwrap().unwrap();
+        assert!(
+            applied.cookies_import.is_some(),
+            "an applied import stays on the row as the profile's session record"
+        );
+        assert!(applied.cookies_import_applied_at.is_some());
+    }
+
+    /// Fix for the data loss this replaced: the import survives, and a save that re-submits the SAME
+    /// draft (what the edit form does, since it now reads rawText back) must not re-arm it.
+    #[test]
+    fn applied_cookie_import_survives_and_only_a_different_draft_re_arms_it() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let draft = serde_json::json!({
+            "mode": "merge", "source": "plain_text",
+            "rawText": "example.test\tFALSE\t/\tFALSE\t0\tsid\tsecret"
+        });
+        let mut new_profile = input("Session");
+        new_profile.cookies_import = Some(draft.clone());
+        let created = create(&conn, &cipher, new_profile).unwrap();
+        assert!(created.cookies_import_applied_at.is_none());
+        assert!(mark_cookie_import_applied(&conn, &created.id).unwrap());
+
+        let resaved = update(&conn, &cipher, &created.id, patch_with_cookies(Some(draft)))
             .unwrap()
-            .unwrap()
-            .cookies_import
-            .is_none());
+            .unwrap();
+        assert_eq!(
+            resaved.cookies_import.as_ref().unwrap()["rawText"],
+            "example.test\tFALSE\t/\tFALSE\t0\tsid\tsecret",
+            "rawText must survive both the launch and the re-save"
+        );
+        assert!(
+            resaved.cookies_import_applied_at.is_some(),
+            "re-saving the same draft must not re-inject it on the next launch"
+        );
+
+        let replaced = update(
+            &conn,
+            &cipher,
+            &created.id,
+            patch_with_cookies(Some(serde_json::json!({
+                "mode": "replace", "source": "plain_text", "rawText": "other.test\tFALSE\t/\tFALSE\t0\tsid\tfresh"
+            }))),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            replaced.cookies_import_applied_at.is_none(),
+            "a genuinely new import has to be applied"
+        );
+    }
+
+    /// SEC-19: a cell we cannot decrypt must fail the read. The old fallback returned `None`, and
+    /// the next `update()` wrote that `None` back — destroying the row's session and overrides.
+    #[test]
+    fn an_undecryptable_cell_is_reported_and_never_overwritten() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let mut new_profile = input("Foreign key");
+        new_profile.cookies_import = Some(serde_json::json!({ "mode": "merge" }));
+        let created = create(&conn, &cipher, new_profile).unwrap();
+        let stored_cell: String = conn
+            .query_row(
+                "SELECT cookies_import FROM profiles WHERE id = ?1",
+                params![created.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // Another install's key: the row still LISTS — failing the mapping would fail the whole
+        // query and leave the user with an empty app — but the damage is named.
+        let stranger = SecretCipher::new(&[7u8; 32]);
+        let read = get(&conn, &stranger, &created.id).unwrap().unwrap();
+        assert!(read.cookies_import.is_none(), "the cell is not guessed at");
+        assert_eq!(read.unreadable_secrets, vec!["cookies_import".to_string()]);
+        assert_eq!(list(&conn, &stranger).unwrap().len(), 1, "list still works");
+
+        // ...and the write is refused, which is what actually protects the cell: every field in
+        // `update` falls back to the value from the read, and that value is now None.
+        let err = update(&conn, &stranger, &created.id, patch_with_cookies(None))
+            .expect_err("saving a row with an unreadable cell must be refused");
+        assert!(
+            err.to_string().contains("cannot decrypt"),
+            "the error names the cause: {err}"
+        );
+        let after: String = conn
+            .query_row(
+                "SELECT cookies_import FROM profiles WHERE id = ?1",
+                params![created.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, stored_cell, "the ciphertext is byte-for-byte intact");
+
+        // Unencrypted JSON planted directly in the cell is an injection attempt, not legacy data:
+        // it has no `lbsec1:` prefix, so it must not be honoured as a cookie import.
+        conn.execute(
+            "UPDATE profiles SET cookies_import = ?2 WHERE id = ?1",
+            params![
+                created.id,
+                r#"{"mode":"replace","cookies":[{"name":"sid","value":"attacker"}]}"#
+            ],
+        )
+        .unwrap();
+        let planted = get(&conn, &cipher, &created.id).unwrap().unwrap();
+        assert!(planted.cookies_import.is_none(), "plaintext is not trusted");
+        assert_eq!(planted.unreadable_secrets, vec!["cookies_import".to_string()]);
+
+        conn.execute(
+            "UPDATE profiles SET cookies_import = NULL, fingerprint_overrides = 'not json' WHERE id = ?1",
+            params![created.id],
+        )
+        .unwrap();
+        let broken = get(&conn, &cipher, &created.id).unwrap().unwrap();
+        assert!(broken.fingerprint_overrides.is_none());
+        assert_eq!(
+            broken.unreadable_secrets,
+            vec!["fingerprint_overrides".to_string()]
+        );
     }
 
     #[test]

@@ -66,7 +66,12 @@ export interface ProfilesRepository {
   findAllByTeam(teamId: string): Promise<Profile[]>;
   /** Returns the updated profile, or null when it does not exist / belongs to another team. */
   update(teamId: string, id: string, patch: UpdateProfileRecord): Promise<Profile | null>;
-  /** Returns true when a row was deleted, false when nothing matched the (team, id). */
+  /**
+   * Delete the profile. Implementations MAY soft-delete — the Prisma repository writes a
+   * `deletedAt` tombstone so a machine that was offline can still learn the profile is gone — but
+   * either way it stops matching every other method here. Returns true when something was deleted,
+   * false when nothing live matched the (team, id).
+   */
   remove(teamId: string, id: string): Promise<boolean>;
   /**
    * The team's plan profile limit from its Subscription, or null when no subscription exists

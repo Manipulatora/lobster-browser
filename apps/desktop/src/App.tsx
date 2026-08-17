@@ -1,5 +1,5 @@
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { authClient, type CloudUser } from './api/auth';
 import { isDesktopRuntime, profilesClient } from './api/tauri';
@@ -83,11 +83,30 @@ export function App(): JSX.Element {
     return <AuthScreen onAuthenticated={setUser} />;
   }
 
-  return <Dashboard />;
+  return (
+    <Dashboard
+      user={user}
+      onSignedOut={() => {
+        setUser(null);
+        setOffline(false);
+      }}
+    />
+  );
 }
 
-/** The launcher dashboard, shown once the auth gate is satisfied. */
-function Dashboard(): JSX.Element {
+/**
+ * The launcher dashboard, shown once the auth gate is satisfied.
+ *
+ * `user` is nullable on purpose: the gate also admits the `offline` case — a token is held but
+ * could not be verified — so the shell knows an account exists without knowing whose.
+ */
+function Dashboard({
+  user,
+  onSignedOut,
+}: {
+  user: CloudUser | null;
+  onSignedOut: () => void;
+}): JSX.Element {
   const [active, setActive] = useState<NavKey>('profiles');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -96,6 +115,8 @@ function Dashboard(): JSX.Element {
   const [quickLaunchPassword, setQuickLaunchPassword] = useState('');
   const [quickLaunchBusy, setQuickLaunchBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const isMac = useMemo(
     () => typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform),
     [],
@@ -136,6 +157,42 @@ function Dashboard(): JSX.Element {
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, []);
+
+  // Same dismissal contract as the row menus in ProfileList: pointerdown outside, or Escape.
+  useEffect(() => {
+    if (!accountMenuOpen) return undefined;
+
+    function closeIfOutside(event: PointerEvent): void {
+      const target = event.target;
+      if (target instanceof Node && accountMenuRef.current?.contains(target)) return;
+      setAccountMenuOpen(false);
+    }
+
+    function closeOnEscape(event: KeyboardEvent): void {
+      if (event.key === 'Escape') setAccountMenuOpen(false);
+    }
+
+    document.addEventListener('pointerdown', closeIfOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeIfOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [accountMenuOpen]);
+
+  const accountLabel = user?.displayName ?? user?.email ?? 'Account';
+
+  async function handleSignOut(): Promise<void> {
+    setAccountMenuOpen(false);
+    try {
+      await authClient.signOut();
+    } catch {
+      // Nothing actionable to report: sign-out only drops the keychain token and returns no
+      // result, so the one thing this window can still honour is the request itself. Leaving
+      // someone inside a signed-in shell they just asked to leave is the worse outcome.
+    }
+    onSignedOut();
+  }
 
   const requestCreateProfile = useCallback(() => {
     setActive('profiles');
@@ -230,6 +287,37 @@ function Dashboard(): JSX.Element {
             <Icon name="MagnifyingGlassIcon" aria-hidden />
             <Kbd>{isMac ? 'âŒ˜K' : 'Ctrl K'}</Kbd>
           </button>
+          {/* The only place the signed-in account is visible, and the only way out of it: before
+              this, auth_sign_out had no caller anywhere, so the sole escape from a wrong account
+              was clearing the OS keychain by hand. It sits in the topbar rather than the sidebar
+              footer because that footer is display:none below 900px wide. */}
+          <div className="row-menu" ref={accountMenuRef}>
+            <button
+              type="button"
+              className="btn"
+              aria-haspopup="menu"
+              aria-expanded={accountMenuOpen}
+              onClick={() => setAccountMenuOpen((open) => !open)}
+              title={accountLabel}
+            >
+              <span className="account-name">{accountLabel}</span>
+              <Icon name="ChevronDownIcon" aria-hidden />
+            </button>
+            {accountMenuOpen ? (
+              <div className="action-menu" role="menu">
+                <button
+                  type="button"
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    void handleSignOut();
+                  }}
+                >
+                  Sign out
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 

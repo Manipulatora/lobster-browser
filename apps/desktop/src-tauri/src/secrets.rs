@@ -2,9 +2,13 @@
 //!
 //! Sensitive values (proxy usernames/passwords, cookie-import payloads) are encrypted with
 //! AES-256-GCM before they hit disk and decrypted at the store boundary on read. Ciphertext is
-//! stored as `lbsec1:<base64(nonce || ciphertext)>` so encrypted cells are self-describing:
-//! anything WITHOUT the prefix is treated as a legacy plaintext row (pre-SEC-12 databases keep
-//! working and get re-encrypted the next time they are written).
+//! stored as `lbsec1:<base64(nonce || ciphertext)>` so encrypted cells are self-describing.
+//!
+//! Reads are STRICT (SEC-19): a cell without the prefix, or one that does not authenticate, is a
+//! [`SecretUnavailable`] error, never a value. The former best-effort read accepted an unprefixed
+//! cell as "legacy plaintext" and returned a tampered cell verbatim, which turned the SQLite file
+//! into a keyless injection channel — write plain JSON cookies into `cookies_import` and the app
+//! injects the attacker's session on the next launch.
 //!
 //! Key management (SEC-2): a random 32-byte Local Store Key (LSK) is loaded via
 //! [`crate::keychain::load_or_create_lsk`] — OS keychain first, 0600 file fallback.
@@ -67,28 +71,17 @@ impl SecretCipher {
         Ok(format!("{ENC_PREFIX}{}", BASE64.encode(blob)))
     }
 
-    /// Decrypt a stored cell. Best-effort compat: values without the `lbsec1:` prefix are legacy
-    /// plaintext and returned unchanged; a prefixed value that fails to authenticate (wrong key,
-    /// tampering) is also returned as stored rather than crashing the read path.
-    pub fn decrypt_str(&self, stored: &str) -> String {
-        let Some(encoded) = stored.strip_prefix(ENC_PREFIX) else {
-            return stored.to_string();
-        };
-        match self.try_decrypt(encoded) {
-            Ok(plaintext) => plaintext,
-            Err(err) => {
-                tracing::warn!(%err, "failed to decrypt stored secret; returning cell as-is");
-                stored.to_string()
-            }
-        }
-    }
-
-    /// Strict decrypt for credential stores: plaintext and unauthentic ciphertext are rejected.
+    /// Decrypt a stored cell. The only read path: both failure modes are [`SecretUnavailable`].
     pub fn decrypt_strict(&self, stored: &str) -> Result<String> {
         let encoded = stored
             .strip_prefix(ENC_PREFIX)
-            .ok_or_else(|| anyhow!("credential is not encrypted"))?;
-        self.try_decrypt(encoded)
+            .ok_or(SecretUnavailable::NotEncrypted)?;
+        self.try_decrypt(encoded).map_err(|cause| {
+            SecretUnavailable::Undecryptable {
+                detail: cause.to_string(),
+            }
+            .into()
+        })
     }
 
     fn try_decrypt(&self, encoded: &str) -> Result<String> {
@@ -123,18 +116,53 @@ impl SecretCipher {
         Ok(())
     }
 
-    /// Decrypt the given string-valued keys of a JSON object in place (legacy plaintext passes
-    /// through unchanged).
-    pub fn decrypt_json_fields(&self, value: &mut serde_json::Value, fields: &[&str]) {
+    /// Decrypt the given string-valued keys of a JSON object in place. Fails on the first cell
+    /// that cannot be decrypted: a partially-decrypted credential set would be handed to the
+    /// browser as a real username/password and surface as "the proxy rejected my credentials".
+    pub fn decrypt_json_fields(
+        &self,
+        value: &mut serde_json::Value,
+        fields: &[&str],
+    ) -> Result<()> {
         if let Some(obj) = value.as_object_mut() {
             for field in fields {
                 if let Some(serde_json::Value::String(s)) = obj.get_mut(*field) {
-                    *s = self.decrypt_str(s);
+                    *s = self.decrypt_strict(s)?;
                 }
             }
         }
+        Ok(())
     }
 }
+
+/// A stored secret cell that cannot be turned back into plaintext on this machine.
+///
+/// Kept as a distinct type because the two variants need different words in front of the user: one
+/// means the local database was written by something other than this app, the other means the
+/// Local Store Key this install holds is not the key the cells were written with (a copied
+/// `profiles.sqlite`, a reinstall, a restored backup) — "local secrets cannot be decrypted on this
+/// machine", not "your proxy password is wrong".
+#[derive(Debug)]
+pub enum SecretUnavailable {
+    /// No `lbsec1:` marker: never encrypted, or overwritten by something that is not our cell.
+    NotEncrypted,
+    /// Marked as ours but does not authenticate: wrong key, tampering, or truncation.
+    Undecryptable { detail: String },
+}
+
+impl std::fmt::Display for SecretUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotEncrypted => write!(f, "stored secret is not encrypted"),
+            Self::Undecryptable { detail } => write!(
+                f,
+                "local secrets cannot be decrypted on this machine ({detail})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SecretUnavailable {}
 
 #[cfg(test)]
 mod tests {
@@ -150,25 +178,36 @@ mod tests {
         let stored = c.encrypt_str("hunter2").unwrap();
         assert!(SecretCipher::is_encrypted(&stored));
         assert!(!stored.contains("hunter2"));
-        assert_eq!(c.decrypt_str(&stored), "hunter2");
+        assert_eq!(c.decrypt_strict(&stored).unwrap(), "hunter2");
         // Fresh nonce per call: same plaintext yields different ciphertext.
         assert_ne!(stored, c.encrypt_str("hunter2").unwrap());
     }
 
+    /// SEC-19: a read must never hand back the stored cell. Returning it made the SQLite file an
+    /// injection channel requiring no key (unprefixed cookies were trusted as "legacy plaintext").
     #[test]
-    fn legacy_plaintext_and_tampered_cells_do_not_crash_reads() {
+    fn plaintext_and_tampered_cells_are_rejected_as_secret_unavailable() {
         let c = cipher();
-        assert_eq!(c.decrypt_str("plain-old-password"), "plain-old-password");
-        // Wrong key → auth failure → cell returned as stored, not a panic.
+        let unavailable = |stored: &str, cipher: &SecretCipher| {
+            let err = cipher
+                .decrypt_strict(stored)
+                .expect_err("undecryptable cell must not read back as a value");
+            assert!(
+                !err.to_string().contains(stored),
+                "the error must not echo the cell: {err}"
+            );
+            format!(
+                "{:?}",
+                err.downcast_ref::<SecretUnavailable>()
+                    .expect("typed SecretUnavailable")
+            )
+        };
+        assert!(unavailable("plain-old-password", &c).starts_with("NotEncrypted"));
+        // Wrong key → auth failure → error, never the ciphertext string.
         let stored = c.encrypt_str("secret").unwrap();
         let other = SecretCipher::new(&[9u8; 32]);
-        assert_eq!(other.decrypt_str(&stored), stored);
-        assert_eq!(
-            c.decrypt_str("lbsec1:!!!not-base64"),
-            "lbsec1:!!!not-base64"
-        );
-        assert!(c.decrypt_strict("plain-old-password").is_err());
-        assert!(other.decrypt_strict(&stored).is_err());
+        assert!(unavailable(&stored, &other).starts_with("Undecryptable"));
+        assert!(unavailable("lbsec1:!!!not-base64", &c).starts_with("Undecryptable"));
     }
 
     #[test]
@@ -192,7 +231,8 @@ mod tests {
         c.encrypt_json_fields(&mut config, PROXY_SECRET_FIELDS)
             .unwrap();
         assert_eq!(config["password"].as_str().unwrap(), once);
-        c.decrypt_json_fields(&mut config, PROXY_SECRET_FIELDS);
+        c.decrypt_json_fields(&mut config, PROXY_SECRET_FIELDS)
+            .unwrap();
         assert_eq!(config["username"], "user1");
         assert_eq!(config["password"], "hunter2");
     }
@@ -206,7 +246,10 @@ mod tests {
         let first = SecretCipher::load_or_create(&key_path).unwrap();
         let stored = first.encrypt_str("persisted-secret").unwrap();
         let reloaded = SecretCipher::load_or_create(&key_path).unwrap();
-        assert_eq!(reloaded.decrypt_str(&stored), "persisted-secret");
+        assert_eq!(
+            reloaded.decrypt_strict(&stored).unwrap(),
+            "persisted-secret"
+        );
 
         #[cfg(unix)]
         {

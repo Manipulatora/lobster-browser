@@ -184,10 +184,19 @@ model Profile {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Soft-delete tombstone. Deleting a profile sets this instead of removing the row, because a
+  // machine that was offline during the delete has no other way to LEARN the profile is gone — it
+  // would see a missing row as "never synced here" and resurrect it. Every read filters on
+  // `deletedAt: null`, so a tombstone is invisible to the API and never consumes the plan's
+  // profile allowance.
+  deletedAt DateTime?
+
   // Relations
   ownerTeam Team @relation(fields: [ownerTeamId], references: [id], onDelete: Cascade)
 
   @@index([ownerTeamId])
+  // Every profile read is (ownerTeamId, live), including the plan-limit count.
+  @@index([ownerTeamId, deletedAt])
   @@map("profiles")
 }
 

@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
+  detectUnloadableUserExtensions,
   downloadChromeWebStoreCrx,
   extensionLaunchArgs,
   extractExtensionZip,
+  LOBEE_EXTENSION_ID,
   parseChromeWebStoreId,
   prepareProfileExtensions,
   verifyCrx3,
@@ -295,5 +297,47 @@ test('local unpacked extensions are snapshotted and symlinks fail closed', async
     );
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('detectUnloadableUserExtensions names browser-installed extensions only', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'ext-unloadable-'));
+  try {
+    // Nothing to read yet on a fresh profile — a diagnostic must never fail a launch.
+    assert.deepEqual(await detectUnloadableUserExtensions(userDataDir), []);
+
+    await mkdir(join(userDataDir, 'Default'), { recursive: true });
+    // Locations as Chromium writes them: 1 = kInternal (installed by the user from inside the browser,
+    // the ones --disable-extensions-except silently drops), 8 = kCommandLine (ours), 5 = kComponent.
+    await writeFile(
+      join(userDataDir, 'Default', 'Preferences'),
+      JSON.stringify({
+        extensions: {
+          settings: {
+            gighmmpiobklfepjocnamgkkbiglidom: {
+              location: 1,
+              manifest: { name: 'AdBlock — block ads across the web', version: '6.44.0' },
+            },
+            aikjogmpaoaookmacnkbenekcnkjlkmi: { location: 1 },
+            [LOBEE_EXTENSION_ID]: { location: 8, manifest: { name: 'Lobee', version: '1' } },
+            mhjfbmdgcfjbbpaeojofohoefgiehjai: {
+              location: 5,
+              manifest: { name: 'Chromium PDF Viewer', version: '1' },
+            },
+          },
+        },
+      }),
+    );
+
+    assert.deepEqual(await detectUnloadableUserExtensions(userDataDir), [
+      {
+        id: 'gighmmpiobklfepjocnamgkkbiglidom',
+        name: 'AdBlock — block ads across the web',
+        version: '6.44.0',
+      },
+      { id: 'aikjogmpaoaookmacnkbenekcnkjlkmi' },
+    ]);
+  } finally {
+    await rm(userDataDir, { recursive: true, force: true });
   }
 });

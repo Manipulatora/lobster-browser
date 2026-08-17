@@ -1,7 +1,10 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -14,6 +17,7 @@ import { dirname, join, resolve } from 'node:path';
 import type { ProxyConfig } from '@lobster/shared-types';
 import { readDevToolsEndpoint, clearDevToolsActivePort } from '../devtools-endpoint.js';
 import {
+  detectUnloadableUserExtensions,
   extensionLaunchArgs,
   LOBEE_EXTENSION_ID,
   prepareDefaultLobeeExtension,
@@ -368,8 +372,13 @@ export async function buildNativeLobiumProcessArgs(
     // later launch cannot decrypt Default/Cookies and the user is silently logged out (e.g. a Google
     // account needing re-login). The basic store uses a fixed key, so the cookie jar always decrypts.
     '--password-store=basic',
-    // Restore the previous session (open tabs) on relaunch. The launcher also seeds
-    // session.restore_on_startup=1; this flag forces it regardless of any startup URL.
+    // Restore the previous session (open tabs) on relaunch — and the ONLY mechanism used for it.
+    // StartupBrowserCreatorImpl reads this switch directly (startup_browser_creator.cc: kRestoreLastSession
+    // forces SessionStartupPref::LAST for any non-new profile), so the launcher deliberately does NOT also
+    // write session.restore_on_startup into Default/Preferences: prefs::kRestoreOnStartup is tracked pref
+    // id 3 at ENFORCE_ON_LOAD/ATOMIC, and the Windows/macOS enforcement group is GROUP_ENFORCE_DEFAULT, so
+    // writing it without updating protection.macs makes Chromium treat the profile as tampered and RESET
+    // the startup prefs. That can never reproduce on Linux (GROUP_NO_ENFORCEMENT there).
     '--restore-last-session',
     // Profile name for the NATIVE toolbar chip (rendered left of the omnibox by the Lobium engine
     // patch). Replaces the old in-page profile chip drawn by the injected NTP.
@@ -427,11 +436,6 @@ function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
 }
 
 /**
- * Best-effort: set Chromium's profile display name so the avatar / profile UI can show the Lobster
- * profile name. True omnibox-left profile chips still need engine chrome patches — this is the
- * Preferences-level approach available without rebuilding Lobium.
- */
-/**
  * Read a JSON preferences file for read-modify-write. Returns `{}` when the file is ABSENT (a fresh
  * profile) but `null` when it EXISTS yet is unparseable — so callers skip writing rather than clobber
  * the user's real preferences with a fresh object (LOBIUM data-safety: a corrupt/half-written file must
@@ -455,23 +459,80 @@ function readPrefsForUpdate(path: string): Record<string, unknown> | null {
   }
 }
 
-export function ensureChromiumProfileName(userDataDir: string, profileName: string): void {
-  const name = profileName.trim();
-  if (!name) return;
-  const defaultDir = join(userDataDir, 'Default');
+/**
+ * Replace a Chromium JSON preferences document ATOMICALLY: temp file at 0600 → fsync → rename.
+ *
+ * Chromium writes these documents through ImportantFileWriter for a reason. A plain writeFileSync leaves
+ * a window in which a crash, kill, or full disk truncates ~40 KB of real user state; Chromium then reads
+ * a corrupt Preferences, permanently skips it, and silently falls back to defaults — losing that
+ * profile's site permissions, zoom levels, search engine and language. A rename over the target means a
+ * reader only ever sees the whole old document or the whole new one.
+ */
+function writePrefsAtomic(path: string, prefs: Record<string, unknown>): void {
+  const tmp = `${path}.lobium-tmp`;
+  const fd = openSync(tmp, 'w', 0o600);
+  try {
+    writeFileSync(fd, JSON.stringify(prefs));
+    // Without the flush the rename can land while the temp file's bytes are still only in page cache,
+    // so a power loss would publish an EMPTY Preferences — exactly the corruption this avoids.
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path);
+}
+
+/**
+ * Apply every Lobster-owned `Default/Preferences` value for one launch, in a SINGLE atomic write.
+ *
+ * The profile name, the persona languages and the Lobee toolbar pin used to be three independent
+ * read-modify-writeFileSync passes over the same file (a fourth wrote session.restore_on_startup, now
+ * dropped in favour of --restore-last-session alone), so one launch re-published ~40 KB of the user's
+ * real Chromium state up to four times and each pass carried its own truncation window. One read, all
+ * mutations in memory, one temp+rename write.
+ */
+export function ensureChromiumLaunchPreferences(ctx: LaunchContext): void {
+  const defaultDir = join(ctx.options.userDataDir, 'Default');
   try {
     mkdirSync(defaultDir, { recursive: true });
   } catch {
-    /* ignore */
+    /* ignore — the write below fails harmlessly if the directory really is unusable */
   }
   const prefsPath = join(defaultDir, 'Preferences');
   const prefs = readPrefsForUpdate(prefsPath);
-  if (prefs === null) {
-    // Preferences exists but is unparseable (corrupt or a partial write). Never overwrite it with a
-    // fresh object — that would discard all of the user's real Chromium preferences. Skip this
-    // cosmetic, best-effort name injection for this launch and preserve the file intact.
-    return;
+  // A null document means Preferences exists but is unparseable (corrupt, or a partial write from an
+  // older build): skip the whole batch rather than overwrite it with a fresh object, which would discard
+  // all of the user's real Chromium preferences. Everything set here is cosmetic or has a command-line
+  // fallback (--lobium-profile-name, --lang), so skipping is the safe outcome.
+  if (prefs !== null) {
+    if (ctx.profileName) ensureChromiumProfileName(prefs, ctx.profileName);
+    ensureChromiumPersonaPreferences(prefs, ctx);
+    ensureLobeePreferences(prefs);
+    try {
+      writePrefsAtomic(prefsPath, prefs);
+    } catch {
+      /* ignore — branding still works via NTP chip, and --lang carries the locale */
+    }
   }
+  // Application locale lives in Local State (a separate document, so it needs its own write). `--lang`
+  // remains authoritative; this keeps restart/profile UI state from resetting it to the host locale.
+  // It is atomic too: Local State also carries os_crypt.encrypted_key on Windows/macOS, where a
+  // truncated file makes every cookie in the profile permanently undecryptable.
+  ensureChromiumLocalStateLocale(ctx);
+}
+
+/**
+ * Best-effort: set Chromium's profile display name so the avatar / profile UI can show the Lobster
+ * profile name. True omnibox-left profile chips still need engine chrome patches — this is the
+ * Preferences-level approach available without rebuilding Lobium. Mutates the caller's in-memory
+ * document; {@link ensureChromiumLaunchPreferences} owns the single write.
+ */
+export function ensureChromiumProfileName(
+  prefs: Record<string, unknown>,
+  profileName: string,
+): void {
+  const name = profileName.trim();
+  if (!name) return;
   const profile =
     prefs.profile && typeof prefs.profile === 'object' && !Array.isArray(prefs.profile)
       ? ({ ...(prefs.profile as Record<string, unknown>) } as Record<string, unknown>)
@@ -485,20 +546,6 @@ export function ensureChromiumProfileName(userDataDir: string, profileName: stri
   // Keep the name from being overwritten by Gaia / sync defaults on first run.
   profile.name_truncated = true;
   prefs.profile = profile;
-  // Prefer New Tab on startup so restored legacy data:text/html branding tabs do not win the omnibox.
-  const session =
-    prefs.session && typeof prefs.session === 'object' && !Array.isArray(prefs.session)
-      ? ({ ...(prefs.session as Record<string, unknown>) } as Record<string, unknown>)
-      : {};
-  // 1 = "Continue where you left off" (Chromium SessionStartupPref::Type::LAST). Restores the previous
-  // tabs on relaunch instead of forcing a fresh New Tab Page (which discarded unpinned tabs).
-  session.restore_on_startup = 1;
-  prefs.session = session;
-  try {
-    writeFileSync(prefsPath, JSON.stringify(prefs), { mode: 0o600 });
-  } catch {
-    /* ignore — branding still works via NTP chip */
-  }
 }
 
 /**
@@ -507,17 +554,8 @@ export function ensureChromiumProfileName(userDataDir: string, profileName: stri
  * extension IDs); it needs no MAC/super_mac. No-op when Lobee isn't bundled (`LOBSTER_LOBEE_DIR` unset)
  * or when it is already pinned. Merges into the existing `extensions` object so sibling keys survive.
  */
-export function ensureLobeePreferences(userDataDir: string): void {
+export function ensureLobeePreferences(prefs: Record<string, unknown>): void {
   if (!process.env.LOBSTER_LOBEE_DIR) return;
-  const defaultDir = join(userDataDir, 'Default');
-  try {
-    mkdirSync(defaultDir, { recursive: true });
-  } catch {
-    return;
-  }
-  const prefsPath = join(defaultDir, 'Preferences');
-  const prefs = readPrefsForUpdate(prefsPath);
-  if (prefs === null) return; // never clobber a corrupt/half-written Preferences file
   const extensions =
     prefs.extensions && typeof prefs.extensions === 'object' && !Array.isArray(prefs.extensions)
       ? { ...(prefs.extensions as Record<string, unknown>) }
@@ -529,59 +567,41 @@ export function ensureLobeePreferences(userDataDir: string): void {
   // Pin Lobee leftmost (nearest the omnibox), keeping any user-pinned extensions after it.
   extensions.pinned_extensions = [LOBEE_EXTENSION_ID, ...existing];
   prefs.extensions = extensions;
-  try {
-    writeFileSync(prefsPath, JSON.stringify(prefs), { mode: 0o600 });
-  } catch {
-    /* best-effort: the extension still loads, just unpinned */
-  }
 }
 
 /**
- * Persist the resolved language cluster before Chromium starts. Unlike the detector harness's CDP
- * override, profile prefs feed navigator.language(s), workers, and the network Accept-Language source.
+ * Apply the resolved language cluster to an in-memory `Default/Preferences` document. Unlike the detector
+ * harness's CDP override, profile prefs feed navigator.language(s), workers, and the network
+ * Accept-Language source.
  */
-export function ensureChromiumPersonaPreferences(ctx: LaunchContext): void {
-  const defaultDir = join(ctx.options.userDataDir, 'Default');
-  try {
-    mkdirSync(defaultDir, { recursive: true });
-  } catch {
-    return;
-  }
+export function ensureChromiumPersonaPreferences(
+  prefs: Record<string, unknown>,
+  ctx: LaunchContext,
+): void {
   const languages = ctx.fingerprint.navigator.languages.join(',');
-  const prefsPath = join(defaultDir, 'Preferences');
-  // Skip (never clobber) an existing-but-unparseable Preferences file; --lang + env carry the locale.
-  const prefs = readPrefsForUpdate(prefsPath);
-  if (prefs !== null) {
-    const intl =
-      prefs.intl && typeof prefs.intl === 'object' && !Array.isArray(prefs.intl)
-        ? { ...(prefs.intl as Record<string, unknown>) }
-        : {};
-    intl.accept_languages = languages;
-    intl.selected_languages = languages;
-    prefs.intl = intl;
-    try {
-      writeFileSync(prefsPath, JSON.stringify(prefs), { mode: 0o600 });
-    } catch {
-      /* launch will still carry --lang + environment fallback */
-    }
-  }
+  const intl =
+    prefs.intl && typeof prefs.intl === 'object' && !Array.isArray(prefs.intl)
+      ? { ...(prefs.intl as Record<string, unknown>) }
+      : {};
+  intl.accept_languages = languages;
+  intl.selected_languages = languages;
+  prefs.intl = intl;
+}
 
-  // Application locale is a Local State pref (not a profile pref). `--lang` remains authoritative,
-  // while this keeps restart/profile UI state from resetting it to the host locale.
+function ensureChromiumLocalStateLocale(ctx: LaunchContext): void {
   const localStatePath = join(ctx.options.userDataDir, 'Local State');
   const localState = readPrefsForUpdate(localStatePath);
-  if (localState !== null) {
-    const localIntl =
-      localState.intl && typeof localState.intl === 'object' && !Array.isArray(localState.intl)
-        ? { ...(localState.intl as Record<string, unknown>) }
-        : {};
-    localIntl.app_locale = ctx.fingerprint.locale.locale;
-    localState.intl = localIntl;
-    try {
-      writeFileSync(localStatePath, JSON.stringify(localState), { mode: 0o600 });
-    } catch {
-      /* no-op */
-    }
+  if (localState === null) return; // never clobber a corrupt/half-written Local State
+  const localIntl =
+    localState.intl && typeof localState.intl === 'object' && !Array.isArray(localState.intl)
+      ? { ...(localState.intl as Record<string, unknown>) }
+      : {};
+  localIntl.app_locale = ctx.fingerprint.locale.locale;
+  localState.intl = localIntl;
+  try {
+    writePrefsAtomic(localStatePath, localState);
+  } catch {
+    /* no-op */
   }
 }
 
@@ -622,27 +642,8 @@ export function scrubLegacyBrandingSessions(userDataDir: string): void {
       }
     }
   }
-
-  // Also force New Tab startup so Chromium does not "continue where you left off" into a data: tab.
-  const prefsPath = join(userDataDir, 'Default', 'Preferences');
-  try {
-    mkdirSync(join(userDataDir, 'Default'), { recursive: true });
-    let prefs: Record<string, unknown> = {};
-    if (existsSync(prefsPath)) {
-      prefs = JSON.parse(readFileSync(prefsPath, 'utf8')) as Record<string, unknown>;
-    }
-    const session =
-      prefs.session && typeof prefs.session === 'object' && !Array.isArray(prefs.session)
-        ? ({ ...(prefs.session as Record<string, unknown>) } as Record<string, unknown>)
-        : {};
-    // 1 = restore the previous session (see the note in ensureChromiumPersonaPreferences). This legacy
-    // branding-session scrub must not force a fresh NTP and discard the user's open tabs.
-    session.restore_on_startup = 1;
-    prefs.session = session;
-    writeFileSync(prefsPath, JSON.stringify(prefs), { mode: 0o600 });
-  } catch {
-    /* ignore */
-  }
+  // Session restore itself is not touched here: --restore-last-session already forces it (see the switch
+  // in buildNativeLobiumProcessArgs), so this scrub no longer writes Default/Preferences at all.
 }
 
 async function requestGracefulBrowserClose(browserWs: string): Promise<void> {
@@ -726,6 +727,33 @@ async function applyCookiesToNativeLobium(
   return true;
 }
 
+/**
+ * Report the extensions this launch will refuse to load, so the failure is LOUD instead of invisible.
+ *
+ * Whenever any extension is loaded (Lobee is, on every production launch) the args carry
+ * `--disable-extensions-except`, and Chromium then silently drops everything the user installed from
+ * inside the browser: the CRX is unpacked and an enabled `extensions.settings` entry is written, so the
+ * install looks successful, yet the extension never runs and never shows up in chrome://extensions.
+ * Whether to keep the switch is a product decision (it is what guarantees "only our extensions run"),
+ * so this does NOT change the launch — it names the affected extensions on the launcher's existing
+ * report channel, the same `[lobium] profile <id> …` stderr line a fail-closed proxy uses.
+ */
+async function reportUnloadableUserExtensions(
+  ctx: LaunchContext,
+  args: readonly string[],
+): Promise<void> {
+  if (!args.some((arg) => arg.startsWith('--disable-extensions-except='))) return;
+  const unloadable = await detectUnloadableUserExtensions(ctx.options.userDataDir);
+  if (unloadable.length === 0) return;
+  const named = unloadable
+    .map((ext) => `${ext.name ?? ext.id}${ext.version ? ` ${ext.version}` : ''} (${ext.id})`)
+    .join(', ');
+  console.error(
+    `[lobium] profile ${ctx.profileId} will NOT load ${unloadable.length} browser-installed ` +
+      `extension(s) because --disable-extensions-except is active: ${named}`,
+  );
+}
+
 /** Explicit local export of the current cookie jar from a running browser. */
 export async function exportCookiesFromNativeLobium(wsUrl: string): Promise<string> {
   const { exportCookiesJson } = await import('../cookie-inject.js');
@@ -764,13 +792,9 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
         // That gives HTTP/HTTPS/SOCKS one monitored, remote-DNS-capable, no-direct-fallback boundary.
         adapter = await startLocalProxyAdapter(ctx.options.proxy);
       }
-      if (ctx.profileName) {
-        ensureChromiumProfileName(ctx.options.userDataDir, ctx.profileName);
-      }
-      // Always scrub — even when profileName is missing — so restored data: tabs cannot win.
+      ensureChromiumLaunchPreferences(ctx);
+      // Always scrub, so a restored legacy data: tab cannot win the omnibox.
       scrubLegacyBrandingSessions(ctx.options.userDataDir);
-      ensureChromiumPersonaPreferences(ctx);
-      ensureLobeePreferences(ctx.options.userDataDir);
       // Drop a stale DevToolsActivePort so we never brand/automate against a dead previous port.
       await clearDevToolsActivePort(ctx.options.userDataDir);
       const args = await buildNativeLobiumProcessArgs(
@@ -781,6 +805,7 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
             ? ctx.options.proxy.server
             : undefined),
       );
+      await reportUnloadableUserExtensions(ctx, args);
       const env = await buildNativeLobiumEnv(ctx, opts);
       const child = spawn(bin, args, {
         env,

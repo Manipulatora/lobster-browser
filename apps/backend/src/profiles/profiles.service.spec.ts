@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { ConflictException } from '@nestjs/common';
+import type { ConfigService } from '@nestjs/config';
 import type { Profile } from '@lobster/shared-types';
 
 import type { AuditService } from '../audit/audit.service';
@@ -10,13 +11,19 @@ import { InMemoryBlobStore } from './blob/in-memory-blob-store';
 import type { ProfilesRepository } from './profiles.repository';
 import { ProfilesService, type SyncProfileInput } from './profiles.service';
 
+/** No S3_* configured — the blob refs the service builds then name the in-memory store. */
+const config = { get: () => undefined } as unknown as ConfigService;
+
 /**
  * Unit tests for ProfilesService.sync's optimistic-concurrency behaviour, wired against the real
  * InMemoryBlobStore plus minimal stubs for the other collaborators (team + profile resolution and
  * a no-op audit). Driving it in-process lets us interleave two pushes deterministically — HTTP e2e
  * can't guarantee interleaving because Nest may serialise the two request handlers.
  */
-function makeService(): { service: ProfilesService; blobs: InMemoryBlobStore } {
+function makeService(cfg: ConfigService = config): {
+  service: ProfilesService;
+  blobs: InMemoryBlobStore;
+} {
   const blobs = new InMemoryBlobStore();
   const teams = {
     getMembership: async () => ({ teamId: 'team-1', userId: 'user-1', role: 'admin' }),
@@ -26,7 +33,7 @@ function makeService(): { service: ProfilesService; blobs: InMemoryBlobStore } {
       ({ id, ownerTeamId: teamId, name: 'Racy' }) as unknown as Profile,
   } as unknown as ProfilesRepository;
   const audit = { record: async () => {} } as unknown as AuditService;
-  return { service: new ProfilesService(profiles, teams, blobs, audit), blobs };
+  return { service: new ProfilesService(profiles, teams, blobs, audit, cfg), blobs };
 }
 
 test('two interleaved pushes at the same baseVersion resolve to exactly one success and one 409 (atomic compare-and-set)', async () => {
@@ -55,6 +62,24 @@ test('two interleaved pushes at the same baseVersion resolve to exactly one succ
   // The store settled at version 1 — the single winner's write, never clobbered to 2.
   const latest = await blobs.getLatest('team-1/p1');
   assert.equal(latest?.version, 1);
+});
+
+test('blobRef names the bucket and key prefix the store actually writes under', async () => {
+  // Only the ref DERIVATION is under test (the in-memory store still holds the bytes here). The
+  // ref used to be a hardcoded `s3://lobster-profiles/…` that ignored both settings, so every ref
+  // handed to a client or written to the audit log pointed at an object key that need not exist.
+  const { service } = makeService({
+    get: (key: string) =>
+      ({ S3_BUCKET: 'lobster-blobs', S3_KEY_PREFIX: 'profiles' })[key as string],
+  } as unknown as ConfigService);
+
+  const result = await service.sync(
+    'user-1',
+    'p1',
+    { direction: 'push', payload: Buffer.from('cipher').toString('base64') },
+    'team-1',
+  );
+  assert.equal(result.blobRef, 's3://lobster-blobs/profiles/team-1/p1/1.enc');
 });
 
 test('export projects only secret-free metadata and sanitizes legacy cookie rawText', async () => {
@@ -98,7 +123,7 @@ test('export projects only secret-free metadata and sanitizes legacy cookie rawT
     getMembership: async () => ({ teamId: 'team-1', userId: 'user-1', role: 'admin' }),
   } as unknown as TeamsRepository;
   const audit = { record: async () => {} } as unknown as AuditService;
-  const service = new ProfilesService(profiles, teams, new InMemoryBlobStore(), audit);
+  const service = new ProfilesService(profiles, teams, new InMemoryBlobStore(), audit, config);
 
   const bundle = await service.exportAll('user-1', 'team-1');
   const exported = bundle.profiles[0]!;

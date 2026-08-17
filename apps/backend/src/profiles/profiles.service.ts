@@ -9,12 +9,14 @@ import {
   NotFoundException,
   PayloadTooLargeException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { FREE_PLAN_PROFILE_LIMIT } from '@lobster/shared-types';
 import type { Profile, ProfileExport, ProfileExportBundle } from '@lobster/shared-types';
 
 import { AuditService } from '../audit/audit.service';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 import { BLOB_STORE, BlobVersionConflictError, type BlobStore } from './blob/blob-store';
+import { blobObjectKey, normalizeKeyPrefix } from './blob/s3-blob-store';
 import type { BulkCreateProfilesDto } from './dto/bulk-create-profiles.dto';
 import type { CreateProfileDto } from './dto/create-profile.dto';
 import type { ImportProfilesDto } from './dto/import-profiles.dto';
@@ -38,8 +40,8 @@ export interface SyncProfileInput {
  * Result of a profile sync.
  *
  * `version` is the current stored version (0 when a profile has never been synced). `blobRef` is
- * the S3-style object key / URI for the CLIENT-encrypted blob at that version (null when none
- * exists). On `pull`, `payload` carries the latest blob base64-encoded (null when never synced);
+ * the object URI for the CLIENT-encrypted blob at that version, in the bucket the active store
+ * writes to (null when none exists). On `pull`, `payload` carries the latest blob base64-encoded (null when never synced);
  * it is omitted on `push`. The server never sees plaintext — the desktop agent holds the AES key.
  */
 export interface SyncResult {
@@ -85,12 +87,21 @@ export const DEFAULT_BLOB_TEAM_QUOTA_BYTES = 250 * 1024 * 1024;
  */
 @Injectable()
 export class ProfilesService {
+  /** Bucket the active blob store writes to, or '' when the in-memory store is bound. */
+  private readonly blobBucket: string;
+  /** Key namespace inside that bucket (`S3_KEY_PREFIX`), normalised exactly as the store does. */
+  private readonly blobKeyPrefix: string;
+
   constructor(
     @Inject(PROFILES_REPOSITORY) private readonly profiles: ProfilesRepository,
     @Inject(TEAMS_REPOSITORY) private readonly teams: TeamsRepository,
     @Inject(BLOB_STORE) private readonly blobs: BlobStore,
     private readonly audit: AuditService,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.blobBucket = config.get<string>('S3_BUCKET') ?? '';
+    this.blobKeyPrefix = normalizeKeyPrefix(config.get<string>('S3_KEY_PREFIX'));
+  }
 
   async create(userId: string, dto: CreateProfileDto, teamId?: string): Promise<Profile> {
     const ownerTeamId = await this.resolveTeamId(userId, teamId);
@@ -296,7 +307,8 @@ export class ProfilesService {
       targetId: id,
     });
     // Delete the profile's encrypted blob versions so they are not orphaned in the object store.
-    // Best-effort: the DB record is already gone (the source of truth), so a transient store error
+    // Best-effort: the row is already a tombstone (deletedAt set) and no longer served, so a
+    // transient store error
     // must not fail the delete — it would only leave reclaimable bytes, never a dangling profile.
     try {
       await this.blobs.deleteAll(this.blobKey(ownerTeamId, id));
@@ -419,9 +431,19 @@ export class ProfilesService {
     return `${teamId}/${profileId}`;
   }
 
-  /** S3-style object URI for a specific stored version of a profile's encrypted blob. */
+  /**
+   * Object URI for a specific stored version of a profile's encrypted blob.
+   *
+   * Derived from the bucket and key prefix the ACTIVE store writes under, not a literal: this used
+   * to return `s3://lobster-profiles/…` unconditionally, so every ref handed to a client and
+   * written to the audit log named a bucket that may not exist, dropped `S3_KEY_PREFIX`, and
+   * claimed S3 durability even when the in-memory store was bound. Support and recovery tooling
+   * can only follow a ref that matches the real object key — hence `memory://` when there is no
+   * bucket, which is the honest answer rather than a fabricated one.
+   */
   private blobRef(teamId: string, profileId: string, version: number): string {
-    return `s3://lobster-profiles/${teamId}/${profileId}/${version}.enc`;
+    const objectKey = blobObjectKey(this.blobKeyPrefix, this.blobKey(teamId, profileId), version);
+    return this.blobBucket ? `s3://${this.blobBucket}/${objectKey}` : `memory://${objectKey}`;
   }
 
   /**

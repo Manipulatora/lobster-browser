@@ -16,11 +16,11 @@
 //!      stores it in the OS keychain.
 //!
 //! WHAT PROTECTS WHAT, since a loopback redirect has more than one weakness:
-//!   * `state`    — a callback meant for a different launcher instance, and CSRF on the listener.
-//!   * PKCE       — a hostile local process that binds the port first and steals the code. It
-//!                  cannot redeem it: the verifier never leaves this process.
-//!   * 127.0.0.1  — binding the loopback interface only, so nothing off-machine can reach it.
-//!   * timeout    — the listener does not outlive the sign-in attempt.
+//! * `state`    — a callback meant for a different launcher instance, and CSRF on the listener.
+//! * PKCE       — a hostile local process that binds the port first and steals the code. It cannot
+//!   redeem it: the verifier never leaves this process.
+//! * 127.0.0.1  — binding the loopback interface only, so nothing off-machine can reach it.
+//! * timeout    — the listener does not outlive the sign-in attempt.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;

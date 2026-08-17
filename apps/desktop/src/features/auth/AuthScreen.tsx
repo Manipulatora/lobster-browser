@@ -66,9 +66,13 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps): JSX.Element {
         ) : (
           <>
             <h1 className="auth-screen__title">Lobster Browser</h1>
+            {/* THIS COPY IS A DURABILITY PROMISE, so it says only what the product does. It read
+                "Sign in to sync profiles" while nothing in the app uploads a byte of profile data —
+                a user who believed it would skip exporting and lose every profile on reinstall.
+                Restore the sync wording when bytes actually move. */}
             <p className="auth-screen__lede">
-              Sign in to sync profiles and manage your plan. New accounts start with five free
-              profiles.
+              Sign in to your Lobster account and manage your plan. New accounts start with five
+              free profiles.
             </p>
 
             <div className="auth-screen__actions">

@@ -6,6 +6,7 @@ import {
   GetObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
+  type PutObjectCommandInput,
   type S3Client,
 } from '@aws-sdk/client-s3';
 
@@ -20,12 +21,15 @@ import { S3BlobStore } from './s3-blob-store';
  */
 class FakeS3Client {
   readonly objects = new Map<string, { body: Buffer; lastModified: Date }>();
+  /** Every PutObject input the store issued, so tests can assert the request itself. */
+  readonly puts: PutObjectCommandInput[] = [];
   /** Small page size so ListObjectsV2 pagination (ContinuationToken) is actually exercised. */
   private readonly pageSize = 2;
 
   async send(command: unknown): Promise<unknown> {
     if (command instanceof PutObjectCommand) {
       const { Key, Body, IfNoneMatch } = command.input;
+      this.puts.push(command.input);
       if (IfNoneMatch === '*' && this.objects.has(Key!)) {
         throw Object.assign(
           new Error('At least one of the pre-conditions you specified did not hold'),
@@ -91,6 +95,21 @@ test('put assigns monotonically increasing versions and getLatest/head read them
 
   const head = await store.head('team-1/p1');
   assert.equal(head?.version, 2);
+});
+
+test('every put requests server-side encryption and tags no team/profile topology', async () => {
+  const { store, s3 } = makeStore();
+  await store.put('team-1/p1', Buffer.from('v1'), meta);
+
+  assert.equal(s3.puts.length, 1);
+  assert.equal(
+    s3.puts[0]!.ServerSideEncryption,
+    'AES256',
+    'a bucket policy denying unencrypted PUTs must accept our writes',
+  );
+  // The object key already carries <teamId>/<profileId>; repeating it in metadata only widened what
+  // a caller with bucket-listing rights learns without decrypting a byte.
+  assert.equal(s3.puts[0]!.Metadata, undefined);
 });
 
 test('getLatest and head return null for a key that has never been stored', async () => {

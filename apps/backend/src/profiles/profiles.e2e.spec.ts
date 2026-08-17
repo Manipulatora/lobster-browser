@@ -13,6 +13,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
+import { ApiExceptionFilter } from '../common/api-exception.filter';
 import { PrismaModule } from '../prisma/prisma.module';
 import { MailModule } from '../mail/mail.module';
 import { AuthModule } from '../auth/auth.module';
@@ -61,6 +62,7 @@ before(async () => {
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
   );
+  app.useGlobalFilters(new ApiExceptionFilter());
   await app.init();
 });
 
@@ -366,8 +368,10 @@ test('push then pull round-trips the exact encrypted payload (server stores opaq
   assert.equal(push.body.code, 0);
   assert.equal(push.body.data.direction, 'push');
   assert.equal(push.body.data.version, 1);
-  // The blobRef is an S3-style, team-scoped key ending in <version>.enc (never a plaintext leak).
-  assert.match(push.body.data.blobRef, /^s3:\/\/lobster-profiles\/.+\/.+\/1\.enc$/);
+  // The blobRef is a team-scoped object key ending in <version>.enc (never a plaintext leak), and
+  // its SCHEME names the store that actually holds the bytes: no S3_BUCKET is configured here, so
+  // the in-memory store is bound and an `s3://` ref would promise durability nothing provides.
+  assert.match(push.body.data.blobRef, /^memory:\/\/.+\/.+\/1\.enc$/);
   // A push does not echo the payload back.
   assert.ok(push.body.data.payload === undefined || push.body.data.payload === null);
 
@@ -571,6 +575,71 @@ test('free-tier profile limit matches the schema default (3) and is enforced', a
     .set(auth)
     .send({ name: 'one too many', engine: 'lobium', os: 'windows' });
   assert.equal(overflow.status, 403);
+});
+
+test('errors answer in the same { code, data, msg } envelope as successes', async () => {
+  const token = await registerToken('profiles-error-envelope@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+
+  // A service-level 404.
+  const missing = await request(app.getHttpServer())
+    .get('/profiles/00000000-0000-0000-0000-000000000000')
+    .set(auth);
+  assert.equal(missing.status, 404);
+  assert.deepEqual(missing.body, { code: 1, data: null, msg: 'profile not found' });
+
+  // A ValidationPipe rejection, whose `message` is an ARRAY of constraint failures — the case that
+  // matches neither the envelope nor Nest's own single-message shape unless it is flattened.
+  const invalid = await request(app.getHttpServer())
+    .post('/profiles')
+    .set(auth)
+    .send({ name: 'no engine' });
+  assert.equal(invalid.status, 400);
+  assert.equal(invalid.body.code, 1);
+  assert.equal(invalid.body.data, null);
+  assert.equal(typeof invalid.body.msg, 'string');
+  assert.match(invalid.body.msg, /engine/);
+
+  // The guard's 401 goes through the filter too (it is thrown before any controller runs).
+  const unauthenticated = await request(app.getHttpServer()).get('/profiles');
+  assert.equal(unauthenticated.status, 401);
+  assert.equal(unauthenticated.body.code, 1);
+  assert.equal(unauthenticated.body.data, null);
+});
+
+test('a deleted profile is a tombstone: hidden from reads and not counted against the plan limit', async () => {
+  const token = await registerToken('profiles-tombstone@example.com');
+  const auth = { Authorization: `Bearer ${token}` };
+
+  // Fill the free allowance, then delete one and re-create: the freed slot must come back. This
+  // pins the API-level contract over whichever repository is bound (in-memory here); the Prisma
+  // tombstone's own `deletedAt: null` filters are proven in prisma-profiles.repository.spec.ts.
+  const ids: string[] = [];
+  for (let i = 0; i < DEFAULT_FREE_PROFILE_LIMIT; i += 1) {
+    const res = await request(app.getHttpServer())
+      .post('/profiles')
+      .set(auth)
+      .send({ name: `Tombstone ${i}`, engine: 'lobium', os: 'windows' });
+    ids.push(res.body.data.id as string);
+  }
+  const del = await request(app.getHttpServer()).delete(`/profiles/${ids[0]}`).set(auth);
+  assert.equal(del.status, 200);
+
+  const list = await request(app.getHttpServer()).get('/profiles').set(auth);
+  assert.equal(
+    list.body.data.length,
+    DEFAULT_FREE_PROFILE_LIMIT - 1,
+    'the tombstone is not listed',
+  );
+
+  const replacement = await request(app.getHttpServer())
+    .post('/profiles')
+    .set(auth)
+    .send({ name: 'Replacement', engine: 'lobium', os: 'windows' });
+  assert.ok(
+    [200, 201].includes(replacement.status),
+    `a deleted profile must give its slot back, got ${replacement.status}`,
+  );
 });
 
 test('unauthenticated create is 401', async () => {

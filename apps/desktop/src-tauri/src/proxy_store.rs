@@ -2,8 +2,8 @@
 //!
 //! SEC-12: proxy credentials (`username`/`password` inside the `config` JSON) are encrypted with
 //! AES-256-GCM before they are written and decrypted on read — the on-disk DB never holds a
-//! cleartext proxy password. Legacy plaintext rows (pre-SEC-12) still read fine; see
-//! `crate::secrets`.
+//! cleartext proxy password. SEC-19: a credential cell that cannot be decrypted fails the read
+//! rather than reaching the browser as a literal `lbsec1:…` password; see `crate::secrets`.
 
 use anyhow::Result;
 use rusqlite::{params, Connection, Row};
@@ -51,6 +51,9 @@ pub struct StoredProxy {
     pub last_error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Columns this machine could not decrypt. See `profile_store::Profile::unreadable_secrets`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub unreadable_secrets: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,9 +89,38 @@ pub struct UpdateStoredProxyInput {
 
 fn row_to_proxy(cipher: &SecretCipher, row: &Row) -> rusqlite::Result<StoredProxy> {
     let config_json: String = row.get("config")?;
-    let mut config = serde_json::from_str(&config_json).unwrap_or(serde_json::Value::Null);
-    cipher.decrypt_json_fields(&mut config, PROXY_SECRET_FIELDS);
+    // SEC-19: a config we cannot parse or decrypt must never be silently substituted. The fallbacks
+    // this replaces handed the browser the stored `lbsec1:…` string as the proxy password (surfacing
+    // as "the proxy rejected my credentials"), and `update()` then wrote that substitute back.
+    // Recorded rather than fatal, for the same reason as profiles: failing the mapping fails the
+    // whole `list` and leaves the proxy manager empty with nothing to act on. [`update`] refuses.
+    let mut unreadable_secrets: Vec<String> = Vec::new();
+
+    let config = match serde_json::from_str::<serde_json::Value>(&config_json) {
+        Ok(mut value) => match cipher.decrypt_json_fields(&mut value, PROXY_SECRET_FIELDS) {
+            Ok(()) => value,
+            Err(_) => {
+                unreadable_secrets.push("config".to_string());
+                redacted_config(&value)
+            }
+        },
+        Err(_) => {
+            unreadable_secrets.push("config".to_string());
+            serde_json::json!({})
+        }
+    };
+
     let rotate_url: Option<String> = row.get("rotate_url")?;
+    let rotate_url = rotate_url
+        .as_deref()
+        .and_then(|value| match cipher.decrypt_strict(value) {
+            Ok(plaintext) => Some(plaintext),
+            Err(_) => {
+                unreadable_secrets.push("rotate_url".to_string());
+                None
+            }
+        });
+
     Ok(StoredProxy {
         id: row.get("id")?,
         source: row.get("source")?,
@@ -98,12 +130,30 @@ fn row_to_proxy(cipher: &SecretCipher, row: &Row) -> rusqlite::Result<StoredProx
         timezone: row.get("timezone")?,
         latency_ms: row.get("latency_ms")?,
         status: row.get("status")?,
-        rotate_url: rotate_url.map(|value| cipher.decrypt_str(&value)),
+        rotate_url,
         last_checked_at: row.get("last_checked_at")?,
         last_error: row.get("last_error")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        unreadable_secrets,
     })
+}
+
+/// The proxy's non-secret fields only, for a row whose credentials would not decrypt.
+///
+/// Host and port are what let the user RECOGNISE which proxy is broken; the credential fields are
+/// dropped rather than passed through, because passing them through is how the encrypted `lbsec1:…`
+/// string ended up being sent to the proxy as a password.
+fn redacted_config(value: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    if let Some(object) = value.as_object() {
+        for (key, field) in object {
+            if !PROXY_SECRET_FIELDS.contains(&key.as_str()) {
+                out.insert(key.clone(), field.clone());
+            }
+        }
+    }
+    serde_json::Value::Object(out)
 }
 
 fn validate_config(config: &serde_json::Value) -> Result<()> {
@@ -242,6 +292,16 @@ pub fn update(
     let Some(existing) = get(conn, cipher, id)? else {
         return Ok(None);
     };
+
+    // Refused, not clobbered — see the same guard in `profile_store::update`. `existing.config` had
+    // its credentials dropped during the read, so saving would persist a proxy with no password.
+    if !existing.unreadable_secrets.is_empty() {
+        anyhow::bail!(
+            "proxy {id} has values this machine cannot decrypt ({}); saving would overwrite them. \
+             Re-enter the credentials to replace them, or restore this machine's secrets key.",
+            existing.unreadable_secrets.join(", ")
+        );
+    }
     let source = patch.source.unwrap_or(existing.source);
     let label = patch.label.unwrap_or(existing.label);
     let mut config = patch.config.unwrap_or(existing.config);
@@ -401,9 +461,11 @@ mod tests {
         assert_eq!(listed.config["password"], "hunter2-topsecret");
     }
 
-    /// Migration/compat path: pre-SEC-12 rows with plaintext credentials must still read fine.
+    /// SEC-19 replaces the pre-SEC-12 compat path this used to assert. An unencrypted credential is
+    /// now a hard read failure: accepting one let anyone with write access to the SQLite file — no
+    /// key needed — point a victim's profile at a proxy whose host they control.
     #[test]
-    fn legacy_plaintext_rows_are_still_readable() {
+    fn unencrypted_credentials_are_dropped_rather_than_trusted() {
         let conn = mem();
         let cipher = test_cipher();
         conn.execute(
@@ -413,9 +475,48 @@ mod tests {
             params![r#"{"id":"px_legacy","type":"http","host":"h","port":80,"username":"olduser","password":"oldpass"}"#],
         )
         .unwrap();
-        let listed = list(&conn, &cipher, None).unwrap().remove(0);
-        assert_eq!(listed.config["username"], "olduser");
-        assert_eq!(listed.config["password"], "oldpass");
+
+        // The row is still listed — a proxy manager that renders nothing gives the user no way to
+        // fix the one broken entry — but the credentials are dropped, not passed through. Passing
+        // them through is how the stored `lbsec1:…` string once reached the proxy as a password.
+        let listed = list(&conn, &cipher, None).unwrap();
+        assert_eq!(listed.len(), 1);
+        let row = &listed[0];
+        assert_eq!(row.unreadable_secrets, vec!["config".to_string()]);
+        assert_eq!(row.config["host"], "h", "non-secret fields stay recognisable");
+        assert!(row.config.get("username").is_none());
+        assert!(row.config.get("password").is_none());
+        let serialized = serde_json::to_string(&row).unwrap();
+        assert!(
+            !serialized.contains("oldpass") && !serialized.contains("olduser"),
+            "no credential may survive serialization: {serialized}"
+        );
+
+        // And the write is refused, so saving cannot persist the credential-less config over the
+        // original cell.
+        let err = update(
+            &conn,
+            &cipher,
+            "px_legacy",
+            UpdateStoredProxyInput {
+                source: None,
+                label: Some("Renamed".to_string()),
+                config: None,
+                location: None,
+                timezone: None,
+                rotate_url: None,
+            },
+        )
+        .expect_err("saving a proxy with an unreadable config must be refused");
+        assert!(err.to_string().contains("cannot decrypt"), "{err}");
+        let after: String = conn
+            .query_row(
+                "SELECT config FROM proxies WHERE id = 'px_legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(after.contains("oldpass"), "the original cell is untouched");
     }
 
     #[test]

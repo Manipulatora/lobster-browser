@@ -602,3 +602,53 @@ export function extensionLaunchArgs(paths: readonly string[]): string[] {
   const value = paths.join(',');
   return [`--disable-extensions-except=${value}`, `--load-extension=${value}`];
 }
+
+/** An extension the user installed from inside the browser, which this launch will refuse to load. */
+export interface UnloadableUserExtension {
+  id: string;
+  name?: string;
+  version?: string;
+}
+
+/**
+ * Chromium's `ManifestLocation::kInternal` — a CRX installed through the browser's own web-store flow,
+ * i.e. by the user from inside the profile. Our own loads are `kCommandLine` (8) and the bundled PDF
+ * viewer is `kComponent` (5), so keying on this value reports only the user's own installs.
+ */
+const MANIFEST_LOCATION_INTERNAL = 1;
+
+/**
+ * List the extensions the user installed from inside the browser, for a launch that carries
+ * `--disable-extensions-except` (which {@link extensionLaunchArgs} always emits).
+ *
+ * That switch makes Chromium refuse every extension not named on it — and it refuses SILENTLY: the CRX
+ * is unpacked into `Default/Extensions` and an enabled `extensions.settings` entry is written, so the
+ * install looks successful, yet the extension never runs and never appears in chrome://extensions.
+ * Dropping the switch would surrender the "only our extensions run" guarantee, so until that product
+ * decision is made the launcher at least names what is not loading instead of failing invisibly.
+ */
+export async function detectUnloadableUserExtensions(
+  userDataDir: string,
+): Promise<UnloadableUserExtension[]> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(join(userDataDir, 'Default', 'Preferences'), 'utf8'));
+  } catch {
+    // Absent (fresh profile), unreadable, or corrupt Preferences: nothing to report either way. This is
+    // a diagnostic, so it must never be the reason a launch fails.
+    return [];
+  }
+  const settings = (parsed as { extensions?: { settings?: unknown } } | null)?.extensions?.settings;
+  if (!settings || typeof settings !== 'object') return [];
+  const found: UnloadableUserExtension[] = [];
+  for (const [id, value] of Object.entries(settings as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object') continue;
+    const entry = value as { location?: unknown; manifest?: { name?: unknown; version?: unknown } };
+    if (entry.location !== MANIFEST_LOCATION_INTERNAL) continue;
+    const name = typeof entry.manifest?.name === 'string' ? entry.manifest.name : undefined;
+    const version =
+      typeof entry.manifest?.version === 'string' ? entry.manifest.version : undefined;
+    found.push({ id, ...(name ? { name } : {}), ...(version ? { version } : {}) });
+  }
+  return found;
+}

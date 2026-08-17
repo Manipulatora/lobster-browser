@@ -26,7 +26,7 @@ use crate::agent_secrets;
 use crate::profile_store;
 use crate::proxy_check;
 use crate::proxy_store;
-use crate::secrets::SecretCipher;
+use crate::secrets::{SecretCipher, PROXY_SECRET_FIELDS};
 use crate::sidecar::SidecarClient;
 
 const API_OK: i32 = 0;
@@ -229,6 +229,14 @@ pub async fn start_profile_via_sidecar(
         profile_store::set_status(&conn, profile_id, "launching").map_err(StartError::Failed)?;
     }
     let user_data_dir = profiles_dir.join(&profile.id);
+    // Only a PENDING import is handed to the sidecar. The payload is kept after it is applied (it is
+    // the profile's only durable session record), so the applied-at stamp — not a NULL cell — is
+    // what stops a second launch re-injecting a stale jar.
+    let pending_cookie_import = if profile.cookies_import_applied_at.is_some() {
+        None
+    } else {
+        profile.cookies_import.clone()
+    };
     let params = json!({
         "profileId": profile.id,
         "profileName": profile.name,
@@ -239,7 +247,7 @@ pub async fn start_profile_via_sidecar(
         "fingerprintSeed": profile.fingerprint_seed,
         "fingerprintOverrides": profile.fingerprint_overrides,
         "proxy": resolved_proxy,
-        "cookiesImport": profile.cookies_import,
+        "cookiesImport": pending_cookie_import,
         "extensions": profile.extensions,
         "userDataDir": user_data_dir.to_string_lossy(),
         "headless": headless,
@@ -256,7 +264,7 @@ pub async fn start_profile_via_sidecar(
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             {
-                profile_store::clear_cookie_import(&conn, profile_id)
+                profile_store::mark_cookie_import_applied(&conn, profile_id)
                     .map_err(StartError::Failed)?;
             }
             profile_store::set_status(&conn, profile_id, "running").map_err(StartError::Failed)?;
@@ -436,6 +444,51 @@ async fn profile_stop(
     }
 }
 
+/// Cookie-import fields that are diagnostics rather than session material, and so may leave the
+/// machine. Allowlist, mirroring the backend's `sanitizeCookieImportMetadata`
+/// (apps/backend/src/profiles/sanitize-cookie-import.ts): `rawText` IS the cookie jar, and an
+/// unrecognised future field is dropped rather than leaked.
+const SAFE_COOKIE_IMPORT_FIELDS: &[&str] = &["mode", "source", "fileName", "parsedCount", "errors"];
+
+/// Strip live secrets from a profile before it goes out over the loopback API.
+///
+/// The holder of the API key is not the holder of the profiles: every automation script, every
+/// third-party tool the key is pasted into, and any same-user malware that reads the 0600 key file
+/// gets whatever this returns. Session cookies and proxy credentials are not automation inputs —
+/// the sidecar reads them from the store directly — so they never appear here, which also stops the
+/// loopback API from undoing the backend's deliberate `rawText` stripping.
+fn redact_profile_for_automation(profile: &mut Value) {
+    let Some(object) = profile.as_object_mut() else {
+        return;
+    };
+    // FAILS CLOSED. An `and_then(as_object_mut)` here would silently pass the field through whenever
+    // it is not an object, and these cells are stored as arbitrary `serde_json::Value` with no shape
+    // validation on write — so an array or a scalar would reach an API-key holder verbatim. That
+    // matters more since the cookie import is now KEPT after launch rather than nulled, which makes
+    // the exposure permanent instead of one-shot. Anything not matching the expected object shape is
+    // dropped entirely rather than inspected.
+    match object.get_mut("cookiesImport") {
+        Some(Value::Object(cookies_import)) => {
+            cookies_import.retain(|field, _| SAFE_COOKIE_IMPORT_FIELDS.contains(&field.as_str()));
+        }
+        Some(_) => {
+            object.remove("cookiesImport");
+        }
+        None => {}
+    }
+    match object.get_mut("proxy") {
+        Some(Value::Object(proxy)) => {
+            for field in PROXY_SECRET_FIELDS {
+                proxy.remove(*field);
+            }
+        }
+        Some(_) => {
+            object.remove("proxy");
+        }
+        None => {}
+    }
+}
+
 async fn profile_list(
     State(state): State<Arc<LocalApiState>>,
     headers: HeaderMap,
@@ -459,10 +512,13 @@ async fn profile_list(
         }
     };
     match profile_store::list(&conn, &state.cipher) {
-        Ok(profiles) => (
-            StatusCode::OK,
-            ApiResponse::ok(serde_json::to_value(profiles).unwrap_or(Value::Null)),
-        ),
+        Ok(profiles) => {
+            let mut data = serde_json::to_value(profiles).unwrap_or(Value::Null);
+            for profile in data.as_array_mut().into_iter().flatten() {
+                redact_profile_for_automation(profile);
+            }
+            (StatusCode::OK, ApiResponse::ok(data))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             ApiResponse::err(e.to_string()),
@@ -668,7 +724,7 @@ rl.on('line', (line) => {
     }
 
     #[tokio::test]
-    async fn pending_cookie_import_is_consumed_after_success_and_preserved_on_failure() {
+    async fn applied_cookie_import_is_stamped_kept_and_never_reapplied() {
         let db = mem_db();
         let cipher = SecretCipher::new(&[42u8; 32]);
         let mut success_input = test_input("Import once");
@@ -697,15 +753,14 @@ rl.on('line', (line) => {
             first.get("cookieImportApplied").and_then(Value::as_bool),
             Some(true)
         );
-        assert!(db
-            .lock()
+        let applied = profile_store::get(&db.lock().unwrap(), &cipher, &success.id)
             .unwrap()
-            .query_row(
-                "SELECT cookies_import IS NULL FROM profiles WHERE id = ?1",
-                [&success.id],
-                |row| row.get::<_, bool>(0)
-            )
-            .unwrap());
+            .unwrap();
+        assert!(
+            applied.cookies_import.is_some(),
+            "the import is the profile's only durable session record — it must survive the launch"
+        );
+        assert!(applied.cookies_import_applied_at.is_some());
 
         let second =
             start_profile_via_sidecar(&db, &cipher, &sidecar, &root, &success.id, None, true)
@@ -714,7 +769,7 @@ rl.on('line', (line) => {
         assert_eq!(
             second.get("cookieImportApplied").and_then(Value::as_bool),
             Some(false),
-            "a later launch must not reapply the consumed import"
+            "a later launch must not reapply an import that is already in the jar"
         );
 
         let failed =
@@ -798,11 +853,59 @@ rl.on('line', (line) => {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn product_launch_connect_stop_e2e_when_enabled() {
-        if std::env::var("LOBSTER_PRODUCT_E2E").as_deref() != Ok("1") {
-            return;
+    /// The loopback API's audience is every automation script and every tool the API key is pasted
+    /// into, so `GET /api/v1/profile/list` must not be a one-request harvest of live sessions and
+    /// proxy credentials.
+    #[test]
+    fn profile_list_never_emits_cookie_raw_text_or_proxy_credentials() {
+        let db = mem_db();
+        let cipher = SecretCipher::new(&[42u8; 32]);
+        let mut input = test_input("Automation");
+        input.proxy = Some(serde_json::json!({
+            "type": "socks5", "host": "proxy.example", "port": 1080,
+            "username": "alice-user", "password": "hunter2-topsecret"
+        }));
+        input.cookies_import = Some(serde_json::json!({
+            "mode": "merge", "source": "plain_text", "parsedCount": 1,
+            "rawText": "example.test\tFALSE\t/\tFALSE\t0\tsid\tlive-session-token"
+        }));
+        let conn = db.lock().unwrap();
+        profile_store::create(&conn, &cipher, input).unwrap();
+        let mut data = serde_json::to_value(profile_store::list(&conn, &cipher).unwrap()).unwrap();
+        for profile in data.as_array_mut().into_iter().flatten() {
+            redact_profile_for_automation(profile);
         }
+
+        let body = data.to_string();
+        for secret in [
+            "live-session-token",
+            "rawText",
+            "hunter2-topsecret",
+            "alice-user",
+        ] {
+            assert!(
+                !body.contains(secret),
+                "`{secret}` must not leave the app: {body}"
+            );
+        }
+        // Non-secret diagnostics and proxy topology still describe the profile to automation.
+        assert_eq!(data[0]["cookiesImport"]["mode"], "merge");
+        assert_eq!(data[0]["cookiesImport"]["parsedCount"], 1);
+        assert_eq!(data[0]["proxy"]["host"], "proxy.example");
+    }
+
+    /// Opt-in: launches the REAL engine, so it is `#[ignore]`d rather than gated on an env var with
+    /// a bare `return`. That return made `cargo test` report a green pass for zero work — and this is
+    /// the only relaunch-persistence proof in the Rust suite, so a false pass hid its absence
+    /// entirely. Run it with `LOBSTER_PRODUCT_E2E=1 cargo test -- --ignored`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "real-engine E2E: LOBSTER_PRODUCT_E2E=1 cargo test -- --ignored"]
+    async fn product_launch_connect_stop_e2e_when_enabled() {
+        assert_eq!(
+            std::env::var("LOBSTER_PRODUCT_E2E").as_deref(),
+            Ok("1"),
+            "this test provisions and launches the real engine; set LOBSTER_PRODUCT_E2E=1 to confirm"
+        );
 
         // The sidecar inherits env at spawn. Headless CI/container runs need the Chromium sandbox off.
         std::env::set_var("LOBSTER_NO_SANDBOX", "1");

@@ -76,6 +76,64 @@ jobs:
         working-directory: apps/desktop/src-tauri
         run: cargo test --lib
 
+  # Every job above runs on ubuntu-latest, so nothing in this repo is verified anywhere else — while
+  # Windows is a shipping target (scripts/build-windows-product.ps1). That gap bites hardest on
+  # per-profile data: Linux OSCrypt pins Chromium's fixed v10 cookie key, so a copied cookie jar keeps
+  # working, while Windows (DPAPI) and macOS (Keychain) wrap that key per install — a persistence
+  # change that keeps every session alive on this Linux box can log every Windows user out, green.
+  # macOS ships no installer today (recorded in ci/validation/version-coherence.test.mjs:133); it is
+  # here as the second Keychain-wrapped platform and the cheap POSIX-but-not-Linux signal.
+  #
+  # This job runs ONLY what is genuinely portable today, so a red here always means a real defect:
+  #   - `cargo check` rather than `cargo test`: keychain.rs's LSK round-trip talks to the real
+  #     credential store (Credential Manager / login keychain), which a github-hosted runner does not
+  #     reliably provide. Checking every target still catches Windows/macOS-only cfg breakage.
+  #   - no live-engine job (engine-launch, lobium-detect, product-e2e): those need a Lobium binary, a
+  #     GPU and a provisioned open-font pack, none of which exist on a github-hosted Windows/macOS box.
+  cross-platform:
+    name: Cross-platform (${{ matrix.os }} typecheck / test / cargo check)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # A Windows-only or macOS-only failure is the entire reason this job exists — never let one
+      # platform's failure cancel the other's evidence.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      # Same reason as the web job: the backend typechecks against the generated Prisma client.
+      - run: npx prisma generate --schema=apps/backend/prisma/schema.prisma
+      - run: npm run typecheck --workspaces --if-present
+      # The node:test suites are already written to be platform-aware where the platform differs (e.g.
+      # lobium-config.test.ts asserts owner-write instead of 0o600 on win32, fonts.test.ts matches
+      # either path separator) — they had simply never been executed anywhere but Linux.
+      - run: npm run test --workspaces --if-present
+      # The toolchain version is pinned by rust-toolchain.toml (>= 1.85 for edition2024 deps).
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Frontend dist stub (so generate_context! has assets without a full JS build)
+        # Both runner images ship bash, so this stays byte-identical to the `rust` job rather than
+        # being rewritten for PowerShell.
+        shell: bash
+        run: |
+          mkdir -p apps/desktop/dist
+          echo '<!doctype html><html><head><meta charset="utf-8"><title>Lobster</title></head><body><div id="root"></div></body></html>' > apps/desktop/dist/index.html
+      - name: cargo check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --lib --all-targets
+      # PHASE 1 PLACEHOLDER — the per-profile snapshot round-trip (capture a profile's identity set on
+      # THIS OS, restore it into a fresh user-data-dir, assert the cookie jar still decrypts and the
+      # fingerprint seed is unchanged) belongs here and nowhere else: it is the one check that can fail
+      # on Windows/macOS while passing on Linux, because of the OSCrypt asymmetry described above.
+      # It cannot be written yet — there is no snapshot engine, and ci/validation/product-e2e.mjs needs
+      # a Lobium binary this runner does not have. Wire it in with the snapshot engine and make it
+      # blocking, do not add it as a warning:
+      #   - run: node ci/validation/snapshot-roundtrip.mjs
+
   # QA-1: native Lobium detector gate. Skip-clean on github-hosted runners (no Lobium binary /
   # real GPU). On a self-hosted GPU runner set LOBSTER_LOBIUM_BIN + LOBSTER_GPU=gpu and remove
   # the `if:` skip so this job becomes blocking.

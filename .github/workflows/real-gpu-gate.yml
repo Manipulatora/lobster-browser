@@ -8,7 +8,8 @@ name: Real-GPU stealth gate
 # This is NOT the ubuntu-latest CI (github-hosted runners have no GPU/Lobium binary). Set up the
 # self-hosted GPU runner per docs/ENGINEERING.md (§4), then:
 #   - label it `gpu`
-#   - set repo variables: LOBSTER_LOBIUM_BIN, DISPLAY, and (optional) LOBSTER_ANGLE_BACKEND / VK_ICD_FILENAMES
+#   - set repo variables: LOBSTER_LOBIUM_BIN, LOBSTER_FONTS_DIR, DISPLAY, and (optional)
+#     LOBSTER_ANGLE_BACKEND / VK_ICD_FILENAMES
 # The job is manual + nightly by default so a missing/asleep GPU box never blocks normal PR CI. Flip
 # `pull_request` on once the runner is reliably online to make it a true per-PR merge gate.
 
@@ -59,9 +60,10 @@ jobs:
       - name: Build validation deps
         run: npx tsc -b packages/shared-types packages/proxy packages/fingerprint packages/engine-runner
 
-      - name: Preflight — confirm real GPU + Lobium binary
+      - name: Preflight — confirm real GPU + Lobium binary + open-font pack
         env:
           LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_FONTS_DIR: ${{ vars.LOBSTER_FONTS_DIR }}
         run: |
           if [ -z "${LOBSTER_LOBIUM_BIN:-}" ] || [ ! -x "$LOBSTER_LOBIUM_BIN" ]; then
             echo "::error::LOBSTER_LOBIUM_BIN unset or not executable ($LOBSTER_LOBIUM_BIN)."
@@ -69,6 +71,14 @@ jobs:
             exit 1
           fi
           echo "Lobium binary: $LOBSTER_LOBIUM_BIN"
+          # The product E2E launch is font-isolated and REFUSES to start without a provisioned pack, so
+          # check it here where the error names the missing repo variable rather than 20 minutes in.
+          if [ ! -f "${LOBSTER_FONTS_DIR:-}/font-pack.manifest.json" ]; then
+            echo "::error::LOBSTER_FONTS_DIR has no font-pack.manifest.json ($LOBSTER_FONTS_DIR)."
+            echo "Set the repo variable LOBSTER_FONTS_DIR to the open-font pack on this runner (scripts/provision-open-fonts.mjs output, or <install>/lobium/fonts)."
+            exit 1
+          fi
+          echo "Open-font pack: $LOBSTER_FONTS_DIR"
 
       # Fast GPU-independent plumbing check: proves the HC-4 deep-WebGL hook is compiled + live in the
       # binary (sentinel values round-trip). Cheap early failure if a rebuild dropped the hook.
@@ -76,6 +86,24 @@ jobs:
         env:
           LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
         run: node ci/validation/hc4-probe.mjs
+
+      # The repo's ONLY real-engine persistence proof: create a profile, launch it through the exact
+      # sidecar path the desktop Launch button uses, prove the imported cookies reached the jar, then
+      # RELAUNCH the same profile and prove the jar, the exported cookies and the loaded extension all
+      # survived. It was invoked by no workflow at all — only non-blockingly late in
+      # scripts/build-linux-product.sh — so a regression breaking cookie or extension persistence
+      # across relaunch reached main green. Blocking, and it lives here rather than in ci.yml because
+      # `lobium` is the only registered launcher (runners/default-launchers.ts:29-31): without the
+      # native binary this runner provides, the harness cannot launch anything at all.
+      - name: Product E2E (create / launch / relaunch persistence)
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_FONTS_DIR: ${{ vars.LOBSTER_FONTS_DIR }}
+          LOBSTER_GPU: gpu
+          LOBSTER_ANGLE_BACKEND: ${{ vars.LOBSTER_ANGLE_BACKEND || 'vulkan' }}
+          VK_ICD_FILENAMES: ${{ vars.VK_ICD_FILENAMES }}
+          DISPLAY: ${{ vars.DISPLAY || ':0' }}
+        run: node ci/validation/product-e2e.mjs
 
       - name: Native Lobium detector (real GPU)
         env:
