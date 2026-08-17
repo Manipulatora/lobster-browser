@@ -94,8 +94,58 @@ model User {
   memberships       Membership[]
   desktopAuthGrants DesktopAuthGrant[]
   emailVerifications EmailVerification[]
+  vaultEnrollment   VaultEnrollment?
 
   @@map("users")
+}
+
+/// The wrapped key material that lets a user decrypt their own profile snapshots on a NEW machine.
+///
+/// WHY THE SERVER HOLDS THIS AT ALL. The snapshot key has to survive the loss of the machine that
+/// made the snapshot, or cloud sync is a backup nobody can restore. What is stored is the Team Data
+/// Key wrapped twice — once under an Argon2id key derived from the account password, once under a key
+/// derived from a printed recovery code — so the server holds no key it can open. Both wraps are
+/// AES-256-GCM, so a tampered row fails closed rather than yielding a wrong key.
+///
+/// THE SALTS ARE SEPARATE, and that is load-bearing: a shared salt would make the two wrapping keys
+/// related, and rotating the password would silently invalidate the recovery code.
+///
+/// A forgotten password AND a lost recovery code is permanent, unrecoverable loss of every synced
+/// session. That is the accepted cost of the server never being able to read profile data; support
+/// can see `enrolledAt` and `recoveryCodeUsedAt` and nothing more.
+model VaultEnrollment {
+  userId String @id
+
+  /// Argon2id salt for the password-derived wrapping key. 16 bytes.
+  passwordSalt Bytes
+  /// Argon2id salt for the recovery-code-derived wrapping key. 16 bytes, never equal to the above.
+  recoverySalt Bytes
+
+  /// The Team Data Key under the password key (`LKw1 | nonce | ct+tag`).
+  wrappedByPassword Bytes
+  /// The same Team Data Key under the recovery-code key.
+  wrappedByRecovery Bytes
+
+  /// Non-secret fingerprint of the TDK, so a client can tell "wrong password" from "wrong vault"
+  /// without unwrapping anything.
+  keyFingerprint String
+
+  /// Argon2id cost this enrollment was created with, so parameters can be raised later without
+  /// stranding existing users — an unlock must use the cost its wrap was made with.
+  argonMemoryKiB Int
+  argonIterations Int
+  argonParallelism Int
+
+  enrolledAt DateTime  @default(now())
+  /// Set the first time the recovery code is used. A used code is not invalidated (the user may still
+  /// need it), but support and the UI need to know it has left the paper it was printed on.
+  recoveryCodeUsedAt DateTime?
+  /// Bumped whenever the wraps are rewritten (password change, recovery-code regeneration).
+  rotatedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("vault_enrollments")
 }
 
 /// A single-use email-verification token.
