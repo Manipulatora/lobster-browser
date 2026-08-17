@@ -4,6 +4,34 @@ STATUS: design accepted, Phase 0 in progress. This document is the contract for 
 because the audit that produced it found the feature to be 0% implemented on the client while the
 product's sign-in screen told users their profiles were being synced.
 
+## Status at a glance
+
+Read this before the design below: parts of that design were superseded while building, and each
+change is explained where it happened.
+
+| Phase | State | What actually exists |
+|---|---|---|
+| 0 — Stop the bleeding | **Done** | Cookie import preserved; unreadable cells degrade instead of blanking the app; loopback API no longer serves live cookies or proxy passwords; nginx body limit; tombstones. |
+| 1 — Platform CI | **Partly done** | `windows-latest` + `macos-latest` run typecheck, portable node:test suites, `cargo check`, and the snapshot round-trip **blocking** on both. The live logged-in round-trip still needs a self-hosted runner with a Lobium binary. |
+| 2 — Local snapshot engine | **Done** | Capture / restore / verify with rollback, over the real artifact set. Proven on all 9 real profiles on the dev box. |
+| 3 — Cross-OS portability | **Done (Linux-proven)** | 873/873 real cookie values survive a change of platform key. Windows DPAPI and macOS Keychain **key sources** are written but unexercised — they need the Phase 1 runners. |
+| 4 — Account key | **Done, simplified** | `GET /vault/key`. No password derivation, no recovery code — see the Correction section. |
+| 5 — Cloud sync | **Server + client done; not wired to the UI** | Durable filesystem blob store on the server, push/pull with compare-and-set, conflict refusal. **No UI calls it yet, and capture still seals under the per-install key** — so it is not yet a feature a user can use. |
+| 6 — Leases | Next | |
+| 7 — Startup performance | Next | Baseline measured: local profile read **2.1 ms**, `/auth/me` blocks up to **15 s** on the boot path. The work is local-first paint, not faster queries. |
+| 8 — Extensions | Blocked on a decision | Needs a fork patch exempting extensions **by ID**; the obvious path-based approach changes extension IDs and destroys their stored data. |
+
+### Known gaps, stated rather than implied
+
+- Sync is **not user-visible**. The commands exist; nothing calls them.
+- Capture seals under the per-install key, so a push re-seals at the transport layer only.
+- Windows/macOS OSCrypt key sources are unproven until the CI runners execute them.
+- The `.env` leak class has now caused three separate defects (tests hitting the live database, then
+  production blob storage, then sending real email from the production mailbox). Each was found while
+  verifying something else. It deserves one guard that fails a run when a production-pointing
+  variable is live, rather than another per-variable fix.
+
+
 ## Why this document exists
 
 An eleven-agent audit of every layer (desktop Rust, engine-runner sidecar, backend, Postgres, the
@@ -29,7 +57,7 @@ flaw in each. What follows is the synthesis.
 | Decision | Choice | Consequence |
 |---|---|---|
 | Sync unit | Slim identity set (~1–7 MB/profile) | Whole user-data-dir measured at 0.96–4.48 GB/profile for 0.55–6.44 MB of identity. Not viable. |
-| Key custody | Account password (Argon2id) → wrapped per-profile keys, escrowed server-side, plus a printable recovery code | Server never sees plaintext. Forgotten password **and** lost code = permanent loss. |
+| Key custody | **Server-held account key** (`GET /vault/key`, created on first use), deriving a separate key per profile | Sign in and your profiles are there. Password reset costs nothing; nothing to write down. The server can read profile data — the right posture when the operator owns the server. *(Superseded a password-derived design; see "Correction" at the end.)* |
 | Cookies | Decrypted at capture into our own portable envelope | A raw file copy silently logs users out on Windows/macOS. Users must stay logged in. |
 | Concurrency | Octo's model: hard block, one device at a time | Plus a 150s lease so a crashed machine self-heals, which Octo does not do. |
 | localStorage | **On by default** | Octo defaults it *off* and warns users get logged out. We were asked to preserve it. |
@@ -253,42 +281,28 @@ Every artifact: **stage → `fsync` → `integrity_check` → read back through 
 7. `prefs-subset` allowlist, **untracked keys only**: `profile.content_settings.exceptions`, `profile.default_content_setting_values`, `partition.default_zoom_level`, `profile.per_host_zoom_levels`, `intl.*`, `translate_*`. Never `default_search_provider_data` (Warm Restore's insight: excluding it deletes the protected-pref-MAC question), never `homepage`, `pinned_tabs`, `session.*`, `extensions.settings`, never `Secure Preferences`. Restore **merges** into the target's own Preferences and lets Chromium recompute its MACs.
 
 ---
-### 8. KEY HIERARCHY
+### 8. KEY HIERARCHY (as built — simplified)
 
-**Argon2id** (both derivations), matching `packages/crypto/src/keys.ts:23-27` so Node and Rust agree byte-for-byte: `m = 65536 KiB`, `t = 3`, `p = 1`, `dkLen = 32`, salt 16 CSPRNG bytes. Rust: `Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::new(65536,3,1,Some(32))?)`. This **also replaces** `Argon2::default()` (m≈19 MiB, t=2) for per-profile launch passwords at `profile_store.rs:504,536` and replaces the UUIDv4-derived salt at `:501` with `SaltString::generate(&mut OsRng)` — one Argon2 posture in the repo (gap [48]).
+> The elaborate password-derived ladder that was here (UMK → UKWK → ADK, recovery codes, double
+> wraps) has been **removed**. It is preserved only in the "Correction" section at the end of this
+> document, which explains why. What follows is what the code does.
 
-**HKDF-SHA256**, labels versioned to v2 because v1 omits the account id, so any shared/restored/re-wrapped ADK derives colliding PCKs across accounts:
-- `PCK = HKDF(ADK, salt="", info="lobster/pck/v2:"‖accountId‖":"‖profileId, 32)`
-- `key_id = HKDF(ADK, salt="", info="lobster/pck-key-id/v2:"‖accountId‖":"‖profileId, 16)`
-- `AK_artifact = HKDF(PCK, salt="", info="lobster/artifact/v1:"‖artifactId, 32)`
-- per chunk: `okm = HKDF(AK_artifact, salt=plainDigest, info="lobster/chunk/v1", 44)`; `chunkKey=okm[0..32]`, `nonce=okm[32..44]`. Deterministic key **and** nonce is the point — identical plaintext dedups — and nonce reuse across different plaintexts is impossible because the key is salted with the plaintext's own digest.
+```text
+  sign in ──▶ GET /vault/key ──▶ account key ──HKDF(key, profileId)──▶ per-profile key ──▶ LBv1 seal
+```
 
-v1 derivation retained **read-only**, selected by the envelope's `key_id`, which finally gives that field a consumer (gap [44]: `lib.rs:767` discards it as `let (plaintext, _)`).
+- **Account key**: 32 random bytes per user, generated by the server on first request and returned to
+  any client that can sign in. Never derived from anything the user types.
+- **Per-profile key**: `PCK = HKDF-SHA256(accountKey, info="lobster/pck/v1:" ‖ profileId, 32)` and
+  `key_id = HKDF-SHA256(accountKey, info="lobster/pck-key-id/v1:" ‖ profileId, 16)`. Per profile so
+  one profile's key does not open another's.
+- **Cross-language**: Rust and TypeScript must derive identical bytes or a snapshot sealed on one
+  platform will not open on the other. Both assert against
+  `packages/crypto/fixtures/key-derivation-vectors.json`; the test was verified to *catch* a
+  divergence, not merely to pass.
+- **Held in memory only** on the desktop. Persisting it would put a copy on that machine's disk for
+  no benefit, since it is re-fetchable by anyone who can sign in.
 
-**Ladder:** `account password —Argon2id(passwordSalt)→ UMK` (never persisted, zeroized) `—LKw1→ UKWK —LKw1→ ADK —HKDF→ PCK —→ LBv2`. `recovery code —Argon2id(recoverySalt)→ RK —LKw1→ UKWK`. A team's ADK is one ADK wrapped once per membership.
-
-**Enrollment** (`keys::enroll`, Rust only — no key material crosses Tauri IPC): generate salts; `UMK`; `UKWK` = 32 CSPRNG + `wrap_key(UKWK, UMK)`; `ADK` = 32 CSPRNG + `wrap_key(ADK, UKWK)` + `adkKeyId`; recovery code = 128 CSPRNG bits → Crockford base32, 25 chars + 1 checksum, shown `XXXXX-XXXXX-XXXXX-XXXXX-XXXXX-C`, normalised on entry (uppercase, strip non-alphanumerics, `I|L→1`, `O→0`); `RK`; `wrap_key(UKWK, RK)`. **Enrollment does not complete until the user types the recovery code back** (Strongbox — a one-shot secret the user never transcribed is a countdown, not custody). Then zeroize UMK/RK/UKWK and cache `wrap_key(ADK, LSK)` in the keychain + `account_keys`.
-
-Wrap format is the existing `LKw1` = `"LKw1" ‖ nonce(12) ‖ ct(32) ‖ tag(16)` = exactly 64 bytes.
-
-**Password surface.** `AuthScreen.tsx:13-17` deliberately means the desktop window never handles a password (loopback sign-in through the system browser). We add **exactly one** clearly-labelled *"Unlock your profiles"* sheet for the **account** password — not a separate sync password (Warm Restore's deviation from binding decision #2 doubles the forgotten-secret surface). It runs on a blocking thread, never in the Tauri `setup` hook, ~250–500 ms, **once per install**. Keep Warm Restore's finding: a web password reset does **not** rotate the vault, so `keyEnrolledAt` plus explicit copy and an "I reset my password" path are mandatory.
-
-**No AUTHK login split in v1.** Molt's `users.kdfVersion 1→2` migration would move Argon2id into the Angular login for 44 live accounts, crossed with password reset, for a benefit that is at-rest-equivalent. Documented honestly instead: *"the server cannot read your profile data at rest"* — never *"we never see your password"*.
-
-**Server stores only:** `passwordSalt`, `recoverySalt`, `wrappedUkwkByUmk`, `wrappedUkwkByRk`, `kdfParams`, `enrolledAt`, `recoveryCodeUsedAt?`, `passwordRotatedAt?`; and per membership `wrappedAdkByUkwk` + `adkKeyId`. Enforced server-side, not by convention: every wrap must be exactly 64 bytes starting `LKw1`, and `kdfParams` weaker than normative `m/t/p` is rejected. `PUT /keys/enrollment` is **idempotent-once** — a second write with a different `wrappedUkwk` is a 409 unless it carries a complete re-wrap set (Molt), so a client bug can never orphan an enrolled vault.
-
-**`LBv2` envelope** (closing gap [18]): `magic "LBv2"(4) | key_id(16) | alg(1, 0x01=A256GCM) | aad_len(2 BE) | aad | nonce(12) | ct | tag(16)`, with AES-GCM AAD = the **entire header prefix**. `aad` = canonical CBOR of `{accountId, profileId, artifactId, snapshotVersion, chunkIndex, chunkCount}`. A chunk cannot be replayed for another profile, artifact, earlier version or different stream position. `LBv1` stays readable (dispatch on magic, not the equality check at `blob_crypto.rs:58-60`). `decryptProfileBlob` gains the `payload.profileId === requestedProfileId` equality check it never had (`index.ts:210-231` only checks it is a string). A shared KAT at `packages/crypto/test-vectors/lbv2.json` is read by **both** the Node test and a Rust test as a **required CI gate** — today the two implementations agree only by human inspection.
-
-**SEC-12 hardening (prerequisites, not extras).**
-- **Delete `decrypt_str`.** Its two fail-open returns (`secrets.rs:75` prefix-miss accepted as legacy plaintext, `:81` auth failure returned verbatim) are an injection primitive: unprefixed plaintext cookie JSON written into `profiles.sqlite` gets injected into the victim's profile on next launch. All callers (`profile_store.rs:250,254`, `proxy_store.rs:90,101`) move to `decrypt_strict` with a typed `SecretUnavailable` error and a **user-facing** "this profile's local secrets cannot be decrypted on this machine — restore from cloud snapshot" flow. The one-time legacy upgrade becomes an explicit migration keyed on `PRAGMA user_version`.
-- Remove the `.ok()` swallow at `profile_store.rs:250,254` that turns a corrupt cell into `None` which `update()` then **persists as NULL** (`:472-476`) — corruption must be reported, not destroyed.
-- `encrypt_cell(table, id, column, pt)` / `decrypt_cell` with AAD `"{table}/{id}/{column}"`, so a ciphertext copied between rows or columns fails to authenticate.
-- `fingerprint_seed` joins the encrypt set with AAD `profiles/<id>/fingerprint_seed`, making true the comment at `packages/crypto/src/index.ts:191`. Server-side the plaintext indexed column becomes `fingerprintSeedDigest` (BLAKE3-128 hex, dedupe only).
-- `template_store.rs` takes a `SecretCipher`; its per-startup `rawText` scrubber retires behind `user_version`.
-- **Remove `encrypt_profile_blob`/`decrypt_profile_blob` from `tauri::generate_handler!`** (`lib.rs:1497-1498`) and delete their `pck_hex`/`team_data_key_hex` parameters. Wired as written, the team-wide TDK would live in renderer JavaScript on every sync (gap [40]). Replaced by `snapshot_capture`/`snapshot_restore`/`account_unlock`, which take no key material and return no plaintext.
-- `keychain.rs:36-38` stops mirroring the LSK to `secrets.key` on the keychain-**hit** path. The file becomes an opt-in `--allow-file-key` CI fallback, **DPAPI-wrapped via `CryptProtectData` on Windows** (Molt), with a restrictive DACL replacing the `#[cfg(unix)]`-gated `0o600` (gap [17]).
-
----
 ### 9. SYNC PROTOCOL — manifest + content-addressed chunks
 
 **Reused as-is:** team-scoped auth resolution, the audit pipeline, the `{code,data,msg}` envelope, and `S3BlobStore`'s `If-None-Match: '*'` conditional-create as the atomic CAS primitive. That mechanism is correct and load-bearing; it is simply pointed at a content-addressed layout.
@@ -508,9 +522,9 @@ Phases 0–2 deliver "save cookies, localStorage and extensions" with no network
 
 **Exit criteria.** A cross-OS matrix in CI: capture on ubuntu -> restore on windows -> /whoami logged-in; capture on windows -> restore on macos -> logged-in; and both reverse directions. Partitioned and __Host- cookies survive every leg. A Windows test captures cookies from a STOPPED, never-relaunched profile and restores them (proving gap [3] is fixed on the shipping platform). A macOS test asserts --use-mock-keychain is NEVER passed to a profile whose oscrypt_mode != 'mock', and that the migration re-encrypts then verifies before flipping. A key-unreachable test asserts the plaintext-value fallback loads and the manifest/UI say atRest:'plaintext'. A malformed-cookie test asserts binary-split injects the other 299 and the launch succeeds.
 
-### Phase 4 — Key custody: enrollment, recovery, LBv2
+### Phase 4 — Account key (SIMPLIFIED — see the Correction section)
 
-**Goal.** An account password plus a recovery code can recover every profile's data on a brand-new machine. No key material crosses the Tauri IPC boundary. Independent of Phase 5: enrollment and LBv2 can ship and be tested with local artifacts only.
+**Goal.** ~~An account password plus a recovery code can recover every profile's data on a brand-new machine.~~ **As built:** signing in is enough. `GET /vault/key` returns the account key, which derives a per-profile key. No enrollment step, no recovery code, no Argon2id.
 
 **Tasks.**
 
