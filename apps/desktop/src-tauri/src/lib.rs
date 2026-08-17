@@ -50,12 +50,11 @@ struct AppState {
     profiles_dir: PathBuf,
     /// SEC-12: per-install AES-256-GCM cipher used by the stores for at-rest secret encryption.
     cipher: Arc<SecretCipher>,
-    /// The account key, once unlocked this session.
+    /// The account key, cached for this session.
     ///
-    /// IN MEMORY ONLY, and deliberately not persisted: it is what makes a snapshot openable on
-    /// another machine, so writing it to this one's disk would undo the reason it exists. A restart
-    /// requires the password again, which is the correct cost.
-    unlocked_vault: Arc<Mutex<Option<vault_key::UnlockedVault>>>,
+    /// In memory only: persisting it would put a copy on this machine's disk for no benefit, since
+    /// it is re-fetchable from the server by anyone who can sign in.
+    account_key: Arc<Mutex<Option<vault_key::AccountKey>>>,
 }
 
 /// Returns the desktop agent version, sourced from Cargo at compile time.
@@ -120,59 +119,25 @@ async fn auth_sign_in(mode: String) -> Result<cloud_auth::CloudUser, String> {
 
 /// Whether this session can seal and open snapshots for other machines.
 ///
-/// `enrolled` is an account fact (the server holds key material); `unlocked` is a session fact (this
-/// process has the key in memory). The UI needs both: an enrolled-but-locked account prompts for a
-/// password, an unenrolled one has to be walked through setup and shown its recovery code once.
+/// There is no unlock step and no second secret: the account key is fetched after sign-in and cached
+/// for the session. This exists so the UI can show whether sync is usable and say why when it is not.
 #[tauri::command]
 async fn vault_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let unlocked = state
-        .unlocked_vault
+    let cached = state
+        .account_key
         .lock()
         .map_err(|e| e.to_string())?
-        .as_ref()
-        .map(|v| v.fingerprint().to_string());
-    let enrolled = match vault_key::fetch_enrollment().await {
-        Ok(enrollment) => enrollment.is_some(),
-        // Offline is not "unenrolled": answering false would walk a user into a second enrollment,
-        // which the server refuses precisely because it would strand their existing snapshots.
-        Err(err) => {
-            return Ok(serde_json::json!({
-                "enrolled": serde_json::Value::Null,
-                "unlocked": unlocked,
-                "error": format!("{err:#}"),
-            }))
+        .is_some();
+    if cached {
+        return Ok(serde_json::json!({ "ready": true }));
+    }
+    match vault_key::fetch().await {
+        Ok(key) => {
+            *state.account_key.lock().map_err(|e| e.to_string())? = Some(key);
+            Ok(serde_json::json!({ "ready": true }))
         }
-    };
-    Ok(serde_json::json!({ "enrolled": enrolled, "unlocked": unlocked }))
-}
-
-/// Unlock the account key for this session with a password or a printed recovery code.
-#[tauri::command]
-async fn vault_unlock(
-    state: State<'_, AppState>,
-    secret: String,
-    using: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let using = match using.as_deref().unwrap_or("password") {
-        "password" => vault_key::UnlockWith::Password,
-        "recovery-code" => vault_key::UnlockWith::RecoveryCode,
-        other => return Err(format!("unknown unlock method `{other}`")),
-    };
-    let enrollment = vault_key::fetch_enrollment()
-        .await
-        .map_err(|e| format!("{e:#}"))?
-        .ok_or("this account has no vault key material yet")?;
-    let vault = vault_key::unlock(&enrollment, &secret, using).map_err(|e| format!("{e:#}"))?;
-    let fingerprint = vault.fingerprint().to_string();
-    *state.unlocked_vault.lock().map_err(|e| e.to_string())? = Some(vault);
-    Ok(serde_json::json!({ "unlocked": fingerprint }))
-}
-
-/// Forget the account key without signing out. The snapshots stay; this session just cannot open them.
-#[tauri::command]
-fn vault_lock(state: State<'_, AppState>) -> Result<(), String> {
-    *state.unlocked_vault.lock().map_err(|e| e.to_string())? = None;
-    Ok(())
+        Err(err) => Ok(serde_json::json!({ "ready": false, "error": format!("{err:#}") })),
+    }
 }
 
 #[tauri::command]
@@ -1515,7 +1480,7 @@ pub fn run() {
                 sidecar: sidecar.clone(),
                 profiles_dir: profiles_dir.clone(),
                 cipher: cipher.clone(),
-                unlocked_vault: Arc::new(Mutex::new(None)),
+                account_key: Arc::new(Mutex::new(None)),
             });
 
             // Start the local automation API on the same runtime, sharing the store + sidecar.
@@ -1540,8 +1505,6 @@ pub fn run() {
             snapshot::commands::snapshot_push,
             snapshot::commands::snapshot_pull,
             vault_status,
-            vault_unlock,
-            vault_lock,
             app_version,
             auth_status,
             auth_sign_in,

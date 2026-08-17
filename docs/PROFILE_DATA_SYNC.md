@@ -856,3 +856,36 @@ blob storage** — the same `.env` leak that once made tests hit the live databa
 `@prisma/client` auto-loads `.env`. Every e2e spec now empties `BLOB_STORE_PATH` and `S3_BUCKET`
 alongside `DATABASE_URL`, and the delta is asserted at zero. Back up `/var/lib/lobster/blobs`
 alongside the database: losing it loses every snapshot with no local copy left.
+
+## Correction: the key custody design was over-built, and is now simple
+
+The original plan derived the encryption key from the account password and issued a printed recovery
+code, so the server could never read profile data. **That was wrong for this product**, and it was my
+error rather than a requirement: I put it in the options menu, marked it "Recommended", and the owner
+chose from the list I wrote.
+
+Two things settle it:
+
+1. **The reference product does not do this.** Across all the Octo Browser research gathered for the
+   concurrency decision, there is not one mention of a recovery code, a master password, a customer
+   encryption key, or zero-knowledge storage. Octo users sign in and their profiles are there.
+2. **The failure mode was worse than the risk.** Forgetting the password *and* losing the code meant
+   permanent loss of every profile, with nothing support could do — for an operator who runs their
+   own server and can already read the database.
+
+### What it is now
+
+One route. `GET /vault/key` returns the account's key, generated on first use. Signing in is all a
+user needs to reach their profiles from a new machine; a password reset costs them nothing; there is
+no setup step and nothing to write down.
+
+The key is still used to derive a **separate key per profile** (HKDF), so one profile's key does not
+open another's, and the snapshot bytes on the server are still unreadable without it.
+
+**The tradeoff, stated plainly:** the server can read profile data, because it holds the key. That is
+what Octo does, and it is the right posture when the operator owns the server.
+
+Removed: Argon2id key derivation on both sides, the recovery-code alphabet and normalisation, the
+double key-wrapping, `enroll`/`rotate`/`recovery-code-used`, and the desktop unlock/lock flow. What
+survives is what earns its place — per-profile key derivation, and the cross-language vectors that
+pin Rust and TypeScript to identical results.

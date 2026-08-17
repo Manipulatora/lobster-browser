@@ -26,23 +26,6 @@ export const ARGON2ID_PARALLELISM = 1;
 export const ARGON2ID_SALT_LEN = 16;
 export const ARGON2ID_HASH_LEN = 32;
 
-/**
- * Recovery-code shape: 128 bits, Crockford base32, in six groups of five.
- *
- * 128 bits because this key is the ONLY thing between a user who forgot their password and the
- * permanent loss of every synced session — it has to be strong enough that guessing is not a threat
- * model, so it is generated rather than chosen. Crockford base32 because a recovery code gets written
- * on paper and typed back: it has no `I`, `L`, `O` or `U`, so the classic transcription confusions
- * cannot produce a different valid code, and {@link normalizeRecoveryCode} folds the ones that do get
- * mistyped back to their intended digit.
- */
-export const RECOVERY_CODE_BITS = 128;
-export const RECOVERY_CODE_GROUPS = 6;
-export const RECOVERY_CODE_GROUP_LEN = 5;
-
-/** Crockford base32, excluding I, L, O, U by construction. */
-const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-
 /** HKDF info labels (stable; changing them rotates all derived keys). */
 export const HKDF_INFO_PCK = 'lobster/pck/v1';
 export const HKDF_INFO_KEY_ID = 'lobster/pck-key-id/v1';
@@ -256,83 +239,6 @@ export function wrapTeamDataKeyForMember(
 }
 
 /** Fingerprint a key for logs/UI without leaking material (SHA-256 truncated). */
-/**
- * A fresh recovery code, e.g. `A1B2C-3D4E5-...`.
- *
- * The 128 bits are read from a CSPRNG and encoded five bits at a time, so every character carries
- * exactly one symbol's worth of entropy and there is no modulo bias to reason about. 26 symbols hold
- * 130 bits, so the last symbol's low two bits are zero-padded — stated because a reader checking the
- * arithmetic will otherwise wonder where the missing bits went.
- */
-export function generateRecoveryCode(): string {
-  const bytes = randomBytes(RECOVERY_CODE_BITS / 8);
-  const symbols = RECOVERY_CODE_GROUPS * RECOVERY_CODE_GROUP_LEN;
-  let bits = 0;
-  let acc = 0;
-  let out = '';
-  for (let i = 0; out.length < symbols; ) {
-    if (bits < 5) {
-      acc = (acc << 8) | (i < bytes.length ? bytes[i]! : 0);
-      bits += 8;
-      i += 1;
-    }
-    bits -= 5;
-    out += CROCKFORD[(acc >> bits) & 0x1f];
-  }
-  const groups: string[] = [];
-  for (let i = 0; i < symbols; i += RECOVERY_CODE_GROUP_LEN) {
-    groups.push(out.slice(i, i + RECOVERY_CODE_GROUP_LEN));
-  }
-  return groups.join('-');
-}
-
-/**
- * Fold a typed recovery code back to its canonical symbols.
- *
- * Accepts the separators and case a human will actually produce, and applies Crockford's substitutions
- * (`I`/`L` → `1`, `O` → `0`) so a transcription slip is corrected rather than rejected. `U` is NOT
- * substituted — it is excluded from the alphabet specifically so it cannot be confused with `V`, and
- * silently mapping it would accept a code that was never issued.
- */
-export function normalizeRecoveryCode(code: string): string {
-  const folded = code
-    .toUpperCase()
-    .replace(/[\s-]+/g, '')
-    .replace(/[IL]/g, '1')
-    .replace(/O/g, '0');
-  const expected = RECOVERY_CODE_GROUPS * RECOVERY_CODE_GROUP_LEN;
-  if (folded.length !== expected) {
-    throw new KeyHierarchyError(
-      `recovery code must be ${expected} symbols (got ${folded.length} after normalising)`,
-    );
-  }
-  for (const ch of folded) {
-    if (!CROCKFORD.includes(ch)) {
-      throw new KeyHierarchyError(`recovery code contains '${ch}', which is not in the alphabet`);
-    }
-  }
-  return folded;
-}
-
-/**
- * Derive a wrapping key from a recovery code, using the same Argon2id cost as a password.
- *
- * Deliberately as slow as the password path even though the code has far more entropy: the cost is
- * paid once, during a recovery someone is already anxious about, and matching the parameters means
- * there is only one KDF configuration in the system to get right or to migrate.
- *
- * The salt is SEPARATE from the password salt. Sharing one would mean the two wraps of the same key
- * were derived from related material, and rotating a password would silently invalidate the recovery
- * code.
- */
-export async function deriveRecoveryKey(
-  code: string,
-  salt: Uint8Array | Buffer,
-  options: DeriveUmkOptions = {},
-): Promise<Buffer> {
-  return deriveUserMasterKey(normalizeRecoveryCode(code), salt, options);
-}
-
 export function keyFingerprint(key: Uint8Array | Buffer): string {
   const buf = Buffer.isBuffer(key) ? key : Buffer.from(key);
   return createHash('sha256').update(buf).digest('hex').slice(0, 16);

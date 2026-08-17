@@ -37,7 +37,12 @@ before(async () => {
   // directory, so running the suite wrote real files into it. Emptied, not deleted, for
   // the reason above.
   process.env.BLOB_STORE_PATH = '';
-  process.env.S3_BUCKET = ''; // force in-memory repos. NOT `delete`: requiring @prisma/client
+  process.env.S3_BUCKET = '';
+  // ...and the mailer, for the same reason. Registering a user sends a verification email,
+  // so with the real SMTP settings leaking in from .env every test run posted real mail to
+  // fake addresses from the production mailbox — enough of it to trip the provider's rate
+  // limit. Unconfigured, MailService logs instead of sending.
+  process.env.SMTP_HOST = ''; // force in-memory repos. NOT `delete`: requiring @prisma/client
   // auto-loads .env and re-injects DATABASE_URL, so a deleted var comes back and the suite
   // silently runs against whatever database .env points at. dotenv never overwrites a var that
   // is already set, so an empty string (falsy) survives and PrismaService picks in-memory.

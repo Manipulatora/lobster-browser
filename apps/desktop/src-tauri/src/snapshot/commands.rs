@@ -233,17 +233,16 @@ mod tests {
 /// The account key for one profile, or a clear reason it is unavailable.
 ///
 /// Separate from the ledger's own key on purpose: the ledger seals with a per-install key so a purely
-/// local backup works with no account at all, while sync needs a key another machine can reach. A
-/// locked vault is therefore a normal state with a specific remedy, not an error to bubble.
+/// local backup works with no account at all, while sync needs a key another machine can reach.
 fn profile_keys(
     state: &State<'_, AppState>,
     profile_id: &str,
 ) -> Result<([u8; 32], [u8; 16]), String> {
-    let guard = state.unlocked_vault.lock().map_err(|e| e.to_string())?;
-    let vault = guard
+    let guard = state.account_key.lock().map_err(|e| e.to_string())?;
+    let account = guard
         .as_ref()
-        .ok_or("the account vault is locked — unlock it with your password to sync")?;
-    let key = vault
+        .ok_or("the account key is not loaded yet — sign in, then try again")?;
+    let key = account
         .profile_content_key(profile_id)
         .map_err(|e| format!("{e:#}"))?;
     let key_id =
