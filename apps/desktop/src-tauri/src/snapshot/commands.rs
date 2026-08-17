@@ -229,3 +229,63 @@ mod tests {
         assert!(err.contains("unknown capture mode"), "{err}");
     }
 }
+
+/// The account key for one profile, or a clear reason it is unavailable.
+///
+/// Separate from the ledger's own key on purpose: the ledger seals with a per-install key so a purely
+/// local backup works with no account at all, while sync needs a key another machine can reach. A
+/// locked vault is therefore a normal state with a specific remedy, not an error to bubble.
+fn profile_keys(
+    state: &State<'_, AppState>,
+    profile_id: &str,
+) -> Result<([u8; 32], [u8; 16]), String> {
+    let guard = state.unlocked_vault.lock().map_err(|e| e.to_string())?;
+    let vault = guard
+        .as_ref()
+        .ok_or("the account vault is locked — unlock it with your password to sync")?;
+    let key = vault
+        .profile_content_key(profile_id)
+        .map_err(|e| format!("{e:#}"))?;
+    let key_id =
+        crate::blob_crypto::derive_key_id(&key, profile_id).map_err(|e| format!("{e:#}"))?;
+    Ok((key, key_id))
+}
+
+/// Seal the newest local snapshot for the account and upload it.
+///
+/// `baseVersion` is what the caller believes the server currently holds. A mismatch is a 409 that
+/// surfaces as SYNC_CONFLICT rather than an overwrite: the remote snapshot is another machine's
+/// session, and last-write-wins would destroy it silently.
+#[tauri::command]
+pub async fn snapshot_push(
+    state: State<'_, AppState>,
+    profile_id: String,
+    base_version: Option<u64>,
+) -> Result<crate::profile_sync::PushOutcome, String> {
+    let vault = open_vault(&state)?;
+    let (key, key_id) = profile_keys(&state, &profile_id)?;
+    crate::profile_sync::push(
+        &vault,
+        &profile_id,
+        &key,
+        &key_id,
+        base_version.unwrap_or(0),
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// Download the account's snapshot into the local ledger as a NEW version.
+///
+/// Never overwrites a local version, so a pull cannot destroy a capture that has not been uploaded.
+#[tauri::command]
+pub async fn snapshot_pull(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<crate::profile_sync::PullOutcome, String> {
+    let vault = open_vault(&state)?;
+    let (key, _key_id) = profile_keys(&state, &profile_id)?;
+    crate::profile_sync::pull(&vault, &profile_id, &key)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}

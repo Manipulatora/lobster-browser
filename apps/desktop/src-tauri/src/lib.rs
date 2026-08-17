@@ -17,6 +17,7 @@ mod engine_provision;
 mod keychain;
 mod local_api;
 mod profile_store;
+mod profile_sync;
 mod proxy_check;
 mod proxy_store;
 mod secrets;
@@ -49,6 +50,12 @@ struct AppState {
     profiles_dir: PathBuf,
     /// SEC-12: per-install AES-256-GCM cipher used by the stores for at-rest secret encryption.
     cipher: Arc<SecretCipher>,
+    /// The account key, once unlocked this session.
+    ///
+    /// IN MEMORY ONLY, and deliberately not persisted: it is what makes a snapshot openable on
+    /// another machine, so writing it to this one's disk would undo the reason it exists. A restart
+    /// requires the password again, which is the correct cost.
+    unlocked_vault: Arc<Mutex<Option<vault_key::UnlockedVault>>>,
 }
 
 /// Returns the desktop agent version, sourced from Cargo at compile time.
@@ -109,6 +116,63 @@ async fn auth_sign_in(mode: String) -> Result<cloud_auth::CloudUser, String> {
     })?;
 
     pending.wait().await.map_err(|e| e.to_string())
+}
+
+/// Whether this session can seal and open snapshots for other machines.
+///
+/// `enrolled` is an account fact (the server holds key material); `unlocked` is a session fact (this
+/// process has the key in memory). The UI needs both: an enrolled-but-locked account prompts for a
+/// password, an unenrolled one has to be walked through setup and shown its recovery code once.
+#[tauri::command]
+async fn vault_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let unlocked = state
+        .unlocked_vault
+        .lock()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .map(|v| v.fingerprint().to_string());
+    let enrolled = match vault_key::fetch_enrollment().await {
+        Ok(enrollment) => enrollment.is_some(),
+        // Offline is not "unenrolled": answering false would walk a user into a second enrollment,
+        // which the server refuses precisely because it would strand their existing snapshots.
+        Err(err) => {
+            return Ok(serde_json::json!({
+                "enrolled": serde_json::Value::Null,
+                "unlocked": unlocked,
+                "error": format!("{err:#}"),
+            }))
+        }
+    };
+    Ok(serde_json::json!({ "enrolled": enrolled, "unlocked": unlocked }))
+}
+
+/// Unlock the account key for this session with a password or a printed recovery code.
+#[tauri::command]
+async fn vault_unlock(
+    state: State<'_, AppState>,
+    secret: String,
+    using: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let using = match using.as_deref().unwrap_or("password") {
+        "password" => vault_key::UnlockWith::Password,
+        "recovery-code" => vault_key::UnlockWith::RecoveryCode,
+        other => return Err(format!("unknown unlock method `{other}`")),
+    };
+    let enrollment = vault_key::fetch_enrollment()
+        .await
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or("this account has no vault key material yet")?;
+    let vault = vault_key::unlock(&enrollment, &secret, using).map_err(|e| format!("{e:#}"))?;
+    let fingerprint = vault.fingerprint().to_string();
+    *state.unlocked_vault.lock().map_err(|e| e.to_string())? = Some(vault);
+    Ok(serde_json::json!({ "unlocked": fingerprint }))
+}
+
+/// Forget the account key without signing out. The snapshots stay; this session just cannot open them.
+#[tauri::command]
+fn vault_lock(state: State<'_, AppState>) -> Result<(), String> {
+    *state.unlocked_vault.lock().map_err(|e| e.to_string())? = None;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1451,6 +1515,7 @@ pub fn run() {
                 sidecar: sidecar.clone(),
                 profiles_dir: profiles_dir.clone(),
                 cipher: cipher.clone(),
+                unlocked_vault: Arc::new(Mutex::new(None)),
             });
 
             // Start the local automation API on the same runtime, sharing the store + sidecar.
@@ -1472,6 +1537,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            snapshot::commands::snapshot_push,
+            snapshot::commands::snapshot_pull,
+            vault_status,
+            vault_unlock,
+            vault_lock,
             app_version,
             auth_status,
             auth_sign_in,
