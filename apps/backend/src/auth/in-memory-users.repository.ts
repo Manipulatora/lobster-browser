@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
 
-import type { CreateUserInput, StoredUser, UsersRepository } from './users.repository';
+import type {
+  CreateUserInput,
+  PendingRegistrationInput,
+  StoredPendingRegistration,
+  StoredUser,
+  UsersRepository,
+} from './users.repository';
 
 /** Mirrors the Prisma repository's cap; see it for why a 6-digit code needs one. */
 const MAX_VERIFICATION_ATTEMPTS = 5;
@@ -24,12 +30,76 @@ export class InMemoryUsersRepository implements UsersRepository {
       id: randomUUID(),
       email: input.email,
       displayName: input.displayName,
+      company: input.company,
       passwordHash: input.passwordHash,
       createdAt: new Date().toISOString(),
+      // Matches the Prisma implementation: an account only exists after its code was proven, so it
+      // is verified at the moment of creation.
+      emailVerifiedAt: new Date().toISOString(),
     };
     this.byId.set(user.id, user);
     this.idByEmail.set(this.normalizeEmail(input.email), user.id);
     return user;
+  }
+
+  // --- Pending sign-ups ------------------------------------------------------
+
+  private readonly pending = new Map<
+    string,
+    PendingRegistrationInput & { attempts: number }
+  >();
+
+  async upsertPendingRegistration(input: PendingRegistrationInput): Promise<void> {
+    // Replaces, so re-registering supersedes the previous code and resets the attempt cap — the cap
+    // belongs to the code, not to the address.
+    this.pending.set(this.normalizeEmail(input.email), { ...input, attempts: 0 });
+  }
+
+  async findPendingRegistration(email: string): Promise<StoredPendingRegistration | null> {
+    const row = this.pending.get(this.normalizeEmail(email));
+    if (!row) return null;
+    return {
+      email: row.email,
+      passwordHash: row.passwordHash,
+      fullName: row.fullName,
+      company: row.company,
+    };
+  }
+
+  async consumePendingRegistration(
+    email: string,
+    codeHash: string,
+    now: Date,
+  ): Promise<StoredPendingRegistration | null> {
+    const key = this.normalizeEmail(email);
+    const row = this.pending.get(key);
+    const live =
+      row &&
+      row.codeHash === codeHash &&
+      row.expiresAt.getTime() > now.getTime() &&
+      row.attempts < MAX_VERIFICATION_ATTEMPTS;
+
+    if (!live) {
+      // Burn an attempt: the verify endpoint is public, so nothing else bounds guessing.
+      if (row) row.attempts += 1;
+      return null;
+    }
+
+    // Delete before returning, so one code can never create two accounts. Single-threaded and no
+    // await between the check and this line, which is what makes it atomic here.
+    this.pending.delete(key);
+    return {
+      email: row.email,
+      passwordHash: row.passwordHash,
+      fullName: row.fullName,
+      company: row.company,
+    };
+  }
+
+  async purgeExpiredPendingRegistrations(now: Date): Promise<void> {
+    for (const [key, row] of this.pending) {
+      if (row.expiresAt.getTime() < now.getTime()) this.pending.delete(key);
+    }
   }
 
   async findByEmail(email: string): Promise<StoredUser | null> {

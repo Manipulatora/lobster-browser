@@ -12,6 +12,8 @@ import { MailModule } from '../mail/mail.module';
 import { AuthModule } from '../auth/auth.module';
 import { ApiKeysModule } from './api-keys.module';
 import { ApiKeysService } from './api-keys.service';
+import { createMailCapture, signUpOverHttp, type MailCapture } from '../testing/e2e-auth';
+import { MailService } from '../mail/mail.service';
 
 /**
  * HTTP e2e for API keys: boots a real Nest app (controllers + JWT guard + validation pipe) and
@@ -20,14 +22,14 @@ import { ApiKeysService } from './api-keys.service';
  * keys are scoped to. The service's `verify()` path is exercised directly via the DI container.
  */
 let app: INestApplication;
+/** Reads back the verification code, which sign-up now requires. See testing/e2e-auth.ts. */
+let mailCapture: MailCapture;
 
 /** Register a fresh user and return their bearer token. */
 async function registerToken(email: string): Promise<string> {
-  const res = await request(app.getHttpServer())
-    .post('/auth/register')
-    .send({ email, password: 'supersecret1' });
-  assert.ok([200, 201].includes(res.status), `register status ${res.status}`);
-  return res.body.data.token as string;
+  // Sign-up is two steps now: register emails a code and creates nothing; verify creates the
+  // account and returns the session. See testing/e2e-auth.ts.
+  return (await signUpOverHttp(app, mailCapture, email)).token;
 }
 
 before(async () => {
@@ -56,7 +58,10 @@ before(async () => {
       AuthModule,
       ApiKeysModule,
     ],
-  }).compile();
+  })
+    .overrideProvider(MailService)
+    .useValue((mailCapture = createMailCapture()))
+    .compile();
 
   app = moduleRef.createNestApplication();
   app.useGlobalPipes(
@@ -70,7 +75,7 @@ after(async () => {
 });
 
 test('create returns the full secret exactly once with the expected format and public fields', async () => {
-  const token = await registerToken('api-keys-create@example.com');
+  const token = await registerToken('api-keys-create@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   const create = await request(app.getHttpServer())
@@ -103,7 +108,7 @@ test('create returns the full secret exactly once with the expected format and p
 });
 
 test('list returns the team keys without ever exposing the secret or hash', async () => {
-  const token = await registerToken('api-keys-list@example.com');
+  const token = await registerToken('api-keys-list@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   await request(app.getHttpServer()).post('/api-keys').set(auth).send({ name: 'key one' });
@@ -123,7 +128,7 @@ test('list returns the team keys without ever exposing the secret or hash', asyn
 });
 
 test('delete revokes a key and a second delete of the same id is 404', async () => {
-  const token = await registerToken('api-keys-delete@example.com');
+  const token = await registerToken('api-keys-delete@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   const create = await request(app.getHttpServer())
@@ -147,8 +152,8 @@ test('delete revokes a key and a second delete of the same id is 404', async () 
 });
 
 test("keys are isolated per team: deleting another team's key is 404 and never listed", async () => {
-  const tokenA = await registerToken('api-keys-isolation-a@example.com');
-  const tokenB = await registerToken('api-keys-isolation-b@example.com');
+  const tokenA = await registerToken('api-keys-isolation-a@gmail.com');
+  const tokenB = await registerToken('api-keys-isolation-b@gmail.com');
 
   const createA = await request(app.getHttpServer())
     .post('/api-keys')
@@ -177,7 +182,7 @@ test("keys are isolated per team: deleting another team's key is 404 and never l
 });
 
 test('an empty or over-long name is rejected with 400 by the validation pipe', async () => {
-  const token = await registerToken('api-keys-validation@example.com');
+  const token = await registerToken('api-keys-validation@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   const empty = await request(app.getHttpServer()).post('/api-keys').set(auth).send({ name: '' });
@@ -191,7 +196,7 @@ test('an empty or over-long name is rejected with 400 by the validation pipe', a
 });
 
 test('verify() authenticates the presented secret, stamps lastUsedAt, and rejects unknown secrets', async () => {
-  const token = await registerToken('api-keys-verify@example.com');
+  const token = await registerToken('api-keys-verify@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   const create = await request(app.getHttpServer())
@@ -223,7 +228,7 @@ test('verify() authenticates the presented secret, stamps lastUsedAt, and reject
 });
 
 test('a revoked secret no longer verifies', async () => {
-  const token = await registerToken('api-keys-revoked-verify@example.com');
+  const token = await registerToken('api-keys-revoked-verify@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   const create = await request(app.getHttpServer())
@@ -242,7 +247,7 @@ test('a revoked secret no longer verifies', async () => {
 });
 
 test('BE-5: GET /automation/whoami accepts a live key and 401s after revoke', async () => {
-  const token = await registerToken('api-keys-automation@example.com');
+  const token = await registerToken('api-keys-automation@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   const create = await request(app.getHttpServer())

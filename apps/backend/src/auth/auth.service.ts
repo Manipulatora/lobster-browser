@@ -36,6 +36,56 @@ function sixDigitCode(): string {
 }
 
 /**
+ * Only what is stored, ever. Whitespace is stripped first so a pasted code with stray spaces or a
+ * line break still matches what was mailed.
+ */
+function hashVerificationCode(code: string): string {
+  return createHash('sha256').update(code.replace(/\s+/g, '')).digest('hex');
+}
+
+/**
+ * Mail providers accepted at sign-up.
+ *
+ * A product decision, not a technical one: sign-ups are restricted to Google and Microsoft consumer
+ * mail. Both aliases of each are included because an "Outlook account" is just as often a hotmail
+ * or live address, and rejecting those would read as a bug to the person holding one.
+ *
+ * ENFORCED SERVER-SIDE, which is the point. The same rule in the sign-up form is a courtesy that
+ * saves a round-trip; a client-side check alone is bypassed by anyone posting to the endpoint
+ * directly.
+ */
+const ALLOWED_EMAIL_DOMAINS = new Set([
+  'gmail.com',
+  'googlemail.com',
+  'outlook.com',
+  'hotmail.com',
+  'live.com',
+  'msn.com',
+]);
+
+function assertAllowedEmailProvider(email: string): void {
+  const domain = email.slice(email.lastIndexOf('@') + 1);
+  if (!ALLOWED_EMAIL_DOMAINS.has(domain)) {
+    throw new BadRequestException(
+      'sign-up is currently limited to Gmail and Outlook addresses',
+    );
+  }
+}
+
+/**
+ * What `register` returns now: an acknowledgement, not a session.
+ *
+ * Deliberately carries no user and no token — there is no account yet. A caller that expected
+ * `AuthResult` here fails to compile rather than quietly treating a pending sign-up as a signed-in
+ * one, which is the mistake this shape exists to prevent.
+ */
+export interface PendingRegistrationResult {
+  pending: true;
+  email: string;
+  expiresInMinutes: number;
+}
+
+/**
  * A real bcrypt hash (of a throwaway password) compared against when the email is unknown, so an
  * unknown-email login costs the same as a wrong-password login. Without it, skipping the compare
  * for a missing user is a user-enumeration timing oracle ("no such user" returns much faster than
@@ -45,6 +95,22 @@ const DUMMY_HASH = bcrypt.hashSync('lobster:auth:timing-safe-dummy', BCRYPT_COST
 
 /** How long an issued token stays valid before the client must log in again. */
 const TOKEN_TTL = '7d';
+
+/**
+ * How long a DESKTOP LAUNCHER token lasts.
+ *
+ * Much longer than the web's 7 days, deliberately. A web session lives in `localStorage` on a
+ * machine that may be shared, and re-authenticating there costs a password field that is already
+ * on screen. The launcher's token lives in the OS keychain, and re-authenticating costs an entire
+ * browser round-trip — open a browser, sign in, redirect back — for someone who is trying to open
+ * a browser profile. Making a user do that every week is the difference between an app they leave
+ * running and an app they resent.
+ *
+ * The exposure this accepts is bounded by where the token is: the OS credential store, readable
+ * only by this user account, cleared on sign-out and on any 401. If a token has to be revoked
+ * sooner than this, that needs server-side revocation, which no TTL substitutes for.
+ */
+const DESKTOP_TOKEN_TTL = '365d';
 
 /** What the auth endpoints hand back to a client: the public user + a bearer token. */
 export interface AuthResult {
@@ -75,32 +141,108 @@ export class AuthService {
     private readonly mail: MailService,
   ) {}
 
-  async register(dto: RegisterDto): Promise<AuthResult> {
+  /**
+   * Begin a sign-up. Creates NO account, NO team and NO token.
+   *
+   * The credentials are held as a pending registration and a code is emailed. Only
+   * {@link completeRegistration} turns that into a real account.
+   *
+   * WHY IT WORKS THIS WAY. Registering used to create the User, the personal Team and a signed
+   * token immediately, and mail the code afterwards. Abandoning the form at the code step therefore
+   * left a real, signed-in, unverified account behind — and because `users.email` is unique, anyone
+   * could register an address they did not control and permanently deny it to its owner. Nothing is
+   * created here now, so an abandoned sign-up expires and leaves no trace.
+   *
+   * The mail is awaited rather than fired and forgotten: there is no account to fall back on, so a
+   * failure to send has to surface as a failure to register instead of a silent dead end.
+   */
+  async register(dto: RegisterDto): Promise<PendingRegistrationResult> {
     // Normalize the email centrally so BOTH the in-memory and Prisma stores behave identically
     // (Postgres lookups are case-sensitive; the in-memory map is not). One canonical form avoids
     // duplicate accounts and login mismatches across backends.
     const email = this.normalizeEmail(dto.email);
+    assertAllowedEmailProvider(email);
+
     const existing = await this.users.findByEmail(email);
     if (existing) {
       throw new ConflictException('email already registered');
     }
+
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_COST);
-    const user = await this.users.create({
+    const code = sixDigitCode();
+
+    await this.users.upsertPendingRegistration({
       email,
       passwordHash,
-      displayName: dto.displayName,
+      fullName: dto.fullName.trim(),
+      company: dto.company?.trim() || undefined,
+      codeHash: hashVerificationCode(code),
+      expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS),
+    });
+
+    await this.mail.sendVerification(email, code, VERIFICATION_TTL_MS / 60000);
+
+    return { pending: true, email, expiresInMinutes: VERIFICATION_TTL_MS / 60000 };
+  }
+
+  /**
+   * Finish a sign-up by proving the emailed code. THIS is what creates the account.
+   *
+   * Public by necessity — there is no session yet, which is exactly what is being established — so
+   * the code carries the whole burden. Brute force is bounded in the repository by an attempt
+   * counter on the pending row, not here.
+   */
+  async completeRegistration(emailInput: string, code: string): Promise<AuthResult> {
+    const email = this.normalizeEmail(emailInput);
+    const pending = await this.users.consumePendingRegistration(
+      email,
+      hashVerificationCode(code),
+      new Date(),
+    );
+    // Wrong, expired, exhausted or unknown — all one message, so this cannot be used to discover
+    // which addresses have a sign-up in flight.
+    if (!pending) throw new BadRequestException('that code is incorrect or has expired');
+
+    // Re-check between consuming the code and creating the row: the address could have been
+    // registered by another flow while this sign-up sat waiting.
+    const existing = await this.users.findByEmail(email);
+    if (existing) throw new ConflictException('email already registered');
+
+    const user = await this.users.create({
+      email: pending.email,
+      passwordHash: pending.passwordHash,
+      displayName: pending.fullName,
+      company: pending.company,
     });
     // Every user gets a personal team + an admin membership so they always have a place to own
-    // profiles the moment they register (no separate "create your first team" step).
+    // profiles the moment the account exists (no separate "create your first team" step).
     const team = await this.teams.createTeam(user.id, this.personalTeamName(user));
     await this.teams.addMember(team.id, user.id, 'admin');
 
-    // Best-effort. The account exists and is usable; an unsent verification mail is recoverable
-    // through `resendVerification`, whereas failing the request here would leave a registered user
-    // staring at an error for a side effect that already succeeded.
-    void this.issueVerification(user.id, user.email);
-
     return { user: this.toPublicUser(user), token: this.signToken(user) };
+  }
+
+  /**
+   * Re-send the code for a sign-up in flight.
+   *
+   * Reports success regardless of whether a pending sign-up exists, so this cannot be used to
+   * enumerate which addresses are mid-registration.
+   */
+  async resendRegistrationCode(emailInput: string): Promise<void> {
+    const email = this.normalizeEmail(emailInput);
+    const pending = await this.users.findPendingRegistration(email);
+    if (!pending) return;
+
+    const code = sixDigitCode();
+    await this.users.upsertPendingRegistration({
+      email: pending.email,
+      passwordHash: pending.passwordHash,
+      fullName: pending.fullName,
+      company: pending.company,
+      codeHash: hashVerificationCode(code),
+      expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS),
+    });
+    await this.mail.sendVerification(email, code, VERIFICATION_TTL_MS / 60000);
   }
 
   async login(dto: LoginDto): Promise<AuthResult> {
@@ -137,9 +279,12 @@ export class AuthService {
    * in hand and no password to re-verify. It performs NO authentication of its own: callers must
    * have established the identity first.
    */
-  issueTokenFor(userId: string, email: string): string {
+  issueTokenFor(userId: string, email: string, audience: 'web' | 'desktop' = 'web'): string {
     const payload: JwtPayload = { sub: userId, email };
-    return this.jwt.sign(payload, { secret: this.jwtSecret, expiresIn: TOKEN_TTL });
+    return this.jwt.sign(payload, {
+      secret: this.jwtSecret,
+      expiresIn: audience === 'desktop' ? DESKTOP_TOKEN_TTL : TOKEN_TTL,
+    });
   }
 
   private signToken(user: StoredUser): string {
@@ -162,48 +307,48 @@ export class AuthService {
     return `${user.displayName ?? user.email}'s Team`;
   }
 
-  // --- Email verification ---------------------------------------------------
+  // --- Verifying an EXISTING account's address --------------------------------
+  //
+  // Separate from the sign-up flow above, and needed because of it. New accounts are verified the
+  // instant they exist — the code is proven before the User row is written — but every account
+  // created BEFORE that change is sitting unverified, and the deposit path is closed to them
+  // (`EmailVerifiedGuard`). Without this they would have a permanently dead "Enter your code"
+  // button and no way to pay.
+  //
+  // These are the authenticated counterparts of `completeRegistration` / `resendRegistrationCode`:
+  // the account already exists, so the session identifies it and the code is checked against that
+  // user alone. They use the retained `EmailVerification` table rather than pending registrations.
 
-  /**
-   * Mint a verification token, store only its digest, and mail the link.
-   *
-   * The token is 32 random bytes. It is returned to the caller ONLY so tests can assert on it;
-   * nothing in the request path echoes it back, because the whole point is that possession of the
-   * mailbox is what proves the address.
-   */
-  async issueVerification(userId: string, email: string): Promise<string> {
+  /** Mint and mail a code for the signed-in user's own address. */
+  async issueVerificationForUser(userId: string, email: string): Promise<void> {
     const code = sixDigitCode();
-    // The stored value is a hash, exactly as for a password. A six-digit space is small enough to
-    // enumerate offline in moments, so the hash is not what protects it — the 15-minute expiry,
-    // single use, and the fact that a guess must be aimed at one already-authenticated account do.
-    const codeHash = createHash('sha256').update(code).digest('hex');
-    const expiresAt = new Date(Date.now() + VERIFICATION_TTL_MS);
-    await this.users.createEmailVerification(userId, codeHash, expiresAt);
-
+    await this.users.createEmailVerification(
+      userId,
+      hashVerificationCode(code),
+      new Date(Date.now() + VERIFICATION_TTL_MS),
+    );
     await this.mail.sendVerification(email, code, VERIFICATION_TTL_MS / 60000);
-    return code;
   }
 
-  /** Consume a link. Unknown, expired and already-used all look identical to the caller. */
-  async verifyEmail(userId: string, code: string): Promise<User> {
-    // Normalised before hashing so a pasted code with stray spaces still matches what was mailed.
-    const codeHash = createHash('sha256').update(code.replace(/\s+/g, '')).digest('hex');
-    const user = await this.users.consumeEmailVerification(userId, codeHash);
+  /**
+   * Prove the signed-in user's address.
+   *
+   * Scoped to that user by construction: six digits collide across accounts, so a global lookup by
+   * hash would let one person's code match another's pending row.
+   */
+  async verifyExistingEmail(userId: string, code: string): Promise<User> {
+    const user = await this.users.consumeEmailVerification(userId, hashVerificationCode(code));
     if (!user) throw new BadRequestException('that code is incorrect or has expired');
     return this.toPublicUser(user);
   }
 
   /**
-   * Re-send a link.
-   *
-   * Always resolves, whether or not the address exists and whether or not it is already verified.
-   * Reporting the truth would turn this endpoint into an account-existence oracle, which is worth
-   * more to an attacker than the convenience is to a user.
+   * Re-send a code to the signed-in user. Silent if they are already verified — there is nothing to
+   * prove, and saying so would be noise on a button they should not have been shown.
    */
-  async resendVerification(rawEmail: string): Promise<void> {
-    const email = this.normalizeEmail(rawEmail);
-    const user = await this.users.findByEmail(email);
+  async resendVerificationForUser(userId: string): Promise<void> {
+    const user = await this.users.findById(userId);
     if (!user || user.emailVerifiedAt) return;
-    await this.issueVerification(user.id, user.email);
+    await this.issueVerificationForUser(user.id, user.email);
   }
 }

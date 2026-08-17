@@ -39,15 +39,28 @@ export class AuthStore {
   readonly isAuthenticated = computed(() => this._user() !== null);
   readonly restoring = this._restoring.asReadonly();
 
-  async register(email: string, password: string, displayName?: string): Promise<void> {
-    const result = await this.api.post<AuthResult>('/auth/register', {
-      email,
-      password,
-      // Sent only when non-empty: the DTO rejects an empty string, and "no display name" is the
-      // normal case for a signup form that asks for two fields.
-      ...(displayName ? { displayName } : {}),
+  /**
+   * Begin a sign-up. DOES NOT SIGN ANYONE IN, because no account exists yet.
+   *
+   * The server holds the credentials as a pending registration and emails a code; only
+   * {@link verifyEmail} creates the account and returns a session. Nothing is stored here — there
+   * is no token to store — so a caller that treats a resolved promise as "signed in" gets a signed
+   * -out store, which is the truth.
+   */
+  async register(input: {
+    email: string;
+    password: string;
+    fullName: string;
+    company?: string;
+  }): Promise<void> {
+    await this.api.post<{ pending: true; email: string }>('/auth/register', {
+      email: input.email,
+      password: input.password,
+      fullName: input.fullName,
+      // Sent only when non-empty: the DTO rejects an empty string, and signing up as an individual
+      // is a legitimate case with nothing truthful to put here.
+      ...(input.company ? { company: input.company } : {}),
     });
-    this.accept(result);
   }
 
   async login(email: string, password: string): Promise<void> {
@@ -58,18 +71,39 @@ export class AuthStore {
   readonly emailVerified = computed(() => this.user()?.emailVerifiedAt != null);
 
   /**
-   * Submit the emailed 6-digit code for the CURRENT session.
+   * Submit the emailed 6-digit code. THIS is what creates the account and signs the user in.
    *
-   * The endpoint is authenticated, so there is no email to pass: the code is only ever checked
-   * against the signed-in account, which is what stops six digits from being sprayed at every
-   * account at once.
+   * Takes the address explicitly because there is no session to infer it from — registration
+   * deliberately issues no token, so until this succeeds there is no account at all. Guessing is
+   * bounded server-side by an attempt counter on the pending sign-up.
    */
-  async verifyEmail(code: string): Promise<void> {
-    this._user.set(await this.api.post<AuthUser>('/auth/verify-email', { code }));
+  async verifyEmail(email: string, code: string): Promise<void> {
+    this.accept(await this.api.post<AuthResult>('/auth/verify-email', { email, code }));
   }
 
-  /** Ask for a fresh code. Supersedes any still outstanding. */
+  /**
+   * Prove the address on an account that ALREADY exists and is signed in.
+   *
+   * The counterpart of {@link verifyEmail}, for accounts created before verification gated account
+   * creation. They are signed in but unproven, so there is no pending registration to consume —
+   * the session identifies them instead.
+   */
+  async verifyExistingEmail(code: string): Promise<void> {
+    this._user.set(await this.api.post<AuthUser>('/auth/verify-email/session', { code }));
+  }
+
+  /**
+   * Ask for a fresh code. Supersedes any still outstanding.
+   *
+   * Routes to whichever flow the caller is actually in: a signed-in user is re-proving an existing
+   * address, anyone else is finishing a sign-up. Sending both to the sign-up endpoint would silently
+   * do nothing for the first group, since they have no pending registration.
+   */
   async resendVerification(email: string): Promise<void> {
+    if (this.isAuthenticated()) {
+      await this.api.post<{ sent: true }>('/auth/resend-verification/session', {});
+      return;
+    }
     await this.api.post<{ sent: true }>('/auth/resend-verification', { email });
   }
 

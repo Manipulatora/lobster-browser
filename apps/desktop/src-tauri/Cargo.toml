@@ -103,8 +103,18 @@ tauri-plugin-single-instance = "2"
 # with no entropy bind the blob to the current user, so our own process both reads and creates it.
 # Target-gated so a Linux `cargo test --lib` never pulls or compiles it; the pure v10 GCM value
 # format in `oscrypt` is cfg-independent and unit-tested with an injected key on Linux.
+#
+# `Win32_UI_Shell` / `Win32_UI_WindowsAndMessaging` are for ShellExecuteW, which opens the sign-in
+# URL in the default browser. Shelling out to `cmd /c start` instead is what broke desktop sign-in:
+# cmd treats `&` as a command separator and Rust does not quote an argument containing no spaces, so
+# every query parameter after the first was stripped off the URL. See `open_in_browser` in lib.rs.
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security_Cryptography",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 # macOS OSCrypt v10 key custody (`snapshot::oscrypt::macos`): the v10 key is
 # PBKDF2-HMAC-SHA1(1003, "saltysalt", <Keychain generic password>). Reading that generic password

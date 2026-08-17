@@ -136,7 +136,9 @@ export class DesktopAuthService {
     // Re-resolve the user rather than trusting the stored id: an account deleted between issue and
     // redemption must not yield a working token.
     const user = await this.auth.validateUser(grant.userId);
-    return { user, token: this.auth.issueTokenFor(user.id, user.email) };
+    // `desktop` audience: a long-lived token, because re-authenticating the launcher costs a whole
+    // browser round-trip rather than a password field. See DESKTOP_TOKEN_TTL.
+    return { user, token: this.auth.issueTokenFor(user.id, user.email, 'desktop') };
   }
 }
 

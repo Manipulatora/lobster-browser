@@ -3,7 +3,6 @@ import { ConfigService } from '@nestjs/config';
 import { constants as fsConstants } from 'node:fs';
 import { link, mkdir, mkdtemp, open, readdir, readFile, rm, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 
 import {
   BlobVersionConflictError,
@@ -175,7 +174,17 @@ export class FilesystemBlobStore implements BlobStore {
    * Throws `EEXIST` when `version` is already taken. Callers treat that as the CAS losing.
    */
   private async writeVersion(dir: string, version: number, bytes: Buffer): Promise<void> {
-    const scratch = await mkdtemp(join(tmpdir(), 'lobster-blob-'));
+    // THE SCRATCH FILE MUST LIVE IN THE STORE, NOT IN THE SYSTEM TEMP DIRECTORY.
+    //
+    // It used to be `mkdtemp(join(tmpdir(), …))`, and the `link()` below then failed with EXDEV —
+    // "cross-device link not permitted" — whenever the two were on different filesystems. That is
+    // not an exotic setup: it is the DEFAULT on most Linux distributions, where /tmp is a tmpfs and
+    // BLOB_STORE_PATH would be somewhere under /var. Every single write failed, on the store whose
+    // entire purpose is durability. Verified by reproducing both the EXDEV and the EPERM below.
+    //
+    // Keeping the scratch file inside `dir` guarantees the same filesystem, which is what makes
+    // `link()` — the atomic publish this design depends on — possible at all.
+    const scratch = await mkdtemp(join(dir, '.tmp-'));
     const temp = join(scratch, 'payload');
     try {
       const handle = await open(temp, 'w', 0o600);
@@ -187,13 +196,7 @@ export class FilesystemBlobStore implements BlobStore {
       }
 
       await link(temp, join(dir, this.fileName(version)));
-
-      const dirHandle = await open(dir, fsConstants.O_RDONLY);
-      try {
-        await dirHandle.sync();
-      } finally {
-        await dirHandle.close();
-      }
+      await syncDirectory(dir);
     } finally {
       // The temp file is unlinked whether or not the publish succeeded; on success the link keeps the
       // inode alive, so this frees the name and nothing else.
@@ -205,4 +208,33 @@ export class FilesystemBlobStore implements BlobStore {
 
 function isEexist(err: unknown): boolean {
   return (err as NodeJS.ErrnoException | undefined)?.code === 'EEXIST';
+}
+
+/**
+ * fsync a directory so a newly-linked entry survives a crash, where the platform supports it.
+ *
+ * POSIX requires this: the file's own contents being durable says nothing about the directory
+ * entry that points at them, so without it a crash can lose a version that readers already
+ * consider live.
+ *
+ * WINDOWS CANNOT DO IT, and used to make every write fail. Opening a directory handle and calling
+ * fsync returns EPERM there, which propagated out of `put` — so the durable blob store could not
+ * store a blob at all on Windows. It is not merely unsupported but unnecessary: NTFS journals
+ * metadata, so the directory entry is already durable once the link returns.
+ *
+ * Any failure is therefore swallowed rather than propagated. The alternative — failing a write that
+ * has already succeeded, because an optimisation could not be applied — is strictly worse than a
+ * marginally weaker crash guarantee on platforms that do not need it.
+ */
+async function syncDirectory(dir: string): Promise<void> {
+  try {
+    const handle = await open(dir, fsConstants.O_RDONLY);
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    // EPERM on Windows, EINVAL/EISDIR on some others. The data itself is already fsync'd.
+  }
 }

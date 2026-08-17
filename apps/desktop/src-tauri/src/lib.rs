@@ -165,34 +165,79 @@ fn auth_sign_out() {
 
 /// Hand a URL to the OS default browser.
 ///
-/// Done with a direct spawn rather than by adding an opener plugin: this is the only URL the app
-/// ever opens, and a plugin would add a capability surface for it.
+/// WINDOWS USES ShellExecuteW, AND THE PREVIOUS `cmd /c start` FORM WAS A SHIPPED BUG.
 ///
-/// The Windows form is `cmd /c start "" <url>`. The empty quoted argument is required — `start`
-/// treats a leading quoted argument as the WINDOW TITLE, so omitting it makes a quoted URL vanish
-/// into the title and open nothing.
+/// `Command::new("cmd").args(["/c", "start", "", url])` looks equivalent and is not. Rust quotes an
+/// argument only when it contains a space, tab or quote — a URL contains none — so the sign-in URL
+/// reached `cmd` unquoted, and `&` is a COMMAND SEPARATOR to cmd. Running that exact argv shows the
+/// browser being handed
+///
+///     https://lobrowser.com/login?desktop=1
+///
+/// while `state=…`, `port=…` and `challenge=…` were each executed as commands and failed with
+/// "'state' is not recognized as an internal or external command".
+///
+/// That broke the entire desktop sign-in. The website received `desktop=1` with no state, port or
+/// challenge, so it could not recognise a launcher handoff at all: it completed as an ordinary web
+/// login and never redirected to the loopback listener. The app then sat on its sign-in screen
+/// until the ten-minute timeout, having given the user no reason to believe anything had failed.
+/// The stray sub-commands also printed into the console window `cmd` created on the way past.
+///
+/// ShellExecuteW takes the URL as one wide string and hands it to the shell's URL handler. No
+/// command line is parsed, so nothing in the URL can be interpreted, and no console is created.
+#[cfg(target_os = "windows")]
 fn open_in_browser(url: &str) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", url])
-            .spawn()
-            .map(|_| ())
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    fn wide(s: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
+
+    let verb = wide("open");
+    let target = wide(url);
+
+    // SAFETY: both pointers are null-terminated UTF-16 buffers owned by this scope for the duration
+    // of the call; the remaining arguments are the documented "no parameters, no working directory"
+    // nulls.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL as i32,
+        )
+    };
+
+    // ShellExecuteW returns a pseudo-HINSTANCE; any value <= 32 is an error code, not a handle.
+    if (result as isize) <= 32 {
+        return Err(std::io::Error::other(format!(
+            "ShellExecuteW failed with code {}",
+            result as isize
+        )));
+    }
+    Ok(())
+}
+
+/// `open` / `xdg-open` receive the URL as a single argv entry with no shell in between, so the
+/// escaping hazard described above cannot arise here.
+#[cfg(not(target_os = "windows"))]
+fn open_in_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .map(|_| ())
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .map(|_| ())
-    }
+    let program = "open";
+    #[cfg(not(target_os = "macos"))]
+    let program = "xdg-open";
+
+    std::process::Command::new(program)
+        .arg(url)
+        .spawn()
+        .map(|_| ())
 }
 
 /// Strip Windows' extended-length (`\\?\`) verbatim prefix from a path.

@@ -83,6 +83,9 @@ model User {
   id           String    @id @default(uuid())
   email        String    @unique
   displayName  String?
+  /// Organisation the account belongs to, collected at sign-up. Optional on the column so accounts
+  /// created before it existed remain valid; the sign-up form requires it.
+  company      String?
   passwordHash String?
   createdAt    DateTime  @default(now())
   /// Null until the address is proven. Nullable-timestamp rather than a boolean so we keep WHEN,
@@ -97,6 +100,38 @@ model User {
   vaultKey          VaultKey?
 
   @@map("users")
+}
+
+/// A sign-up that has been started but not yet proven.
+///
+/// NO USER EXISTS UNTIL THE CODE IS ENTERED. Registration used to create the account, the personal
+/// team and a signed token immediately, then email a code as an afterthought — so abandoning the
+/// form at the code step left a real, logged-in, unverified account behind. Anyone could also mint
+/// accounts against addresses they do not control, and every one of them consumed the unique
+/// `users.email` slot for the real owner.
+///
+/// The credentials now wait here instead. `POST /auth/register` writes this row and returns no
+/// token; `POST /auth/verify-email` checks the code and only then creates the User, Team and
+/// Membership in one transaction. An abandoned sign-up expires and is swept, leaving nothing.
+///
+/// `attempts` is load-bearing. A six-digit code is a million possibilities, which is minutes of
+/// brute force against an endpoint that must be public — it has no session to authenticate. The
+/// row is refused past a small number of wrong guesses and the sign-up has to be restarted.
+model PendingRegistration {
+  /// Unique: one live sign-up per address. Re-registering the same address overwrites the row and
+  /// supersedes the previous code rather than leaving several valid at once.
+  email        String   @id
+  passwordHash String
+  fullName     String
+  company      String?
+  /// SHA-256 of the six-digit code. The code itself only ever exists in the email.
+  codeHash     String
+  expiresAt    DateTime
+  attempts     Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  @@index([expiresAt])
+  @@map("pending_registrations")
 }
 
 /// The key this account's profile snapshots are scrambled with.

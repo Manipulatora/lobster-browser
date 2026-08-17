@@ -10,6 +10,8 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { MailModule } from '../mail/mail.module';
 import { AuthModule } from '../auth/auth.module';
 import { TeamsModule } from './teams.module';
+import { createMailCapture, signUpOverHttp, type MailCapture } from '../testing/e2e-auth';
+import { MailService } from '../mail/mail.service';
 
 /**
  * HTTP e2e for teams: boots a real Nest app and drives it over HTTP with supertest. No database —
@@ -17,13 +19,13 @@ import { TeamsModule } from './teams.module';
  * role change, and admin-only / membership enforcement.
  */
 let app: INestApplication;
+/** Reads back the verification code, which sign-up now requires. See testing/e2e-auth.ts. */
+let mailCapture: MailCapture;
 
 async function registerToken(email: string): Promise<string> {
-  const res = await request(app.getHttpServer())
-    .post('/auth/register')
-    .send({ email, password: 'supersecret1' });
-  assert.ok([200, 201].includes(res.status), `register status ${res.status}`);
-  return res.body.data.token as string;
+  // Sign-up is two steps now: register emails a code and creates nothing; verify creates the
+  // account and returns the session. See testing/e2e-auth.ts.
+  return (await signUpOverHttp(app, mailCapture, email)).token;
 }
 
 before(async () => {
@@ -52,7 +54,10 @@ before(async () => {
       AuthModule,
       TeamsModule,
     ],
-  }).compile();
+  })
+    .overrideProvider(MailService)
+    .useValue((mailCapture = createMailCapture()))
+    .compile();
 
   app = moduleRef.createNestApplication();
   app.useGlobalPipes(
@@ -66,7 +71,7 @@ after(async () => {
 });
 
 test('register auto-creates a personal team visible via GET /teams', async () => {
-  const token = await registerToken('teamowner@example.com');
+  const token = await registerToken('teamowner@gmail.com');
   const res = await request(app.getHttpServer())
     .get('/teams')
     .set({ Authorization: `Bearer ${token}` });
@@ -76,9 +81,9 @@ test('register auto-creates a personal team visible via GET /teams', async () =>
 });
 
 test('create team -> invite -> role change -> admin-only + membership enforcement', async () => {
-  const adminToken = await registerToken('admin-flow@example.com');
-  const memberToken = await registerToken('member-flow@example.com');
-  const outsiderToken = await registerToken('outsider-flow@example.com');
+  const adminToken = await registerToken('admin-flow@gmail.com');
+  const memberToken = await registerToken('member-flow@gmail.com');
+  const outsiderToken = await registerToken('outsider-flow@gmail.com');
   const auth = (t: string) => ({ Authorization: `Bearer ${t}` });
 
   // admin creates a shared team (they become its admin)
@@ -94,7 +99,7 @@ test('create team -> invite -> role change -> admin-only + membership enforcemen
   const invite = await request(app.getHttpServer())
     .post(`/teams/${teamId}/members`)
     .set(auth(adminToken))
-    .send({ email: 'member-flow@example.com', role: 'member' });
+    .send({ email: 'member-flow@gmail.com', role: 'member' });
   assert.ok([200, 201].includes(invite.status), `invite status ${invite.status}`);
   assert.equal(invite.body.data.role, 'member');
 
@@ -115,7 +120,7 @@ test('create team -> invite -> role change -> admin-only + membership enforcemen
   const memberInvite = await request(app.getHttpServer())
     .post(`/teams/${teamId}/members`)
     .set(auth(memberToken))
-    .send({ email: 'outsider-flow@example.com', role: 'member' });
+    .send({ email: 'outsider-flow@gmail.com', role: 'member' });
   assert.equal(memberInvite.status, 403);
 
   // admin promotes the member to admin
@@ -131,7 +136,7 @@ test('create team -> invite -> role change -> admin-only + membership enforcemen
   const promotedInvite = await request(app.getHttpServer())
     .post(`/teams/${teamId}/members`)
     .set(auth(memberToken))
-    .send({ email: 'outsider-flow@example.com', role: 'member' });
+    .send({ email: 'outsider-flow@gmail.com', role: 'member' });
   assert.ok([200, 201].includes(promotedInvite.status), `promoted invite ${promotedInvite.status}`);
 });
 
@@ -141,8 +146,8 @@ test('unauthenticated create is 401', async () => {
 });
 
 test('BE-7: admin can remove a member; member can leave after promotion', async () => {
-  const adminToken = await registerToken('admin-remove@example.com');
-  const memberToken = await registerToken('member-remove@example.com');
+  const adminToken = await registerToken('admin-remove@gmail.com');
+  const memberToken = await registerToken('member-remove@gmail.com');
   const auth = (t: string) => ({ Authorization: `Bearer ${t}` });
 
   const create = await request(app.getHttpServer())
@@ -154,7 +159,7 @@ test('BE-7: admin can remove a member; member can leave after promotion', async 
   const invite = await request(app.getHttpServer())
     .post(`/teams/${teamId}/members`)
     .set(auth(adminToken))
-    .send({ email: 'member-remove@example.com', role: 'member' });
+    .send({ email: 'member-remove@gmail.com', role: 'member' });
   assert.ok([200, 201].includes(invite.status));
   const memberId: string = invite.body.data.userId;
 
@@ -168,7 +173,7 @@ test('BE-7: admin can remove a member; member can leave after promotion', async 
   const invite2 = await request(app.getHttpServer())
     .post(`/teams/${teamId}/members`)
     .set(auth(adminToken))
-    .send({ email: 'member-remove@example.com', role: 'member' });
+    .send({ email: 'member-remove@gmail.com', role: 'member' });
   const memberId2: string = invite2.body.data.userId;
   await request(app.getHttpServer())
     .patch(`/teams/${teamId}/members/${memberId2}/role`)

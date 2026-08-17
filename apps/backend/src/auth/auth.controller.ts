@@ -2,11 +2,15 @@ import { Body, Controller, Get, HttpCode, Post, Req, UnauthorizedException, UseG
 import type { User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
-import { AuthService, type AuthResult } from './auth.service';
+import {
+  AuthService,
+  type AuthResult,
+  type PendingRegistrationResult,
+} from './auth.service';
 import { DesktopAuthService } from './desktop-auth.service';
 import { DesktopExchangeDto, DesktopGrantDto } from './dto/desktop-auth.dto';
 import { LoginDto } from './dto/login.dto';
-import { RegisterDto } from './dto/register.dto';
+import { RegisterDto, ResendVerificationDto, VerifyEmailDto } from './dto/register.dto';
 import { JwtAuthGuard, type AuthenticatedRequest } from './jwt-auth.guard';
 
 /**
@@ -21,8 +25,15 @@ export class AuthController {
     private readonly desktopAuth: DesktopAuthService,
   ) {}
 
+  /**
+   * Begin a sign-up. Returns an acknowledgement, NOT a session.
+   *
+   * No account exists at this point — the credentials are held as a pending registration until the
+   * emailed code is submitted to `verify-email`. A client must not treat this response as a
+   * sign-in; the return type makes that a compile error rather than a subtle bug.
+   */
   @Post('register')
-  async register(@Body() dto: RegisterDto): Promise<ApiResponse<AuthResult>> {
+  async register(@Body() dto: RegisterDto): Promise<ApiResponse<PendingRegistrationResult>> {
     return ok(await this.authService.register(dto));
   }
 
@@ -90,28 +101,66 @@ export class AuthController {
    * reads the token from the URL and posts it.
    */
   /**
-   * Submit the 6-digit code. AUTHENTICATED: registration already returns a session, and scoping
-   * the attempt to that session is what keeps a six-digit code from being sprayed across accounts.
+   * Submit the 6-digit code. THIS is what creates the account, and it returns the session.
+   *
+   * PUBLIC, and it has to be: registration no longer issues a token, so there is no session to
+   * authenticate with at this point — establishing one is the whole purpose of the call. What
+   * bounds guessing is the attempt counter on the pending row, not a guard here; see
+   * `consumePendingRegistration`.
    */
   @Post('verify-email')
   @HttpCode(200)
+  async verifyEmail(@Body() dto: VerifyEmailDto): Promise<ApiResponse<AuthResult>> {
+    // WRAPPED, like every other endpoint. This used to return a bare object, and the web client —
+    // which treats a missing `code` field as a business failure — reported "request failed" on a
+    // call that had in fact succeeded.
+    return ok(await this.authService.completeRegistration(dto.email, dto.code));
+  }
+
+  /**
+   * Re-send the code for a sign-up in flight.
+   *
+   * Always 200, whether or not a pending sign-up exists for that address: reporting the truth would
+   * turn this into an oracle for which addresses are mid-registration.
+   */
+  @Post('resend-verification')
+  @HttpCode(200)
+  async resendVerification(
+    @Body() dto: ResendVerificationDto,
+  ): Promise<ApiResponse<{ sent: true }>> {
+    await this.authService.resendRegistrationCode(dto.email);
+    return ok({ sent: true });
+  }
+
+  /**
+   * Prove the address on an EXISTING, signed-in account.
+   *
+   * Distinct from `verify-email`, which completes a sign-up and has no session to work from. This
+   * one is for accounts created before verification gated account creation: they exist, they are
+   * signed in, and their address was never proven — so the deposit path is shut to them. The
+   * session identifies the account, which is what keeps a six-digit code from being sprayed across
+   * every account at once.
+   */
+  @Post('verify-email/session')
+  @HttpCode(200)
   @UseGuards(JwtAuthGuard)
-  async verifyEmail(
+  async verifyExistingEmail(
     @Req() req: AuthenticatedRequest,
     @Body('code') code: string,
   ): Promise<ApiResponse<User>> {
     if (!req.user) throw new UnauthorizedException();
-    // WRAPPED, like every other endpoint. These two returned bare objects, and the web client —
-    // which treats a missing `code` as a business failure — reported "request failed" on a call
-    // that had in fact succeeded and already stamped the account verified.
-    return ok(await this.authService.verifyEmail(req.user.id, String(code ?? '')));
+    return ok(await this.authService.verifyExistingEmail(req.user.id, String(code ?? '')));
   }
 
-  /** Re-send a code. Always 200 — see `resendVerification` for why it cannot report the truth. */
-  @Post('resend-verification')
+  /** Re-send a code to the signed-in user's own address. */
+  @Post('resend-verification/session')
   @HttpCode(200)
-  async resendVerification(@Body('email') email: string): Promise<ApiResponse<{ sent: true }>> {
-    await this.authService.resendVerification(String(email ?? ''));
+  @UseGuards(JwtAuthGuard)
+  async resendExistingVerification(
+    @Req() req: AuthenticatedRequest,
+  ): Promise<ApiResponse<{ sent: true }>> {
+    if (!req.user) throw new UnauthorizedException();
+    await this.authService.resendVerificationForUser(req.user.id);
     return ok({ sent: true });
   }
 }

@@ -11,20 +11,22 @@ import { MailModule } from '../mail/mail.module';
 import { AuthModule } from '../auth/auth.module';
 import { LeasesModule } from './leases.module';
 import { LEASES_REPOSITORY, type LeasesRepository } from './leases.repository';
+import { createMailCapture, signUpOverHttp, type MailCapture } from '../testing/e2e-auth';
+import { MailService } from '../mail/mail.service';
 
 /**
  * The lease, end to end. Every test here is about a REFUSAL: one profile is one browser identity, and
  * two machines running it means the same account arriving from two IPs.
  */
 let app: INestApplication;
+/** Reads back the verification code, which sign-up now requires. See testing/e2e-auth.ts. */
+let mailCapture: MailCapture;
 let repo: LeasesRepository;
 
 async function register(email: string): Promise<string> {
-  const res = await request(app.getHttpServer())
-    .post('/auth/register')
-    .send({ email, password: 'supersecret1' });
-  assert.ok([200, 201].includes(res.status), `register status ${res.status}`);
-  return res.body.data.token as string;
+  // Sign-up is two steps now: register emails a code and creates nothing; verify creates the
+  // account and returns the session. See testing/e2e-auth.ts.
+  return (await signUpOverHttp(app, mailCapture, email)).token;
 }
 
 before(async () => {
@@ -42,7 +44,10 @@ before(async () => {
       AuthModule,
       LeasesModule,
     ],
-  }).compile();
+  })
+    .overrideProvider(MailService)
+    .useValue((mailCapture = createMailCapture()))
+    .compile();
 
   app = moduleRef.createNestApplication();
   app.useGlobalPipes(
@@ -57,7 +62,7 @@ after(async () => {
 });
 
 test('a free profile reads as free, and claiming it names the holder', async () => {
-  const token = await register('lease-free@example.com');
+  const token = await register('lease-free@gmail.com');
 
   const before = await request(app.getHttpServer())
     .get('/profiles/prf-free/lease')
@@ -79,7 +84,7 @@ test('a free profile reads as free, and claiming it names the holder', async () 
 });
 
 test('a second machine is refused and told where the profile is open', async () => {
-  const token = await register('lease-second@example.com');
+  const token = await register('lease-second@gmail.com');
   await request(app.getHttpServer())
     .post('/profiles/prf-busy/lease')
     .set('Authorization', `Bearer ${token}`)
@@ -100,7 +105,7 @@ test('a second machine is refused and told where the profile is open', async () 
 });
 
 test('two machines racing for the same profile: exactly one wins', async () => {
-  const token = await register('lease-race@example.com');
+  const token = await register('lease-race@gmail.com');
 
   const [a, b] = await Promise.all([
     request(app.getHttpServer())
@@ -193,7 +198,7 @@ test('a taken-over machine cannot extend or release the claim it lost', async ()
 });
 
 test('releasing frees the profile for the next machine', async () => {
-  const token = await register('lease-release@example.com');
+  const token = await register('lease-release@gmail.com');
   const claimed = await request(app.getHttpServer())
     .post('/profiles/prf-release/lease')
     .set('Authorization', `Bearer ${token}`)

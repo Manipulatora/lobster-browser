@@ -3,7 +3,10 @@ export type Role = 'admin' | 'member';
 export interface User {
   id: string;
   email: string;
+  /** The person's name as they entered it at sign-up. */
   displayName?: string;
+  /** Organisation, collected at sign-up. Optional: signing up as an individual is legitimate. */
+  company?: string;
   createdAt: string;
   /**
    * ISO instant the email address was proven, or undefined while unverified.

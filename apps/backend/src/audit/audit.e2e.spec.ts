@@ -12,6 +12,8 @@ import { AuthModule } from '../auth/auth.module';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 import { AuditModule } from './audit.module';
 import { AuditService, encodeAuditCursor } from './audit.service';
+import { createMailCapture, signUpOverHttp, type MailCapture } from '../testing/e2e-auth';
+import { MailService } from '../mail/mail.service';
 
 /**
  * HTTP e2e for the audit log: boots a real Nest app (controller + JWT guard + validation pipe)
@@ -21,6 +23,8 @@ import { AuditService, encodeAuditCursor } from './audit.service';
  * automatically (auth), which the audit feed is scoped to.
  */
 let app: INestApplication;
+/** Reads back the verification code, which sign-up now requires. See testing/e2e-auth.ts. */
+let mailCapture: MailCapture;
 let auditService: AuditService;
 let teams: TeamsRepository;
 
@@ -32,14 +36,12 @@ interface RegisteredUser {
 
 /** Register a fresh user and return their bearer token, user id, and personal team id. */
 async function register(email: string): Promise<RegisteredUser> {
-  const res = await request(app.getHttpServer())
-    .post('/auth/register')
-    .send({ email, password: 'supersecret1' });
-  assert.ok([200, 201].includes(res.status), `register status ${res.status}`);
-  const userId = res.body.data.user.id as string;
+  // Sign-up is two steps now: register emails a code and creates nothing; verify creates the
+  // account (and its personal team) and returns the session. See testing/e2e-auth.ts.
+  const { token, userId } = await signUpOverHttp(app, mailCapture, email);
   const [team] = await teams.findTeamsForUser(userId);
   assert.ok(team, 'a freshly-registered user should have a personal team');
-  return { token: res.body.data.token as string, userId, teamId: team.id };
+  return { token, userId, teamId: team.id };
 }
 
 /** Small delay so successive audit writes get strictly-increasing (distinct) createdAt values. */
@@ -71,7 +73,10 @@ before(async () => {
       AuthModule,
       AuditModule,
     ],
-  }).compile();
+  })
+    .overrideProvider(MailService)
+    .useValue((mailCapture = createMailCapture()))
+    .compile();
 
   app = moduleRef.createNestApplication();
   app.useGlobalPipes(
@@ -90,7 +95,7 @@ after(async () => {
 });
 
 test('an entry recorded via the service is returned by GET /audit, newest first', async () => {
-  const user = await register('audit-basic@example.com');
+  const user = await register('audit-basic@gmail.com');
   const auth = { Authorization: `Bearer ${user.token}` };
 
   await auditService.record({
@@ -131,8 +136,8 @@ test('an entry recorded via the service is returned by GET /audit, newest first'
 });
 
 test("audit entries are team-scoped: one team never sees another team's history", async () => {
-  const a = await register('audit-iso-a@example.com');
-  const b = await register('audit-iso-b@example.com');
+  const a = await register('audit-iso-a@gmail.com');
+  const b = await register('audit-iso-b@gmail.com');
 
   await auditService.record({
     teamId: a.teamId,
@@ -149,7 +154,7 @@ test("audit entries are team-scoped: one team never sees another team's history"
 });
 
 test('GET /audit honors limit and the before cursor (newest first, cursor-paginated)', async () => {
-  const user = await register('audit-page@example.com');
+  const user = await register('audit-page@gmail.com');
   const auth = { Authorization: `Bearer ${user.token}` };
 
   // Five entries with distinct, increasing timestamps → deterministic newest-first ordering.
@@ -183,7 +188,7 @@ test('GET /audit honors limit and the before cursor (newest first, cursor-pagina
 });
 
 test('cursor pagination is lossless across same-millisecond entries (keyset tiebreak)', async () => {
-  const user = await register('audit-tie@example.com');
+  const user = await register('audit-tie@gmail.com');
   const auth = { Authorization: `Bearer ${user.token}` };
 
   // A burst with NO delay: many entries share a createdAt millisecond. A timestamp-only cursor
@@ -218,7 +223,7 @@ test('cursor pagination is lossless across same-millisecond entries (keyset tieb
 });
 
 test('a malformed before cursor is a 400 (not a 500 or a silent wrong page)', async () => {
-  const user = await register('audit-badcursor@example.com');
+  const user = await register('audit-badcursor@gmail.com');
   const res = await request(app.getHttpServer())
     .get('/audit?before=not-a-valid-cursor')
     .set({ Authorization: `Bearer ${user.token}` });
@@ -226,7 +231,7 @@ test('a malformed before cursor is a 400 (not a 500 or a silent wrong page)', as
 });
 
 test('AuditService.record is fail-safe: it never throws and returns void', async () => {
-  const user = await register('audit-failsafe@example.com');
+  const user = await register('audit-failsafe@gmail.com');
   // A well-formed record resolves to undefined (void) rather than throwing or returning a row.
   const result = await auditService.record({
     teamId: user.teamId,

@@ -70,12 +70,21 @@ export class MailService {
     return this.send(
       to,
       `${code} is your Lobster Browser verification code`,
-      `Your verification code is ${code}\n\nEnter it in the app to finish setting up your account. It expires in ${expiresMinutes} minutes. If you did not create an account, ignore this email.`,
+      `Your verification code is ${code}.\n\nEnter it on the sign-up screen to finish creating your account. Your account is not created until you do.\n\nThis code expires in ${expiresMinutes} minutes. If you did not try to create an account, you can ignore this email.`,
       layout(
         'Confirm your email',
-        `<p style="margin:0 0 20px">Enter this code to finish setting up your Lobster Browser account.</p>
-         <p style="margin:0 0 8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:34px;letter-spacing:10px;font-weight:600;color:#171320">${escapeHtml(code)}</p>
-         <p style="margin:24px 0 0;font-size:13px;color:#736c85">This code expires in ${expiresMinutes} minutes. If you did not create an account, you can ignore this email.</p>`,
+        // THE CODE IS WRITTEN AS PART OF A SENTENCE, not displayed as a monument.
+        //
+        // It was 34px monospace with 10px letter-spacing, which is the treatment a marketing email
+        // gives a discount code. Set at the size of the surrounding text it reads as information,
+        // and the letters stay together so a double-click selects the whole code — wide tracking
+        // breaks that in several clients, forcing the user to select it by hand.
+        `<p style="margin:0 0 18px">Your verification code is
+           <strong style="font-weight:600;color:#171320">${escapeHtml(code)}</strong>.</p>
+         <p style="margin:0 0 18px">Enter it on the sign-up screen to finish creating your account.
+           Your account is not created until you do.</p>
+         <p style="margin:0;font-size:13px;color:#8b8598">This code expires in ${expiresMinutes} minutes.
+           If you did not try to create an account, you can ignore this email.</p>`,
       ),
     );
   }
@@ -107,20 +116,61 @@ function escapeHtml(s: string): string {
 }
 
 
-/** Table-based layout with inline styles — the only thing mail clients render consistently. */
+/**
+ * Where the logo is fetched from. Overridable so a staging deployment does not hotlink production.
+ *
+ * An absolute HTTPS URL, not a CID attachment: inline attachments show as a paperclip in several
+ * webmail clients and are stripped outright by others, and a relative path has no meaning in an
+ * inbox.
+ */
+const ASSET_BASE = (process.env.MAIL_ASSET_BASE ?? 'https://lobrowser.com').replace(/\/+$/, '');
+
+/**
+ * Content font stack.
+ *
+ * Inter first, as asked. Most clients ignore webfonts entirely and will fall through to the system
+ * stack, which is why the fallbacks are ordered to look like Inter rather than merely to exist:
+ * Segoe UI on Windows and -apple-system on macOS/iOS are the closest widely-installed neighbours.
+ * The `@import` below serves the clients that DO honour it (Apple Mail, some desktop clients); it
+ * is harmless where it is stripped.
+ */
+const FONT_STACK = "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+
+/**
+ * Table-based layout with inline styles — the only thing mail clients render consistently.
+ *
+ * WHITE, AND SQUARE. The previous version floated a rounded card on a tinted page. In an inbox that
+ * reads as a decorated marketing mail rather than a transactional one, and the tint fights every
+ * client that composites its own background behind the message. Flat white edge to edge with square
+ * corners is what a receipt or a security notice looks like, and it renders identically everywhere
+ * — including Outlook, whose renderer ignores `border-radius` and would have squared the corners
+ * for a chunk of the audience regardless, giving two different-looking emails.
+ */
 function layout(heading: string, body: string): string {
-  return `<!doctype html><html><body style="margin:0;padding:0;background:#faf9ff">
-<table role="presentation" style="width:100%;border-collapse:collapse;background:#faf9ff">
-  <tr><td align="center" style="padding:32px 16px">
-    <table role="presentation" style="width:100%;max-width:520px;border-collapse:collapse;background:#fff;border:1px solid #ece9f5;border-radius:16px">
-      <tr><td style="padding:32px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#171320">
-        <p style="margin:0 0 6px;font-size:14px;color:#7c3aed">Lobster Browser</p>
-        <h1 style="margin:0 0 20px;font-size:22px;font-weight:500">${escapeHtml(heading)}</h1>
-        <div style="font-size:15px;line-height:1.6;color:#423c52">${body}</div>
+  return `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+<meta name="supported-color-schemes" content="light only">
+<style>@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');</style>
+</head>
+<body style="margin:0;padding:0;background:#ffffff">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#ffffff">
+  <tr><td align="center" style="padding:40px 16px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:520px;border-collapse:collapse;background:#ffffff">
+      <tr><td style="padding:0 0 28px">
+        <img src="${ASSET_BASE}/brand/email-logo.png" width="150" height="30" alt="Lobster Browser"
+             style="display:block;border:0;outline:none;text-decoration:none;height:auto;width:150px">
+      </td></tr>
+      <tr><td style="font-family:${FONT_STACK};color:#171320">
+        <h1 style="margin:0 0 18px;font-size:21px;font-weight:600;line-height:1.3">${escapeHtml(heading)}</h1>
+        <div style="font-size:15px;line-height:1.65;color:#3f3a4d">${body}</div>
+      </td></tr>
+      <tr><td style="padding:32px 0 0">
+        <div style="border-top:1px solid #e8e5f0;padding-top:16px;font-family:${FONT_STACK};font-size:12px;line-height:1.6;color:#8b8598">
+          Sent by Lobster Browser. Please do not reply to this address.
+        </div>
       </td></tr>
     </table>
-    <p style="margin:16px 0 0;font-size:12px;color:#9a94a8;font-family:-apple-system,Segoe UI,Roboto,sans-serif">
-      Sent by Lobster Browser. Please do not reply to this address.</p>
   </td></tr>
 </table></body></html>`;
 }

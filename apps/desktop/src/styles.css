@@ -2334,21 +2334,20 @@ code {
   background: var(--bg);
 }
 
-.auth-screen__panel {
+/* No panel, border, or shadow: the content sits on the window background. A card floating on an
+   otherwise empty screen is chrome around nothing, and reads as a dialog to be dismissed rather
+   than as the app's own first screen. Width is still bounded so the lede does not run to the full
+   window on a wide monitor. */
+.auth-screen__content {
   width: 100%;
-  max-width: 380px;
-  padding: 40px 32px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg, 14px);
-  background: var(--surface);
-  box-shadow: var(--shadow-md, 0 8px 24px rgba(18, 23, 34, 0.06));
+  max-width: 340px;
   text-align: center;
 }
 
 .auth-screen__logo {
-  height: 26px;
+  height: 30px;
   width: auto;
-  margin: 0 auto 28px;
+  margin: 0 auto 32px;
 }
 
 .auth-screen__title {

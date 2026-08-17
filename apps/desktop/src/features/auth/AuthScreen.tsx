@@ -37,8 +37,11 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps): JSX.Element {
   }
 
   return (
+    // NO CARD. The content sits directly on the window background: a bordered panel floating on an
+    // empty screen is chrome drawn around nothing, and at this size it reads as a dialog the user
+    // is expected to dismiss rather than the app's own first screen.
     <div className="auth-screen">
-      <div className="auth-screen__panel">
+      <div className="auth-screen__content">
         <img className="auth-screen__logo" src={siteLogo} alt="Lobster Browser" />
 
         {waiting ? (
@@ -55,11 +58,7 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps): JSX.Element {
             </div>
             {/* Cancelling only stops this window waiting; the Rust side drops its loopback
                 listener when the attempt is abandoned. */}
-            <button
-              type="button"
-              className="auth-screen__link"
-              onClick={() => setWaiting(null)}
-            >
+            <button type="button" className="auth-screen__link" onClick={() => setWaiting(null)}>
               Cancel
             </button>
           </>
@@ -69,10 +68,13 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps): JSX.Element {
             {/* THIS COPY IS A DURABILITY PROMISE, so it says only what the product does. It read
                 "Sign in to sync profiles" while nothing in the app uploads a byte of profile data —
                 a user who believed it would skip exporting and lose every profile on reinstall.
-                Restore the sync wording when bytes actually move. */}
+                Restore the sync wording when bytes actually move.
+
+                It also promised "five free profiles" while the server's allowance had already moved
+                to three. A number duplicated here cannot track the one the API enforces, so it is
+                gone rather than restated: the plan page is the single place that quotes limits. */}
             <p className="auth-screen__lede">
-              Sign in to your Lobster account and manage your plan. New accounts start with five
-              free profiles.
+              Sign in to your Lobster account to manage your plan and profiles.
             </p>
 
             <div className="auth-screen__actions">

@@ -34,12 +34,42 @@ pub struct SidecarClient {
 impl SidecarClient {
     /// Spawn `node <sidecar_js>` and start the response reader.
     pub async fn spawn(node_path: &str, sidecar_js: &str) -> Result<Arc<Self>> {
-        let mut child = Command::new(node_path)
+        let mut command = Command::new(node_path);
+        command
             .arg(sidecar_js)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+            // PIPED, NOT INHERITED. A GUI process has no console to inherit, so on Windows this is
+            // the difference between the sidecar's diagnostics going to our log and Windows opening
+            // a console window to put them in — which is what users saw: a terminal appearing beside
+            // the app, printing the local API's 127.0.0.1 address. It is also better behaviour
+            // everywhere else: sidecar stderr now reaches `tracing` instead of a stream nobody reads.
+            .stderr(Stdio::piped());
+
+        // Belt and braces on Windows. `node.exe` is a CONSOLE-subsystem binary, so launching it
+        // from a windows-subsystem process allocates a fresh console for the child regardless of
+        // where its handles point. CREATE_NO_WINDOW suppresses that allocation.
+        #[cfg(windows)]
+        {
+            // `creation_flags` is inherent on tokio's Command (it mirrors the std extension trait),
+            // so importing std::os::windows::process::CommandExt here would be an unused import.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let mut child = command.spawn()?;
+
+        // Drain stderr into the log. Without a reader the pipe's buffer fills and the sidecar blocks
+        // on its next write — a deadlock that only appears once it has logged a few kilobytes, which
+        // is exactly the situation where the output matters.
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(target: "sidecar", "{line}");
+                }
+            });
+        }
 
         let stdin = child
             .stdin

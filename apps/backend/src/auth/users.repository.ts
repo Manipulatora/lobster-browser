@@ -16,6 +16,30 @@ export interface CreateUserInput {
   email: string;
   passwordHash: string;
   displayName?: string;
+  company?: string;
+}
+
+/**
+ * A sign-up that has been started but not yet proven by entering the emailed code.
+ *
+ * Deliberately NOT a `User`. No account, team or token exists while this row does — see the model
+ * comment in schema.prisma for why registration no longer creates one up front.
+ */
+export interface PendingRegistrationInput {
+  email: string;
+  passwordHash: string;
+  fullName: string;
+  company?: string;
+  codeHash: string;
+  expiresAt: Date;
+}
+
+/** A pending sign-up, as read back for completion or for re-sending its code. */
+export interface StoredPendingRegistration {
+  email: string;
+  passwordHash: string;
+  fullName: string;
+  company?: string;
 }
 
 /**
@@ -50,6 +74,39 @@ export interface UsersRepository {
    * had too many failed attempts — the caller cannot tell which, and must not be able to.
    */
   consumeEmailVerification(userId: string, codeHash: string): Promise<StoredUser | null>;
+
+  // --- Pending sign-ups ------------------------------------------------------
+
+  /**
+   * Record (or replace) a sign-up awaiting its code.
+   *
+   * Replaces on conflict, so re-registering the same address supersedes the previous code instead
+   * of leaving several valid at once, and resets the attempt counter for the new code.
+   */
+  upsertPendingRegistration(input: PendingRegistrationInput): Promise<void>;
+
+  /** Read a pending sign-up without consuming it — used to re-send its code. */
+  findPendingRegistration(email: string): Promise<StoredPendingRegistration | null>;
+
+  /**
+   * Redeem a pending sign-up, atomically.
+   *
+   * Increments the attempt counter on a wrong code and refuses the row once too many have been
+   * made: the endpoint is necessarily public (there is no session yet), so a six-digit code is
+   * otherwise brute-forceable in minutes.
+   *
+   * Returns the stored details on success and deletes the row, so the same code cannot be redeemed
+   * twice. Returns null when the code is wrong, expired, exhausted or unknown — the caller cannot
+   * distinguish these, and must not be able to.
+   */
+  consumePendingRegistration(
+    email: string,
+    codeHash: string,
+    now: Date,
+  ): Promise<StoredPendingRegistration | null>;
+
+  /** Housekeeping. Expiry is already enforced in `consumePendingRegistration`. */
+  purgeExpiredPendingRegistrations(now: Date): Promise<void>;
 }
 
 /**

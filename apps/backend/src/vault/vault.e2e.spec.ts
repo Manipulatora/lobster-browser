@@ -10,19 +10,21 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { MailModule } from '../mail/mail.module';
 import { AuthModule } from '../auth/auth.module';
 import { VaultModule } from './vault.module';
+import { createMailCapture, signUpOverHttp, type MailCapture } from '../testing/e2e-auth';
+import { MailService } from '../mail/mail.service';
 
 /**
  * The account key, end to end. One route, no setup step: signing in is all a user needs to reach
  * their profiles from a new machine.
  */
 let app: INestApplication;
+/** Reads back the verification code, which sign-up now requires. See testing/e2e-auth.ts. */
+let mailCapture: MailCapture;
 
 async function register(email: string): Promise<string> {
-  const res = await request(app.getHttpServer())
-    .post('/auth/register')
-    .send({ email, password: 'supersecret1' });
-  assert.ok([200, 201].includes(res.status), `register status ${res.status}`);
-  return res.body.data.token as string;
+  // Sign-up is two steps now: register emails a code and creates nothing; verify creates the
+  // account and returns the session. See testing/e2e-auth.ts.
+  return (await signUpOverHttp(app, mailCapture, email)).token;
 }
 
 before(async () => {
@@ -44,7 +46,10 @@ before(async () => {
       AuthModule,
       VaultModule,
     ],
-  }).compile();
+  })
+    .overrideProvider(MailService)
+    .useValue((mailCapture = createMailCapture()))
+    .compile();
 
   app = moduleRef.createNestApplication();
   app.useGlobalPipes(
@@ -58,7 +63,7 @@ after(async () => {
 });
 
 test('a signed-in user gets a key with no setup step, and the same one every time', async () => {
-  const token = await register('key-basic@example.com');
+  const token = await register('key-basic@gmail.com');
 
   const first = await request(app.getHttpServer())
     .get('/vault/key')
@@ -77,7 +82,7 @@ test('a signed-in user gets a key with no setup step, and the same one every tim
 });
 
 test('two machines signing in at once end up with the same key', async () => {
-  const token = await register('key-race@example.com');
+  const token = await register('key-race@gmail.com');
 
   // Two callers, issued before either has been answered. Different keys here would mean snapshots
   // sealed by one machine could not be opened by the other. Kept to two connections: supertest binds
@@ -93,8 +98,8 @@ test('two machines signing in at once end up with the same key', async () => {
 });
 
 test('each account gets its own key', async () => {
-  const alice = await register('key-alice@example.com');
-  const bob = await register('key-bob@example.com');
+  const alice = await register('key-alice@gmail.com');
+  const bob = await register('key-bob@gmail.com');
 
   const [a, b] = await Promise.all([
     request(app.getHttpServer()).get('/vault/key').set('Authorization', `Bearer ${alice}`),
@@ -108,7 +113,7 @@ test('the key requires a token, and there is no route that names a user', async 
   assert.equal(anonymous.status, 401);
 
   // The route is scoped to the caller's token; there is no `:userId` shape to attack.
-  const token = await register('key-scope@example.com');
+  const token = await register('key-scope@gmail.com');
   const mine = await request(app.getHttpServer())
     .get('/vault/key')
     .set('Authorization', `Bearer ${token}`);

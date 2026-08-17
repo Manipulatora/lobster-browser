@@ -213,6 +213,14 @@ impl PendingSignIn {
 
         let result = exchange(&callback.code, &self.state, &self.verifier).await?;
         store_token(&result.token)?;
+        // Cache the identity HERE, not only in `current_user`.
+        //
+        // Without this a fresh sign-in stored the token but no cached user, so the next cold start
+        // asked `auth_status_cached` who was signed in, got None, and showed the sign-in screen to
+        // someone who had signed in minutes earlier. The token was valid the whole time — only the
+        // thing first paint reads was missing. Signing in is precisely the moment the identity is
+        // known and proven, so it is the right place to record it.
+        cache_user(&result.user);
         Ok(result.user)
     }
 }
@@ -495,5 +503,36 @@ mod tests {
     fn urlencode_leaves_base64url_untouched_and_escapes_the_rest() {
         assert_eq!(urlencode("aZ09-_.~"), "aZ09-_.~");
         assert_eq!(urlencode("a b&c"), "a%20b%26c");
+    }
+
+    /// Every parameter the website needs must survive into the URL.
+    ///
+    /// REGRESSION GUARD. The URL itself was always built correctly; what broke desktop sign-in was
+    /// DELIVERING it through `cmd /c start`, where `&` separates commands, so the browser received
+    /// only `…/login?desktop=1`. The site then saw a handoff with no state, port or challenge,
+    /// could not recognise it as one, and never redirected to the loopback listener.
+    ///
+    /// This asserts the four parameters are present and non-empty. It does not, and cannot, prove
+    /// the delivery path leaves them intact — that lives in `open_in_browser`, which now calls
+    /// ShellExecuteW precisely so no command line is parsed on the way.
+    #[tokio::test]
+    async fn the_sign_in_url_carries_every_handoff_parameter() {
+        let (handle, pending) = begin("login").await.expect("begin");
+
+        let query = handle.url.split_once('?').expect("a query string").1;
+        let params: std::collections::HashMap<_, _> = query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .collect();
+
+        assert_eq!(params.get("desktop"), Some(&"1"));
+        for key in ["state", "port", "challenge"] {
+            let value = params.get(key).unwrap_or_else(|| panic!("{key} missing from {}", handle.url));
+            assert!(!value.is_empty(), "{key} is empty");
+        }
+        assert_eq!(params["port"], handle.port.to_string());
+
+        // Dropping the attempt releases the loopback listener.
+        drop(pending);
     }
 }

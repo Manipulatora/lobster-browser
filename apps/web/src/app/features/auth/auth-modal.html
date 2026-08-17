@@ -15,19 +15,31 @@
       [attr.aria-label]="step() === 'verify' ? 'Confirm your email' : isSignUp() ? 'Create your account' : 'Sign in'"
       class="card relative w-full max-w-[26rem] p-7 sm:p-8"
     >
-      <button
-        type="button"
-        class="absolute right-4 top-4 flex size-9 items-center justify-center rounded-lg text-muted transition-colors hover:bg-brand-50 hover:text-ink"
-        aria-label="Close"
-        (click)="close()"
-      >
-        <span class="icon text-[20px]">close</span>
-      </button>
+      <!-- Hidden on the verify step. The sign-up is not finished there, and an X in the corner is
+           exactly the control someone hits by reflex — losing a sign-up that is one field from
+           complete. `abandon` at the foot of that step is the deliberate way out. -->
+      @if (!dismissLocked()) {
+        <button
+          type="button"
+          class="absolute right-4 top-4 flex size-9 items-center justify-center rounded-lg text-muted transition-colors hover:bg-brand-50 hover:text-ink"
+          aria-label="Close"
+          (click)="close()"
+        >
+          <span class="icon text-[20px]">close</span>
+        </button>
+      }
 
       @if (step() === 'verify') {
         <h2 class="text-2xl tracking-[-0.02em] text-ink">Confirm your email</h2>
         <p class="mt-1.5 text-[0.875rem] text-muted">
           We sent a 6-digit code to <span class="text-ink">{{ sentTo() }}</span>.
+        </p>
+        <!-- Stated outright, because it changes what abandoning this step means. The account does
+             not exist yet; the credentials are held server-side and expire. Someone who leaves
+             here and later tries to sign in would otherwise be baffled to be told they have no
+             account. -->
+        <p class="mt-3 text-[0.8125rem] text-faint">
+          Your account is created once you enter this code.
         </p>
       } @else {
         <h2 class="text-2xl tracking-[-0.02em] text-ink">
@@ -44,6 +56,37 @@
 
       @if (step() === 'credentials') {
       <form [formGroup]="form" (ngSubmit)="submit()" class="mt-7" novalidate>
+        @if (isSignUp()) {
+          <div class="mb-5">
+            <label class="field-label" for="auth-name">Full name</label>
+            <input
+              id="auth-name"
+              type="text"
+              class="field-input"
+              formControlName="fullName"
+              autocomplete="name"
+              [attr.aria-invalid]="invalid('fullName') ? 'true' : null"
+              [attr.aria-describedby]="invalid('fullName') ? 'auth-name-error' : null"
+            />
+            @if (invalid('fullName')) {
+              <p id="auth-name-error" class="field-error">Enter your name.</p>
+            }
+          </div>
+
+          <div class="mb-5">
+            <label class="field-label" for="auth-company">
+              Company <span class="text-faint">(optional)</span>
+            </label>
+            <input
+              id="auth-company"
+              type="text"
+              class="field-input"
+              formControlName="company"
+              autocomplete="organization"
+            />
+          </div>
+        }
+
         <div>
           <label class="field-label" for="auth-email">Email</label>
           <input
@@ -55,7 +98,13 @@
             [attr.aria-invalid]="invalid('email') ? 'true' : null"
             [attr.aria-describedby]="invalid('email') ? 'auth-email-error' : null"
           />
-          @if (invalid('email')) {
+          @if (wrongProvider()) {
+            <!-- Named specifically. "Enter a valid email address" against a perfectly valid work
+                 address reads as a broken form, and the user retypes it rather than switching. -->
+            <p id="auth-email-error" class="field-error">
+              Use a Gmail or Outlook address — those are the only providers we accept right now.
+            </p>
+          } @else if (invalid('email')) {
             <p id="auth-email-error" class="field-error">Enter a valid email address.</p>
           }
         </div>
@@ -94,6 +143,26 @@
             </p>
           }
         </div>
+
+        @if (isSignUp()) {
+          <div class="mt-5">
+            <label class="field-label" for="auth-password-confirm">Confirm password</label>
+            <input
+              id="auth-password-confirm"
+              [type]="showPassword() ? 'text' : 'password'"
+              class="field-input"
+              formControlName="confirmPassword"
+              autocomplete="new-password"
+              [attr.aria-invalid]="passwordMismatch() ? 'true' : null"
+              [attr.aria-describedby]="passwordMismatch() ? 'auth-confirm-error' : null"
+            />
+            @if (passwordMismatch()) {
+              <p id="auth-confirm-error" class="field-error">Both passwords must match.</p>
+            } @else if (invalid('confirmPassword')) {
+              <p class="field-error">Re-enter your password.</p>
+            }
+          </div>
+        }
 
         @if (error()) {
           <!-- aria-live so the failure is announced: a screen-reader user who submits and hears
@@ -199,6 +268,20 @@
               {{ resending() ? 'Sending…' : 'Send another' }}
             </button>
           }
+        </p>
+
+        <!-- The only way out of this step, and deliberately explicit. The backdrop, Escape and the
+             corner X are all disabled here so a sign-up one field from completion cannot be lost to
+             a mis-click. -->
+        <p class="rule mt-6 pt-5 text-center">
+          <button
+            type="button"
+            class="text-[0.8125rem] text-faint transition-colors hover:text-muted"
+            [disabled]="submitting()"
+            (click)="abandon()"
+          >
+            Cancel sign-up
+          </button>
         </p>
       }
     </div>

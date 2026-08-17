@@ -20,6 +20,8 @@ import { AuthModule } from '../auth/auth.module';
 import { configureBodyLimit } from '../body-limit';
 import { ProfilesModule } from './profiles.module';
 import { DEFAULT_FREE_PROFILE_LIMIT } from './profiles.service';
+import { createMailCapture, signUpOverHttp, type MailCapture } from '../testing/e2e-auth';
+import { MailService } from '../mail/mail.service';
 
 /**
  * HTTP e2e for profiles: boots a real Nest app (controllers + JWT guard + validation pipe) and
@@ -28,14 +30,14 @@ import { DEFAULT_FREE_PROFILE_LIMIT } from './profiles.service';
  * profiles are scoped to.
  */
 let app: NestExpressApplication;
+/** Reads back the verification code, which sign-up now requires. See testing/e2e-auth.ts. */
+let mailCapture: MailCapture;
 
 /** Register a fresh user and return their bearer token. */
 async function registerToken(email: string): Promise<string> {
-  const res = await request(app.getHttpServer())
-    .post('/auth/register')
-    .send({ email, password: 'supersecret1' });
-  assert.ok([200, 201].includes(res.status), `register status ${res.status}`);
-  return res.body.data.token as string;
+  // Sign-up is two steps now: register emails a code and creates nothing; verify creates the
+  // account and returns the session. See testing/e2e-auth.ts.
+  return (await signUpOverHttp(app, mailCapture, email)).token;
 }
 
 before(async () => {
@@ -64,7 +66,10 @@ before(async () => {
       AuthModule,
       ProfilesModule,
     ],
-  }).compile();
+  })
+    .overrideProvider(MailService)
+    .useValue((mailCapture = createMailCapture()))
+    .compile();
 
   // Mirror the production bootstrap (main.ts): disable the built-in ~100kb body parser and apply
   // the raised limit, so large encrypted profile blobs on sync are exercised as they run in prod.
@@ -82,7 +87,7 @@ after(async () => {
 });
 
 test('create -> list -> get -> update -> delete, all team-scoped with a unique seed', async () => {
-  const token = await registerToken('profiles-crud@example.com');
+  const token = await registerToken('profiles-crud@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   // create (no seed provided → server generates a unique, non-constant one)
@@ -141,8 +146,8 @@ test('create -> list -> get -> update -> delete, all team-scoped with a unique s
 });
 
 test("profiles are isolated per team: one user never sees another user's profiles", async () => {
-  const tokenA = await registerToken('isolation-a@example.com');
-  const tokenB = await registerToken('isolation-b@example.com');
+  const tokenA = await registerToken('isolation-a@gmail.com');
+  const tokenB = await registerToken('isolation-b@gmail.com');
 
   await request(app.getHttpServer())
     .post('/profiles')
@@ -157,7 +162,7 @@ test("profiles are isolated per team: one user never sees another user's profile
 });
 
 test('create accepts the lobium engine (no longer a contract-drift 400)', async () => {
-  const token = await registerToken('profiles-lobium@example.com');
+  const token = await registerToken('profiles-lobium@gmail.com');
   const res = await request(app.getHttpServer())
     .post('/profiles')
     .set({ Authorization: `Bearer ${token}` })
@@ -168,7 +173,7 @@ test('create accepts the lobium engine (no longer a contract-drift 400)', async 
 });
 
 test('update persists all editable non-secret desktop metadata', async () => {
-  const token = await registerToken('profiles-update@example.com');
+  const token = await registerToken('profiles-update@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   const create = await request(app.getHttpServer())
@@ -248,7 +253,7 @@ test('update persists all editable non-secret desktop metadata', async () => {
 });
 
 test('profile DTOs reject inline proxies, raw cookie text, and malformed extensions', async () => {
-  const token = await registerToken('profiles-secret-validation@example.com');
+  const token = await registerToken('profiles-secret-validation@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   const inlineProxy = await request(app.getHttpServer())
@@ -345,7 +350,7 @@ function encryptedBlob(text: string): string {
 }
 
 test('sync rejects an invalid direction with 400', async () => {
-  const token = await registerToken('profiles-sync@example.com');
+  const token = await registerToken('profiles-sync@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
   const id = await createProfile(auth, 'Syncable');
 
@@ -364,7 +369,7 @@ test('sync rejects an invalid direction with 400', async () => {
 });
 
 test('push then pull round-trips the exact encrypted payload (server stores opaque bytes)', async () => {
-  const token = await registerToken('profiles-roundtrip@example.com');
+  const token = await registerToken('profiles-roundtrip@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
   const id = await createProfile(auth, 'Roundtrip');
 
@@ -402,7 +407,7 @@ test('push then pull round-trips the exact encrypted payload (server stores opaq
 });
 
 test('SEC-1: real LBv1 envelope syncs opaquely and decrypts only client-side', async () => {
-  const token = await registerToken('profiles-lbv1@example.com');
+  const token = await registerToken('profiles-lbv1@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
   const id = await createProfile(auth, 'LBv1 profile');
 
@@ -459,7 +464,7 @@ test('SEC-1: real LBv1 envelope syncs opaquely and decrypts only client-side', a
 });
 
 test('version increments across pushes and pull returns the latest', async () => {
-  const token = await registerToken('profiles-versioning@example.com');
+  const token = await registerToken('profiles-versioning@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
   const id = await createProfile(auth, 'Versioned');
 
@@ -485,7 +490,7 @@ test('version increments across pushes and pull returns the latest', async () =>
 });
 
 test('a push with a stale baseVersion is rejected with 409 Conflict', async () => {
-  const token = await registerToken('profiles-conflict@example.com');
+  const token = await registerToken('profiles-conflict@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
   const id = await createProfile(auth, 'Conflicting');
 
@@ -520,7 +525,7 @@ test('a push with a stale baseVersion is rejected with 409 Conflict', async () =
 });
 
 test('a >100kb encrypted blob syncs (push) successfully (body limit raised above the ~100kb default)', async () => {
-  const token = await registerToken('profiles-largeblob@example.com');
+  const token = await registerToken('profiles-largeblob@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
   const id = await createProfile(auth, 'Large blob');
 
@@ -545,7 +550,7 @@ test('a >100kb encrypted blob syncs (push) successfully (body limit raised above
 });
 
 test('pull on a never-synced profile returns version 0 and a null payload', async () => {
-  const token = await registerToken('profiles-empty-pull@example.com');
+  const token = await registerToken('profiles-empty-pull@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
   const id = await createProfile(auth, 'Never synced');
 
@@ -570,7 +575,7 @@ test('free-tier profile limit matches the schema default (3) and is enforced', a
   // Cross-checks the ProfilesService default against prisma/schema.prisma's Subscription default.
   assert.equal(DEFAULT_FREE_PROFILE_LIMIT, 3);
 
-  const token = await registerToken('profiles-limit@example.com');
+  const token = await registerToken('profiles-limit@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   for (let i = 0; i < DEFAULT_FREE_PROFILE_LIMIT; i += 1) {
@@ -589,7 +594,7 @@ test('free-tier profile limit matches the schema default (3) and is enforced', a
 });
 
 test('errors answer in the same { code, data, msg } envelope as successes', async () => {
-  const token = await registerToken('profiles-error-envelope@example.com');
+  const token = await registerToken('profiles-error-envelope@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   // A service-level 404.
@@ -619,7 +624,7 @@ test('errors answer in the same { code, data, msg } envelope as successes', asyn
 });
 
 test('a deleted profile is a tombstone: hidden from reads and not counted against the plan limit', async () => {
-  const token = await registerToken('profiles-tombstone@example.com');
+  const token = await registerToken('profiles-tombstone@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   // Fill the free allowance, then delete one and re-create: the freed slot must come back. This
@@ -661,7 +666,7 @@ test('unauthenticated create is 401', async () => {
 });
 
 test('bulk create makes N profiles each with a unique seed, batch-checked against the plan limit', async () => {
-  const token = await registerToken('profiles-bulk@example.com');
+  const token = await registerToken('profiles-bulk@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   const bulk = await request(app.getHttpServer())
@@ -689,9 +694,9 @@ test('bulk create makes N profiles each with a unique seed, batch-checked agains
 });
 
 test('export is secret-free; import transfers profiles (preserving seed identity) to another team', async () => {
-  const tokenA = await registerToken('export-a@example.com');
+  const tokenA = await registerToken('export-a@gmail.com');
   const authA = { Authorization: `Bearer ${tokenA}` };
-  const tokenB = await registerToken('import-b@example.com');
+  const tokenB = await registerToken('import-b@gmail.com');
   const authB = { Authorization: `Bearer ${tokenB}` };
 
   const alphaMetadata = {
@@ -778,7 +783,7 @@ test('export is secret-free; import transfers profiles (preserving seed identity
 });
 
 test('profile actions are recorded to the team audit log (newest first, with metadata)', async () => {
-  const token = await registerToken('audit-integration@example.com');
+  const token = await registerToken('audit-integration@gmail.com');
   const auth = { Authorization: `Bearer ${token}` };
 
   const create = await request(app.getHttpServer())

@@ -1,7 +1,13 @@
 import { Injectable } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
-import type { CreateUserInput, StoredUser, UsersRepository } from './users.repository';
+import type {
+  CreateUserInput,
+  PendingRegistrationInput,
+  StoredPendingRegistration,
+  StoredUser,
+  UsersRepository,
+} from './users.repository';
 
 /** Failed guesses allowed against one 6-digit code before it is dead. */
 const MAX_VERIFICATION_ATTEMPTS = 5;
@@ -32,9 +38,90 @@ export class PrismaUsersRepository implements UsersRepository {
         email: input.email,
         passwordHash: input.passwordHash,
         displayName: input.displayName ?? null,
+        company: input.company ?? null,
+        // Created only after the emailed code was proven (see PendingRegistration), so the address
+        // is verified at the instant the row exists. Stamping it here rather than leaving it null
+        // avoids an account that is real but permanently unverified.
+        emailVerifiedAt: new Date(),
       },
     });
     return this.toStoredUser(row);
+  }
+
+  // --- Pending sign-ups ------------------------------------------------------
+
+  async upsertPendingRegistration(input: PendingRegistrationInput): Promise<void> {
+    const data = {
+      passwordHash: input.passwordHash,
+      fullName: input.fullName,
+      company: input.company ?? null,
+      codeHash: input.codeHash,
+      expiresAt: input.expiresAt,
+      // Reset on re-send: the cap belongs to the code, not to the address, or one exhausted code
+      // would lock the address out permanently.
+      attempts: 0,
+    };
+    await this.prisma.pendingRegistration.upsert({
+      where: { email: input.email },
+      create: { email: input.email, ...data },
+      update: data,
+    });
+  }
+
+  async findPendingRegistration(email: string): Promise<StoredPendingRegistration | null> {
+    const row = await this.prisma.pendingRegistration.findUnique({ where: { email } });
+    if (!row) return null;
+    return {
+      email: row.email,
+      passwordHash: row.passwordHash,
+      fullName: row.fullName,
+      company: row.company ?? undefined,
+    };
+  }
+
+  async consumePendingRegistration(
+    email: string,
+    codeHash: string,
+    now: Date,
+  ): Promise<StoredPendingRegistration | null> {
+    return this.prisma.$transaction(async (tx) => {
+      // The claim is a conditional deleteMany: matching on the hash, the expiry AND the attempt cap
+      // in one statement means two simultaneous submissions cannot both succeed, and a correct code
+      // is consumed exactly once. Read-then-delete would leave precisely that race.
+      const row = await tx.pendingRegistration.findFirst({
+        where: {
+          email,
+          codeHash,
+          expiresAt: { gt: now },
+          attempts: { lt: MAX_VERIFICATION_ATTEMPTS },
+        },
+      });
+
+      if (!row) {
+        // Wrong, expired or exhausted. Burn an attempt so a six-digit code cannot be ground down
+        // against an endpoint that has no session to rate-limit against.
+        await tx.pendingRegistration.updateMany({
+          where: { email },
+          data: { attempts: { increment: 1 } },
+        });
+        return null;
+      }
+
+      const deleted = await tx.pendingRegistration.deleteMany({ where: { email, codeHash } });
+      // Lost the race to a concurrent submission: the other one gets the account.
+      if (deleted.count === 0) return null;
+
+      return {
+        email: row.email,
+        passwordHash: row.passwordHash,
+        fullName: row.fullName,
+        company: row.company ?? undefined,
+      };
+    });
+  }
+
+  async purgeExpiredPendingRegistrations(now: Date): Promise<void> {
+    await this.prisma.pendingRegistration.deleteMany({ where: { expiresAt: { lt: now } } });
   }
 
   async findByEmail(email: string): Promise<StoredUser | null> {
