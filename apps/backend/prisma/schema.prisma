@@ -80,18 +80,46 @@ enum DepositStatus {
 // Mirrors shared-types `User`. `passwordHash` is backend-only (never leaves the server);
 // real hashing (argon2/bcrypt) lands Day 2.
 model User {
-  id           String   @id @default(uuid())
-  email        String   @unique
+  id           String    @id @default(uuid())
+  email        String    @unique
   displayName  String?
   passwordHash String?
-  createdAt    DateTime @default(now())
+  createdAt    DateTime  @default(now())
+  /// Null until the address is proven. Nullable-timestamp rather than a boolean so we keep WHEN,
+  /// which matters for disputes and for expiring stale unverified accounts.
+  emailVerifiedAt DateTime?
 
   // Relations
-  ownedTeams        Team[]             @relation("TeamOwner")
+  ownedTeams        Team[]              @relation("TeamOwner")
   memberships       Membership[]
   desktopAuthGrants DesktopAuthGrant[]
+  emailVerifications EmailVerification[]
 
   @@map("users")
+}
+
+/// A single-use email-verification token.
+///
+/// Stores a SHA-256 of the token, never the token itself: the mailed value is a bearer credential,
+/// and a leaked database should not hand over working links. Rows are kept after consumption so a
+/// replayed link is distinguishable from an unknown one.
+model EmailVerification {
+  id         String    @id @default(uuid())
+  userId     String
+  /// SHA-256 hex of the emailed 6-digit code. NOT unique: six digits collide across users, and a
+  /// unique index would make one user's pending code block another's. Lookups are scoped by userId.
+  tokenHash  String
+  expiresAt  DateTime
+  consumedAt DateTime?
+  /// Failed attempts against this code. Capped so a 6-digit secret cannot be brute-forced.
+  attempts   Int       @default(0)
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("email_verifications")
 }
 
 // Mirrors shared-types `Team`.

@@ -7,6 +7,7 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
 import { PrismaModule } from '../prisma/prisma.module';
+import { MailModule } from '../mail/mail.module';
 import { AuthModule } from '../auth/auth.module';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 import { AuditModule } from './audit.module';
@@ -54,6 +55,7 @@ before(async () => {
   const moduleRef = await Test.createTestingModule({
     imports: [
       ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true }),
+      MailModule,
       PrismaModule,
       AuthModule,
       AuditModule,

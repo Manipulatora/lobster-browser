@@ -37,6 +37,11 @@
   --color-surface-tint: #f5f2ff;
 
   /* Hairlines — the whole UI is drawn with these */
+  /* Sampled from the pixel-lobster sprite (the dominant colour of its outline), so anything that
+     has to match the lobster matches it exactly rather than approximately — brand-600 is a
+     different violet and the mismatch shows when the two touch. */
+  --color-lobster: #711fe9;
+
   --color-hairline: #ece9f5;
   --color-hairline-strong: #ded8ef;
 

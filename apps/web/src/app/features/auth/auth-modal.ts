@@ -51,12 +51,39 @@ export class AuthModal {
   protected readonly showPassword = signal(false);
   protected readonly error = signal<string | null>(null);
 
+  /**
+   * Which step the dialog is on.
+   *
+   * Sign-up does not finish at "account created": the address still has to be proven before the
+   * account can move money, so the dialog stays open and asks for the emailed code rather than
+   * dropping the user on a page that will refuse them.
+   */
+  protected readonly step = signal<'credentials' | 'verify'>('credentials');
+  protected readonly code = signal('');
+  protected readonly resending = signal(false);
+  protected readonly resent = signal(false);
+  /** The address the code went to, kept for the "we sent it to…" line and for resending. */
+  private pendingEmail = '';
+  protected readonly sentTo = signal('');
+
+  protected readonly codeComplete = computed(() => /^\d{6}$/.test(this.code()));
+
   protected readonly form = this.fb.nonNullable.group({
     email: ['', [Validators.required, Validators.email]],
     password: ['', [Validators.required, Validators.minLength(MIN_PASSWORD)]],
   });
 
   constructor() {
+    effect(() => {
+      // Opened straight at the code step for an account that exists but is not yet proven.
+      const pending = this.modal.verifyFor();
+      if (pending) {
+        this.pendingEmail = pending;
+        this.sentTo.set(pending);
+        this.step.set('verify');
+      }
+    });
+
     effect(() => {
       const open = this.mode() !== null;
       // Lock the page behind the modal. Without this the backdrop scrolls under the dialog on
@@ -66,8 +93,34 @@ export class AuthModal {
         this.form.reset();
         this.submitted.set(false);
         this.error.set(null);
+        this.step.set('credentials');
+        this.code.set('');
+        this.resent.set(false);
       }
     });
+  }
+
+  /**
+   * Leave the dialog and land somewhere useful.
+   *
+   * The single exit for BOTH paths — signing in, and finishing sign-up by entering the code — so
+   * the desktop handoff cannot be skipped by whichever path happens to be taken. Sign-up used to
+   * reach it directly; now it arrives here one step later, and the launcher still gets its session.
+   */
+  private async finish(): Promise<void> {
+    // If the launcher sent the user here, hand the session back to it instead of continuing into
+    // the website. `complete` navigates away, so nothing below runs.
+    const view = this.document.defaultView;
+    const desktop = view ? this.handoff.parse(view.location.search) : null;
+    if (desktop) {
+      await this.handoff.complete(desktop);
+      return;
+    }
+
+    this.modal.completed();
+    // Straight to billing: a new account has no Credit and no package, so the dashboard would
+    // only be able to tell them to go there.
+    void this.router.navigate(['/account/billing']);
   }
 
   /** Errors stay hidden until the field has been visited or the form submitted once. */
@@ -84,6 +137,43 @@ export class AuthModal {
     this.error.set(null);
     this.submitted.set(false);
     this.modal.switchTo(this.isSignUp() ? 'sign-in' : 'sign-up');
+  }
+
+  /** Digits only, six at most — so the boxes can never hold something unsubmittable. */
+  protected onCodeInput(value: string): void {
+    this.code.set(value.replace(/\D/g, '').slice(0, 6));
+    this.error.set(null);
+  }
+
+  protected async submitCode(): Promise<void> {
+    if (this.submitting() || !this.codeComplete()) return;
+    this.submitting.set(true);
+    this.error.set(null);
+    try {
+      await this.auth.verifyEmail(this.code());
+      await this.finish();
+    } catch (err) {
+      this.error.set(err instanceof Error ? err.message : 'that code did not work');
+      this.code.set('');
+    } finally {
+      this.submitting.set(false);
+    }
+  }
+
+  protected async resend(): Promise<void> {
+    if (this.resending()) return;
+    this.resending.set(true);
+    this.error.set(null);
+    try {
+      await this.auth.resendVerification(this.pendingEmail);
+      this.resent.set(true);
+      this.code.set('');
+    } catch {
+      // Resend is deliberately silent about outcomes; a failure here is not worth alarming over.
+      this.resent.set(true);
+    } finally {
+      this.resending.set(false);
+    }
   }
 
   protected close(): void {
@@ -116,23 +206,17 @@ export class AuthModal {
     try {
       if (this.isSignUp()) {
         await this.auth.register(email, password);
-      } else {
-        await this.auth.login(email, password);
-      }
-
-      // If the launcher sent the user here, hand the session back to it instead of continuing into
-      // the website. `complete` navigates away, so nothing below runs.
-      const view = this.document.defaultView;
-      const desktop = view ? this.handoff.parse(view.location.search) : null;
-      if (desktop) {
-        await this.handoff.complete(desktop);
+        // Registered, signed in, but unproven. Stop here and ask for the code — every route that
+        // matters (deposits above all) is closed to an unverified account, so continuing into the
+        // site would only walk the user into a refusal.
+        this.pendingEmail = email;
+        this.sentTo.set(email);
+        this.step.set('verify');
+        this.submitting.set(false);
         return;
       }
-
-      this.modal.completed();
-      // Straight to billing: a new account has no Credit and no package, so the dashboard would
-      // only be able to tell them to go there.
-      void this.router.navigate(['/account/billing']);
+      await this.auth.login(email, password);
+      await this.finish();
     } catch (err) {
       this.error.set(err instanceof Error ? err.message : 'something went wrong');
     } finally {

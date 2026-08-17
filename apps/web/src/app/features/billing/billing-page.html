@@ -1,332 +1,411 @@
-<div class="container-page py-12 sm:py-16">
-  <header class="mb-10">
-    <p class="eyebrow">Account</p>
-    <h1 class="section-title mt-2">Credit &amp; packages</h1>
-  </header>
+<!-- One centred column. Every row on this page is a form control or a line of a receipt, and both
+     read badly stretched across a desktop viewport — so the column is capped and the page is
+     composed around it rather than starting at the left gutter. -->
+<div class="container-page py-10 sm:py-14">
+  <div class="mx-auto w-full max-w-xl">
+    <!-- ── Wallet ────────────────────────────────────────────────────────────
+         Name and number, nothing else. -->
+    <section>
+      <h1 class="text-[0.9375rem] text-muted">Wallet</h1>
+      <p class="mt-1 text-4xl tracking-[-0.03em] text-ink sm:text-5xl">{{ formatCredit(balanceCents()) }}</p>
+    </section>
 
-  @if (loading() && !balanceCents()) {
-    <p class="text-muted">Loading…</p>
-  }
-
-  @if (error()) {
-    <div role="alert" class="card-soft mb-8 border-l-4 border-l-red-500 p-5">
-      <p class="text-ink">{{ error() }}</p>
-    </div>
-  }
-
-  <!-- ── Balance ─────────────────────────────────────────────────────────── -->
-  <section class="card p-7 sm:p-8">
-    <div class="flex flex-wrap items-end justify-between gap-6">
-      <div>
-        <p class="field-label mb-1">Credit balance</p>
-        <p class="text-[2.75rem] leading-none tracking-[-0.03em] text-ink">
-          {{ formatUsd(balanceCents()) }}
-        </p>
-      </div>
-
-      @if (subscription(); as sub) {
-        <div class="text-right">
-          <p class="field-label mb-1">Current package</p>
-          <p class="text-lg text-ink">
-            {{ sub.tier === 'free' ? 'Free' : (sub.tier | titlecase) }}
-            <span class="text-muted">· {{ sub.profileLimit }} profiles</span>
-          </p>
-          @if (sub.currentPeriodEnd && sub.tier !== 'free') {
-            <p class="mt-0.5 text-xs text-faint">
-              {{ sub.autoRenew ? 'Renews' : 'Ends' }}
-              {{ sub.currentPeriodEnd | date: 'mediumDate' }}
-            </p>
-          }
-        </div>
-      }
+  @if (loading()) {
+    <p class="mt-10 text-[0.9375rem] text-muted">Loading…</p>
+  } @else {
+    <!-- ── Add funds ─────────────────────────────────────────────────────────
+         Three steps, and the line below is derived from real state (see `step`) so it can never
+         claim a stage the payment has not actually reached. -->
+    <!-- The lobster stands ON the card.
+         `mb-0` is deliberate and load-bearing: the sprite was cropped to the walk cycle's exact
+         bounding box, so its bottom edge IS the feet. Any negative margin here sinks them below
+         the outline instead of landing them on it. Offset toward the right rather than centred,
+         and aligned to the card's own inner padding so it stands over the panel, not off its edge. -->
+    <div class="flex justify-end pr-6 sm:pr-10">
+      <img
+        src="/brand/lobster-step.gif"
+        alt=""
+        aria-hidden="true"
+        width="397"
+        height="203"
+        class="pointer-events-none mb-0 block h-auto w-[92px] select-none"
+        style="image-rendering: pixelated"
+      />
     </div>
 
-    @if (isPastDue()) {
-      <!-- The one state that needs explaining: nothing was cancelled, and nothing is owed. -->
-      <div role="alert" class="mt-6 rounded-xl bg-amber-50 p-4 text-[0.9375rem] text-amber-900">
-        <strong>Your package is paused.</strong> There was not enough Credit at the last renewal, so
-        new profiles are on hold — your existing profiles are untouched. Top up and it resumes
-        automatically; there is nothing else to do.
-      </div>
-    }
-
-    @if (subscription(); as sub) {
-      @if (sub.tier !== 'free') {
-        <div class="rule mt-6 flex items-center justify-between pt-5">
-          <div>
-            <p class="text-[0.9375rem] text-ink">Auto-renew</p>
-            <p class="text-xs text-faint">
-              Deducts {{ formatUsd(sub.priceCents) }} from Credit every 30 days.
-            </p>
-          </div>
-          <button type="button" class="btn btn-sm btn-secondary" (click)="toggleAutoRenew()">
-            {{ sub.autoRenew ? 'Turn off' : 'Turn on' }}
-          </button>
-        </div>
-      }
-    }
-  </section>
-
-  <!-- ── Top up ──────────────────────────────────────────────────────────── -->
-  <section class="mt-8">
-    <h2 class="text-xl tracking-[-0.02em] text-ink">Add Credit</h2>
-    <p class="mt-1 text-[0.9375rem] text-muted">
-      Crypto only. Deposit any amount, any time — it stays as Credit until you spend it.
-    </p>
-
-    @if (instruction(); as inst) {
-      <!-- Payment instructions. Shown in place of the form so there is one thing to do. -->
-      <div class="card mt-5 p-7">
-        <div class="flex items-start justify-between gap-4">
-          <div>
-            <p class="field-label mb-1">Send exactly</p>
-            <p class="text-2xl tracking-[-0.02em] text-ink">
-              {{ inst.amountCrypto }} {{ inst.asset }}
-            </p>
-            <p class="mt-1 text-[0.875rem] text-muted">
-              on {{ inst.chain }} · credits {{ formatUsd(inst.amountCents) }}
-            </p>
-          </div>
-          <button
-            type="button"
-            class="btn btn-sm btn-ghost"
-            aria-label="Dismiss payment instructions"
-            (click)="dismissInstruction()"
-          >
-            <span class="icon text-[20px]">close</span>
-          </button>
-        </div>
-
-        <div class="mt-6">
-          <p class="field-label mb-1.5">To this address</p>
-          <div class="flex items-center gap-2">
-            <code
-              class="flex-1 overflow-x-auto rounded-xl bg-brand-50 px-4 py-3 font-mono text-[0.8125rem] text-ink"
-              >{{ inst.address }}</code
+    <section class="rounded-panel border-2 border-lobster bg-surface p-6 shadow-soft sm:p-8">
+      <ol class="flex items-center gap-0" aria-label="Deposit progress">
+        @for (s of [{ n: 1, label: 'Amount' }, { n: 2, label: 'Send' }, { n: 3, label: 'Done' }]; track s.n) {
+          <li class="flex flex-1 items-center gap-3 last:flex-none">
+            <span
+              class="flex size-8 shrink-0 items-center justify-center rounded-full border-[1.5px] text-[0.8125rem] transition-colors"
+              [class]="
+                step() > s.n
+                  ? 'border-brand-600 bg-brand-600 text-white'
+                  : step() === s.n
+                    ? 'border-brand-600 text-brand-700'
+                    : 'border-hairline-strong text-faint'
+              "
             >
-            <button
-              type="button"
-              class="btn btn-sm btn-secondary shrink-0"
-              (click)="copy(inst.address, 'address')"
-            >
-              {{ copied() === 'address' ? 'Copied' : 'Copy' }}
-            </button>
-          </div>
-        </div>
-
-        <!-- The two mistakes that actually lose money on a deposit address. -->
-        <div class="mt-5 rounded-xl bg-amber-50 p-4 text-[0.875rem] text-amber-900">
-          Send <strong>{{ inst.asset }} on {{ inst.chain }}</strong> only. A different coin, or the
-          right coin on a different network, will not arrive and cannot be recovered.
-        </div>
-
-        <p class="mt-5 text-[0.875rem] text-muted">
-          Credit appears automatically once the network confirms — usually a minute or two. You can
-          close this page; it will still land.
-        </p>
-
-        @if (inst.hostedUrl) {
-          <a
-            [href]="inst.hostedUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="btn btn-md btn-secondary mt-5"
-          >
-            Open payment page
-          </a>
+              @if (step() > s.n) {
+                <span class="icon text-[18px]" aria-hidden="true">check</span>
+              } @else {
+                {{ s.n }}
+              }
+            </span>
+            <span
+              class="text-[0.875rem]"
+              [class]="step() >= s.n ? 'text-ink' : 'text-faint'"
+              [attr.aria-current]="step() === s.n ? 'step' : null"
+            >{{ s.label }}</span>
+            @if (s.n < 3) {
+              <span class="mx-2 h-px flex-1" [class]="step() > s.n ? 'bg-brand-600' : 'bg-hairline'"></span>
+            }
+          </li>
         }
-      </div>
-    } @else {
-      <div class="card mt-5 p-7">
-        <!-- Amount -->
-        <p class="field-label mb-2">Amount</p>
-        <div class="flex flex-wrap gap-2">
-          @for (preset of presets; track preset) {
-            <button
-              type="button"
-              class="chip"
-              [class]="amountCents() === preset ? 'bg-brand-600 text-white' : ''"
-              (click)="setPreset(preset)"
-            >
-              {{ formatUsd(preset) }}
-            </button>
-          }
-        </div>
+      </ol>
 
-        <div class="relative mt-3 max-w-[12rem]">
-          <span class="absolute inset-y-0 left-3.5 flex items-center text-muted">$</span>
+      <!-- ── Step 1: amount + coin ───────────────────────────────────────── -->
+      @if (!instruction()) {
+        <div class="mt-8">
+          <label class="field-label" for="amount">Amount</label>
+          <!-- `type=text` with a decimal keypad, NOT `type=number`: a number field silently
+               discards what it cannot parse mid-entry and fights every keystroke. The value is
+               echoed straight back from `amountText`, so the box shows exactly what was typed. -->
           <input
-            type="number"
-            min="5"
-            step="0.01"
-            class="field-input pl-7"
-            aria-label="Deposit amount in US dollars"
-            [value]="amountDollars()"
+            id="amount"
+            type="text"
+            inputmode="decimal"
+            autocomplete="off"
+            placeholder="10"
+            class="field-input h-12 text-lg"
+            [value]="amountText()"
             (input)="onAmountInput($any($event.target).value)"
           />
-        </div>
+          <p class="mt-1.5 text-[0.8125rem] text-muted">
+            {{ amountCents() === null ? 'Enter an amount' : formatCredit(amountCents()!) + ' will be added' }}
+          </p>
 
-        <!-- Network. The point of this whole block is the fee column. -->
-        <p class="field-label mb-2 mt-7">Pay with</p>
-        <p class="mb-3 text-[0.875rem] text-muted">
-          The fee below is what <em>your</em> wallet pays the network to send — not our charge. It
-          differs by hundreds of times between chains, so the cheap ones are listed first.
-        </p>
-
-        <div class="grid gap-2 sm:grid-cols-2">
-          @for (chain of recommendedChains(); track chain.code) {
-            <button
-              type="button"
-              class="flex items-center justify-between rounded-xl border p-4 text-left transition-colors"
-              [class]="
-                chainCode() === chain.code
-                  ? 'border-brand-600 bg-brand-50'
-                  : 'border-black/10 hover:border-black/20'
-              "
-              (click)="chainCode.set(chain.code)"
-            >
-              <span>
-                <span class="block text-[0.9375rem] text-ink">{{ chain.asset }}</span>
-                <span class="block text-xs text-muted">{{ chain.chain }}</span>
-              </span>
-              <span class="text-xs text-emerald-700">{{ formatFee(chain.networkFeeUsd) }}</span>
-            </button>
-          }
-        </div>
-
-        @if (otherChains().length) {
+          <label class="field-label mt-6" for="coin">Coin</label>
           <button
+            id="coin"
             type="button"
-            class="mt-3 text-[0.875rem] text-brand-600 transition-colors hover:text-brand-700"
-            (click)="showAllChains.set(!showAllChains())"
+            class="field-input flex h-12 w-full items-center justify-between text-left"
+            aria-haspopup="dialog"
+            [attr.aria-expanded]="pickerOpen()"
+            (click)="togglePicker()"
           >
-            {{ showAllChains() ? 'Hide' : 'Show' }} other networks ({{ otherChains().length }})
+            @if (selectedChain(); as c) {
+              <span class="flex min-w-0 items-center gap-3">
+                <!-- Asset icon with the network as a badge. The badge is the thing that separates
+                     USDT-on-Tron from USDT-on-BNB, and sending to the wrong one loses the money. -->
+                <span class="relative shrink-0">
+                  <img [src]="'/coins/' + c.icon + '.svg'" alt="" width="24" height="24" class="size-6" />
+                  @if (c.networkIcon) {
+                    <img
+                      [src]="'/coins/' + c.networkIcon + '.svg'"
+                      alt=""
+                      width="14"
+                      height="14"
+                      class="absolute -bottom-1 -right-1 size-3.5 rounded-full ring-2 ring-surface"
+                    />
+                  }
+                </span>
+                <span class="truncate text-ink">{{ c.asset }}</span>
+                <span class="truncate text-[0.8125rem] text-muted">{{ c.chain }}</span>
+              </span>
+            } @else {
+              <span class="text-muted">Select a coin</span>
+            }
+            <span class="icon shrink-0 text-[20px] text-muted" aria-hidden="true">expand_more</span>
           </button>
 
-          @if (showAllChains()) {
-            <div class="mt-3 grid gap-2 sm:grid-cols-2">
-              @for (chain of otherChains(); track chain.code) {
-                <button
-                  type="button"
-                  class="flex items-center justify-between rounded-xl border p-4 text-left transition-colors"
-                  [class]="
-                    chainCode() === chain.code
-                      ? 'border-brand-600 bg-brand-50'
-                      : 'border-black/10 hover:border-black/20'
-                  "
-                  (click)="chainCode.set(chain.code)"
-                >
-                  <span>
-                    <span class="block text-[0.9375rem] text-ink">{{ chain.asset }}</span>
-                    <span class="block text-xs text-muted">{{ chain.chain }}</span>
-                  </span>
-                  <span class="text-xs text-amber-700">{{ formatFee(chain.networkFeeUsd) }}</span>
-                </button>
-              }
-            </div>
+          @if (depositError()) {
+            <p class="field-error mt-3">{{ depositError() }}</p>
           }
-        }
 
-        @if (depositError()) {
-          <p role="alert" class="field-error mt-4">{{ depositError() }}</p>
-        }
+          <button
+            type="button"
+            class="btn btn-md btn-primary mt-7 w-full"
+            [disabled]="creatingDeposit() || !chainCode() || !depositsAvailable() || !emailVerified() || amountCents() === null"
+            (click)="requestPay()"
+          >
+            {{ creatingDeposit() ? 'Getting address…' : 'Pay' }}
+          </button>
 
-        <button
-          type="button"
-          class="btn btn-md btn-primary mt-7"
-          [disabled]="creatingDeposit() || !chainCode()"
-          (click)="createDeposit()"
-        >
-          {{ creatingDeposit() ? 'Getting address…' : 'Get deposit address' }}
-        </button>
-      </div>
-    }
-  </section>
-
-  <!-- ── Packages ────────────────────────────────────────────────────────── -->
-  <section class="mt-12">
-    <h2 class="text-xl tracking-[-0.02em] text-ink">Packages</h2>
-    <p class="mt-1 text-[0.9375rem] text-muted">
-      Monthly, paid from Credit. Change or cancel any time.
-    </p>
-
-    @if (purchaseError()) {
-      <p role="alert" class="field-error mt-4">{{ purchaseError() }}</p>
-    }
-
-    <div class="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      @for (plan of plans(); track plan.tier) {
-        <div
-          class="card flex flex-col p-6"
-          [class]="planIsCurrent(plan) ? 'ring-2 ring-brand-600' : ''"
-        >
-          <p class="text-[0.9375rem] text-muted">{{ plan.name }}</p>
-          <p class="mt-1 text-3xl tracking-[-0.02em] text-ink">
-            {{ formatUsd(plan.priceCents) }}<span class="text-base text-muted">/mo</span>
-          </p>
-          <p class="mt-2 text-[0.9375rem] text-ink">{{ plan.profileLimit }} profiles</p>
-
-          <div class="mt-auto pt-6">
-            @if (planIsCurrent(plan)) {
-              <button type="button" class="btn btn-md btn-secondary w-full" disabled>
-                Current package
-              </button>
-            } @else if (canAfford(plan)) {
+          <!-- Both stated here, before an amount is even typed, rather than after Pay is pressed. -->
+          @if (!emailVerified()) {
+            <p class="mt-3 text-center text-[0.8125rem] text-muted">
+              Confirm your email address before adding Credit.
               <button
                 type="button"
-                class="btn btn-md btn-primary w-full"
-                [disabled]="purchasing() !== null"
-                (click)="purchase(plan)"
+                class="text-brand-600 transition-colors hover:text-brand-700"
+                (click)="confirmEmail()"
               >
-                {{ purchasing() === plan.tier ? 'Purchasing…' : 'Choose' }}
+                Enter your code
               </button>
-            } @else {
-              <!-- Not disabled-and-silent: say exactly how much more is needed. -->
-              <button type="button" class="btn btn-md btn-secondary w-full" disabled>
-                {{ formatUsd(shortfall(plan)) }} more needed
-              </button>
-            }
-          </div>
+            </p>
+          } @else if (!depositsAvailable()) {
+            <p class="mt-3 text-center text-[0.8125rem] text-muted">
+              Crypto deposits are temporarily unavailable. Nothing will be charged.
+            </p>
+          }
         </div>
       }
-    </div>
-  </section>
 
-  <!-- ── Statement ───────────────────────────────────────────────────────── -->
-  @if (transactions().length) {
-    <section class="mt-12">
-      <h2 class="text-xl tracking-[-0.02em] text-ink">Credit history</h2>
-      <div class="card mt-5 overflow-x-auto">
-        <table class="w-full text-left text-[0.9375rem]">
-          <thead class="text-xs uppercase tracking-wide text-faint">
-            <tr>
-              <th scope="col" class="px-6 py-4 font-normal">Date</th>
-              <th scope="col" class="px-6 py-4 font-normal">Description</th>
-              <th scope="col" class="px-6 py-4 text-right font-normal">Amount</th>
-              <th scope="col" class="px-6 py-4 text-right font-normal">Balance</th>
-            </tr>
-          </thead>
-          <tbody>
-            @for (tx of transactions(); track tx.id) {
-              <tr class="border-t border-black/5">
-                <td class="whitespace-nowrap px-6 py-4 text-muted">
-                  {{ tx.createdAt | date: 'mediumDate' }}
-                </td>
-                <td class="px-6 py-4 text-ink">{{ tx.description }}</td>
-                <td
-                  class="whitespace-nowrap px-6 py-4 text-right"
-                  [class]="tx.amountCents >= 0 ? 'text-emerald-700' : 'text-ink'"
-                >
-                  {{ tx.amountCents >= 0 ? '+' : '−' }}{{ formatUsd(abs(tx.amountCents)) }}
-                </td>
-                <td class="whitespace-nowrap px-6 py-4 text-right text-muted">
-                  {{ formatUsd(tx.balanceAfterCents) }}
-                </td>
-              </tr>
-            }
-          </tbody>
-        </table>
-      </div>
+      <!-- ── Step 2: the address ─────────────────────────────────────────── -->
+      @if (instruction(); as inst) {
+        <div class="mt-8">
+          <p class="text-[0.9375rem] text-ink">
+            Send exactly <strong>{{ inst.amountCrypto }} {{ inst.asset }}</strong> on
+            <strong>{{ inst.chain }}</strong>.
+          </p>
+
+          @if (qr(); as src) {
+            <img
+              [src]="src"
+              alt="QR code for the deposit address"
+              width="180"
+              height="180"
+              class="mx-auto mt-5 size-[180px] rounded-xl border-[0.5px] border-hairline bg-white p-2"
+            />
+          }
+
+          <div class="mt-5">
+            <p class="field-label">Address</p>
+            <div class="flex items-stretch gap-2">
+              <code class="min-w-0 flex-1 truncate rounded-xl border-[0.5px] border-hairline-strong bg-surface-soft px-3.5 py-3 text-[0.8125rem] text-ink">
+                {{ inst.address }}
+              </code>
+              <button
+                type="button"
+                class="btn btn-md btn-secondary shrink-0 !px-3"
+                [attr.aria-label]="'Copy address'"
+                (click)="copy(inst.address, 'address')"
+              >
+                <span class="icon text-[20px]" aria-hidden="true">{{ copied() === 'address' ? 'check' : 'content_copy' }}</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="mt-4">
+            <p class="field-label">Amount</p>
+            <div class="flex items-stretch gap-2">
+              <code class="min-w-0 flex-1 truncate rounded-xl border-[0.5px] border-hairline-strong bg-surface-soft px-3.5 py-3 text-[0.8125rem] text-ink">
+                {{ inst.amountCrypto }} {{ inst.asset }}
+              </code>
+              <button
+                type="button"
+                class="btn btn-md btn-secondary shrink-0 !px-3"
+                [attr.aria-label]="'Copy amount'"
+                (click)="copy(inst.amountCrypto, 'amount')"
+              >
+                <span class="icon text-[20px]" aria-hidden="true">{{ copied() === 'amount' ? 'check' : 'content_copy' }}</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- The one mistake that actually loses money. Kept, because it is not decoration. -->
+          <p class="mt-5 rounded-xl bg-amber-50 p-3 text-[0.8125rem] leading-relaxed text-amber-900">
+            Send {{ inst.asset }} on {{ inst.chain }} only. Another coin, or this coin on another
+            network, will not arrive and cannot be recovered.
+          </p>
+
+          <button type="button" class="btn btn-md btn-secondary mt-5" (click)="dismissInstruction()">
+            Cancel
+          </button>
+        </div>
+      }
     </section>
-  }
+
+    <!-- ── History ───────────────────────────────────────────────────────── -->
+    @if (transactions().length) {
+      <section class="mt-14">
+        <h2 class="text-[0.9375rem] text-muted">History</h2>
+        <ul class="mt-3 divide-y-[0.5px] divide-hairline border-y-[0.5px] border-hairline">
+          @for (tx of transactions(); track tx.id) {
+            <li class="flex items-baseline justify-between gap-4 py-3">
+              <span class="min-w-0">
+                <span class="block truncate text-[0.9375rem] text-ink">{{ tx.description }}</span>
+                <span class="block text-xs text-muted">{{ tx.createdAt | date: 'mediumDate' }}</span>
+              </span>
+              <span
+                class="shrink-0 text-[0.9375rem]"
+                [class]="tx.amountCents >= 0 ? 'text-emerald-700' : 'text-ink'"
+              >{{ tx.amountCents >= 0 ? '+' : '' }}{{ formatCredit(tx.amountCents) }}</span>
+            </li>
+          }
+        </ul>
+      </section>
+    }
+    }
+  </div>
 </div>
+
+<!-- ── Confirm before paying ───────────────────────────────────────────────
+     A deliberate stop. Everything shown is frozen from the moment Pay was pressed, so what is
+     confirmed is exactly what is paid. No invoice exists yet; Cancel costs nothing. -->
+@if (pendingConfirm(); as c) {
+  <div
+    class="fixed inset-0 z-[80] flex items-center justify-center bg-ink/40 p-4 backdrop-blur-sm"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="confirm-pay-title"
+  >
+    <div class="w-full max-w-md rounded-panel border-[0.5px] border-hairline bg-surface p-6 shadow-lift">
+      <h2 id="confirm-pay-title" class="text-lg text-ink">Confirm your top-up</h2>
+      <p class="mt-1 text-[0.875rem] text-muted">Check these before we generate an address.</p>
+
+      <dl class="mt-5 divide-y-[0.5px] divide-hairline border-y-[0.5px] border-hairline">
+        <div class="flex items-baseline justify-between py-3">
+          <dt class="text-[0.875rem] text-muted">Credit added</dt>
+          <dd class="text-lg text-ink">{{ formatCredit(c.amountCents) }}</dd>
+        </div>
+        <div class="flex items-baseline justify-between py-3">
+          <dt class="text-[0.875rem] text-muted">You pay in</dt>
+          <dd class="text-[0.9375rem] text-ink">{{ c.asset }} <span class="text-muted">on {{ c.chain }}</span></dd>
+        </div>
+        <div class="flex items-baseline justify-between py-3">
+          <dt class="text-[0.875rem] text-muted">Your network fee</dt>
+          <dd class="text-[0.9375rem] text-ink">{{ formatFee(c.networkFeeUsd) }}</dd>
+        </div>
+      </dl>
+
+      <!-- The mistake that actually loses money, stated before the address is even issued. -->
+      <p class="mt-4 rounded-xl bg-amber-50 p-3 text-[0.8125rem] leading-relaxed text-amber-900">
+        Send <strong>{{ c.asset }} on {{ c.chain }}</strong> only. A different coin, or the right
+        coin on another network, will not arrive and cannot be recovered.
+      </p>
+      <p class="mt-3 text-[0.8125rem] leading-relaxed text-muted">
+        The exchange rate is fixed when the address is issued and holds for one hour.
+      </p>
+
+      <div class="mt-6 flex gap-3">
+        <button type="button" class="btn btn-md btn-secondary flex-1" (click)="cancelPay()">
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="btn btn-md btn-primary flex-1"
+          [disabled]="creatingDeposit()"
+          (click)="confirmPay()"
+        >
+          {{ creatingDeposit() ? 'Getting address…' : 'Confirm & get address' }}
+        </button>
+      </div>
+    </div>
+  </div>
+}
+
+<!-- ── Payment settled ─────────────────────────────────────────────────────
+     Raised only when this deposit is observed `confirmed`, i.e. the processor settled and the
+     Credit is really there. -->
+@if (settled(); as s) {
+  <div
+    class="fixed inset-0 z-[80] flex items-center justify-center bg-ink/40 p-4 backdrop-blur-sm"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="settled-title"
+  >
+    <div class="w-full max-w-md rounded-panel border-[0.5px] border-hairline bg-surface p-6 text-center shadow-lift">
+      <span class="mx-auto flex size-12 items-center justify-center rounded-full bg-emerald-50 text-emerald-700">
+        <span class="icon text-[26px]" aria-hidden="true">check</span>
+      </span>
+      <h2 id="settled-title" class="mt-4 text-lg text-ink">Payment received</h2>
+      <p class="mt-2 text-[0.9375rem] leading-relaxed text-muted">
+        Your {{ s.asset }} payment is confirmed and
+        <strong class="text-ink">{{ formatCredit(s.amountCents) }}</strong> has been added to your
+        Credit.
+      </p>
+      <p class="mt-3 text-[0.8125rem] text-muted">Balance: {{ formatCredit(balanceCents()) }}</p>
+      <button type="button" class="btn btn-md btn-primary mt-6 w-full" (click)="dismissSettled()">
+        Done
+      </button>
+    </div>
+  </div>
+}
+
+<!-- ── Coin picker ─────────────────────────────────────────────────────────
+     A modal rather than a dropdown. Twenty-odd rails do not belong in a popup that spills over the
+     page, and the choice deserves the room: the two groups answer the only two questions a payer
+     has — "the steady one" or "the coin I already hold". -->
+@if (pickerOpen()) {
+  <div
+    class="fixed inset-0 z-[80] flex items-end justify-center bg-ink/40 p-0 backdrop-blur-sm sm:items-center sm:p-4"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="coin-picker-title"
+    (click)="togglePicker()"
+  >
+    <!-- Stops a click inside the panel from reaching the backdrop's dismiss handler. -->
+    <div
+      class="flex max-h-[85vh] w-full max-w-lg flex-col rounded-t-panel border-[0.5px] border-hairline bg-surface shadow-lift sm:rounded-panel"
+      (click)="$event.stopPropagation()"
+    >
+      <div class="flex items-center justify-between gap-4 border-b-[0.5px] border-hairline px-5 py-4">
+        <h2 id="coin-picker-title" class="text-lg text-ink">Choose a coin</h2>
+        <button
+          type="button"
+          class="btn btn-sm btn-secondary !px-2"
+          aria-label="Close"
+          (click)="togglePicker()"
+        >
+          <span class="icon text-[20px]" aria-hidden="true">close</span>
+        </button>
+      </div>
+
+      <div class="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+        @for (group of [
+          { title: 'Stablecoins', hint: 'Pegged to the dollar — what you send is what you get', rows: stableChains() },
+          { title: 'Other coins', hint: 'Converted at the rate fixed when your address is issued', rows: nativeChains() }
+        ]; track group.title) {
+          @if (group.rows.length) {
+            <p class="px-3 pb-1 pt-3 text-[0.8125rem] text-ink">{{ group.title }}</p>
+            <p class="px-3 pb-2 text-xs text-muted">{{ group.hint }}</p>
+            <ul role="listbox" [attr.aria-label]="group.title">
+              @for (c of group.rows; track c.code) {
+                <li>
+                  <button
+                    type="button"
+                    role="option"
+                    [attr.aria-selected]="chainCode() === c.code"
+                    class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-brand-50"
+                    [class]="chainCode() === c.code ? 'bg-brand-50' : ''"
+                    (click)="chooseChain(c.code)"
+                  >
+                    <span class="relative shrink-0">
+                      <img [src]="'/coins/' + c.icon + '.svg'" alt="" width="32" height="32" class="size-8" />
+                      @if (c.networkIcon) {
+                        <img
+                          [src]="'/coins/' + c.networkIcon + '.svg'"
+                          alt=""
+                          width="16"
+                          height="16"
+                          class="absolute -bottom-0.5 -right-0.5 size-4 rounded-full ring-2 ring-surface"
+                        />
+                      }
+                    </span>
+                    <span class="min-w-0 flex-1">
+                      <span class="block truncate text-[0.9375rem] text-ink">{{ c.asset }}</span>
+                      <span class="block truncate text-xs text-muted">{{ c.chain }}</span>
+                    </span>
+                    <span class="shrink-0 text-right text-xs" [class]="c.recommended ? 'text-emerald-700' : 'text-muted'">
+                      {{ formatFeeShort(c.networkFeeUsd) }}
+                    </span>
+                    @if (chainCode() === c.code) {
+                      <span class="icon shrink-0 text-[20px] text-brand-700" aria-hidden="true">check</span>
+                    }
+                  </button>
+                </li>
+              }
+            </ul>
+          }
+        }
+      </div>
+
+      <p class="border-t-[0.5px] border-hairline px-5 py-3 text-xs leading-relaxed text-muted">
+        The fee shown is what your own wallet pays the network to send — it is not charged by us.
+      </p>
+    </div>
+  </div>
+}

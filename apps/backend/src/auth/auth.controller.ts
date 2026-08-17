@@ -1,13 +1,4 @@
-import {
-  Body,
-  Controller,
-  Get,
-  HttpCode,
-  Post,
-  Req,
-  UnauthorizedException,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
 import type { User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
@@ -89,5 +80,38 @@ export class AuthController {
   @HttpCode(200)
   async desktopExchange(@Body() dto: DesktopExchangeDto): Promise<ApiResponse<AuthResult>> {
     return ok(await this.desktopAuth.exchange(dto));
+  }
+
+  /**
+   * Prove ownership of an address.
+   *
+   * POST, not GET: mail clients and security scanners prefetch links, and a GET here would let a
+   * scanner silently consume the single-use token before the human ever clicked it. The web app
+   * reads the token from the URL and posts it.
+   */
+  /**
+   * Submit the 6-digit code. AUTHENTICATED: registration already returns a session, and scoping
+   * the attempt to that session is what keeps a six-digit code from being sprayed across accounts.
+   */
+  @Post('verify-email')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard)
+  async verifyEmail(
+    @Req() req: AuthenticatedRequest,
+    @Body('code') code: string,
+  ): Promise<ApiResponse<User>> {
+    if (!req.user) throw new UnauthorizedException();
+    // WRAPPED, like every other endpoint. These two returned bare objects, and the web client —
+    // which treats a missing `code` as a business failure — reported "request failed" on a call
+    // that had in fact succeeded and already stamped the account verified.
+    return ok(await this.authService.verifyEmail(req.user.id, String(code ?? '')));
+  }
+
+  /** Re-send a code. Always 200 — see `resendVerification` for why it cannot report the truth. */
+  @Post('resend-verification')
+  @HttpCode(200)
+  async resendVerification(@Body('email') email: string): Promise<ApiResponse<{ sent: true }>> {
+    await this.authService.resendVerification(String(email ?? ''));
+    return ok({ sent: true });
   }
 }

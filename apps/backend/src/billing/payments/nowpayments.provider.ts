@@ -76,6 +76,14 @@ export class NowPaymentsProvider implements PaymentProvider {
     return this.apiKey.length > 0 && this.ipnSecret.length > 0;
   }
 
+  /**
+   * NOWPayments takes the curated codes as-is — it has no per-account rail gating for these — so
+   * every catalogue entry is offerable whenever the account is configured.
+   */
+  supportsCurrency(_currencyCode: string): boolean {
+    return this.isConfigured();
+  }
+
   async createDeposit(args: {
     amountCents: number;
     currencyCode: string;

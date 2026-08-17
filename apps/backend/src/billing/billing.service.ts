@@ -5,6 +5,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   FREE_PLAN_PROFILE_LIMIT,
@@ -33,6 +34,12 @@ export interface BillingOverview {
   plans: typeof PLAN_CATALOG;
   chains: typeof DEPOSIT_CHAINS;
   freePlanProfileLimit: number;
+  /**
+   * Whether the processor is actually usable right now. Sent so the page can say so BEFORE the
+   * user picks an amount, rather than letting them commit to Pay and meet a 503 — the credentials
+   * being absent is a fact we already know at render time.
+   */
+  depositsAvailable: boolean;
 }
 
 /** A newly issued deposit address for the user to send to. */
@@ -99,7 +106,10 @@ export class BillingService {
       balanceCents,
       subscription,
       plans: PLAN_CATALOG,
-      chains: DEPOSIT_CHAINS,
+      // Only rails the processor will actually accept. Offering one it refuses turns a curated
+      // list into a trap: the user picks it, confirms, and only then meets the refusal.
+      chains: DEPOSIT_CHAINS.filter((c) => this.payments.supportsCurrency(c.code)),
+      depositsAvailable: this.payments.isConfigured(),
       freePlanProfileLimit: FREE_PLAN_PROFILE_LIMIT,
     };
   }
@@ -130,7 +140,8 @@ export class BillingService {
     }
     if (amountCents < MIN_DEPOSIT_CENTS || amountCents > MAX_DEPOSIT_CENTS) {
       throw new BadRequestException(
-        `deposit must be between $${MIN_DEPOSIT_CENTS / 100} and $${MAX_DEPOSIT_CENTS / 100}`,
+        // Phrased in Credit, matching the account page: the balance is Credit, not dollars.
+        `deposit must be between ${MIN_DEPOSIT_CENTS / 100} and ${MAX_DEPOSIT_CENTS / 100} Credit`,
       );
     }
 
@@ -140,8 +151,31 @@ export class BillingService {
     const chain = depositChainByCode(currencyCode);
     if (!chain) throw new BadRequestException('unsupported deposit currency');
 
+    // Missing credentials are a deployment state, not a client error — and the provider would
+    // otherwise throw from inside `createDeposit` and surface as a bare 500 "Internal server
+    // error" on the payment page, after the user had already confirmed.
+    if (!this.payments.isConfigured()) {
+      throw new ServiceUnavailableException(
+        'crypto deposits are temporarily unavailable — no payment has been taken',
+      );
+    }
+
     const orderId = `${team}:${Date.now()}`;
-    const created = await this.payments.createDeposit({ amountCents, currencyCode, orderId });
+    // A processor that refuses the request is an upstream fault, not a bug in the caller's input,
+    // and it must not reach the payment page as a bare 500 "Internal server error". The detail is
+    // logged here and NOT returned: it can carry merchant identifiers and upstream diagnostics.
+    // The one thing the user needs to know is that no money moved.
+    let created: Awaited<ReturnType<PaymentProvider['createDeposit']>>;
+    try {
+      created = await this.payments.createDeposit({ amountCents, currencyCode, orderId });
+    } catch (err) {
+      this.logger.error(
+        `deposit address request failed via ${this.payments.name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      throw new ServiceUnavailableException(
+        'could not reach the payment processor — no payment has been taken, please try again shortly',
+      );
+    }
 
     const deposit = await this.repo.createDeposit({
       teamId: team,

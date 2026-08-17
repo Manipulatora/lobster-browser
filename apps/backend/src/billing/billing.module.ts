@@ -7,6 +7,7 @@ import { BILLING_REPOSITORY } from './billing.repository';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
 import { InMemoryBillingRepository } from './in-memory-billing.repository';
+import { CryptomusProvider } from './payments/cryptomus.provider';
 import { NowPaymentsProvider } from './payments/nowpayments.provider';
 import { PAYMENT_PROVIDER } from './payments/payment-provider';
 import { PrismaBillingRepository } from './prisma-billing.repository';
@@ -43,7 +44,23 @@ import { RenewalService } from './renewal.service';
       // adding or swapping one is a change to ./payments and this binding.
       provide: PAYMENT_PROVIDER,
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => new NowPaymentsProvider(config),
+      /**
+       * Selected by `PAYMENT_PROVIDER`, defaulting to NOWPayments so an existing deployment that
+       * never sets it keeps the processor it already had. An unrecognised value throws at boot
+       * rather than silently falling back: quietly charging through a different processor than the
+       * one configured is not a failure mode worth being lenient about.
+       */
+      useFactory: (config: ConfigService) => {
+        const choice = (config.get<string>('PAYMENT_PROVIDER') ?? 'nowpayments').toLowerCase();
+        switch (choice) {
+          case 'cryptomus':
+            return new CryptomusProvider(config);
+          case 'nowpayments':
+            return new NowPaymentsProvider(config);
+          default:
+            throw new Error(`unknown PAYMENT_PROVIDER "${choice}"`);
+        }
+      },
     },
   ],
   exports: [BillingService, BILLING_REPOSITORY],

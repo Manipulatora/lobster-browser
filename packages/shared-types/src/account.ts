@@ -5,6 +5,14 @@ export interface User {
   email: string;
   displayName?: string;
   createdAt: string;
+  /**
+   * ISO instant the email address was proven, or undefined while unverified.
+   *
+   * Exposed on the public user so a client can show verification state without a second call.
+   * It is a timestamp rather than a boolean because "when" matters for support and for expiring
+   * accounts that never confirmed.
+   */
+  emailVerifiedAt?: string;
 }
 
 export interface Team {
@@ -193,4 +201,17 @@ export interface DepositChainOption {
   networkFeeUsd: number;
   /** Cheap rails are offered first and one is preselected. */
   recommended: boolean;
+  /** Asset icon slug under /coins/<icon>.svg — the coin itself (USDT, BTC …). */
+  icon: string;
+  /**
+   * Network icon slug under /coins/<networkIcon>.svg, shown as a small badge on the asset icon.
+   *
+   * The same token rides several chains and sending it on the wrong one loses it, so the chain is
+   * not secondary information here — the badge is what distinguishes USDT-on-Tron from
+   * USDT-on-BNB at a glance. Undefined when the asset IS the chain (BTC on Bitcoin), where a badge
+   * would just repeat the icon it sits on.
+   */
+  networkIcon?: string;
+  /** True for a fiat-pegged token. Groups the list, since most people want a stablecoin. */
+  stable: boolean;
 }

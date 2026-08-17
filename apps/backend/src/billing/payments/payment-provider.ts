@@ -51,6 +51,15 @@ export interface PaymentProvider {
   /** True when the processor is configured well enough to be used (API key present, etc.). */
   isConfigured(): boolean;
 
+  /**
+   * Will this processor actually accept `currencyCode` right now?
+   *
+   * Asked so the account page can OMIT rails that would be refused rather than offering one and
+   * failing after the user has committed. It is a claim about this processor's current state, not
+   * about the curated catalogue — a code can be perfectly valid and still be unavailable here.
+   */
+  supportsCurrency(currencyCode: string): boolean;
+
   createDeposit(args: {
     /** Amount the user wants to add to their Credit, in USD cents. */
     amountCents: number;

@@ -4,6 +4,7 @@ import { ConfigModule } from '@nestjs/config';
 import { AgentModule } from './agent/agent.module';
 import { ApiKeysModule } from './api-keys/api-keys.module';
 import { AuditModule } from './audit/audit.module';
+import { MailModule } from './mail/mail.module';
 import { AuthModule } from './auth/auth.module';
 import { BillingModule } from './billing/billing.module';
 import { HealthModule } from './health/health.module';
@@ -21,6 +22,7 @@ import { TeamsModule } from './teams/teams.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    MailModule,
     PrismaModule,
     HealthModule,
     AuthModule,

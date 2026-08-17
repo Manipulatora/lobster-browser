@@ -34,7 +34,17 @@ export class BillingStore {
   readonly balanceCents = computed(() => this._overview()?.balanceCents ?? 0);
   readonly plans = computed(() => this._overview()?.plans ?? []);
   readonly chains = computed(() => this._overview()?.chains ?? []);
+  // Absent until the overview lands; assume unavailable rather than offering a button that 503s.
+  readonly depositsAvailable = computed(() => this._overview()?.depositsAvailable === true);
   readonly subscription = computed(() => this._overview()?.subscription ?? null);
+  /**
+   * Whether the overview has actually arrived.
+   *
+   * Distinct from `subscription() === null`, which is ALSO what a genuinely free account looks
+   * like. Callers that must not mistake "not fetched yet" for "on the free plan" — the pricing
+   * page's current-plan badge, for one — need this to tell the two apart.
+   */
+  readonly loaded = computed(() => this._overview() !== null);
 
   /** Cheap rails first, then the rest — the ordering the backend already sorted them into. */
   readonly recommendedChains = computed(() => this.chains().filter((c) => c.recommended));

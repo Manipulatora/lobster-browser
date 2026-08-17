@@ -37,6 +37,15 @@ export interface DepositChainOption {
   /** What the USER's wallet pays to broadcast — not our fee and not the processor's. */
   networkFeeUsd: number;
   recommended: boolean;
+  /** Asset icon slug under /coins/<icon>.svg — the coin itself. */
+  icon: string;
+  /**
+   * Network icon slug, drawn as a badge on the asset icon. Undefined when the asset IS the chain.
+   * Sending a token on the wrong chain loses it, so the badge is load-bearing, not decoration.
+   */
+  networkIcon?: string;
+  /** True for a fiat-pegged token; the picker groups on this. */
+  stable: boolean;
 }
 
 export interface BillingOverview {
@@ -45,6 +54,8 @@ export interface BillingOverview {
   plans: PlanDefinition[];
   chains: DepositChainOption[];
   freePlanProfileLimit: number;
+  /** Whether the processor is usable right now; false means deposits cannot be started. */
+  depositsAvailable: boolean;
 }
 
 export type CreditTxKind = 'deposit' | 'purchase' | 'renewal' | 'refund' | 'adjustment';

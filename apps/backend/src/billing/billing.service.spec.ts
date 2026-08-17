@@ -31,6 +31,7 @@ function paymentsStub(): PaymentProvider {
   return {
     name: 'stub',
     isConfigured: () => true,
+    supportsCurrency: () => true,
     createDeposit: async (): Promise<CreatedDeposit> => {
       n += 1;
       return {

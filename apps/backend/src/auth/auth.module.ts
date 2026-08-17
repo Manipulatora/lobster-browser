@@ -15,6 +15,7 @@ import {
   PrismaDesktopAuthRepository,
 } from './desktop-auth.repository';
 import { InMemoryUsersRepository } from './in-memory-users.repository';
+import { EmailVerifiedGuard } from './email-verified.guard';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { PrismaUsersRepository } from './prisma-users.repository';
 import { resolveJwtSecret } from './jwt-secret';
@@ -33,7 +34,7 @@ import { USERS_REPOSITORY } from './users.repository';
     }),
   ],
   controllers: [AuthController],
-  providers: [
+  providers: [EmailVerifiedGuard, 
     AuthService,
     DesktopAuthService,
     JwtAuthGuard,
@@ -70,6 +71,6 @@ import { USERS_REPOSITORY } from './users.repository';
   ],
   // Re-export JwtModule so modules that import AuthModule to reuse JwtAuthGuard (Teams, Profiles)
   // can resolve the guard's JwtService dependency in their own context.
-  exports: [AuthService, JwtAuthGuard, JwtModule, USERS_REPOSITORY, TEAMS_REPOSITORY],
+  exports: [AuthService, JwtAuthGuard, EmailVerifiedGuard, JwtModule, USERS_REPOSITORY, TEAMS_REPOSITORY],
 })
 export class AuthModule {}

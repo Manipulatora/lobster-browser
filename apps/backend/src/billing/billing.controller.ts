@@ -4,6 +4,7 @@ import { Type } from 'class-transformer';
 import type { CreditTransaction, Deposit, PaidPlanTier, Subscription } from '@lobster/shared-types';
 
 import { CurrentUser } from '../auth/current-user.decorator';
+import { EmailVerifiedGuard } from '../auth/email-verified.guard';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ok, type ApiResponse } from '../common/api-response';
 import {
@@ -106,9 +107,14 @@ export class BillingController {
     return ok(await this.billing.listDeposits(user.id, Number(limit) || 20, teamId));
   }
 
-  /** Issue a deposit address. The user sends funds to it; Credit appears when the IPN confirms. */
+  /**
+   * Issue a deposit address. The user sends funds to it; Credit appears when the IPN confirms.
+   *
+   * `EmailVerifiedGuard` is the money gate: an account whose address was never proven cannot open
+   * a deposit, because it is an account we could not send a receipt to or resolve a dispute with.
+   */
   @Post('deposits')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, EmailVerifiedGuard)
   async createDeposit(
     @CurrentUser() user: { id: string },
     @Body() dto: CreateDepositDto,

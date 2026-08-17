@@ -8,6 +8,8 @@ export interface AuthUser {
   email: string;
   displayName?: string;
   createdAt: string;
+  /** When the address was proven. Absent until the emailed code has been entered. */
+  emailVerifiedAt?: string;
 }
 
 interface AuthResult {
@@ -30,6 +32,8 @@ export class AuthStore {
 
   private readonly _user = signal<AuthUser | null>(null);
   private readonly _restoring = signal(false);
+  /** The single outstanding `/auth/me` call, so concurrent restores share one result. */
+  private _inFlight?: Promise<void>;
 
   readonly user = this._user.asReadonly();
   readonly isAuthenticated = computed(() => this._user() !== null);
@@ -50,6 +54,25 @@ export class AuthStore {
     this.accept(await this.api.post<AuthResult>('/auth/login', { email, password }));
   }
 
+  /** True once the address on the account has actually been proven. */
+  readonly emailVerified = computed(() => this.user()?.emailVerifiedAt != null);
+
+  /**
+   * Submit the emailed 6-digit code for the CURRENT session.
+   *
+   * The endpoint is authenticated, so there is no email to pass: the code is only ever checked
+   * against the signed-in account, which is what stops six digits from being sprayed at every
+   * account at once.
+   */
+  async verifyEmail(code: string): Promise<void> {
+    this._user.set(await this.api.post<AuthUser>('/auth/verify-email', { code }));
+  }
+
+  /** Ask for a fresh code. Supersedes any still outstanding. */
+  async resendVerification(email: string): Promise<void> {
+    await this.api.post<{ sent: true }>('/auth/resend-verification', { email });
+  }
+
   /**
    * Re-establish the session from a stored token, if there is one.
    *
@@ -59,6 +82,18 @@ export class AuthStore {
    */
   async restore(): Promise<void> {
     if (!this.tokens.read() || this._user()) return;
+    // SHARE THE IN-FLIGHT CALL. A deep link into a guarded page calls this twice before either
+    // resolves — once from `authGuard`, once from the page's own init — and two independent
+    // requests race: if the loser rejects after the winner resolved, its `catch` sets the user
+    // back to null and the freshly restored session is thrown away. That is precisely how a hard
+    // load of /account/billing bounced an authenticated user to /login.
+    this._inFlight ??= this.fetchSession().finally(() => {
+      this._inFlight = undefined;
+    });
+    return this._inFlight;
+  }
+
+  private async fetchSession(): Promise<void> {
     this._restoring.set(true);
     try {
       this._user.set(await this.api.get<AuthUser>('/auth/me'));

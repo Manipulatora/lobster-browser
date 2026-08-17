@@ -23,8 +23,11 @@
     "@angular/ssr": "^22.0.8",
     "@ng-icons/core": "^34.0.0",
     "@ng-icons/heroicons": "^34.0.0",
+    "@types/qrcode": "^1.5.6",
+    "cryptocurrency-icons": "^0.18.1",
     "express": "^5.1.0",
     "postprocessing": "^6.39.4",
+    "qrcode": "^1.5.4",
     "rxjs": "~7.8.0",
     "three": "^0.185.1",
     "tslib": "^2.3.0"

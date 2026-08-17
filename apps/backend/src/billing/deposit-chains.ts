@@ -3,100 +3,62 @@ import type { DepositChainOption } from '@lobster/shared-types';
 /**
  * The chains a user may deposit on, ordered cheapest-first.
  *
- * WHY THIS LIST IS CURATED RATHER THAN FETCHED. NOWPayments supports hundreds of currencies.
- * Offering all of them is worse than offering eight: the user has to make an informed choice about
- * network economics in order to avoid overpaying, and almost nobody can. So the list is short,
- * every entry is a USD-stable asset or a major coin, and it is sorted by what it costs the user to
- * send.
+ * `networkFeeUsd` IS NOT OUR FEE AND NOT THE PROCESSOR'S. It is what the user's own wallet pays the
+ * chain to broadcast the transfer, and it is the dominant cost on a small deposit — a $10 deposit
+ * over Ethereum can lose a fifth of its value to gas before it arrives, while the same deposit over
+ * BSC or Solana loses a fraction of a cent. That spread is a property of the chains, not of the
+ * processor, and surfacing it at the moment of choosing is the only thing that actually reduces
+ * what users pay. Sorting by it is therefore the sort order that matters.
  *
- * `networkFeeUsd` IS NOT OUR FEE AND NOT THE PROCESSOR'S. It is what the user's own wallet pays
- * the chain to broadcast the transfer, and it is the dominant cost on a small deposit — a $10
- * deposit over Tron loses 10-20% to the network before it arrives, while the same deposit over BSC
- * loses about a fiftieth of a cent. That spread is a property of the chains, not of NOWPayments,
- * and it is identical wherever the payment is processed. Surfacing it at the moment of choosing is
- * the only thing that actually reduces what users pay.
+ * EXPENSIVE RAILS ARE STILL LISTED, and still not recommended. Ethereum and Tron are the default
+ * habit for a lot of people; removing them sends those users away rather than helping them. The
+ * honest move is to keep them available with their real cost printed alongside.
  *
- * TRON IS DELIBERATELY STILL HERE, and deliberately not recommended. It is the default habit for a
- * lot of people in this market and removing it would just send them away; the honest move is to
- * keep it available with its real cost printed next to it.
+ * FIGURES ARE INDICATIVE, an order of magnitude rather than a quote — they move with gas and token
+ * prices. Re-measure before relying on the exact numbers.
  *
- * FIGURES ARE INDICATIVE, measured 2026-08-14 from live chain state — Tron `getEnergyFee` at 100
- * SUN against 32k-65k energy with TRX at $0.332, BSC at 0.05 gwei against 55k gas with BNB at $606.
- * They move with gas prices and token prices, so treat them as an order of magnitude rather than a
- * quote. Re-measure before relying on the exact numbers.
+ * THIS LIST IS ASPIRATIONAL UNTIL VERIFIED. Which pairs a processor actually offers is an account
+ * fact, not a constant: `CryptomusProvider.assertServicesCover()` checks every code here against
+ * the live service table and refuses any it cannot find, so an entry that turns out to be
+ * unsupported fails closed at deposit time instead of stranding a payment.
  */
 export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
-  {
-    code: 'usdcsol',
-    chain: 'Solana',
-    asset: 'USDC',
-    networkFeeUsd: 0.001,
-    recommended: true,
-  },
-  {
-    code: 'usdtbsc',
-    chain: 'BNB Smart Chain (BEP20)',
-    asset: 'USDT',
-    networkFeeUsd: 0.002,
-    recommended: true,
-  },
-  {
-    code: 'usdcbsc',
-    chain: 'BNB Smart Chain (BEP20)',
-    asset: 'USDC',
-    networkFeeUsd: 0.002,
-    recommended: true,
-  },
-  {
-    code: 'usdcbase',
-    chain: 'Base',
-    asset: 'USDC',
-    networkFeeUsd: 0.003,
-    recommended: true,
-  },
-  {
-    code: 'usdtmatic',
-    chain: 'Polygon',
-    asset: 'USDT',
-    networkFeeUsd: 0.01,
-    recommended: true,
-  },
-  {
-    code: 'ltc',
-    chain: 'Litecoin',
-    asset: 'LTC',
-    networkFeeUsd: 0.01,
-    recommended: false,
-  },
-  {
-    code: 'usdttrc20',
-    chain: 'Tron (TRC20)',
-    asset: 'USDT',
-    // The expensive one, and the one users reach for by habit. 32k energy for an address that
-    // already holds USDT, ~65k for one that does not — so a first-time depositor pays the top of
-    // this range.
-    networkFeeUsd: 1.6,
-    recommended: false,
-  },
-  {
-    code: 'usdterc20',
-    chain: 'Ethereum (ERC20)',
-    asset: 'USDT',
-    // Wildly variable with base fee; this is a quiet-period figure and it can be several times
-    // higher during congestion.
-    networkFeeUsd: 1.5,
-    recommended: false,
-  },
-  {
-    code: 'btc',
-    chain: 'Bitcoin',
-    asset: 'BTC',
-    networkFeeUsd: 1.0,
-    recommended: false,
-  },
+  // --- Stablecoins on cheap rails: what most people should use --------------
+  { code: 'usdcsol',   chain: 'Solana',                  asset: 'USDC', icon: 'usdc', networkIcon: 'sol',   networkFeeUsd: 0.001, recommended: true,  stable: true },
+  { code: 'usdtsol',   chain: 'Solana',                  asset: 'USDT', icon: 'usdt', networkIcon: 'sol',   networkFeeUsd: 0.001, recommended: true,  stable: true },
+  { code: 'usdtbsc',   chain: 'BNB Smart Chain (BEP20)', asset: 'USDT', icon: 'usdt', networkIcon: 'bnb',   networkFeeUsd: 0.002, recommended: true,  stable: true },
+  { code: 'usdcbsc',   chain: 'BNB Smart Chain (BEP20)', asset: 'USDC', icon: 'usdc', networkIcon: 'bnb',   networkFeeUsd: 0.002, recommended: true,  stable: true },
+  { code: 'usdcbase',  chain: 'Base',                    asset: 'USDC', icon: 'usdc', networkIcon: 'base',  networkFeeUsd: 0.003, recommended: true,  stable: true },
+  { code: 'usdtmatic', chain: 'Polygon',                 asset: 'USDT', icon: 'usdt', networkIcon: 'matic', networkFeeUsd: 0.004, recommended: true,  stable: true },
+  { code: 'usdcmatic', chain: 'Polygon',                 asset: 'USDC', icon: 'usdc', networkIcon: 'matic', networkFeeUsd: 0.004, recommended: true,  stable: true },
+
+  // --- Native coins ---------------------------------------------------------
+  // No `networkIcon`: the asset IS the chain, so a badge would repeat the icon underneath it.
+  { code: 'sol',       chain: 'Solana',                  asset: 'SOL',  icon: 'sol',                        networkFeeUsd: 0.001, recommended: false, stable: false },
+  { code: 'bnb',       chain: 'BNB Smart Chain (BEP20)', asset: 'BNB',  icon: 'bnb',                        networkFeeUsd: 0.005, recommended: false, stable: false },
+  { code: 'matic',     chain: 'Polygon',                 asset: 'POL',  icon: 'matic',                      networkFeeUsd: 0.005, recommended: false, stable: false },
+  { code: 'xlm',       chain: 'Stellar',                 asset: 'XLM',  icon: 'xlm',                        networkFeeUsd: 0.001, recommended: false, stable: false },
+  { code: 'xrp',       chain: 'XRP Ledger',              asset: 'XRP',  icon: 'xrp',                        networkFeeUsd: 0.01,  recommended: false, stable: false },
+  { code: 'bch',       chain: 'Bitcoin Cash',            asset: 'BCH',  icon: 'bch',                        networkFeeUsd: 0.01,  recommended: false, stable: false },
+  { code: 'ltc',       chain: 'Litecoin',                asset: 'LTC',  icon: 'ltc',                        networkFeeUsd: 0.02,  recommended: false, stable: false },
+  { code: 'dash',      chain: 'Dash',                    asset: 'DASH', icon: 'dash',                       networkFeeUsd: 0.02,  recommended: false, stable: false },
+  { code: 'xmr',       chain: 'Monero',                  asset: 'XMR',  icon: 'xmr',                        networkFeeUsd: 0.02,  recommended: false, stable: false },
+  { code: 'dot',       chain: 'Polkadot',                asset: 'DOT',  icon: 'dot',                        networkFeeUsd: 0.05,  recommended: false, stable: false },
+  { code: 'ada',       chain: 'Cardano',                 asset: 'ADA',  icon: 'ada',                        networkFeeUsd: 0.12,  recommended: false, stable: false },
+  { code: 'doge',      chain: 'Dogecoin',                asset: 'DOGE', icon: 'doge',                       networkFeeUsd: 0.15,  recommended: false, stable: false },
+  { code: 'trx',       chain: 'Tron (TRC20)',            asset: 'TRX',  icon: 'trx',                        networkFeeUsd: 0.3,   recommended: false, stable: false },
+  { code: 'btc',       chain: 'Bitcoin',                 asset: 'BTC',  icon: 'btc',                        networkFeeUsd: 1.5,   recommended: false, stable: false },
+  { code: 'eth',       chain: 'Ethereum (ERC20)',        asset: 'ETH',  icon: 'eth',                        networkFeeUsd: 2.0,   recommended: false, stable: false },
+  { code: 'link',      chain: 'Ethereum (ERC20)',        asset: 'LINK', icon: 'link', networkIcon: 'eth',   networkFeeUsd: 2.5,   recommended: false, stable: false },
+
+  // --- Stablecoins on rails that are popular but genuinely expensive --------
+  { code: 'usdttrc20', chain: 'Tron (TRC20)',            asset: 'USDT', icon: 'usdt', networkIcon: 'trx',   networkFeeUsd: 1.2,   recommended: false, stable: true },
+  { code: 'usdctrc20', chain: 'Tron (TRC20)',            asset: 'USDC', icon: 'usdc', networkIcon: 'trx',   networkFeeUsd: 1.2,   recommended: false, stable: true },
+  { code: 'usdterc20', chain: 'Ethereum (ERC20)',        asset: 'USDT', icon: 'usdt', networkIcon: 'eth',   networkFeeUsd: 3.0,   recommended: false, stable: true },
+  { code: 'usdcerc20', chain: 'Ethereum (ERC20)',        asset: 'USDC', icon: 'usdc', networkIcon: 'eth',   networkFeeUsd: 3.0,   recommended: false, stable: true },
 ];
 
-/** Look up a chain option by its processor currency code. Unknown codes must be rejected. */
+/** Look up a chain by its processor code. Unknown codes are rejected, never forwarded. */
 export function depositChainByCode(code: string): DepositChainOption | undefined {
   return DEPOSIT_CHAINS.find((c) => c.code === code);
 }
@@ -104,7 +66,7 @@ export function depositChainByCode(code: string): DepositChainOption | undefined
 /**
  * Smallest deposit we accept, in USD cents.
  *
- * Below this the economics stop working for the user rather than for us: NOWPayments enforces its
+ * Below this the economics stop working for the user rather than for us: the processor enforces its
  * own per-currency minimum, and on an expensive chain the network fee alone can approach the
  * deposit. $5 keeps a Light package (one deposit, $10) two deposits away at worst.
  */
