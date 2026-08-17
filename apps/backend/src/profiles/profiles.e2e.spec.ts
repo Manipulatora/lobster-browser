@@ -14,6 +14,7 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
 import { PrismaModule } from '../prisma/prisma.module';
+import { MailModule } from '../mail/mail.module';
 import { AuthModule } from '../auth/auth.module';
 import { configureBodyLimit } from '../body-limit';
 import { ProfilesModule } from './profiles.module';
@@ -46,6 +47,7 @@ before(async () => {
   const moduleRef = await Test.createTestingModule({
     imports: [
       ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true }),
+      MailModule,
       PrismaModule,
       AuthModule,
       ProfilesModule,
@@ -549,9 +551,9 @@ test('unauthenticated sync is 401', async () => {
   assert.equal(res.status, 401);
 });
 
-test('free-tier profile limit matches the schema default (5) and is enforced', async () => {
+test('free-tier profile limit matches the schema default (3) and is enforced', async () => {
   // Cross-checks the ProfilesService default against prisma/schema.prisma's Subscription default.
-  assert.equal(DEFAULT_FREE_PROFILE_LIMIT, 5);
+  assert.equal(DEFAULT_FREE_PROFILE_LIMIT, 3);
 
   const token = await registerToken('profiles-limit@example.com');
   const auth = { Authorization: `Bearer ${token}` };

@@ -30,7 +30,7 @@ export const routes: Routes = [
         title: 'Pricing — Lobster Browser',
         data: {
           description:
-            'Four packages, priced per profile and paid in crypto from your Credit balance. Start free with 5 profiles.',
+            'Four packages, priced per profile and paid in crypto from your Credit balance. Start free with 3 profiles.',
         },
       },
 

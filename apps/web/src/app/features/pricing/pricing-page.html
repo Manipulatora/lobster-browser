@@ -1,11 +1,8 @@
-<!-- isolate: the cards' own rim (`.card__border`, z-index -10) is a negative-z child, so it shares
-     a stacking context with these background layers. Pinning them below -10 keeps the rim painting
-     above the background instead of being swallowed by it. -->
+<!-- isolate: keeps the ambient layers below in this section's own stacking context rather than
+     letting their negative z-indexes escape to the page. -->
 <section class="section relative isolate overflow-hidden">
   <!-- The site's existing ambient vocabulary — the same violet wash and masked grid the auth
-       screens use — plus a broad wash under the card row and two soft blooms, so the near-black
-       cards have something to lift off rather than floating on flat white. The magenta bloom
-       picks up the same hue the cards' own gradient ends on, tying the two together. -->
+       screens use — plus a broad wash under the card row and two soft blooms. -->
   <div class="pointer-events-none absolute inset-0 z-[-30] bg-aurora"></div>
   <div class="pointer-events-none absolute inset-0 z-[-30] bg-grid opacity-60"></div>
   <div
@@ -23,22 +20,67 @@
   <div class="mx-auto w-full max-w-[90rem] px-4 sm:px-6">
     <h1 class="section-title text-center">Pricing</h1>
 
+    <!-- ── Monthly / yearly ──────────────────────────────────────────────────
+         Two radios in a group, not two buttons: this is one choice with two states, and a screen
+         reader should hear it as such. The sliding pill is the checked radio's own background. -->
+    <div class="mt-8 flex justify-center">
+      <div
+        class="inline-flex items-center gap-1 rounded-full border-[0.5px] border-hairline-strong bg-surface p-1 shadow-soft"
+        role="radiogroup"
+        aria-label="Billing period"
+      >
+        <button
+          type="button"
+          role="radio"
+          [attr.aria-checked]="period() === 'monthly'"
+          class="rounded-full px-4 py-2 text-[0.875rem] transition-colors"
+          [class]="period() === 'monthly' ? 'bg-brand-600 text-white' : 'text-muted hover:text-ink'"
+          (click)="setPeriod('monthly')"
+        >
+          Monthly
+        </button>
+        <button
+          type="button"
+          role="radio"
+          [attr.aria-checked]="period() === 'yearly'"
+          class="flex items-center gap-2 rounded-full px-4 py-2 text-[0.875rem] transition-colors"
+          [class]="period() === 'yearly' ? 'bg-brand-600 text-white' : 'text-muted hover:text-ink'"
+          (click)="setPeriod('yearly')"
+        >
+          Yearly
+          <span
+            class="rounded-full px-2 py-0.5 text-[0.6875rem]"
+            [class]="period() === 'yearly' ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-700'"
+          >−{{ discountPercent }}%</span>
+        </button>
+      </div>
+    </div>
+
     <!-- justify-items-center keeps a card centred in its column once the grid column is wider than
          the card's own max-width. -->
-    <div
-      class="mt-14 grid justify-items-center gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5"
-    >
-      @for (plan of plans; track plan.name) {
-        <div class="card">
-          <div class="card__border"></div>
-
+    <div class="mt-12 grid justify-items-center gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+      @for (plan of plans; track plan.tier) {
+        <div class="card" [class.card--current]="isCurrent(plan)">
           <div class="card_title__container">
             <span class="card_title">{{ plan.name }}</span>
+
             <p class="card_price">
-              {{ plan.price }}@if (plan.period) {
-                <span class="card_period">{{ plan.period }}</span>
+              {{ money(priceCents(plan)) }}@if (periodSuffix(plan)) {
+                <span class="card_period">{{ periodSuffix(plan) }}</span>
               }
             </p>
+
+            <!-- The yearly figure alone hides what it works out to per month, and the per-month
+                 figure alone hides that a year is charged at once. Both, or neither. -->
+            @if (period() === 'yearly' && plan.monthlyCents > 0) {
+              <p class="card_note">
+                {{ money(perMonthCents(plan)) }}/mo · save {{ money(savingCents(plan)) }}
+              </p>
+            } @else if (plan.monthlyCents === 0) {
+              <p class="card_note">No card, no expiry</p>
+            } @else {
+              <p class="card_note">Billed monthly</p>
+            }
           </div>
 
           <hr class="line" />
@@ -54,7 +96,15 @@
             }
           </ul>
 
-          <button type="button" class="button" (click)="choose()">{{ plan.cta }}</button>
+          <button
+            type="button"
+            class="button"
+            [class.button--current]="isCurrent(plan)"
+            [disabled]="isCurrent(plan)"
+            (click)="choose(plan)"
+          >
+            {{ cta(plan) }}
+          </button>
         </div>
       }
     </div>

@@ -104,7 +104,33 @@ export const PLAN_CATALOG: readonly PlanDefinition[] = [
  * `ProfilesService.DEFAULT_FREE_PROFILE_LIMIT` are both aligned to this value, so a team behaves
  * identically before and after a Subscription row exists.
  */
-export const FREE_PLAN_PROFILE_LIMIT = 5;
+export const FREE_PLAN_PROFILE_LIMIT = 3;
+
+/** How a package is billed. Monthly is the base; yearly pays for twelve months up front. */
+export type BillingPeriod = 'monthly' | 'yearly';
+
+/**
+ * Discount applied when twelve months are paid up front, as a fraction of the monthly rate × 12.
+ *
+ * A constant rather than a per-plan column so the storefront cannot drift from what is charged:
+ * every yearly figure anywhere in the product is this one number applied to `priceCents`.
+ */
+export const YEARLY_DISCOUNT = 0.2;
+
+/**
+ * What twelve months of a package costs when paid up front, in USD cents.
+ *
+ * Rounded to a whole cent, and rounded ONCE here rather than at each display site — two places
+ * rounding independently is how a storefront ends up quoting a price the charge does not match.
+ */
+export function yearlyPriceCents(plan: PlanDefinition): number {
+  return Math.round(plan.priceCents * 12 * (1 - YEARLY_DISCOUNT));
+}
+
+/** What a yearly subscriber effectively pays per month. Display only — nothing charges this. */
+export function yearlyPerMonthCents(plan: PlanDefinition): number {
+  return Math.round(yearlyPriceCents(plan) / 12);
+}
 
 export function planByTier(tier: PaidPlanTier): PlanDefinition {
   const plan = PLAN_CATALOG.find((p) => p.tier === tier);

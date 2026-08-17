@@ -70,4 +70,4 @@ Vocabulary: `.container-page` `.section` `.card` `.card-soft` `.rule` `.eyebrow`
 - Auth forms are **UI only** — submit handlers simulate latency and mark where the real API call
   goes. No backend is wired.
 - Pricing figures are illustrative; the real product meters on **profile count** (`free`, `pro`,
-  `team`, `enterprise`), with 5 profiles on the free tier.
+  `team`, `enterprise`), with 3 profiles on the free tier.

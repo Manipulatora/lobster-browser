@@ -253,7 +253,7 @@ model Subscription {
   //
   // The default must equal `FREE_PLAN_PROFILE_LIMIT` in @lobster/shared-types, so a team behaves
   // identically before and after a Subscription row exists.
-  profileLimit Int                @default(5)
+  profileLimit Int                @default(3)
   status       SubscriptionStatus @default(trialing)
 
   // What the next renewal will cost, in USD cents. Also snapshotted at purchase, for the same
