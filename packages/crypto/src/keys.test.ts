@@ -3,6 +3,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
 import {
@@ -177,5 +178,36 @@ describe('recovery code (SEC-2 account recovery)', () => {
     // How someone types it off a printout: lowercase, spaces instead of dashes.
     const asTyped = code.toLowerCase().replace(/-/g, ' ');
     assert.deepEqual(unwrapKey(wrapped, await deriveRecoveryKey(asTyped, salt, cheap)), tdk);
+  });
+});
+
+describe('cross-language key derivation', () => {
+  it('matches the vectors the Rust desktop asserts against', () => {
+    // The SAME file apps/desktop/src-tauri/src/blob_crypto.rs asserts against. A desktop that derives
+    // a different Profile Content Key does not fail loudly — it writes a snapshot that will not open
+    // on the other side, surfacing as "my backup is corrupt" long after the change that caused it.
+    // The two implementations build the HKDF info differently (Rust bakes the ':' into the constant,
+    // this side adds it in a template), so equality is a real claim, not an obvious one.
+    const fixture = JSON.parse(
+      readFileSync(new URL('../fixtures/key-derivation-vectors.json', import.meta.url), 'utf8'),
+    ) as {
+      teamDataKeyHex: string;
+      vectors: { profileId: string; pck: string; keyId: string }[];
+    };
+    const tdk = Buffer.from(fixture.teamDataKeyHex, 'hex');
+    assert.ok(fixture.vectors.length > 0, 'the fixture must actually contain vectors');
+
+    for (const vector of fixture.vectors) {
+      assert.equal(
+        deriveProfileContentKey(tdk, vector.profileId).toString('hex'),
+        vector.pck,
+        `PCK diverged for profileId ${JSON.stringify(vector.profileId)}`,
+      );
+      assert.equal(
+        deriveKeyId(tdk, vector.profileId).toString('hex'),
+        vector.keyId,
+        `key_id diverged for profileId ${JSON.stringify(vector.profileId)}`,
+      );
+    }
   });
 });

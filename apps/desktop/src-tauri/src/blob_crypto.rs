@@ -189,6 +189,56 @@ pub fn unwrap_key(
 mod tests {
     use super::*;
 
+    /// The cross-language contract, asserted against the SAME file the TypeScript side asserts against.
+    ///
+    /// A desktop that derives a different Profile Content Key than the web/backend does not fail
+    /// loudly — it produces a snapshot that simply will not open on the other side, which surfaces as
+    /// "my backup is corrupt" long after the change that caused it. The two implementations build the
+    /// HKDF info differently (Rust bakes the `:` into the constant, TypeScript adds it in a template),
+    /// so equality is a real claim rather than an obvious one, and it is pinned here.
+    #[test]
+    fn key_derivation_matches_the_typescript_vectors() {
+        let raw = include_str!("../../../../packages/crypto/fixtures/key-derivation-vectors.json");
+        let fixture: serde_json::Value = serde_json::from_str(raw).expect("fixture parses");
+
+        let tdk_hex = fixture["teamDataKeyHex"].as_str().unwrap();
+        let mut tdk = [0u8; LB_V1_KEY_LEN];
+        hex_to_bytes(tdk_hex, &mut tdk);
+
+        let vectors = fixture["vectors"].as_array().unwrap();
+        assert!(
+            !vectors.is_empty(),
+            "the fixture must actually contain vectors"
+        );
+
+        for vector in vectors {
+            let profile_id = vector["profileId"].as_str().unwrap();
+            let pck = derive_profile_content_key(&tdk, profile_id).unwrap();
+            let key_id = derive_key_id(&tdk, profile_id).unwrap();
+            assert_eq!(
+                bytes_to_hex(&pck),
+                vector["pck"].as_str().unwrap(),
+                "PCK diverged from TypeScript for profileId {profile_id:?}"
+            );
+            assert_eq!(
+                bytes_to_hex(&key_id),
+                vector["keyId"].as_str().unwrap(),
+                "key_id diverged from TypeScript for profileId {profile_id:?}"
+            );
+        }
+    }
+
+    fn hex_to_bytes(hex: &str, out: &mut [u8]) {
+        assert_eq!(hex.len(), out.len() * 2, "hex length must match the buffer");
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("valid hex");
+        }
+    }
+
+    fn bytes_to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
     const COOKIE_DOMAIN: &str = "accounts.example.com";
     const COOKIE_VALUE: &str = "session-token-hunter2-secret";
 
