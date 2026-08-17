@@ -17,7 +17,7 @@ change is explained where it happened.
 | 3 — Cross-OS portability | **Done (Linux-proven)** | 873/873 real cookie values survive a change of platform key. Windows DPAPI and macOS Keychain **key sources** are written but unexercised — they need the Phase 1 runners. |
 | 4 — Account key | **Done, simplified** | `GET /vault/key`. No password derivation, no recovery code — see the Correction section. |
 | 5 — Cloud sync | **Server + client done; not wired to the UI** | Durable filesystem blob store on the server, push/pull with compare-and-set, conflict refusal. **No UI calls it yet, and capture still seals under the per-install key** — so it is not yet a feature a user can use. |
-| 6 — Leases | Next | |
+| 6 — Leases | **Done (server)** | `GET/POST/DELETE /profiles/:id/lease`. Hard block like Octo, plus a 150s expiry so a crashed machine frees itself — which Octo requires an operator to do. Not yet called by the desktop launch path. |
 | 7 — Startup performance | Next | Baseline measured: local profile read **2.1 ms**, `/auth/me` blocks up to **15 s** on the boot path. The work is local-first paint, not faster queries. |
 | 8 — Extensions | Blocked on a decision | Needs a fork patch exempting extensions **by ID**; the obvious path-based approach changes extension IDs and destroys their stored data. |
 
@@ -903,3 +903,39 @@ Removed: Argon2id key derivation on both sides, the recovery-code alphabet and n
 double key-wrapping, `enroll`/`rotate`/`recovery-code-used`, and the desktop unlock/lock flow. What
 survives is what earns its place — per-profile key derivation, and the cross-language vectors that
 pin Rust and TypeScript to identical results.
+
+## Phase 6 as built: one machine at a time
+
+Octo's rule, verbatim from their docs: *"It is not possible to work with the same profile
+simultaneously, but you can do so in turns."* We match the block and improve on the recovery.
+
+**Why a hard block at all.** A profile is one browser identity. Running it from two machines means
+the same account arriving from two IPs — which is itself the signal an anti-detect profile exists to
+avoid. So `acquire` refuses; it does not queue.
+
+**Why a lease rather than a boolean.** A machine that crashes never gets to clear a flag. Octo's
+answer is that the profile stays claimed until someone manually "force stops" it — and their own docs
+warn that doing so can split-brain, with the other device's work silently not syncing. Ours carries a
+**150-second expiry** that the holder refreshes while the browser runs, so a crashed claim lapses on
+its own:
+
+| | Octo | Here |
+|---|---|---|
+| Second opener | Blocked | Blocked |
+| Message | "Profile is launched on another device" | "This profile is open on *Ivy's desktop*. Close it there first. If that device is offline, the profile frees itself in about 150s." |
+| Crashed machine | Claimed indefinitely; manual force-stop, which may split-brain | Frees itself in ~150s, no operator |
+
+**The database is the arbiter, not application logic.** `profileId` is the primary key of
+`profile_leases`, so two racing callers cannot both insert; taking over a lapsed lease is a single
+conditional `UPDATE ... WHERE expiresAt <= now`, so the check and the write cannot interleave. A
+read-then-write acquire would let two machines both believe they hold the profile — which for this
+product is both a corruption hazard and a detection event.
+
+A machine that was taken over while suspended **cannot extend or release** the claim it lost: refresh
+and release are scoped to the caller's own `leaseId`. Tested, along with the race and the
+self-healing takeover.
+
+Verified live: machine A claims it, machine B is refused with the message above.
+
+**Not yet wired:** the desktop launch path does not call this. Until it does, the block exists on the
+server but nothing enforces it at launch.

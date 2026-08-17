@@ -189,6 +189,43 @@ model Membership {
 // Only metadata + the deterministic seed + a reference to the encrypted blob live here.
 // `metadata` is a JSON grab-bag for the non-secret shared-types fields we don't index on
 // (engine, os, tags, folder, notes, proxy reference, sharing, fingerprintOverrides).
+/// Which device currently has a profile open.
+///
+/// A profile is one browser identity. Running it from two machines at once means the same account
+/// arriving from two IPs, which is itself the signal an anti-detect profile exists to avoid — so this
+/// is a hard block, matching Octo ("It is not possible to work with the same profile simultaneously,
+/// but you can do so in turns").
+///
+/// WHY A LEASE AND NOT A BOOLEAN. A machine that crashes never gets to clear a flag, and Octo's own
+/// answer — the profile stays claimed until someone manually force-stops it — leaves users stuck. The
+/// lease carries an expiry the holder refreshes while it runs, so a crashed machine's claim lapses on
+/// its own and the profile becomes launchable again without an operator.
+///
+/// One row per profile, created on first claim and reused: `profileId` is the primary key, so the
+/// database itself prevents two concurrent holders rather than application logic doing it.
+model ProfileLease {
+  profileId String @id
+
+  /// Random per-claim id. A release or refresh must present it, so a stale client cannot release a
+  /// lease that has since been taken by someone else.
+  leaseId String
+
+  userId     String
+  /// Stable per-install id, so the UI can say WHICH machine holds it.
+  deviceId    String
+  deviceLabel String
+
+  acquiredAt DateTime @default(now())
+  /// The claim is dead after this instant unless refreshed. Readers must compare against it rather
+  /// than trusting the row's existence.
+  expiresAt  DateTime
+
+  profile Profile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("profile_leases")
+}
+
 model Profile {
   id     String @id @default(uuid())
   name   String
@@ -218,6 +255,7 @@ model Profile {
 
   // Relations
   ownerTeam Team @relation(fields: [ownerTeamId], references: [id], onDelete: Cascade)
+  lease     ProfileLease?
 
   @@index([ownerTeamId])
   // Every profile read is (ownerTeamId, live), including the plan-limit count.

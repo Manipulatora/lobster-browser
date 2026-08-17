@@ -10,6 +10,7 @@ import { BillingModule } from './billing/billing.module';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProfilesModule } from './profiles/profiles.module';
+import { LeasesModule } from './leases/leases.module';
 import { TeamsModule } from './teams/teams.module';
 import { VaultModule } from './vault/vault.module';
 
@@ -29,6 +30,7 @@ import { VaultModule } from './vault/vault.module';
     AuthModule,
     TeamsModule,
     VaultModule,
+    LeasesModule,
     ProfilesModule,
     ApiKeysModule,
     AuditModule,
