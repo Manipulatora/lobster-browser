@@ -72,6 +72,21 @@ jobs:
       - name: cargo clippy
         working-directory: apps/desktop/src-tauri
         run: cargo clippy --lib --all-targets -- -D warnings
+      # `cargo test --lib` is NOT self-contained: sidecar.rs:158-183 spawns the BUILT sidecar
+      # (packages/engine-runner/dist/index.js, resolved from CARGO_MANIFEST_DIR) and asserts a real
+      # ping/status round-trip; several local_api tests additionally need `node` on PATH for their own
+      # generated fake sidecar (local_api.rs:643). Without the sidecar bundle the spawn still succeeds,
+      # node dies immediately, and the test fails with
+      # "ping: sidecar closed before responding to 'ping'" — verified by running the suite with
+      # LOBSTER_SIDECAR pointed at a nonexistent path. This job never built it, so the one Rust gate in
+      # CI could not have been green; the same build is why the cross-platform job runs its node suites
+      # before cargo.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: npx tsc -b packages/shared-types packages/proxy packages/fingerprint packages/agent packages/engine-runner
       - name: cargo test
         working-directory: apps/desktop/src-tauri
         run: cargo test --lib
@@ -85,14 +100,24 @@ jobs:
   # here as the second Keychain-wrapped platform and the cheap POSIX-but-not-Linux signal.
   #
   # This job runs ONLY what is genuinely portable today, so a red here always means a real defect:
-  #   - `cargo check` rather than `cargo test`: keychain.rs's LSK round-trip talks to the real
-  #     credential store (Credential Manager / login keychain), which a github-hosted runner does not
-  #     reliably provide. Checking every target still catches Windows/macOS-only cfg breakage.
+  #   - `cargo check` rather than `cargo test` on Windows: two `cargo test --lib` cases are
+  #     POSIX-shaped rather than platform-agnostic — engine_provision's synthetic archive installs a
+  #     `chrome` that `engine_present` looks for as `chrome.exe` (src/engine_provision.rs:301 vs
+  #     lib.rs:196), and sidecar.rs:191 spawns `true` as a fake sidecar, which is not an executable on
+  #     Windows. Checking every target still compiles every `cfg(windows)` block, which is where the
+  #     Windows-only breakage this job exists to catch actually lives.
+  #   - the node:test suites run through ci/validation/cross-platform-suite.mjs rather than
+  #     `npm run test --workspaces`: four individual test files are not portable today, and a
+  #     permanently red job gates nothing. That script names every excluded file, the platform, and the
+  #     reason, and it fails when an exclusion stops matching a real file, so a rename cannot silently
+  #     un-run a suite.
   #   - no live-engine job (engine-launch, lobium-detect, product-e2e): those need a Lobium binary, a
   #     GPU and a provisioned open-font pack, none of which exist on a github-hosted Windows/macOS box.
   cross-platform:
-    name: Cross-platform (${{ matrix.os }} typecheck / test / cargo check)
+    name: Cross-platform (${{ matrix.os }} typecheck / test / cargo)
     runs-on: ${{ matrix.os }}
+    # A hung keychain or sidecar spawn must not sit on a runner for the 6-hour default.
+    timeout-minutes: 60
     strategy:
       # A Windows-only or macOS-only failure is the entire reason this job exists — never let one
       # platform's failure cancel the other's evidence.
@@ -105,14 +130,15 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      # `npm install`, not `npm ci`: the lockfile is generated on Linux, and the platform-specific
+      # optional binaries (esbuild/rollup/vite/@tauri-apps/cli) have to be resolved for this runner.
       - run: npm install --no-audit --no-fund
       # Same reason as the web job: the backend typechecks against the generated Prisma client.
       - run: npx prisma generate --schema=apps/backend/prisma/schema.prisma
       - run: npm run typecheck --workspaces --if-present
-      # The node:test suites are already written to be platform-aware where the platform differs (e.g.
-      # lobium-config.test.ts asserts owner-write instead of 0o600 on win32, fonts.test.ts matches
-      # either path separator) — they had simply never been executed anywhere but Linux.
-      - run: npm run test --workspaces --if-present
+      # The portable node:test suites. This also builds packages/engine-runner/dist, which the Rust
+      # sidecar test below needs.
+      - run: node ci/validation/cross-platform-suite.mjs
       # The toolchain version is pinned by rust-toolchain.toml (>= 1.85 for edition2024 deps).
       - uses: dtolnay/rust-toolchain@stable
       - name: Frontend dist stub (so generate_context! has assets without a full JS build)
@@ -125,14 +151,50 @@ jobs:
       - name: cargo check
         working-directory: apps/desktop/src-tauri
         run: cargo check --lib --all-targets
-      # PHASE 1 PLACEHOLDER — the per-profile snapshot round-trip (capture a profile's identity set on
-      # THIS OS, restore it into a fresh user-data-dir, assert the cookie jar still decrypts and the
-      # fingerprint seed is unchanged) belongs here and nowhere else: it is the one check that can fail
-      # on Windows/macOS while passing on Linux, because of the OSCrypt asymmetry described above.
-      # It cannot be written yet — there is no snapshot engine, and ci/validation/product-e2e.mjs needs
-      # a Lobium binary this runner does not have. Wire it in with the snapshot engine and make it
-      # blocking, do not add it as a warning:
-      #   - run: node ci/validation/snapshot-roundtrip.mjs
+      # macOS is the second Keychain-wrapped platform AND a POSIX box, so unlike Windows it has no
+      # known reason to fail the Rust suite: `true` exists, CHROME_BIN is `chrome`, the `cfg(unix)`
+      # mode assertions hold, and keychain.rs degrades to the file key on any keyring error
+      # (keychain.rs:57-100) rather than requiring an unlocked login keychain.
+      #
+      # It is advisory ONLY because this suite has never executed on macOS anywhere, and a gate whose
+      # first run reds the branch teaches the team to ignore gates. Promote it by deleting the
+      # continue-on-error line after its first green run; do not leave it advisory once it has passed.
+      - name: cargo test (macOS, advisory until its first green run)
+        if: matrix.os == 'macos-latest'
+        continue-on-error: true
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --lib
+      # THE PER-PROFILE SNAPSHOT ROUND-TRIP, and the reason this job exists.
+      #
+      # These are the Phase 2 engine's own tests (capture -> destroy -> restore -> verify, over temp
+      # dirs), and they are BLOCKING on both platforms — including macOS, where the rest of the Rust
+      # suite is still advisory. That asymmetry is deliberate: the advisory carve-out above exists
+      # because the whole suite has never run on macOS, whereas these tests are the one thing this
+      # job is for. A cookie jar that stops restoring on a Keychain-wrapped platform is exactly the
+      # failure that passes green on Linux, so it may not be advisory anywhere.
+      #
+      # `--lib snapshot::` rather than the whole suite so the two POSIX-shaped cases documented above
+      # (engine_provision's `chrome` vs `chrome.exe`, sidecar.rs spawning `true`) cannot red this.
+      - name: Snapshot capture/restore round-trip
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --lib 'snapshot::'
+      # STILL MISSING, and named so it is not mistaken for covered: the LIVE round-trip — launch a
+      # real Lobium, log in to a fixture site, capture, wipe the user-data-dir, restore, and assert
+      # the site still considers the session valid. That needs a Lobium binary, a GPU and a font pack,
+      # none of which a github-hosted Windows/macOS runner has (see the job comment above), so it
+      # belongs on a self-hosted runner. Until it exists, CI proves the ENGINE round-trips artifacts
+      # on this OS; it does not prove a browser still trusts them.
+      - name: Live logged-in round-trip (self-hosted only)
+        if: ${{ vars.LOBSTER_ENABLE_PRODUCT_E2E == 'true' }}
+        shell: bash
+        run: |
+          if [ ! -f ci/validation/snapshot-roundtrip.mjs ]; then
+            echo "PENDING: ci/validation/snapshot-roundtrip.mjs does not exist. The engine-level"
+            echo "round-trip above IS blocking on ${{ matrix.os }}; what is unproven here is that a"
+            echo "real browser still accepts a restored session. See docs/PROFILE_DATA_SYNC.md."
+            exit 0
+          fi
+          node ci/validation/snapshot-roundtrip.mjs
 
   # QA-1: native Lobium detector gate. Skip-clean on github-hosted runners (no Lobium binary /
   # real GPU). On a self-hosted GPU runner set LOBSTER_LOBIUM_BIN + LOBSTER_GPU=gpu and remove
@@ -163,6 +225,48 @@ jobs:
             exit 0
           fi
           node ci/validation/lobium-detect.mjs
+
+  # The relaunch-persistence proof (docs/PROFILE_DATA_SYNC.md gap [27]). ci/validation/product-e2e.mjs
+  # is the only check in the tree that creates a profile, launches a REAL browser through the same
+  # sidecar path as the Launch button, injects cookies, navigates, stops, and relaunches to assert the
+  # jar survived — and it ran in no workflow at all, only inside scripts/build-linux-product.sh.
+  #
+  # OPT-IN, because it cannot run on a github-hosted runner: it refuses to start without
+  # LOBSTER_FONTS_DIR (product-e2e.mjs:142), i.e. a provisioned open-font pack, and it wants a real
+  # engine. Set LOBSTER_ENABLE_PRODUCT_E2E=true on a self-hosted box that has both and it is blocking
+  # from that moment — deliberately with no non-blocking mode, which is the mistake the packaging
+  # script made for as long as it printed "[warn] product-e2e failed" and carried on.
+  product-e2e:
+    name: Product E2E (relaunch persistence, opt-in)
+    runs-on: ubuntu-latest
+    if: ${{ vars.LOBSTER_ENABLE_PRODUCT_E2E == 'true' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: npx tsc -b packages/shared-types packages/proxy packages/fingerprint packages/agent packages/engine-runner
+      - name: Run the product E2E
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_FONTS_DIR: ${{ vars.LOBSTER_FONTS_DIR }}
+          LOBSTER_GPU: ${{ vars.LOBSTER_GPU || 'software' }}
+          LOBSTER_ANGLE_BACKEND: ${{ vars.LOBSTER_ANGLE_BACKEND }}
+          VK_ICD_FILENAMES: ${{ vars.VK_ICD_FILENAMES }}
+          DISPLAY: ${{ vars.DISPLAY }}
+          LOBSTER_HEADFUL: ${{ vars.LOBSTER_HEADFUL || '0' }}
+        run: |
+          # An enabled gate with a missing prerequisite must FAIL, not skip: a silent skip here is how
+          # a persistence gate ends up proving nothing while reporting green.
+          if [ -z "${LOBSTER_FONTS_DIR:-}" ] || [ ! -d "$LOBSTER_FONTS_DIR" ]; then
+            echo "LOBSTER_ENABLE_PRODUCT_E2E is true but LOBSTER_FONTS_DIR is unset or not a directory" >&2
+            echo "(product-e2e reads <pack>/font-pack.manifest.json for the profile's font persona)" >&2
+            exit 1
+          fi
+          node ci/validation/product-e2e.mjs
 
   engine-launch:
     name: Engine launch (patchright live Chromium)

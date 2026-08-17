@@ -1191,7 +1191,10 @@ mod tests {
         .unwrap();
         let planted = get(&conn, &cipher, &created.id).unwrap().unwrap();
         assert!(planted.cookies_import.is_none(), "plaintext is not trusted");
-        assert_eq!(planted.unreadable_secrets, vec!["cookies_import".to_string()]);
+        assert_eq!(
+            planted.unreadable_secrets,
+            vec!["cookies_import".to_string()]
+        );
 
         conn.execute(
             "UPDATE profiles SET cookies_import = NULL, fingerprint_overrides = 'not json' WHERE id = ?1",

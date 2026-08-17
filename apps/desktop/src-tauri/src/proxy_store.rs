@@ -483,7 +483,10 @@ mod tests {
         assert_eq!(listed.len(), 1);
         let row = &listed[0];
         assert_eq!(row.unreadable_secrets, vec!["config".to_string()]);
-        assert_eq!(row.config["host"], "h", "non-secret fields stay recognisable");
+        assert_eq!(
+            row.config["host"], "h",
+            "non-secret fields stay recognisable"
+        );
         assert!(row.config.get("username").is_none());
         assert!(row.config.get("password").is_none());
         let serialized = serde_json::to_string(&row).unwrap();

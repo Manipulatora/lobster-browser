@@ -237,11 +237,29 @@ source "$INSTALL_ROOT/env"
 set +a
 # Headless E2E on this VPS (DISPLAY may be a virtual X without a usable GPU).
 export LOBSTER_HEADFUL="${LOBSTER_HEADFUL:-0}"
-if node "$ROOT/ci/validation/product-e2e.mjs" 2>&1 | tee "$DIST/product-e2e.log"; then
-  E2E_OK=1
-else
-  E2E_OK=0
-  echo "[warn] product-e2e failed — install is still present; see $DIST/product-e2e.log" >&2
+# BLOCKING (docs/PROFILE_DATA_SYNC.md Phase 1). This used to print "[warn] product-e2e failed" and
+# fall through to the "Linux product ready" banner: the script's exit status was non-zero, but the
+# only thing an operator reads — the summary — announced a finished product with a one-line FAIL
+# buried above it. product-e2e is the ONLY relaunch-persistence proof in the tree (gap [27]), so a
+# packaging run that could not prove a profile survives a relaunch has not built a shippable
+# installer. It now stops here, and the summary below can only ever be printed for a passing E2E.
+#
+# The `timeout` bounds a hang rather than a failure: product-e2e stands up a fixture HTTP server and
+# a launcher registry, so a throw on the way in can leave a handle holding the event loop open, and
+# `node … | tee` would then wait forever with no output — a build that never returns is worse than
+# one that fails. Verified by running it with LOBSTER_FONTS_DIR unset: it printed its error and then
+# had to be killed. (The script's own exit path was fixed to force an exit; this is the belt.)
+if ! timeout "${LOBSTER_PRODUCT_E2E_TIMEOUT:-1800}" node "$ROOT/ci/validation/product-e2e.mjs" 2>&1 |
+  tee "$DIST/product-e2e.log"; then
+  echo
+  echo "======== Linux product FAILED its E2E ========" >&2
+  echo "The install and the .deb are still on disk so the failure can be debugged:" >&2
+  echo "  Deb:    $DIST/$(basename "$DEB")" >&2
+  echo "  Install:$INSTALL_ROOT" >&2
+  echo "  Log:    $DIST/product-e2e.log" >&2
+  echo "Do NOT ship this artifact: nothing has proven a profile launches and survives a relaunch." >&2
+  echo "==============================================" >&2
+  exit 1
 fi
 
 echo
@@ -250,10 +268,5 @@ echo "Start:  lobster-browser"
 echo "Deb:    $DIST/$(basename "$DEB")"
 echo "Install:$INSTALL_ROOT"
 echo "Docs:   docs/OPERATIONS.md (§2)"
-if [[ "$E2E_OK" -eq 1 ]]; then
-  echo "E2E:    PASS"
-else
-  echo "E2E:    FAIL (install kept)"
-fi
+echo "E2E:    PASS"
 echo "====================================="
-[[ "$E2E_OK" -eq 1 ]]

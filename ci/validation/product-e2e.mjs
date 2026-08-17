@@ -507,5 +507,10 @@ async function main() {
 
 main().catch((e) => {
   process.stderr.write(`${e?.stack || e}\n`);
-  process.exitCode = 3;
+  // EXIT, do not merely set a code. A throw on the way in (a missing font pack, an unbuilt engine)
+  // happens after buildLaunchers has already registered live launchers, and whatever handle that
+  // leaves open keeps the event loop alive forever: the process printed this error and then had to be
+  // killed by a timeout, so `node product-e2e.mjs | tee` in scripts/build-linux-product.sh waited
+  // indefinitely instead of failing. A gate that hangs is not a gate.
+  process.exit(3);
 });

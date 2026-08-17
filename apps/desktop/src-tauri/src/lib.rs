@@ -21,6 +21,7 @@ mod proxy_check;
 mod proxy_store;
 mod secrets;
 mod sidecar;
+mod snapshot;
 mod template_store;
 
 use std::path::PathBuf;
@@ -1499,6 +1500,10 @@ pub fn run() {
             export_profile_cookies,
             encrypt_profile_blob,
             decrypt_profile_blob,
+            snapshot::commands::snapshot_list,
+            snapshot::commands::snapshot_capture,
+            snapshot::commands::snapshot_restore,
+            snapshot::commands::snapshot_verify,
             agent_start,
             agent_set_api_key,
             agent_api_key_status,

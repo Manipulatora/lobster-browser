@@ -21,7 +21,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 # Serialization for IPC + the local automation API envelope.
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 # Async runtime for the background local-API server (spawned off the UI thread).
 tokio = { version = "1", features = ["full"] }
@@ -29,7 +29,9 @@ tokio = { version = "1", features = ["full"] }
 axum = "0.7"
 
 # Local encrypted-at-rest profile store. `bundled` compiles SQLite in — no system dep.
-rusqlite = { version = "0.32", features = ["bundled"] }
+# `backup`: the page-stepping fallback the snapshot engine needs when a `VACUUM INTO` of a live
+# profile database stays SQLITE_BUSY — see snapshot/sqlite_copy.rs.
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 
 # Stable profile / session identifiers.
 uuid = { version = "1", features = ["v4"] }
@@ -59,6 +61,15 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tar = "0.4"
 flate2 = "1"
 futures-util = "0.3"
+
+# Snapshot integrity: BLAKE3 over every artifact plaintext AND ciphertext, so a truncated or
+# transplanted blob is caught before it is written into a user-data-dir.
+blake3 = "1"
+# Canonical-ish CBOR for the snapshot manifest and the DOM-storage record set: a self-describing
+# binary encoding that round-trips arbitrary BLOBs, which JSON cannot without a base64 tax.
+ciborium = "0.2"
+# Wipe the Local Store Key copy the snapshot vault holds once the cipher is built.
+zeroize = "1"
 
 # Ergonomic error handling across the core.
 anyhow = "1"
