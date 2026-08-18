@@ -306,7 +306,9 @@ export function ProfileList({
           <col style={{ width: COLUMN_WIDTHS.description }} />
           <col style={{ width: COLUMN_WIDTHS.proxy }} />
           <col style={{ width: COLUMN_WIDTHS.tags }} />
-          <col style={{ width: 92 }} />
+          {/* Wide enough for both actions plus the cell's own padding. At 92px the row menu
+              overflowed the table by ~8px and was clipped by the pane's overflow-x. */}
+          <col style={{ width: 104 }} />
         </colgroup>
         <thead>
           <tr>
@@ -540,7 +542,7 @@ export function ProfileList({
                   onSetPassword(openProfile.id);
                 }}
               >
-                Set/remove pwd
+                Set a password
               </button>
               <button
                 type="button"

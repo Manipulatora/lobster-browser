@@ -200,7 +200,7 @@
   padding: 0 var(--space-2);
   border-radius: var(--radius-full);
   font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
+  font-weight: var(--fw-medium);
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
@@ -277,7 +277,7 @@
 .lb-modal__title {
   margin: 0;
   font-size: var(--fs-lg);
-  font-weight: var(--fw-semibold);
+  font-weight: var(--fw-medium);
 }
 .lb-modal__body {
   padding: var(--space-6);
@@ -342,7 +342,7 @@
   min-width: 0;
 }
 .lb-toast__title {
-  font-weight: var(--fw-semibold);
+  font-weight: var(--fw-medium);
   font-size: var(--fs-md);
 }
 .lb-toast__msg {
@@ -494,7 +494,7 @@
 }
 .lb-empty__title {
   font-size: var(--fs-lg);
-  font-weight: var(--fw-semibold);
+  font-weight: var(--fw-medium);
 }
 .lb-empty__desc {
   max-width: 360px;
@@ -567,7 +567,9 @@
   align-items: center;
   gap: var(--space-3);
   width: 100%;
-  padding: var(--space-3);
+  min-height: 38px;
+  padding: 0 var(--space-3);
+  font-size: var(--fs-md);
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -579,6 +581,22 @@
   background: var(--brand-50);
   color: var(--brand-700);
 }
+/* THE ICON SLOT IS ALWAYS THERE. It used to render only when a command carried an icon, so the
+   navigation entries sat 30px further right than the actions and profiles below them — three
+   different left edges in one list. */
+.lb-palette__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+}
+.lb-palette__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .lb-palette__hint {
   margin-left: auto;
   font-size: var(--fs-xs);
@@ -587,7 +605,7 @@
 .lb-palette__group {
   padding: var(--space-2) var(--space-3) var(--space-1);
   font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
+  font-weight: var(--fw-medium);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-soft);
@@ -650,4 +668,146 @@
   background: var(--surface);
   color: var(--text);
   box-shadow: var(--shadow-xs);
+}
+
+/* --- Credit balance, topbar ------------------------------------------------------------------- */
+
+/* A QUIET BUTTON, NOT A LABEL. This opens billing, but with no border and no icon it read as static
+   text in the corner and nothing suggested it could be clicked. It now carries the same 32px pill as
+   the search and account controls beside it, so the topbar is three of one thing rather than three
+   different things. */
+.wallet-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-control);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.wallet-chip:hover {
+  background: var(--surface-muted);
+  border-color: var(--border-strong);
+}
+
+
+
+.wallet-chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* --- Plan + profile allowance, sidebar foot ---------------------------------------------------- */
+
+/* `margin-top: auto` pushes this and the footer below it to the bottom of the sidebar. The footer
+   carries the same rule for when no account is loaded and this block is absent; the sibling rule
+   below cancels it when both are present, otherwise the free space splits BETWEEN them and the block
+   floats in the middle of the column. */
+.plan-usage {
+  margin: auto var(--space-3) var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.plan-usage__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.plan-usage__plan {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-control);
+  color: var(--text);
+}
+
+/* A link, not a button: it competes with nothing, and the primary action on this screen is Create
+   Profile. Violet is spent on that, not here. */
+.plan-usage__upgrade {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-control);
+  cursor: pointer;
+}
+
+.plan-usage__upgrade:hover {
+  text-decoration: underline;
+}
+
+.plan-usage__upgrade:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+.plan-usage__bar {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--n-150);
+  overflow: hidden;
+}
+
+.plan-usage__fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--n-400);
+  transition: width var(--dur) var(--ease);
+}
+
+/* Colour arrives only when it means something. A bar that is violet from the first profile teaches
+   the user to ignore it, so the warning states are the only ones that are not grey. */
+.plan-usage__bar--warn .plan-usage__fill {
+  background: var(--amber);
+}
+
+.plan-usage__bar--full .plan-usage__fill {
+  background: var(--danger);
+}
+
+.plan-usage__meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.plan-usage__count {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-control);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.plan-usage__cap {
+  color: var(--text-soft);
+  font-weight: var(--fw-body);
+}
+
+.plan-usage__unit {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.plan-usage + .sidebar-footer {
+  margin-top: 0;
 }

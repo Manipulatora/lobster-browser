@@ -19,7 +19,7 @@ import type {
 } from '@lobster/shared-types';
 
 import { isDesktopRuntime, type ProfilePatch } from '../../api/tauri';
-import appIcon from '../../assets/brand/icon.png';
+
 import { OS_OPTIONS, OS_VERSION_OPTIONS } from './options';
 import {
   LOCALE_OPTIONS,
@@ -1108,24 +1108,21 @@ export function NewProfileForm({
 
               <label className="field field--wide">
                 <span className="field__label">
-                  <span className="required">*</span> Profile name
+                  Profile name <span className="required">*</span>
                 </span>
-                <div className="profile-name-row">
-                  <img className="profile-icon-preview" src={appIcon} alt="" aria-hidden />
-                  <input
-                    className="input"
-                    type="text"
-                    value={form.name}
-                    maxLength={120}
-                    aria-invalid={
-                      showValidation &&
-                      (form.name.trim().length === 0 || form.name.trim().length > 120)
-                    }
-                    placeholder="Enter profile name"
-                    onChange={(e) => set('name', e.target.value)}
-                    autoFocus
-                  />
-                </div>
+                <input
+                  className="input"
+                  type="text"
+                  value={form.name}
+                  maxLength={120}
+                  aria-invalid={
+                    showValidation &&
+                    (form.name.trim().length === 0 || form.name.trim().length > 120)
+                  }
+                  placeholder="Enter profile name"
+                  onChange={(e) => set('name', e.target.value)}
+                  autoFocus
+                />
               </label>
 
               <label className="field field--wide">
@@ -1146,7 +1143,7 @@ export function NewProfileForm({
                   type="text"
                   value={form.folder}
                   maxLength={240}
-                  placeholder="Optional folder"
+                  placeholder="Enter folder name"
                   onChange={(e) => set('folder', e.target.value)}
                 />
               </label>
@@ -1175,7 +1172,7 @@ export function NewProfileForm({
                 <div className="field-grid field--wide custom-proxy-grid">
                   <label className="field field--wide">
                     <span className="field__label">
-                      <span className="required">*</span> Proxy title
+                      Proxy title <span className="required">*</span>
                     </span>
                     <input
                       className="input"
@@ -1199,7 +1196,7 @@ export function NewProfileForm({
                   </label>
                   <label className="field">
                     <span className="field__label">
-                      <span className="required">*</span> Host
+                      Host <span className="required">*</span>
                     </span>
                     <input
                       className="input"
@@ -1214,7 +1211,7 @@ export function NewProfileForm({
                   </label>
                   <label className="field">
                     <span className="field__label">
-                      <span className="required">*</span> Port
+                      Port <span className="required">*</span>
                     </span>
                     <input
                       className="input"
@@ -1284,7 +1281,7 @@ export function NewProfileForm({
                   className="input"
                   type="text"
                   value={form.tags}
-                  placeholder="Tags"
+                  placeholder="Separate tags with commas"
                   onChange={(e) => set('tags', e.target.value)}
                 />
               </label>

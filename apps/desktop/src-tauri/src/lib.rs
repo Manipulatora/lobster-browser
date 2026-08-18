@@ -10,6 +10,7 @@
 //! `local_api::start_profile_via_sidecar` — the SAME path the local automation API uses — so the UI
 //! Launch button and external automation clients behave identically. See README.md.
 
+mod account;
 mod agent_secrets;
 mod blob_crypto;
 mod cloud_auth;
@@ -88,6 +89,33 @@ struct AuthState {
 ///
 /// `verified: false` is the honest part: this says who was signed in last time it was checked, not
 /// who is signed in now. A revoked token is caught by the background verification a moment later.
+/// Balance, plan and profile cap for the signed-in account.
+///
+/// Returns `null` rather than an error when it cannot be fetched: this is decoration on a screen the
+/// user wants immediately, and a launcher whose profile list fails because a billing endpoint was
+/// slow is a worse product than one that shows the list without a balance.
+/// Open the account's billing page in the system browser.
+///
+/// Top-ups and plan changes live on the website. The launcher deliberately owns neither: keeping
+/// payment in one implementation there is the same call as keeping passwords there, and a desktop
+/// window that took card or crypto details would be a second surface to secure for no gain.
+#[tauri::command]
+fn open_billing() -> Result<(), String> {
+    open_in_browser(&format!("{}/account/billing", cloud_auth::web_origin()))
+        .map_err(|e| format!("could not open the billing page: {e}"))
+}
+
+#[tauri::command]
+async fn account_summary() -> Option<account::AccountSummary> {
+    match account::fetch().await {
+        Ok(summary) => Some(summary),
+        Err(err) => {
+            tracing::debug!(error = %format!("{err:#}"), "account summary unavailable");
+            None
+        }
+    }
+}
+
 #[tauri::command]
 fn auth_status_cached() -> AuthState {
     AuthState {
@@ -1567,6 +1595,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             snapshot::commands::snapshot_push,
             snapshot::commands::snapshot_pull,
+            account_summary,
+            open_billing,
             auth_status_cached,
             vault_status,
             app_version,

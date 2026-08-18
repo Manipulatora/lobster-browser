@@ -84,7 +84,10 @@ struct CallbackResult {
     state: String,
 }
 
-fn web_origin() -> String {
+/// Website origin. `pub(crate)` so the shell can send the user to the billing page, which is where
+/// top-ups actually happen — the launcher never handles payment, for the same reason it never
+/// handles a password.
+pub(crate) fn web_origin() -> String {
     std::env::var("LOBSTER_WEB_ORIGIN").unwrap_or_else(|_| DEFAULT_WEB_ORIGIN.to_string())
 }
 
@@ -527,7 +530,9 @@ mod tests {
 
         assert_eq!(params.get("desktop"), Some(&"1"));
         for key in ["state", "port", "challenge"] {
-            let value = params.get(key).unwrap_or_else(|| panic!("{key} missing from {}", handle.url));
+            let value = params
+                .get(key)
+                .unwrap_or_else(|| panic!("{key} missing from {}", handle.url));
             assert!(!value.is_empty(), "{key} is empty");
         }
         assert_eq!(params["port"], handle.port.to_string());

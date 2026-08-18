@@ -21,6 +21,8 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
+  /* Light by default; controls opt back up to --fw-control. See the note in tokens.css. */
+  font-weight: var(--fw-body);
   font-size: var(--fs-base);
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
@@ -52,9 +54,11 @@ svg {
   stroke-width: 1.05;
 }
 
+/* Grey frame until checked, then violet. An unchecked box is not a state worth colouring, and a
+   column of violet outlines down the left of the table read as selected-when-nothing-was. */
 input[type='checkbox'] {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   margin: 0;
   accent-color: var(--accent);
 }
@@ -82,7 +86,7 @@ input[type='checkbox'] {
   min-width: 0;
   color: var(--text);
   font-size: var(--fs-xl);
-  font-weight: 600;
+  font-weight: var(--fw-medium);
 }
 
 .topbar__logo {
@@ -95,6 +99,12 @@ input[type='checkbox'] {
 
 .topbar__spacer {
   flex: 1;
+}
+
+/* The three topbar pills are the same size and shape, so they need air between them or they read as
+   one segmented control. */
+.topbar__actions {
+  gap: var(--space-2);
 }
 
 .topbar__actions,
@@ -118,7 +128,7 @@ input[type='checkbox'] {
 
 .workspace {
   display: grid;
-  grid-template-columns: 298px minmax(0, 1fr);
+  grid-template-columns: 244px minmax(0, 1fr);
   min-height: 0;
 }
 
@@ -137,8 +147,7 @@ input[type='checkbox'] {
   padding: 0 4px;
 }
 
-.row-mark,
-.profile-icon-preview {
+.row-mark {
   display: block;
   flex: 0 0 auto;
   object-fit: contain;
@@ -147,7 +156,7 @@ input[type='checkbox'] {
 .account-name {
   max-width: 170px;
   overflow: hidden;
-  font-size: var(--fs-xl);
+  font-size: var(--fs-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -161,19 +170,22 @@ input[type='checkbox'] {
 .nav {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-1);
 }
 
+/* NAVIGATION IS NOT THE LOUDEST THING ON SCREEN. These labels were set at `--fs-xl` — 16px, larger
+   than the table content, the modal titles and every heading in the product — so the three words
+   that never change outranked everything that does. */
 .nav-item {
-  gap: 13px;
+  gap: var(--space-3);
   width: 100%;
-  min-height: 40px;
-  padding: 0 10px;
+  min-height: 38px;
+  padding: 0 var(--space-3);
   border: 0;
   border-radius: var(--radius);
   background: transparent;
   color: var(--text-muted);
-  font-size: var(--fs-xl);
+  font-size: var(--fs-lg);
   cursor: pointer;
 }
 
@@ -185,7 +197,9 @@ input[type='checkbox'] {
 .nav-item--active {
   background: var(--accent-soft);
   color: var(--brand-700);
-  font-weight: var(--fw-medium);
+  /* Control weight, not medium: at 500 against Light body text the nav shouted, and the active
+     state is already carried by the tint and the colour. */
+  font-weight: var(--fw-control);
 }
 
 .nav-item__icon {
@@ -223,6 +237,13 @@ input[type='checkbox'] {
   border-bottom: 1px solid var(--border-strong);
 }
 
+/* ONE BAND. The toolbar sets its own control height so the search field (40px) and the buttons
+   beside it line up exactly; `--primary` no longer carries a height of its own, which is what used
+   to make a modal's Save button 8px taller than the Cancel next to it. */
+.table-toolbar .btn {
+  min-height: 40px;
+}
+
 .table-toolbar--simple {
   justify-content: space-between;
 }
@@ -230,14 +251,14 @@ input[type='checkbox'] {
 .toolbar-total {
   gap: 5px;
   min-width: 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
   color: var(--text-muted);
   white-space: nowrap;
 }
 
 .toolbar-total strong {
-  font-weight: 600;
-  font-size: 15px;
+  font-weight: var(--fw-medium);
+  font-size: var(--fs-md);
   color: var(--text);
 }
 
@@ -282,8 +303,8 @@ input[type='checkbox'] {
 }
 
 .search-field--templates {
-  max-width: 526px;
-  margin-left: auto;
+  flex: 1;
+  max-width: 518px;
 }
 
 .search-field > svg {
@@ -297,7 +318,7 @@ input[type='checkbox'] {
   outline: 0;
   background: transparent;
   color: var(--text);
-  font-size: 18px;
+  font-size: var(--fs-md);
 }
 
 .search-field input::placeholder,
@@ -367,6 +388,45 @@ textarea:focus {
   color: var(--text-muted);
 }
 
+/* THE APP DRAWS ITS OWN ARROW.
+ *
+ * A native <select> is painted by the platform: a heavy filled triangle on Linux/GTK, a thin double
+ * chevron on macOS, a different one again on Windows. The filter bar puts five of them side by side
+ * and the profile form another six, so the single most repeated glyph in the interface was the one
+ * element that looked like a different product on every machine — and never matched the chevrons
+ * the app draws everywhere else.
+ *
+ * `appearance: none` removes it and the background image below replaces it with the same Heroicons
+ * chevron, at the same stroke weight, in the same muted grey as the rest of the icon set. The right
+ * padding reserves the space so a long option label can never run underneath it.
+ */
+select.input,
+select.lb-select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke-width='1.6' stroke='%236b7482'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' d='m19.5 8.25-7.5 7.5-7.5-7.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 15px 15px;
+  cursor: pointer;
+}
+
+/* Legacy Edge draws a second arrow of its own next to ours. */
+select.input::-ms-expand,
+select.lb-select::-ms-expand {
+  display: none;
+}
+
+/* The chevron is decoration on a control that is doing nothing, so it fades with the rest of it. */
+select.input:disabled,
+select.lb-select:disabled {
+  background-color: var(--surface-muted);
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 1;
+}
+
 .textarea {
   min-height: 72px;
   resize: vertical;
@@ -382,14 +442,17 @@ textarea:focus {
 
 .btn {
   justify-content: center;
-  gap: 7px;
+  gap: var(--space-2);
   min-height: 32px;
-  padding: 0 16px;
+  padding: 0 var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
   color: var(--text);
-  font-weight: 500;
+  /* Explicit, so a button never inherits a container's size. Control weight rather than the Light
+     body weight: a label you click has to stay crisp at 12px on a 1080p Windows panel. */
+  font-size: var(--fs-md);
+  font-weight: var(--fw-control);
   cursor: pointer;
 }
 
@@ -405,11 +468,10 @@ textarea:focus {
 }
 
 .btn--primary {
-  min-height: 40px;
   border-color: var(--accent);
   background: var(--accent);
   color: var(--on-brand);
-  font-size: 18px;
+  font-size: var(--fs-md);
   box-shadow: 0 2px 4px rgba(124, 58, 237, 0.18);
 }
 
@@ -441,8 +503,8 @@ textarea:focus {
 
 .btn--compact {
   min-height: 30px;
-  padding: 0 10px;
-  font-size: 13px;
+  padding: 0 var(--space-3);
+  font-size: var(--fs-md);
   white-space: nowrap;
 }
 
@@ -466,7 +528,19 @@ textarea:focus {
 .btn--ghost {
   border-color: transparent;
   background: transparent;
-  color: var(--text-soft);
+  color: var(--text-muted);
+}
+
+/* `--text-soft` is the placeholder colour: Edit and Delete sat in it and read as greyed-out. */
+.btn--ghost:hover {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+/* Destructive rows announce themselves on approach rather than looking like every other action. */
+.btn--ghost.btn--danger-hover:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .btn--disabled {
@@ -489,14 +563,25 @@ textarea:focus {
 }
 
 .icon-button:hover {
-  background: var(--accent-soft);
+  background: var(--active-muted);
 }
 
+/* QUIET UNTIL HOVERED. Every row carried two violet-outlined boxes, so a list of twenty profiles
+   drew forty accent-coloured rectangles and the eye had nowhere to land. The launch action is still
+   discoverable — it is the first control in the row and it colours on hover — without the whole
+   table competing with the one primary button on the screen. */
 .icon-button--table {
-  width: 40px;
-  height: 40px;
-  border: 1px solid var(--accent);
+  width: 30px;
+  height: 30px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.icon-button--table:hover {
+  border-color: var(--border);
   background: var(--surface);
+  color: var(--accent);
 }
 
 .icon-button--primary {
@@ -520,23 +605,31 @@ textarea:focus {
 
 .data-table th,
 .data-table td {
-  padding: 12px 10px;
+  /* Padding-free vertical box: the height comes from `--row-h` alone. When this was `12px 10px` it
+     added to that height, so Proxies and Templates ran 72px rows against the profile list's 48px —
+     the same table component at two different densities depending on which tab you were on. */
+  padding: 0 var(--space-3);
   border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: middle;
 }
 
+/* ON THE TYPE SCALE. These were 20px headers over 18px cells in a 74px row — the app's base token is
+   12px, so the table was rendering at roughly 1.5x everything around it and dominated every screen it
+   appeared on. */
 .data-table th {
-  height: 52px;
+  height: 34px;
   background: var(--surface-muted);
-  color: var(--text);
-  font-size: 20px;
-  font-weight: 500;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-control);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .data-table td {
-  height: 74px;
-  font-size: 18px;
+  height: var(--row-h);
+  font-size: var(--fs-md);
 }
 
 .check-cell {
@@ -589,30 +682,11 @@ textarea:focus {
   min-height: 0;
 }
 
-/* Denser, uniform rows: identical + reduced height and font size (column widths are unaffected). */
-.profiles-table th,
-.profiles-table td {
-  padding: 7px 10px;
-}
-.profiles-table th {
-  height: 40px;
-  font-size: 14px;
-}
-.profiles-table td {
-  height: 52px;
-  font-size: 15px;
-}
-.profiles-table .table-title {
-  font-size: 15px;
-  max-width: 100%;
-}
+/* The profile list only widens its text cells — density, type size and chip size all come from the
+   shared table rules, so it cannot drift away from Proxies and Templates. */
+.profiles-table .table-title,
 .profiles-table .table-subtitle {
   max-width: 100%;
-  font-size: 13px;
-}
-.profiles-table .tag {
-  font-size: 12px;
-  min-height: 22px;
 }
 .profile-title-text {
   min-width: 0;
@@ -661,9 +735,11 @@ textarea:focus {
   flex: none;
   vertical-align: middle;
 }
+/* Sized and shrink-proof; spacing now comes from the parent's gap. */
 .table-os-icon {
-  vertical-align: -2px;
-  margin-right: 5px;
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
 }
 
 /* Proxy cell → line 1 name, line 2 host + country flag. */
@@ -673,7 +749,7 @@ textarea:focus {
 }
 .proxy-cell__name {
   color: var(--text);
-  font-weight: 500;
+  font-weight: var(--fw-control);
 }
 .proxy-cell__addr {
   display: flex;
@@ -717,7 +793,7 @@ textarea:focus {
 .os-segmented__item--active {
   border-color: var(--accent, #7c3aed);
   background: var(--accent-soft, rgba(124, 58, 237, 0.12));
-  font-weight: 500;
+  font-weight: var(--fw-control);
 }
 .os-segmented__item:disabled {
   opacity: 0.5;
@@ -736,16 +812,21 @@ textarea:focus {
   max-width: 340px;
   overflow: hidden;
   color: var(--text);
-  font-weight: 500;
+  font-weight: var(--fw-control);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* A FLEX ROW, not inline text. The OS icon used to sit inline with a 5px right margin and overlapped
+   the status word next to it at some sizes; a gap cannot collide. */
 .table-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   max-width: 360px;
   overflow: hidden;
   color: var(--text-muted);
-  font-size: 16px;
+  font-size: var(--fs-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -767,9 +848,9 @@ textarea:focus {
 }
 
 .row-mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
 }
 
 .profile-title-cell .table-actions {
@@ -779,7 +860,7 @@ textarea:focus {
 
 .table-actions {
   display: inline-flex;
-  gap: 8px;
+  gap: var(--space-1);
 }
 
 /* Dedicated trailing actions column (launch + row menu), split out of the title cell so the profile
@@ -828,9 +909,10 @@ textarea:focus {
 .menu-item {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  min-height: 32px;
-  padding: 0 10px;
+  gap: var(--space-2);
+  min-height: 30px;
+  padding: 0 var(--space-2);
+  font-size: var(--fs-md);
   border: 0;
   border-radius: var(--radius);
   background: transparent;
@@ -874,23 +956,23 @@ textarea:focus {
 
 .proxy-refresh {
   color: var(--accent);
-  font-weight: 500;
+  font-weight: var(--fw-control);
 }
 
 .os-glyph {
   color: var(--text-soft);
-  font-size: 26px;
+  font-size: var(--fs-lg);
 }
 
 .status {
   gap: 6px;
   width: max-content;
-  min-height: 24px;
+  min-height: 22px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   background: var(--surface-muted);
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .status__dot {
@@ -910,7 +992,12 @@ textarea:focus {
   color: var(--info);
 }
 
-.status--warning,
+/* AMBER, NOT RED. A proxy that answered slowly and a proxy that did not answer at all were both
+   painted in the error colour, so the list gave no way to tell "check this" from "this is broken". */
+.status--warning {
+  color: var(--amber);
+}
+
 .status--error {
   color: var(--danger);
 }
@@ -925,16 +1012,19 @@ textarea:focus {
   max-width: 220px;
 }
 
+/* NEUTRAL, not violet. A tag is a label the user wrote, not something to act on — colouring every
+   one of them spent the accent on the least important thing in the row and left the primary action
+   competing with a dozen chips for attention. */
 .tag {
   display: inline-flex;
   align-items: center;
-  min-height: 26px;
-  padding: 0 10px;
-  border: 1px solid var(--brand-200);
-  border-radius: var(--radius);
-  background: var(--accent-soft);
-  color: var(--text);
-  font-size: 16px;
+  min-height: 20px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
 }
 
 .muted {
@@ -1048,14 +1138,14 @@ textarea:focus {
   justify-content: space-between;
   gap: 16px;
   min-height: 54px;
-  padding: 0 22px;
+  padding: 0 var(--space-6);
   border-bottom: 1px solid var(--border);
 }
 
 .modal-header h2 {
   margin: 0;
-  font-size: 18px;
-  font-weight: 600;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
 }
 
 .modal-title-row {
@@ -1080,7 +1170,9 @@ textarea:focus {
 .modal-body {
   max-height: min(680px, calc(100dvh - 180px));
   overflow: auto;
-  padding: 22px 28px;
+  /* Matches `.modal-header` and `.subtabs`: the title, the tab strip and the first field all start
+     on the same vertical line. They used to sit at 22px, 24px and 28px respectively. */
+  padding: var(--space-6);
 }
 
 .trash-list {
@@ -1121,9 +1213,9 @@ textarea:focus {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
-  min-height: 64px;
-  padding: 12px 16px;
+  gap: var(--space-2);
+  min-height: 60px;
+  padding: var(--space-3) var(--space-6);
   border-top: 1px solid var(--border);
   background: var(--surface-muted);
 }
@@ -1200,7 +1292,7 @@ textarea:focus {
   background: var(--danger-soft);
   color: var(--danger);
   font-size: var(--fs-xs);
-  font-weight: var(--fw-semibold);
+  font-weight: var(--fw-medium);
 }
 
 .wizard-body {
@@ -1619,7 +1711,7 @@ textarea:focus {
   gap: 6px;
   flex-wrap: wrap;
   color: var(--text);
-  font-size: 16px;
+  font-size: var(--fs-base);
   font-weight: 400;
 }
 
@@ -1627,17 +1719,7 @@ textarea:focus {
   color: var(--danger);
 }
 
-.profile-name-row {
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
-  gap: 8px;
-}
 
-.profile-icon-preview {
-  width: 32px;
-  height: 32px;
-  border-radius: 6px;
-}
 
 .support-grid {
   display: grid;
@@ -1718,7 +1800,7 @@ textarea:focus {
 }
 
 .drop-zone span {
-  font-weight: 600;
+  font-weight: var(--fw-medium);
 }
 
 .drop-zone em {
@@ -1846,7 +1928,7 @@ textarea:focus {
 .fp-group legend {
   padding: 0 6px;
   color: var(--text);
-  font-weight: 500;
+  font-weight: var(--fw-control);
 }
 
 .profile-identity-summary {
@@ -1895,7 +1977,7 @@ textarea:focus {
 .pagination-arrow {
   border: 0;
   color: var(--text-soft);
-  font-size: 26px;
+  font-size: var(--fs-lg);
 }
 
 .pagination-page {
@@ -1957,7 +2039,7 @@ textarea:focus {
 .usage-band strong {
   display: block;
   margin-top: 4px;
-  font-size: 22px;
+  font-size: var(--fs-xl);
 }
 
 .plan-card {
@@ -2020,9 +2102,18 @@ code {
 .topbar-search {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   width: auto;
-  padding: 0 10px;
+  height: 32px;
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+}
+
+.topbar-search:hover {
+  background: var(--surface-muted);
+  color: var(--text);
 }
 
 .topbar-search .lb-kbd {
@@ -2048,7 +2139,7 @@ code {
 }
 
 .bulk-bar strong {
-  font-weight: 600;
+  font-weight: var(--fw-medium);
 }
 
 .skeleton-stack {
@@ -2066,6 +2157,11 @@ code {
   background: transparent;
   color: inherit;
   font: inherit;
+  /* NOT INHERITED AUTOMATICALLY. The UA stylesheet sets `text-transform: none` on form controls, and
+     `font: inherit` does not cover it — so the sortable headers in the profile list rendered
+     "Title" while the plain headers in Proxies rendered "PROXY", in the same app. */
+  text-transform: inherit;
+  letter-spacing: inherit;
   cursor: pointer;
   padding: 0;
 }
@@ -2336,34 +2432,22 @@ code {
 
 /* No panel, border, or shadow: the content sits on the window background. A card floating on an
    otherwise empty screen is chrome around nothing, and reads as a dialog to be dismissed rather
-   than as the app's own first screen. Width is still bounded so the lede does not run to the full
-   window on a wide monitor. */
+   than as the app's own first screen. */
 .auth-screen__content {
   width: 100%;
-  max-width: 340px;
+  max-width: 320px;
   text-align: center;
 }
 
+/* Larger than before, because it is now the ONLY thing above the buttons — with the heading and
+   lede gone, a 30px mark left the screen top-heavy with empty space. */
 .auth-screen__logo {
-  height: 30px;
+  height: 40px;
   width: auto;
-  margin: 0 auto 32px;
+  margin: 0 auto 36px;
 }
 
-.auth-screen__title {
-  margin: 0 0 8px;
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  color: var(--text);
-}
 
-.auth-screen__lede {
-  margin: 0 0 28px;
-  font-size: 13.5px;
-  line-height: 1.55;
-  color: var(--text-muted, var(--n-500));
-}
 
 /* Stacked, full width, equal weight: the two paths are equally likely on a first
    run, so neither is visually demoted. */
@@ -2375,7 +2459,15 @@ code {
 
 .auth-screen__button {
   width: 100%;
-  min-height: 38px;
+  min-height: 40px;
+  font-weight: var(--fw-control);
+}
+
+/* The only control on the waiting screen, so it is sized to be unmissable rather than tucked away
+   as a text link — a user who wants out of a stalled sign-in should not have to hunt for it. */
+.auth-screen__cancel {
+  min-height: 44px;
+  margin-top: 4px;
 }
 
 .auth-screen__error {
@@ -2389,11 +2481,13 @@ code {
   overflow-wrap: anywhere;
 }
 
+/* Carries the whole "still working" message now that the copy is gone, so it sits where the text
+   used to and is given room to read as deliberate rather than as a stray artefact. */
 .auth-screen__waiting {
   display: flex;
   justify-content: center;
   gap: 6px;
-  margin: 8px 0 24px;
+  margin: 4px 0 32px;
 }
 
 .auth-screen__dot {

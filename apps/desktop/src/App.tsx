@@ -1,6 +1,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { accountClient, formatCredit, type AccountSummary } from './api/account';
 import { authClient, type CloudUser } from './api/auth';
 import { isDesktopRuntime, profilesClient } from './api/tauri';
 import { AuthScreen } from './features/auth/AuthScreen';
@@ -8,6 +9,7 @@ import { ProfilesView } from './features/profiles/ProfilesView';
 import { ProxiesView } from './features/proxies/ProxiesView';
 import { TemplatesView } from './features/templates/TemplatesView';
 import siteLogo from './assets/brand/site-logo.png';
+import { PlanUsage } from './ui/PlanUsage';
 import { ActionDialog, CommandPalette, ErrorDialog, Kbd, type Command } from './ui';
 import type { Profile } from '@lobster/shared-types';
 import { Icon, type IconName } from './ui/Icon';
@@ -134,11 +136,35 @@ function Dashboard({
   const [quickLaunchBusy, setQuickLaunchBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [account, setAccount] = useState<AccountSummary | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const isMac = useMemo(
     () => typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform),
     [],
   );
+
+  // Balance, plan and cap. Re-fetched when the profile set changes so the usage figure in the
+  // sidebar cannot drift from the list beside it — a cap that reads 11/200 next to twelve rows is
+  // worse than no cap at all.
+  useEffect(() => {
+    if (!user) {
+      setAccount(null);
+      return;
+    }
+    let cancelled = false;
+    void accountClient
+      .summary()
+      .then((summary) => {
+        if (!cancelled) setAccount(summary);
+      })
+      .catch(() => {
+        // Optional detail. The shell renders without it rather than surfacing a billing failure on
+        // a screen the user opened to launch a profile.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, profiles.length]);
 
   // Keep a lightweight profile list for command-palette search / quick-launch.
   useEffect(() => {
@@ -263,6 +289,7 @@ function Dashboard({
         title: 'Create Profile',
         group: 'Actions',
         keywords: 'new profile',
+        icon: <Icon name="PlusIcon" aria-hidden />,
         run: requestCreateProfile,
       },
     ];
@@ -271,6 +298,7 @@ function Dashboard({
       id: `profile-${p.id}`,
       title: p.name,
       group: 'Profiles',
+      icon: <Icon name="PlayIcon" aria-hidden />,
       hint: p.status === 'running' ? 'Running' : 'Quick launch',
       keywords: `${p.tags.join(' ')} ${p.engine} ${p.os}`,
       run: () => {
@@ -295,6 +323,19 @@ function Dashboard({
         </div>
         <div className="topbar__spacer" />
         <div className="topbar__actions">
+          {/* Credit, in the topbar because it is the number that decides whether the user can do
+              the thing they came to do. Hidden entirely rather than shown as a zero while unknown:
+              a balance that flickers 0.00 -> 12.00 on every start reads as money briefly missing. */}
+          {account ? (
+            <button
+              type="button"
+              className="wallet-chip"
+              onClick={() => void accountClient.openBilling()}
+              title="Credit balance — open billing"
+            >
+              <span className="wallet-chip__value">{formatCredit(account.balanceCents)}</span>
+            </button>
+          ) : null}
           <button
             type="button"
             className="icon-button topbar-search"
@@ -358,6 +399,18 @@ function Dashboard({
               );
             })}
           </nav>
+          {/* Plan and allowance, at the bottom of the nav where it is always visible without being
+              in the way. The bar exists so approaching the cap is noticed BEFORE a create fails:
+              the server refuses profile N+1, and finding that out at the moment of creating is the
+              worst possible time to learn it. */}
+          {account ? (
+            <PlanUsage
+              tier={account.tier}
+              used={profiles.length}
+              cap={account.profileLimit}
+              onUpgrade={() => void accountClient.openBilling()}
+            />
+          ) : null}
           <div className="sidebar-footer">
             <span>{isDesktopRuntime() ? 'Desktop runtime' : 'Dev mock runtime'}</span>
           </div>

@@ -161,8 +161,10 @@ export function CommandPalette({
                         c.run();
                       }}
                     >
-                      {c.icon}
-                      <span>{c.title}</span>
+                      <span className="lb-palette__icon" aria-hidden>
+                        {c.icon}
+                      </span>
+                      <span className="lb-palette__title">{c.title}</span>
                       {c.hint ? <span className="lb-palette__hint">{c.hint}</span> : null}
                     </button>
                   );

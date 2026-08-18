@@ -226,7 +226,7 @@ function AddProxyModal({
       >
         <label className="field field--wide">
           <span className="field__label">
-            <span className="required">*</span> Title
+            Title <span className="required">*</span>
           </span>
           <input
             className="input"
@@ -239,7 +239,7 @@ function AddProxyModal({
 
         <div className="field field--wide">
           <span className="field__label">
-            <span className="required">*</span> Proxy
+            Proxy <span className="required">*</span>
           </span>
           <div className="proxy-input-row">
             <select
@@ -480,8 +480,8 @@ export function ProxiesView(): JSX.Element {
     <section className="page">
       <header className="table-toolbar table-toolbar--simple">
         <div className="toolbar-total">
-          <span>Total:</span>
           <strong>{rows.length}</strong>
+          <span>{rows.length === 1 ? 'proxy' : 'proxies'}</span>
         </div>
         <button type="button" className="btn btn--primary" onClick={() => setShowAddProxy(true)}>
           <Icon name="PlusIcon" aria-hidden />
@@ -584,7 +584,7 @@ export function ProxiesView(): JSX.Element {
                         </button>
                         <button
                           type="button"
-                          className="btn btn--ghost btn--compact"
+                          className="btn btn--ghost btn--compact btn--danger-hover"
                           onClick={() => void handleDeleteProxy(proxy)}
                         >
                           Delete
@@ -602,8 +602,8 @@ export function ProxiesView(): JSX.Element {
       <div className="info-strip">
         <Icon name="SignalIcon" aria-hidden />
         <span>
-          Proxy tests resolve exit IP, latency, timezone, and datacenter warnings through the Rust
-          IPC path.
+          Check reports the exit IP, round-trip latency and timezone a profile will present, and
+          warns when the address looks like a datacenter.
         </span>
       </div>
 

@@ -288,8 +288,8 @@ export function TemplatesView(): JSX.Element {
     <section className="page">
       <header className="table-toolbar">
         <div className="toolbar-total">
-          <span>Total:</span>
           <strong>{rows.length}</strong>
+          <span>{rows.length === 1 ? 'template' : 'templates'}</span>
         </div>
         <label className="search-field search-field--templates">
           <Icon name="MagnifyingGlassIcon" aria-hidden />
@@ -301,7 +301,7 @@ export function TemplatesView(): JSX.Element {
           />
         </label>
         <button type="button" className="btn btn--primary" onClick={() => setShowCreate(true)}>
-          <Icon name="SparklesIcon" aria-hidden />
+          <Icon name="PlusIcon" aria-hidden />
           Create Template
         </button>
       </header>

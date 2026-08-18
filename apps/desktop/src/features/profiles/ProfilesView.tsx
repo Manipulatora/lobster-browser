@@ -20,7 +20,6 @@ import {
   type ProfilePatch,
 } from '../../api/tauri';
 import { LaunchPanel } from '../automation/LaunchPanel';
-import { isOnboarded, markOnboarded, OnboardingModal } from '../onboarding/OnboardingModal';
 import { t } from '../../i18n';
 import { ActionDialog, Button, EmptyState, Skeleton, useToast } from '../../ui';
 import { EditProfileForm } from './EditProfileForm';
@@ -214,7 +213,6 @@ export function ProfilesView({
     profileName: string;
     info: LaunchInfo;
   } | null>(null);
-  const [showOnboarding, setShowOnboarding] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingProfileAction | null>(null);
   const [actionInput, setActionInput] = useState('');
   const [actionBusy, setActionBusy] = useState(false);
@@ -234,12 +232,6 @@ export function ProfilesView({
     }
     prevCreateSignal.current = createProfileSignal;
   }, [createProfileSignal]);
-
-  useEffect(() => {
-    if (!loading && profiles.length === 0 && !isOnboarded()) {
-      setShowOnboarding(true);
-    }
-  }, [loading, profiles.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -339,8 +331,6 @@ export function ProfilesView({
       /* non-fatal */
     }
     setShowForm(false);
-    markOnboarded();
-    setShowOnboarding(false);
     toast.success(`Created profile “${input.name}”.`);
   }
 
@@ -1008,18 +998,6 @@ export function ProfilesView({
         info={launchPanel?.info ?? null}
       />
 
-      <OnboardingModal
-        open={showOnboarding}
-        onSkip={() => {
-          markOnboarded();
-          setShowOnboarding(false);
-        }}
-        onGetStarted={() => {
-          markOnboarded();
-          setShowOnboarding(false);
-          setShowForm(true);
-        }}
-      />
       <ActionDialog
         open={pendingAction !== null}
         title={actionCopy.title}

@@ -63,11 +63,11 @@
   --on-brand: #ffffff;
 
   /* --- Typography ------------------------------------------------------------------------------- */
-  /* Google Sans, self-hosted from assets/google-sans.css (latin subsets, ~56 KB). The fallbacks
-     still matter: font-display:swap paints in 'Segoe UI' for the first frame on Windows, and that
-     is the face the stack should fall back to rather than a generic. */
+  /* Inter, self-hosted from assets/inter.css (latin subsets, variable 300..700, ~130 KB). The
+     fallbacks still matter: font-display:swap paints in 'Segoe UI' for the first frame on Windows,
+     and that is the face the stack should fall back to rather than a generic. */
   --font:
-    'Google Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
     sans-serif;
   --font-mono:
     ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo, Consolas,
@@ -79,10 +79,22 @@
   --fs-lg: 14px;
   --fs-xl: 16px;
   --fs-2xl: 22px;
+
+  /* WEIGHTS ARE DELIBERATELY LIGHT, AND CONTROLS ARE NOT.
+     The interface is set in Light 300, which is what makes it read as thin. Anything the user has to
+     hit or act on — buttons, active nav, table headers — steps up to 400, because 300 at 12px goes
+     fuzzy on the 1080p Windows displays most of these users are on, and a control that is hard to
+     read is a different problem from a paragraph that is. True Thin (100/200) is not vendored at
+     all: it is unreadable at this size and the renderer would synthesise it badly if asked. */
+  --fw-light: 300;
   --fw-regular: 400;
   --fw-medium: 500;
   --fw-semibold: 600;
   --fw-bold: 700;
+
+  /* Body text and headings sit here; --fw-control is the floor for anything interactive. */
+  --fw-body: var(--fw-light);
+  --fw-control: var(--fw-regular);
 
   /* --- Spacing scale (4px base) ----------------------------------------------------------------- */
   --space-1: 4px;
@@ -94,6 +106,13 @@
   --space-8: 32px;
   --space-10: 40px;
   --space-12: 48px;
+
+  /* --- Density -----------------------------------------------------------------------------------
+     A profile list is the one screen users keep open all day, and they run hundreds of profiles —
+     so the row height is a product decision, not a styling detail. 48px shows ~16 rows where the
+     previous 72px showed 9, which is the difference between scanning and scrolling. */
+  --row-h: 48px;
+  --row-pad-x: var(--space-4);
 
   /* --- Radii ------------------------------------------------------------------------------------ */
   --radius-sm: 6px;

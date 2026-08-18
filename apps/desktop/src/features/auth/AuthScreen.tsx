@@ -15,10 +15,16 @@ interface AuthScreenProps {
  * credential path — reset, verification, rate limiting, later 2FA — in one implementation on the
  * website, and means this window never handles a password at all.
  *
+ * NO EXPLANATORY COPY. The two buttons say what they do, and a paragraph under a logo on a launcher's
+ * first screen is text nobody reads that still has to be maintained, translated and kept true — the
+ * previous line had already gone stale twice, promising sync that did not exist and a free-profile
+ * count the server no longer honoured.
+ *
  * WAITING IS THE INTERESTING STATE. Once the browser opens, this window has nothing to show for
- * up to ten minutes while the user reads a pricing page or hunts for a verification email. It
- * must not look frozen, and it must offer a way out — hence the explicit "waiting" panel with a
- * cancel that returns here rather than a spinner over a dead UI.
+ * up to ten minutes while the user reads a pricing page or hunts for a verification email. It must
+ * not look frozen and it must offer a way out — so it keeps the mark, an animated pulse, and one
+ * unmissable Cancel. Nothing else: the instruction it used to print ("finish signing in in the
+ * browser window that just opened") describes something already happening in front of the user.
  */
 export function AuthScreen({ onAuthenticated }: AuthScreenProps): JSX.Element {
   const [waiting, setWaiting] = useState<'signup' | 'login' | null>(null);
@@ -46,37 +52,34 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps): JSX.Element {
 
         {waiting ? (
           <>
-            <h1 className="auth-screen__title">Waiting for your browser</h1>
-            <p className="auth-screen__lede">
-              Finish {waiting === 'signup' ? 'creating your account' : 'signing in'} in the browser
-              window that just opened. This screen unlocks by itself when you are done.
-            </p>
-            <div className="auth-screen__waiting" role="status" aria-live="polite">
+            {/* The status is carried by the pulsing mark and announced to screen readers, rather
+                than printed as a sentence. */}
+            <div
+              className="auth-screen__waiting"
+              role="status"
+              aria-live="polite"
+              aria-label={
+                waiting === 'signup'
+                  ? 'Waiting for you to finish creating your account in the browser'
+                  : 'Waiting for you to finish signing in in the browser'
+              }
+            >
               <span className="auth-screen__dot" />
               <span className="auth-screen__dot" />
               <span className="auth-screen__dot" />
             </div>
             {/* Cancelling only stops this window waiting; the Rust side drops its loopback
                 listener when the attempt is abandoned. */}
-            <button type="button" className="auth-screen__link" onClick={() => setWaiting(null)}>
+            <button
+              type="button"
+              className="btn auth-screen__button auth-screen__cancel"
+              onClick={() => setWaiting(null)}
+            >
               Cancel
             </button>
           </>
         ) : (
           <>
-            <h1 className="auth-screen__title">Lobster Browser</h1>
-            {/* THIS COPY IS A DURABILITY PROMISE, so it says only what the product does. It read
-                "Sign in to sync profiles" while nothing in the app uploads a byte of profile data —
-                a user who believed it would skip exporting and lose every profile on reinstall.
-                Restore the sync wording when bytes actually move.
-
-                It also promised "five free profiles" while the server's allowance had already moved
-                to three. A number duplicated here cannot track the one the API enforces, so it is
-                gone rather than restated: the plan page is the single place that quotes limits. */}
-            <p className="auth-screen__lede">
-              Sign in to your Lobster account to manage your plan and profiles.
-            </p>
-
             <div className="auth-screen__actions">
               <button
                 type="button"
