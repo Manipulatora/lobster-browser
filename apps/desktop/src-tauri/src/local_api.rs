@@ -256,6 +256,50 @@ pub async fn start_profile_via_sidecar(
     let launched = sidecar.call("startProfile", params).await;
     match launched {
         Ok(result) => {
+            // A RESOLVED CALL IS NOT A RUNNING BROWSER.
+            //
+            // This used to mark the profile "running" on the strength of the JSON-RPC envelope
+            // alone — `ok: true` and nothing more. The envelope says the sidecar handled the
+            // request; it says nothing about whether a browser process exists. Anything that
+            // resolves without an endpoint (a stubbed runner, a future code path reporting partial
+            // success, a bug) would tell the user their profile launched while nothing started.
+            //
+            // The endpoint is the proof. `startProfile` only returns one after
+            // `waitForEndpointOrExit` has read a real DevTools address off the child and confirmed
+            // the port is reachable, so its presence means a browser answered.
+            //
+            // HISTORICAL NOTE, so nobody re-derives the wrong lesson: this guard is defence in
+            // depth, and it is NOT what caused the "cannot launch it, but the launcher marked it as
+            // launched" report. That had a live endpoint and a real browser process — the window
+            // was created and never shown, because the launcher spawned the engine with Node's
+            // `windowsHide: true` alongside `--window-size`. See the comment on the spawn in
+            // packages/engine-runner/src/runners/lobium-launcher.ts. A status of "running" is still
+            // only as strong as "CDP answered": it does not prove the user can SEE the browser.
+            let endpoint = result
+                .get("debuggerAddress")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| result.get("ws").and_then(Value::as_str))
+                .filter(|s| !s.trim().is_empty());
+
+            if endpoint.is_none() {
+                if let Ok(conn) = db.lock() {
+                    let _ = profile_store::set_status(&conn, profile_id, "error");
+                }
+                return Err(StartError::Failed(anyhow::anyhow!(
+                    "the engine reported success but returned no debugger endpoint, so no browser \
+                     is running. This usually means no Lobium engine is installed for this \
+                     platform — set LOBSTER_LOBIUM_BIN or provision the engine."
+                )));
+            }
+
+            // The endpoint proves a browser is RUNNING. It does not prove the user can SEE it —
+            // those are different claims, and conflating them is what produced the original
+            // "launched, but no browser" report. Assert the window instead of assuming it.
+            if let Some(pid) = result.get("pid").and_then(Value::as_u64) {
+                crate::window_show::ensure_visible_soon(pid as u32, profile_id);
+            }
+
             let conn = db
                 .lock()
                 .map_err(|_| StartError::Failed(anyhow::anyhow!("profile store lock poisoned")))?;

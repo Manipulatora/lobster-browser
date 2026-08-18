@@ -17,6 +17,7 @@ mod cloud_auth;
 mod engine_provision;
 mod keychain;
 mod local_api;
+mod profile_portable;
 mod profile_store;
 mod profile_sync;
 mod proxy_check;
@@ -26,6 +27,7 @@ mod sidecar;
 mod snapshot;
 mod template_store;
 mod vault_key;
+mod window_show;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -1385,6 +1387,11 @@ pub fn run() {
         }));
     }
 
+    // Native save/open dialogs, used only by profile export/import. A profile file can be tens of
+    // megabytes and the user chooses where it lands, so the `<a download>` blob trick the cookie
+    // export uses is not an option here.
+    builder = builder.plugin(tauri_plugin_dialog::init());
+
     builder
         .setup(|app| {
             // Open the local profile store under the OS app-data dir.
@@ -1632,6 +1639,9 @@ pub fn run() {
             snapshot::commands::snapshot_capture,
             snapshot::commands::snapshot_restore,
             snapshot::commands::snapshot_verify,
+            profile_portable::export_profile_file,
+            profile_portable::inspect_profile_file,
+            profile_portable::import_profile_file,
             agent_start,
             agent_set_api_key,
             agent_api_key_status,

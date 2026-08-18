@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Baseline capability for the main window. Process spawning stays in trusted Rust code.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-save",
+    "dialog:allow-open"
+  ]
 }

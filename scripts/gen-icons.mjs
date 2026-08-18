@@ -8,7 +8,11 @@ import { fileURLToPath } from 'node:url';
 // Heroicon name -> Material Symbol name. Chosen to preserve the existing meaning at each call site,
 // not merely to find a similar-looking glyph.
 const MAP = {
+  // Export a profile to a portable file.
+  ArrowDownTrayIcon: 'download',
   ArrowPathIcon: 'refresh',
+  // Import a profile from a portable file.
+  ArrowUpTrayIcon: 'upload',
   ArrowUturnLeftIcon: 'undo',
   CheckCircleIcon: 'check_circle',
   CheckIcon: 'check',
@@ -20,8 +24,12 @@ const MAP = {
   EllipsisHorizontalIcon: 'more_horiz',
   EllipsisVerticalIcon: 'more_vert',
   FunnelIcon: 'filter_alt',
+  // Country chip fallback when no 2-letter code is known. A globe, not a flag: the code is unknown.
+  GlobeAltIcon: 'language',
   LockClosedIcon: 'lock',
   MagnifyingGlassIcon: 'search',
+  // Edit the proxy attached to a profile row.
+  PencilIcon: 'edit',
   PlayIcon: 'play_arrow',
   PlusIcon: 'add',
   ServerStackIcon: 'dns',

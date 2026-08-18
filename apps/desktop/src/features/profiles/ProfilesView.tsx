@@ -23,6 +23,8 @@ import { LaunchPanel } from '../automation/LaunchPanel';
 import { t } from '../../i18n';
 import { ActionDialog, Button, EmptyState, Skeleton, useToast } from '../../ui';
 import { EditProfileForm } from './EditProfileForm';
+import { ExportProfileDialog } from './ExportProfileDialog';
+import { ImportProfileDialog } from './ImportProfileDialog';
 import { ENGINE_OPTIONS, OS_OPTIONS, STATUS_META } from './options';
 import { ProfileList, type ProfileSortKey, type SortDir } from './ProfileList';
 import { TrashModal } from './TrashModal';
@@ -177,6 +179,7 @@ export function ProfilesView({
     profiles,
     loading,
     error,
+    refresh,
     create,
     clone,
     update,
@@ -196,6 +199,8 @@ export function ProfilesView({
   const [showForm, setShowForm] = useState(false);
   const [showTrash, setShowTrash] = useState(false);
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
+  const [exportingProfile, setExportingProfile] = useState<Profile | null>(null);
+  const [showImport, setShowImport] = useState(false);
   const [saving, setSaving] = useState(false);
   const [query, setQuery] = useState('');
   const [showFilters, setShowFilters] = useState(false);
@@ -703,6 +708,17 @@ export function ProfilesView({
             <Icon name="PlusIcon" aria-hidden />
             Create Profile
           </button>
+          {/* Import sits beside Create because a `.lobprofile` is the other way a profile comes
+              into existence, and a fresh install is the main moment for it. */}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setShowImport(true)}
+            title="Import a profile from a .lobprofile file"
+          >
+            <Icon name="ArrowUpTrayIcon" aria-hidden />
+            Import
+          </button>
           {/* Trash, directly. This was a second primary-coloured square button opening a menu whose
               only item was Trash — two clicks and an extra control to reach one action, and a
               second accent-filled button competing with Create Profile beside it. A menu is worth
@@ -901,6 +917,23 @@ export function ProfilesView({
             onExportCookies={(id) => {
               void handleExportCookies(id);
             }}
+            onExportProfile={(id) => {
+              const profile = profiles.find((p) => p.id === id);
+              if (profile) setExportingProfile(profile);
+            }}
+            // Both proxy affordances open the profile editor, which is the one place a proxy is
+            // attached to a profile — a separate mini-picker would be a second source of truth.
+            onAddProxy={setEditingProfile}
+            onEditProxy={setEditingProfile}
+            onCheckProxy={(profile) => {
+              const inline = profile.proxy;
+              if (inline) return proxiesClient.test_proxy(null, inline);
+              const stored = availableProxies.find((p) => p.id === profile.proxyId);
+              if (stored) return proxiesClient.test_proxy(stored.id, stored.config);
+              // The row only renders the check button when a proxy is present, so this is a
+              // programming error rather than a user-reachable state.
+              return Promise.resolve({ ok: false, error: 'This profile has no proxy configured.' });
+            }}
           />
         )}
       </div>
@@ -962,6 +995,36 @@ export function ProfilesView({
             loadFontFamilies={loadFontFamilies}
           />
         </AccessibleModalOverlay>
+      ) : null}
+
+      {exportingProfile ? (
+        <ExportProfileDialog
+          profile={exportingProfile}
+          onClose={() => setExportingProfile(null)}
+          onDone={(report) => {
+            setExportingProfile(null);
+            // The omissions matter more than the success: a file the user believes is complete but
+            // that silently left out the proxy login is a support ticket a week later.
+            const omitted = report.omitted.length
+              ? ` Not included: ${report.omitted.join(', ')}.`
+              : '';
+            toast.success(
+              `Exported “${report.profileName}” (${(report.bytes / (1024 * 1024)).toFixed(1)} MB).${omitted}`,
+            );
+          }}
+        />
+      ) : null}
+
+      {showImport ? (
+        <ImportProfileDialog
+          onClose={() => setShowImport(false)}
+          onImported={(report) => {
+            setShowImport(false);
+            void refresh();
+            const warned = report.warnings.length ? ` ${report.warnings.join(' ')}` : '';
+            toast.success(`Imported “${report.profile.name}”.${warned}`);
+          }}
+        />
       ) : null}
 
       <LaunchPanel

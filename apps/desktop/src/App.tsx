@@ -1,7 +1,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { accountClient, formatCredit, type AccountSummary } from './api/account';
+import { accountClient, formatCredit, type AccountState } from './api/account';
 import { authClient, type CloudUser } from './api/auth';
 import { profilesClient } from './api/tauri';
 import { AuthScreen } from './features/auth/AuthScreen';
@@ -9,7 +9,7 @@ import { ProfilesView } from './features/profiles/ProfilesView';
 import { ProxiesView } from './features/proxies/ProxiesView';
 import { TemplatesView } from './features/templates/TemplatesView';
 import siteLogo from './assets/brand/site-logo.png';
-import { PlanUsage } from './ui/PlanUsage';
+import { AccountPanel } from './ui/AccountPanel';
 import { ActionDialog, CommandPalette, ErrorDialog, type Command } from './ui';
 import type { Profile } from '@lobster/shared-types';
 import { Icon, type IconName } from './ui/Icon';
@@ -143,31 +143,46 @@ function Dashboard({
   const [quickLaunchBusy, setQuickLaunchBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
-  const [account, setAccount] = useState<AccountSummary | null>(null);
+  const [account, setAccount] = useState<AccountState>({ kind: 'loading' });
+  /** Bumped by the panel's Retry, so a boot-time failure is not permanent. */
+  const [accountAttempt, setAccountAttempt] = useState(0);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
 
   // Balance, plan and cap. Re-fetched when the profile set changes so the usage figure in the
   // sidebar cannot drift from the list beside it — a cap that reads 11/200 next to twelve rows is
   // worse than no cap at all.
+  //
+  // EVERY OUTCOME IS A STATE, and the panel renders all of them. This used to store
+  // `AccountSummary | null` and render nothing for null — which was simultaneously "loading",
+  // "offline", "signed out", "401" and "billing is down". The user saw an empty sidebar and no way
+  // to know why or to try again.
+  //
+  // `accountAttempt` is in the deps because the previous version could only ever retry when the
+  // user or the profile count changed. On a fresh install with no profiles neither ever does, so a
+  // single failed fetch at startup stayed failed for the life of the process.
   useEffect(() => {
     if (!user) {
-      setAccount(null);
+      // Admitted by the auth gate as `offline`: a session is held but could not be verified, so
+      // there is no identity to bill against and no point calling.
+      setAccount({ kind: 'offline' });
       return;
     }
     let cancelled = false;
     void accountClient
       .summary()
       .then((summary) => {
-        if (!cancelled) setAccount(summary);
+        if (cancelled) return;
+        // The Rust side collapses every transport and HTTP failure to null; treat that as an error
+        // the user can retry rather than as an absence of information.
+        setAccount(summary ? { kind: 'ready', summary } : { kind: 'error' });
       })
       .catch(() => {
-        // Optional detail. The shell renders without it rather than surfacing a billing failure on
-        // a screen the user opened to launch a profile.
+        if (!cancelled) setAccount({ kind: 'error' });
       });
     return () => {
       cancelled = true;
     };
-  }, [user, profiles.length]);
+  }, [user, profiles.length, accountAttempt]);
 
   // The reported count is the trigger, not the state: the shell refetches the list, because the
   // palette and quick-launch read it too and a bare number would leave those stale.
@@ -338,18 +353,13 @@ function Dashboard({
         </div>
         <div className="topbar__spacer" />
         <div className="topbar__actions">
-          {/* THE ONLY THING IN THE TOPBAR NOW.
-
-              The command-palette button and the account dropdown that used to sit here are gone.
-              Ctrl+K is a shortcut people either know or never use, and a permanent button
-              advertising it is chrome; the shortcut still works. The account belonged next to the
-              plan it pays for, so it moved to the sidebar footer -- which also keeps sign-out
-              reachable, the one thing that button was load-bearing for.
-
-              Credit stays because it is the number that decides whether the user can do the thing
-              they came to do. Hidden rather than shown as a zero while unknown: a balance that
-              flickers 0.00 -> 12.00 on every start reads as money briefly missing. */}
-          {account ? (
+          {/* Credit, mirrored from the sidebar account panel because it is the number that decides
+              whether the user can do the thing they came to do. Rendered only when it is actually
+              known: a balance that flickers 0.00 -> 12.00 on every start reads as money briefly
+              missing, and an unknown balance shown as zero is worse than no balance at all.
+              Every OTHER account state is reported in the sidebar panel, which never renders
+              nothing. */}
+          {account.kind === 'ready' ? (
             <button
               type="button"
               className="wallet-chip"
@@ -357,7 +367,9 @@ function Dashboard({
               title="Credit balance - open billing"
             >
               <Icon name="WalletIcon" className="wallet-chip__icon" aria-hidden />
-              <span className="wallet-chip__value">{formatCredit(account.balanceCents)}</span>
+              <span className="wallet-chip__value">
+                {formatCredit(account.summary.balanceCents)}
+              </span>
             </button>
           ) : null}
         </div>
@@ -382,54 +394,21 @@ function Dashboard({
               );
             })}
           </nav>
-          {/* Plan and allowance, at the bottom of the nav where it is always visible without being
-              in the way. The bar exists so approaching the cap is noticed BEFORE a create fails:
-              the server refuses profile N+1, and finding that out at the moment of creating is the
-              worst possible time to learn it. */}
-          {account ? (
-            <PlanUsage
-              tier={account.tier}
-              used={profiles.length}
-              cap={account.profileLimit}
-              onUpgrade={() => void accountClient.openBilling()}
-            />
-          ) : null}
-          {/* The account, and the only way out of it.
-
-              This replaced "Desktop runtime" / "Dev mock runtime" — a developer's build-mode
-              readout that told a user nothing and was on screen permanently. The account sits here
-              rather than the topbar because it belongs beside the plan it pays for, and because
-              sign-out has to live somewhere: before it existed anywhere in the UI, `auth_sign_out`
-              had no caller at all and the only escape from a wrong account was clearing the OS
-              keychain by hand. */}
-          <div className="sidebar-account" ref={accountMenuRef}>
-            <button
-              type="button"
-              className="sidebar-account__button"
-              aria-haspopup="menu"
-              aria-expanded={accountMenuOpen}
-              onClick={() => setAccountMenuOpen((open) => !open)}
-              title={accountLabel}
-            >
-              <span className="sidebar-account__name">{accountLabel}</span>
-              <Icon name="ChevronUpIcon" aria-hidden />
-            </button>
-            {accountMenuOpen ? (
-              <div className="action-menu sidebar-account__menu" role="menu">
-                <button
-                  type="button"
-                  className="menu-item"
-                  role="menuitem"
-                  onClick={() => {
-                    void handleSignOut();
-                  }}
-                >
-                  Sign out
-                </button>
-              </div>
-            ) : null}
-          </div>
-        </aside>
+          {/* ONE PANEL, ALWAYS PRESENT: plan, allowance, Credit and identity in the place the user
+              looks for their account. Its states are handled inside; it never renders nothing,
+              which is what the previous two separately-gated blocks did whenever the billing call
+              did not succeed. */}
+          <AccountPanel
+            state={account}
+            used={profiles.length}
+            accountLabel={accountLabel}
+            menuOpen={accountMenuOpen}
+            onToggleMenu={() => setAccountMenuOpen((open) => !open)}
+            onSignOut={() => void handleSignOut()}
+            onOpenBilling={() => void accountClient.openBilling()}
+            onRetry={() => setAccountAttempt((n) => n + 1)}
+            menuRef={accountMenuRef}
+          />        </aside>
 
         <main className="main">
           <ActiveView

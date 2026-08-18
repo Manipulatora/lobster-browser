@@ -139,7 +139,11 @@ try {
 
 $releaseDir = Join-Path $Root 'apps\desktop\src-tauri\target\release'
 $exe = Join-Path $releaseDir 'lobster-desktop.exe'
-$installer = Get-ChildItem (Join-Path $releaseDir 'bundle\nsis') -Filter '*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+# NEWEST, not first. Get-ChildItem returns names in alphabetical order, so a stale bundle left over
+# from an earlier version (e.g. `... _0.0.0_x64-setup.exe`) sorts ahead of the one this run just
+# produced and the summary pointed the reader at a file that was hours old and several MB smaller.
+$installer = Get-ChildItem (Join-Path $releaseDir 'bundle\nsis') -Filter '*.exe' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
 Write-Host ''
 Write-Host '======== Windows product ========' -ForegroundColor Green

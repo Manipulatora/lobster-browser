@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Lobster Browser desktop agent \u2014 Tauri 2 (Rust) core + React/TS UI + Axum local automation API.",
+  "description": "Lobster Browser desktop agent — Tauri 2 (Rust) core + React/TS UI + Axum local automation API.",
   "scripts": {
     "dev": "vite",
     "build": "node ../../scripts/build-lobee.mjs && tsc && vite build",
@@ -15,6 +15,7 @@
     "@lobster/fingerprint": "*",
     "@lobster/shared-types": "*",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

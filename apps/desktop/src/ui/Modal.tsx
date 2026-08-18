@@ -34,20 +34,46 @@ export function Modal({
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const generatedTitleId = useId();
 
+  // `onClose` is read through a ref so the effect below does not depend on it.
+  //
+  // Callers pass an inline arrow (`onClose={() => { … }}`), which is a new function identity on
+  // every parent render. With `onClose` in the dependency array the whole effect tore down and
+  // re-ran on EVERY KEYSTROKE in a dialog whose input is bound to parent state — re-running the
+  // focus move below each time, and running its cleanup, which yanked focus out of the dialog.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     if (!open) return;
     previouslyFocused.current = document.activeElement as HTMLElement | null;
     const dialog = dialogRef.current;
-    // Focus the first focusable element (or the dialog itself).
-    const focusable = dialog?.querySelector<HTMLElement>(
-      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-    );
-    (focusable ?? dialog)?.focus();
+
+    // DO NOT STEAL FOCUS THAT IS ALREADY INSIDE THE DIALOG.
+    //
+    // This is what made the profile password prompt impossible to type into. React applies
+    // `autoFocus` by calling `.focus()` during commitMount — a LAYOUT-phase effect — so by the time
+    // this passive effect runs, the password input is already focused. The unconditional
+    // `querySelector(...)` below then moved focus to the FIRST match in DOM order, and `button`
+    // leads that selector list, so focus landed on the header Close button before the user could
+    // type a character. Enter or Space then activated Close, whose handler clears the field —
+    // exactly the "it only accepted it for a very short time" symptom.
+    //
+    // Note the fix is NOT to query `[autofocus]`: React 18 never writes that attribute to the DOM
+    // on the client (it is emitted only in SSR output), so such a selector matches nothing.
+    // Checking `contains(document.activeElement)` works regardless of how focus got there.
+    if (!dialog?.contains(document.activeElement)) {
+      // Inputs first. When nothing is auto-focused, the field a dialog exists to collect is a
+      // better landing place than its Close button.
+      const focusable = dialog?.querySelector<HTMLElement>(
+        'input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button, [href], [tabindex]:not([tabindex="-1"])',
+      );
+      (focusable ?? dialog)?.focus();
+    }
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.key === 'Tab' && dialog) {
@@ -71,9 +97,17 @@ export function Modal({
     document.addEventListener('keydown', onKey, true);
     return () => {
       document.removeEventListener('keydown', onKey, true);
-      previouslyFocused.current?.focus?.();
+      // Only restore focus if it is still inside the dialog being torn down. Otherwise this fights
+      // whatever the app focused next, and — because `previouslyFocused` is captured AFTER React's
+      // autoFocus has already run — it would otherwise "restore" focus to the very input that is
+      // about to be unmounted.
+      if (dialog?.contains(document.activeElement)) {
+        previouslyFocused.current?.focus?.();
+      }
     };
-  }, [open, onClose]);
+    // `onClose` deliberately absent: it is read through onCloseRef. See the note above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   if (!open) return null;
 

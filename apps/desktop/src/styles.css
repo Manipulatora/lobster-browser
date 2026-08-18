@@ -207,6 +207,21 @@ input[type='checkbox'] {
   height: 20px;
 }
 
+/* --- Account, at the foot of the sidebar ------------------------------------------------------ */
+
+/* THE CONTAINING BLOCK for the sign-out pop-up, and nothing else.
+ *
+ * Its absence is why the menu was unreachable: with no positioned ancestor between here and the
+ * root, `.action-menu`'s offsets resolved against the VIEWPORT, putting the menu 6px below the
+ * bottom of the window at zero height.
+ *
+ * `margin-top: auto` deliberately does NOT live here. This element is nested inside `.account-panel`
+ * now, so an auto margin here pushes it within the card rather than pushing the card down the
+ * sidebar — the bottom-anchoring belongs on the flex child of `.sidebar`, which is the panel. */
+.sidebar-account {
+  position: relative;
+}
+
 .sidebar-account__button {
   display: flex;
   align-items: center;
@@ -239,8 +254,21 @@ input[type='checkbox'] {
 }
 
 /* Opens UPWARD. `.action-menu` anchors below its trigger, which at the bottom of the sidebar would
-   render the menu off the bottom of the window. */
-.sidebar-account__menu {
+ * render the menu off the bottom of the window.
+ *
+ * TWO THINGS MADE THIS FAIL COMPLETELY, and the sign-out menu never appeared at all.
+ *
+ * 1. `.action-menu` is declared at the far end of this file, and a single class beats nothing on
+ *    specificity — so with a plain `.sidebar-account__menu` selector, SOURCE ORDER decided every
+ *    property and `top: calc(100% + 6px)` won over `top: auto`. Qualifying the selector with
+ *    `.action-menu` makes it (0,2,0) and the override wins wherever it sits in the file.
+ * 2. Nothing between here and the viewport was positioned, so `bottom`/`top` resolved against the
+ *    INITIAL containing block. `top` landed 6px below the bottom of the window, and with `top` and
+ *    `bottom` both set against `height: auto` the box solved to zero height. The menu was rendered,
+ *    off-screen and invisible, and sign-out was unreachable. `.sidebar-account` below is the
+ *    containing block that fixes it.
+ */
+.action-menu.sidebar-account__menu {
   top: auto;
   right: auto;
   bottom: calc(100% + 6px);
@@ -248,19 +276,69 @@ input[type='checkbox'] {
   min-width: 100%;
 }
 
+/* The content region, and the carrier for the brand watermark below.
+   `.main` is the second track of `.workspace`'s grid, so the mark is clipped away from the topbar
+   and the sidebar for free — including when that sidebar collapses to a rail at <=900px, which this
+   rule never has to know about. */
 .main {
   min-width: 0;
   overflow: auto;
   background: var(--surface);
+
+  /* A faint lobster in the bottom-right of the content region.
+     Generated from the real brand master by scripts/gen-watermark.ps1 — a flat #7c3aed silhouette
+     at 3% alpha, NOT a faded copy of the artwork (fading full-colour art to a few percent averages
+     its highlights toward the page and leaves a grey haze with a halo on the edge pixels).
+
+     3% is a contrast budget, not a preference: --text-muted (#6b7482) on white is already 4.72:1
+     against a 4.5:1 AA floor, so the composited surface may lose only ~5% relative luminance.
+     0.03 composites to #fbf9fe (4.52:1, passes); 0.04 gives 4.45:1 and fails. The mark earns its
+     presence through SCALE instead of ink.
+
+     It is a background-image rather than an <img> or ::after on purpose: a positioned element is one
+     specificity accident away from painting over the table, and a background never can. */
+  background-image: url('./assets/brand/watermark.png');
+  background-repeat: no-repeat;
+  /* Bottom-right — the toolbar, search, primary button and table header all live in the top band. */
+  background-position: right clamp(20px, 3vw, 48px) bottom clamp(20px, 4vh, 40px);
+  /* Sized so the whole mark always FITS the content region. An earlier 38vw/620px ceiling ran the
+     shield off the bottom edge on a 900px-tall window, and a clipped watermark reads as a failed
+     image rather than as chrome. The `vw` term plus the bottom offsets above keep it clear of the
+     edge at every size this window can be. */
+  background-size: clamp(160px, 22vw, 300px) auto;
+  /* Deliberately `scroll`, never `fixed`. On a scroll container `scroll` attaches the background to
+     the element's own border box, so it stays pinned while rows scroll over it — watermark behaviour
+     with no extra element. `fixed` would anchor to the viewport (sliding the mark under the sidebar)
+     and force a full background repaint every scroll frame in WebView2. */
+  background-attachment: scroll;
 }
 
+/* Below ~720px the content column is under 500px, the profiles table has hit its own min-width and
+   `.data-panel` is scrolling HORIZONTALLY. A mark that holds still while the table slides sideways
+   over it reads as a rendering bug, not a watermark. */
+@media (max-width: 720px) {
+  .main {
+    background-image: none;
+  }
+}
+
+/* A decorative tint is noise in High Contrast, and the forced background is not the white this
+   alpha was computed against. */
+@media (forced-colors: active) {
+  .main {
+    background-image: none;
+  }
+}
+
+/* Transparent, not `--surface`: `.main` already lays down the same surface underneath, and
+   repainting it here would bury the watermark under a second opaque coat. */
 .page {
   display: flex;
   flex-direction: column;
   gap: 20px;
   min-height: 100%;
   padding: 18px 30px;
-  background: var(--surface);
+  background: transparent;
 }
 
 .table-toolbar {
@@ -620,9 +698,13 @@ select.lb-select:disabled {
   color: var(--danger);
 }
 
+/* Transparent for the same reason as `.page`, and this is the one that mattered most: on the
+   Profiles screen `.profiles-view__list .data-panel` is `flex: 1`, so this single opaque rectangle
+   used to cover 100% of the content area. Table rows have no background of their own; `th` and
+   `.row--selected` keep theirs on purpose — a header band and a selected row should read as solid. */
 .data-panel {
   overflow: auto;
-  background: var(--surface);
+  background: transparent;
 }
 
 .data-table {
@@ -770,28 +852,111 @@ select.lb-select:disabled {
   height: 12px;
 }
 
-/* Proxy cell → line 1 name, line 2 host + country flag. */
-.proxy-cell__text {
+/* Proxy cell → country chip, exit IP (host:port until a check runs), then check + edit.
+   One line, not two: the old two-line name/address stack spent the row's tallest element on a label
+   the user chose and already knows. */
+.proxy-cell__ip {
+  flex: 1 1 auto;
   min-width: 0;
-  flex: 1;
-}
-.proxy-cell__name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
   color: var(--text);
-  font-weight: var(--fw-control);
 }
-.proxy-cell__addr {
-  display: flex;
+/* Always visible, never loud. Hover-revealed actions test badly in a dense table — the user cannot
+   discover a control that is not there until the pointer is already on it. */
+.proxy-cell__actions {
+  display: inline-flex;
   align-items: center;
-  gap: 5px;
-  min-width: 0;
+  gap: 2px;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
-.proxy-flag {
-  flex: none;
-  font-size: var(--fs-lg);
+/* 24px rather than the 30px of the row-actions column: two of these share one cell with an IP. */
+.icon-button--cell {
+  width: 24px;
+  height: 24px;
+}
+.icon-button--cell svg {
+  width: 14px;
+  height: 14px;
+}
+.proxy-check[data-state='checking'] svg {
+  animation: lb-spin 0.9s linear infinite;
+}
+.proxy-check[data-state='ok'] {
+  color: var(--green);
+}
+.proxy-check[data-state='fail'] {
+  color: var(--danger);
+}
+/* Checking is progress, not "unavailable" — the default disabled fade reads as the latter. */
+.proxy-check:disabled {
+  opacity: 1;
+}
+
+/* AN EMPTY SLOT, NOT A LINK. The dashed border says "something belongs here"; a bare text button in
+   a dense table reads as data the row happens to contain. */
+.proxy-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--fs-base);
+  font-weight: var(--fw-control);
+  cursor: pointer;
+  transition:
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+.proxy-add:hover {
+  border-style: solid;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.proxy-add:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.proxy-add svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* Country marker: the alpha-2 code in a flag-shaped box. Monochrome on purpose — the status ring is
+   the row's only meaningful colour, and any per-country palette would be invented. */
+.flag-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  /* 3:2, the aspect of most national flags, so it reads as a flag slot without pretending to be one. */
+  width: 21px;
+  height: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: var(--fw-medium);
   line-height: 1;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  cursor: default;
 }
-.proxy-cell--empty {
-  opacity: 0.7;
+.flag-chip--unknown {
+  color: var(--text-soft);
+}
+.flag-chip svg {
+  width: 10px;
+  height: 10px;
 }
 
 /* OS picker rendered as an icon segmented control (native <select> can't show per-option icons). */
@@ -968,20 +1133,21 @@ select.lb-select:disabled {
   height: 16px;
 }
 
+/* `display: flex` + `width: 100%` override the shared `inline-flex` at the top of this file (equal
+   specificity, later source order). The cell has to fill its column or `margin-left: auto` on
+   `.proxy-cell__actions` has no width to push against and the buttons bunch up against the IP. */
 .proxy-cell {
-  gap: 8px;
+  display: flex;
+  gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
 }
 
-.proxy-cell svg,
-.table-lock {
-  width: 18px;
-  height: 18px;
-}
-
-.proxy-refresh {
-  color: var(--accent);
-  font-weight: var(--fw-control);
-}
+/* Deleted with the old markup: `.proxy-cell svg, .table-lock { 18px }` and `.proxy-refresh`.
+   `.table-lock` and `.proxy-refresh` are no longer rendered anywhere, and the descendant `svg` rule
+   had become actively wrong — it sits after `.icon-button--cell svg` (14px) and `.flag-chip svg`
+   (10px) at equal specificity, so it silently won and oversized every glyph in the new cell.
+   Both selectors here were dead or harmful; nothing shared was in the list. */
 
 .os-glyph {
   color: var(--text-soft);
@@ -1077,6 +1243,59 @@ select.lb-select:disabled {
   border-color: var(--brand-200);
   background: var(--danger-soft);
   color: var(--danger);
+}
+
+/* Between info and error: the operation will proceed, but the result is not what the user assumes
+   (a capture taken while the browser is writing, a duplicate profile about to exist twice). */
+.notice--warn {
+  border-color: var(--amber);
+  background: var(--amber-soft);
+  color: var(--text);
+}
+
+/* Sub-label under a field: the constraint, or what the value means. Muted so it reads as guidance
+   and not as a validation failure — errors get `.notice--error`. */
+.field__hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-regular);
+}
+
+/* --- Profile import: file picker + what the chosen file contains ------------------------------- */
+.import-picker {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.import-picker__path {
+  min-width: 0;
+  flex: 1 1 auto;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+/* The preview exists so the user is never asked for a password to open a file they cannot identify. */
+.import-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+}
+.import-preview__name {
+  color: var(--text);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-control);
+}
+.import-preview__meta {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
 }
 
 .empty-state {

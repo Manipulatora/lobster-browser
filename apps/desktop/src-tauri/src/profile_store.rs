@@ -612,6 +612,23 @@ pub fn set_password(conn: &Connection, id: &str, password: Option<String>) -> Re
     Ok(affected > 0)
 }
 
+/// Set the stored Argon2 PHC hash directly, without a plaintext password.
+///
+/// Exists for profile import ([`crate::profile_portable`]): a password-protected profile must arrive
+/// still protected, and the exporting machine only ever had the hash — by design, since the whole
+/// point of storing a hash is that the plaintext is unrecoverable. [`set_password`] cannot express
+/// that, because it takes the plaintext and derives the hash itself.
+///
+/// The caller is responsible for the value being a real PHC string; it is written verbatim.
+pub fn set_password_hash(conn: &Connection, id: &str, hash: Option<&str>) -> Result<bool> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let affected = conn.execute(
+        "UPDATE profiles SET password_hash = ?2, updated_at = ?3 WHERE id = ?1 AND trashed_at IS NULL",
+        params![id, hash, now],
+    )?;
+    Ok(affected > 0)
+}
+
 pub fn verify_password(conn: &Connection, id: &str, password: Option<&str>) -> Result<bool> {
     let mut stmt =
         conn.prepare("SELECT password_hash FROM profiles WHERE id = ?1 AND trashed_at IS NULL")?;

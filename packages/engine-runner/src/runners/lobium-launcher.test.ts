@@ -307,7 +307,13 @@ test('ensureChromiumLaunchPreferences replaces Preferences exactly once, by rena
     // A rename publishes a NEW inode; an in-place writeFileSync would keep the old one. This is what
     // proves the launch cannot leave a truncated Preferences behind.
     assert.notEqual(after.ino, before.ino, 'Preferences must be replaced by temp+rename');
-    assert.equal(after.mode & 0o777, 0o600);
+    // POSIX only. Windows has no Unix permission bits — NTFS ACLs are the real mechanism — and Node
+    // synthesises a mode of 0o666 for any writable file there, so this asserts nothing on the
+    // platform the product actually ships on and fails the suite for a reason unrelated to the
+    // behaviour under test.
+    if (process.platform !== 'win32') {
+      assert.equal(after.mode & 0o777, 0o600);
+    }
     assert.deepEqual(
       readdirSync(join(userDataDir, 'Default')).filter((name) => name !== 'Preferences'),
       [],

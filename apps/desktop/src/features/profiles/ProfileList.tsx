@@ -1,4 +1,4 @@
-import type { Profile, StoredProxy } from '@lobster/shared-types';
+import type { Profile, ProxyTestResult, StoredProxy } from '@lobster/shared-types';
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -7,7 +7,8 @@ import type { LaunchInfo } from '../../api/tauri';
 import appIcon from '../../assets/brand/icon.png';
 import { EmptyState } from '../../ui';
 import { isAndroidTarget, osLabel, STATUS_META } from './options';
-import { OsIcon, countryFlag } from './OsIcon';
+import { OsIcon } from './OsIcon';
+import { FlagChip } from './FlagChip';
 import { Icon } from '../../ui/Icon';
 
 export type ProfileSortKey = 'name' | 'updatedAt' | 'status' | 'proxy' | 'description' | 'tags';
@@ -46,7 +47,21 @@ interface ProfileListProps {
   /** Explicit CDP / automation details (never auto-shown on launch). */
   onShowConnection: (id: string) => void;
   onExportCookies: (id: string) => void;
+  /** Export the whole profile to a portable file. */
+  onExportProfile: (id: string) => void;
+  /** Row has no proxy → open the profile's proxy picker on an empty selection. */
+  onAddProxy: (profile: Profile) => void;
+  /** Row has a proxy → open the same picker with the current one loaded. */
+  onEditProxy: (profile: Profile) => void;
+  /** Live reachability check for the row's proxy. */
+  onCheckProxy: (profile: Profile) => Promise<ProxyTestResult>;
 }
+
+/** Per-row result of the proxy check button. Local to the table; never persisted. */
+type ProxyCheck =
+  | { state: 'checking' }
+  | { state: 'ok'; latencyMs?: number; ip?: string; countryCode?: string }
+  | { state: 'fail'; error: string };
 
 /** Whether a status means the engine is (or is becoming) live. */
 function isLive(status: Profile['status']): boolean {
@@ -65,11 +80,9 @@ function formatDate(value: string): string {
 }
 
 interface ResolvedProxy {
-  /** Line 1: the user-given proxy name. */
-  name: string;
-  /** Line 2: host:port. */
+  /** `host:port` from the store — what the cell shows until a check returns a real exit IP. */
   address: string;
-  /** 2-letter country code for the flag, when known. */
+  /** 2-letter country code from the stored location, when known. */
   countryCode?: string;
   present: boolean;
 }
@@ -82,26 +95,21 @@ function countryCodeFromLocation(location?: string): string | undefined {
 
 function resolveProxy(profile: Profile, stored: StoredProxy[]): ResolvedProxy {
   if (profile.proxy) {
-    const { host, port, label } = profile.proxy;
-    return {
-      name: label ?? `${host}:${port}`,
-      address: `${host}:${port}`,
-      present: true,
-    };
+    const { host, port } = profile.proxy;
+    return { address: `${host}:${port}`, present: true };
   }
   if (profile.proxyId) {
     const match = stored.find((p) => p.id === profile.proxyId);
     if (match) {
       return {
-        name: match.label || `${match.config.host}:${match.config.port}`,
         address: `${match.config.host}:${match.config.port}`,
         countryCode: countryCodeFromLocation(match.location),
         present: true,
       };
     }
-    return { name: 'Stored proxy', address: profile.proxyId, present: true };
+    return { address: profile.proxyId, present: true };
   }
-  return { name: 'No proxy', address: 'Set a proxy', present: false };
+  return { address: '', present: false };
 }
 
 function SortHeader({
@@ -148,8 +156,8 @@ function StatusActionButton({
         type="button"
         className="icon-button icon-button--table status-action status-action--closing"
         disabled
-        aria-label={`${profile.name} is closing`}
-        title="Closing"
+        aria-label={`${profile.name} is stopping`}
+        title="Stopping"
       >
         <span className="status-dots" aria-hidden>
           <i />
@@ -229,13 +237,45 @@ export function ProfileList({
   onSetPassword,
   onShowConnection,
   onExportCookies,
+  onExportProfile,
+  onAddProxy,
+  onEditProxy,
+  onCheckProxy,
 }: ProfileListProps): JSX.Element {
+  const [checks, setChecks] = useState<ReadonlyMap<string, ProxyCheck>>(new Map());
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const triggerRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const allSelected = profiles.length > 0 && profiles.every((p) => selectedIds.has(p.id));
   const someSelected = profiles.some((p) => selectedIds.has(p.id));
+
+  async function runCheck(profile: Profile): Promise<void> {
+    setChecks((m) => new Map(m).set(profile.id, { state: 'checking' }));
+    try {
+      const result = await onCheckProxy(profile);
+      setChecks((m) =>
+        new Map(m).set(
+          profile.id,
+          result.ok
+            ? {
+                state: 'ok',
+                latencyMs: result.latencyMs,
+                ip: result.geo?.ip,
+                countryCode: result.geo?.countryCode,
+              }
+            : { state: 'fail', error: result.error ?? 'Check failed' },
+        ),
+      );
+    } catch (err) {
+      setChecks((m) =>
+        new Map(m).set(profile.id, {
+          state: 'fail',
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
+  }
 
   useLayoutEffect(() => {
     if (!openMenuId) {
@@ -364,6 +404,16 @@ export function ProfileList({
             const proxy = resolveProxy(profile, availableProxies);
             const description = profile.notes ?? info?.debuggerAddress ?? '';
             const androidTarget = isAndroidTarget(profile.os);
+            // The ring follows the optimistic view: `busyIds` flips before the store row does, so a
+            // click feels immediate. Same two conditions StatusActionButton already uses.
+            const ringStatus: Profile['status'] =
+              busy && profile.status === 'running'
+                ? 'stopping'
+                : busy && !isLive(profile.status)
+                  ? 'launching'
+                  : profile.status;
+            const statusWord = STATUS_META[ringStatus].label;
+            const check = checks.get(profile.id);
             return (
               <tr
                 key={profile.id}
@@ -379,18 +429,31 @@ export function ProfileList({
                 </td>
                 <td>
                   <div className="profile-title-cell">
-                    <img className="row-mark" src={appIcon} alt="" aria-hidden />
+                    {/* The ring IS the status. No `title` here as well as the bubble — WebView2
+                        would render the native tooltip too, two labels 300ms apart. */}
+                    <span
+                      className="lb-tooltip lb-tooltip--right profile-mark"
+                      data-status={ringStatus}
+                      role="img"
+                      aria-label={`Status: ${statusWord}`}
+                      tabIndex={0}
+                    >
+                      <img className="row-mark" src={appIcon} alt="" aria-hidden />
+                      <span className="lb-tooltip__bubble" aria-hidden>
+                        {statusWord}
+                      </span>
+                    </span>
                     <div className="profile-title-text">
                       <div className="table-title cell-ellipsis" title={profile.name}>
                         {profile.name}
                       </div>
+                      {/* Status moved to the ring, so the subtitle is identity, not state. The OS
+                          label also used to be a tooltip on the STATUS word — it read out the
+                          wrong thing. */}
                       <div className="table-subtitle">
                         <OsIcon os={profile.os} className="table-os-icon" />
-                        <span title={osLabel(profile.os)}>
-                          {STATUS_META[profile.status].label}
-                        </span>{' '}
-                        · {formatDate(profile.updatedAt)}
-                        {profile.passwordProtected ? ' · 🔒' : ''}
+                        <span>{osLabel(profile.os)}</span> · {formatDate(profile.updatedAt)}
+                        {profile.passwordProtected ? ' · Locked' : ''}
                       </div>
                     </div>
                   </div>
@@ -401,24 +464,66 @@ export function ProfileList({
                   </span>
                 </td>
                 <td>
-                  <div className={`proxy-cell${proxy.present ? '' : ' proxy-cell--empty'}`}>
-                    <Icon name="LockClosedIcon" aria-hidden />
-                    <div className="proxy-cell__text">
-                      <div className="proxy-cell__name cell-ellipsis" title={proxy.name}>
-                        {proxy.name}
-                      </div>
-                      <div className="table-subtitle proxy-cell__addr">
-                        <span className="cell-ellipsis" title={proxy.address}>
-                          {proxy.address}
-                        </span>
-                        {proxy.countryCode ? (
-                          <span className="proxy-flag" title={proxy.countryCode}>
-                            {countryFlag(proxy.countryCode)}
-                          </span>
-                        ) : null}
-                      </div>
+                  {!proxy.present ? (
+                    <button
+                      type="button"
+                      className="proxy-add"
+                      onClick={() => onAddProxy(profile)}
+                      aria-label={`Add a proxy to ${profile.name}`}
+                    >
+                      <Icon name="PlusIcon" aria-hidden />
+                      <span>Add proxy</span>
+                    </button>
+                  ) : (
+                    <div className="proxy-cell">
+                      <FlagChip
+                        code={
+                          (check?.state === 'ok' ? check.countryCode : undefined) ??
+                          proxy.countryCode
+                        }
+                      />
+                      {/* The stored value is often a rotating gateway hostname; the real exit IP
+                          only exists once a check has run, so show host:port until then. */}
+                      <span
+                        className="proxy-cell__ip cell-ellipsis"
+                        title={
+                          check?.state === 'ok' && check.ip ? check.ip : proxy.address
+                        }
+                      >
+                        {check?.state === 'ok' && check.ip ? check.ip : proxy.address}
+                      </span>
+                      <span className="proxy-cell__actions">
+                        <button
+                          type="button"
+                          className="icon-button icon-button--table icon-button--cell proxy-check"
+                          data-state={check?.state ?? 'idle'}
+                          disabled={check?.state === 'checking'}
+                          onClick={() => void runCheck(profile)}
+                          aria-label={`Check proxy for ${profile.name}`}
+                          title={
+                            check?.state === 'checking'
+                              ? 'Checking proxy…'
+                              : check?.state === 'ok'
+                                ? `Reachable${check.latencyMs != null ? ` · ${check.latencyMs} ms` : ''}`
+                                : check?.state === 'fail'
+                                  ? check.error
+                                  : 'Check proxy'
+                          }
+                        >
+                          <Icon name="ArrowPathIcon" aria-hidden />
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button icon-button--table icon-button--cell"
+                          onClick={() => onEditProxy(profile)}
+                          aria-label={`Edit proxy for ${profile.name}`}
+                          title="Edit proxy"
+                        >
+                          <Icon name="PencilIcon" aria-hidden />
+                        </button>
+                      </span>
                     </div>
-                  </div>
+                  )}
                 </td>
                 <td>
                   {profile.tags.length > 0 ? (
@@ -531,6 +636,20 @@ export function ProfileList({
                 }}
               >
                 Clone
+              </button>
+              {/* NOT gated on running, unlike Export cookies above. That gate exists because cookie
+                  export needs a live CDP session; a profile export is a filesystem capture, and the
+                  profile worth exporting is often precisely the one that will not launch. */}
+              <button
+                type="button"
+                className="menu-item"
+                role="menuitem"
+                onClick={() => {
+                  setOpenMenuId(null);
+                  onExportProfile(openProfile.id);
+                }}
+              >
+                Export profile…
               </button>
               <button
                 type="button"

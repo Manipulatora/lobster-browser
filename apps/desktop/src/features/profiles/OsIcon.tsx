@@ -116,9 +116,6 @@ export function OsIcon({
   );
 }
 
-/** Regional-indicator flag emoji from a 2-letter ISO country code (empty string if not a valid code). */
-export function countryFlag(code: string | undefined | null): string {
-  if (!code || !/^[A-Za-z]{2}$/.test(code)) return '';
-  const cc = code.toUpperCase();
-  return String.fromCodePoint(0x1f1e6 + (cc.charCodeAt(0) - 65), 0x1f1e6 + (cc.charCodeAt(1) - 65));
-}
+// `countryFlag()` was removed here: it built a regional-indicator emoji pair, and Windows ships no
+// flag glyphs in Segoe UI Emoji, so every install rendered two boxed letters. Its one call site now
+// uses <FlagChip>, which draws the alpha-2 code in a flag-shaped box instead.

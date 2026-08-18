@@ -92,6 +92,7 @@ anyhow = "1"
 # Structured logging.
 tracing = "0.1"
 tracing-subscriber = "0.3"
+tauri-plugin-dialog = "2.7.2"
 
 # DSK-3: a second app launch focuses the first instance instead of contending on the
 # local-API port / SQLite. Desktop-only plugin (no mobile support).

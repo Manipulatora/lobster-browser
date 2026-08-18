@@ -109,7 +109,10 @@ pub fn snapshot_list(
 /// one without carrying persona detail, and the comparison is still exact. `proxy_endpoint` is
 /// host:port only — never the credentials, which the row holds encrypted and which have no business
 /// in a manifest.
-fn identity_of(state: &State<'_, AppState>, profile_id: &str) -> Result<Identity, String> {
+pub(crate) fn identity_of(
+    state: &State<'_, AppState>,
+    profile_id: &str,
+) -> Result<Identity, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let profile = crate::profile_store::get(&conn, &state.cipher, profile_id)
         .map_err(|e| e.to_string())?

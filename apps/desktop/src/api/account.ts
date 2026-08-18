@@ -12,6 +12,23 @@ export interface AccountSummary {
   profileLimit: number;
 }
 
+/**
+ * What the sidebar knows about the account right now.
+ *
+ * ONE STATE PER MEANING. This replaced a bare `AccountSummary | null`, where `null` stood for
+ * "still loading", "signed out", "offline", "token rejected", "billing returned 500" and "the
+ * payload did not parse" — all six rendering as nothing at all. The user's report was simply that
+ * the plan area was not there, and the UI had no way to say which of the six it was, or to offer a
+ * retry. Each state now renders something, and `loading` is distinguishable from `error`.
+ */
+export type AccountState =
+  | { kind: 'loading' }
+  | { kind: 'ready'; summary: AccountSummary }
+  /** A session is held but the API could not be reached. Not signed out — see auth_status. */
+  | { kind: 'offline' }
+  /** Reached, and refused or malformed. Retrying may work; signing in again may be required. */
+  | { kind: 'error' };
+
 export interface AccountClient {
   /** Open the account's billing page in the system browser. Top-ups happen there, not in the app. */
   openBilling(): Promise<void>;
@@ -20,7 +37,8 @@ export interface AccountClient {
    * The account summary, or null when it cannot be fetched.
    *
    * Null rather than a thrown error on purpose: this is supporting detail on a screen the user wants
-   * immediately, and the shell renders fine without it.
+   * immediately, and the shell renders fine without it. Callers map null onto an {@link AccountState}
+   * so the distinction reaches the UI.
    */
   summary(): Promise<AccountSummary | null>;
 }

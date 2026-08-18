@@ -406,6 +406,88 @@
   opacity: 1;
 }
 
+/* Bubble to the RIGHT, not above. `.data-panel` is `overflow: auto`, so a bubble above the first
+   row is clipped by the scroll box. Centred on a 28px mark inside a 48px row, a right-hand bubble
+   can never leave the row's own vertical band. */
+.lb-tooltip--right .lb-tooltip__bubble {
+  bottom: auto;
+  top: 50%;
+  left: calc(100% + 8px);
+  transform: translateY(-50%);
+}
+
+/* --- Profile mark + live-state ring --------------------------------------------------------------
+   The ring is the profile row's ONLY meaningful colour, which is what lets the rest of the row stay
+   monochrome and dense.
+
+   THIS LIVES IN components.css, NOT styles.css, and the placement is load-bearing: main.tsx imports
+   styles.css BEFORE components.css, and `.lb-tooltip { display: inline-flex }` above has the same
+   specificity as `.profile-mark`. In styles.css the grid display would lose the cascade; here,
+   below the tooltip block, it wins.
+
+   Colour mapping: green is live, amber is transitional, red is reserved for `error` — the only
+   state that has earned alarm. There is no separate "open" status in the store (profile_store
+   accepts exactly idle | launching | running | stopping | error), so "open" and "running" are one
+   thing on this row. */
+.profile-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  /* 20px mark + 2px gap + 2px ring = 28px. The ring is a laid-out box rather than a box-shadow so
+     it cannot eat the title cell's gap. */
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+}
+.profile-mark::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--ring);
+  border-radius: var(--radius-md);
+  pointer-events: none;
+  transition: border-color var(--dur) var(--ease);
+}
+.profile-mark:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.profile-mark[data-status='idle'] {
+  --ring: var(--n-300);
+}
+.profile-mark[data-status='launching'] {
+  --ring: var(--amber);
+}
+.profile-mark[data-status='running'] {
+  --ring: var(--green);
+}
+.profile-mark[data-status='stopping'] {
+  --ring: var(--amber);
+}
+.profile-mark[data-status='error'] {
+  --ring: var(--danger);
+}
+
+/* Transitional states breathe, so "launching" reads differently from a settled amber at a glance
+   without spending a second colour on it. */
+.profile-mark[data-status='launching']::after,
+.profile-mark[data-status='stopping']::after {
+  animation: profile-mark-pulse 1.1s var(--ease) infinite;
+}
+@keyframes profile-mark-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .profile-mark[data-status='launching']::after,
+  .profile-mark[data-status='stopping']::after {
+    animation: none;
+  }
+}
+
 /* --- Tabs --------------------------------------------------------------------------------------- */
 .lb-tabs {
   display: flex;
@@ -705,115 +787,213 @@
   color: var(--text-soft);
 }
 
-/* --- Plan + profile allowance, sidebar foot ---------------------------------------------------- */
 
-/* `margin-top: auto` pushes this and the footer below it to the bottom of the sidebar. The footer
-   carries the same rule for when no account is loaded and this block is absent; the sibling rule
-   below cancels it when both are present, otherwise the free space splits BETWEEN them and the block
-   floats in the middle of the column. */
-.plan-usage {
-  margin: auto var(--space-3) var(--space-2);
+/* --- Account panel, at the foot of the sidebar -------------------------------------------------- */
+
+/* Replaced the separate `.plan-usage` card. Plan, allowance, Credit and identity are one subject
+   and now one block, and — unlike the two gated fragments before it — it always renders something.
+   The card is bordered because it is the one element in the sidebar that is not navigation. */
+.account-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
   padding: var(--space-3);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius);
   background: var(--surface);
+  /* Pins the whole card to the foot of the sidebar. It belongs on THIS element because this is the
+     flex child of `.sidebar`; on the account row nested inside it, the auto margin would only push
+     that row around within the card. */
+  margin-top: auto;
 }
 
-.plan-usage__head {
+.account-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  /* Reserves the height of the loaded panel so the sidebar does not jump when the fetch lands. */
+  min-height: 78px;
+}
+
+.account-panel__row {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--space-2);
-  margin-bottom: var(--space-2);
 }
 
-.plan-usage__plan {
+.account-panel__plan {
   font-size: var(--fs-md);
-  font-weight: var(--fw-control);
+  font-weight: var(--fw-medium);
   color: var(--text);
 }
 
-/* A link, not a button: it competes with nothing, and the primary action on this screen is Create
-   Profile. Violet is spent on that, not here. */
-.plan-usage__upgrade {
-  padding: 0;
+.account-panel__link {
   border: 0;
   background: none;
+  padding: 0;
   color: var(--accent);
-  font-family: inherit;
   font-size: var(--fs-sm);
-  font-weight: var(--fw-control);
   cursor: pointer;
 }
 
-.plan-usage__upgrade:hover {
+.account-panel__link:hover {
+  color: var(--accent-hover);
   text-decoration: underline;
 }
 
-.plan-usage__upgrade:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: var(--radius-sm);
+.account-panel__hint {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  color: var(--text-soft);
 }
 
-.plan-usage__bar {
+/* Offline / billing-error. Same footprint as the loaded panel, so the sidebar does not resize when
+   a retry succeeds. */
+.account-panel__unavailable {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* The count sits under the bar with a little air; baseline alignment is wrong here because there is
+   only one item on the row. */
+.account-panel__row--meta {
+  align-items: center;
+  margin-top: calc(var(--space-1) * -1);
+}
+
+/* --- Allowance bar --- */
+
+.account-panel__bar {
+  position: relative;
   height: 4px;
   border-radius: var(--radius-full);
   background: var(--n-150);
   overflow: hidden;
 }
 
-.plan-usage__fill {
+.account-panel__fill {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--n-400);
+  background: var(--accent);
   transition: width var(--dur) var(--ease);
 }
 
-/* Colour arrives only when it means something. A bar that is violet from the first profile teaches
-   the user to ignore it, so the warning states are the only ones that are not grey. */
-.plan-usage__bar--warn .plan-usage__fill {
+/* Amber approaching the cap, red at it. The colour is the early warning: hitting the wall at the
+   moment of creating a profile is the worst time to discover the limit. */
+.account-panel__bar--warn .account-panel__fill {
   background: var(--amber);
 }
 
-.plan-usage__bar--full .plan-usage__fill {
+.account-panel__bar--full .account-panel__fill {
   background: var(--danger);
 }
 
-.plan-usage__meta {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-1);
-  margin-top: var(--space-2);
-}
-
-.plan-usage__count {
+.account-panel__count {
   font-size: var(--fs-md);
-  font-weight: var(--fw-control);
-  font-variant-numeric: tabular-nums;
   color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 
-.plan-usage__cap {
+.account-panel__cap,
+.account-panel__unit {
   color: var(--text-soft);
-  font-weight: var(--fw-body);
 }
 
-.plan-usage__unit {
+.account-panel__unit {
   font-size: var(--fs-sm);
-  color: var(--text-muted);
 }
 
-/* RESTORED, renamed for the account row that replaced the footer.
- *
- * Both this block and the one after it carry `margin-top: auto` so that whichever is present sits
- * at the bottom of the sidebar. With BOTH present and both keeping it, flexbox splits the free
- * space between them — which is exactly what shipped: a plan card floating well above a lone
- * account row, with a band of nothing in between. Cancelling it on the second one puts them back
- * together as one bottom-anchored group. */
-.plan-usage + .sidebar-account {
-  margin-top: 0;
+/* --- Credit --- */
+
+.account-panel__credit {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 32px;
+  margin-top: var(--space-1);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.account-panel__credit:hover .account-panel__credit-add {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.account-panel__credit-icon {
+  width: 15px;
+  height: 15px;
+  color: var(--text-soft);
+}
+
+.account-panel__credit-value {
+  flex: 1;
+  text-align: left;
+  font-size: var(--fs-md);
+  color: var(--text);
+  /* Tabular, so the row does not shift width when a deposit lands while the app is open. */
+  font-variant-numeric: tabular-nums;
+}
+
+.account-panel__credit-add {
+  font-size: var(--fs-sm);
+  color: var(--accent);
+}
+
+/* --- Loading --- */
+
+.account-panel__skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-1);
+}
+
+.account-panel__skeleton-line {
+  width: 46%;
+  height: 11px;
+  border-radius: var(--radius-full);
+  background: var(--n-150);
+}
+
+.account-panel__skeleton-bar {
+  width: 100%;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--n-150);
+}
+
+.account-panel__skeleton-line,
+.account-panel__skeleton-bar {
+  animation: lb-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes lb-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* A pulsing placeholder is exactly the kind of motion that triggers vestibular discomfort, and it
+   conveys nothing the layout does not already. */
+@media (prefers-reduced-motion: reduce) {
+  .account-panel__skeleton-line,
+  .account-panel__skeleton-bar {
+    animation: none;
+  }
 }
 
 /* --- Row actions ------------------------------------------------------------------------------ */

@@ -66,6 +66,77 @@ export interface ProfilesClient {
   stop_profile(id: string): Promise<void>;
   export_profile_cookies(id: string): Promise<string>;
   list_font_families(os: string): Promise<string[]>;
+  /** Seal the whole profile — row, fingerprint seed and session data — into one `.lobprofile` file. */
+  export_profile_file(
+    id: string,
+    destPath: string,
+    passphrase: string,
+    profilePassword: string | null,
+    options?: ProfileExportOptions,
+  ): Promise<ProfileExportReport>;
+  /** Read only the plaintext header, so the import dialog can describe a file before asking for its password. */
+  inspect_profile_file(path: string): Promise<ProfileImportPreview>;
+  import_profile_file(
+    path: string,
+    passphrase: string,
+    nameOverride: string | null,
+  ): Promise<ProfileImportReport>;
+}
+
+export interface ProfileExportOptions {
+  /** Off by default: the file is meant to travel, and a proxy login inside it travels with it. */
+  includeProxyCredentials?: boolean;
+  excludeArtifacts?: string[];
+  capture?: 'reuse-latest' | 'quiesced' | 'live' | 'dirty';
+}
+
+export interface ProfileExportReport {
+  path: string;
+  bytes: number;
+  profileId: string;
+  profileName: string;
+  snapshotVersion: number;
+  coherence: string;
+  artifacts: string[];
+  /** What the file does NOT contain, phrased for display. */
+  omitted: string[];
+}
+
+export interface ProfileImportPreview {
+  formatVersion: number;
+  manifestVersion: number;
+  profileName: string;
+  engine: string;
+  os: string;
+  osVersion?: string;
+  exportedAt: string;
+  exportedByAppVersion: string;
+  bytes: number;
+  artifacts: string[];
+  sourceProfileId: string;
+  passwordProtected: boolean;
+  hasProxy: boolean;
+  hasProxyCredentials: boolean;
+  /** A profile with this source id is already on this machine. */
+  alreadyPresent: boolean;
+  nameCollision: boolean;
+}
+
+export interface ProfileImportRestoredArtifact {
+  id: string;
+  status: 'restored' | 'skipped' | 'failed';
+  detail?: string;
+}
+
+export interface ProfileImportReport {
+  profile: Profile;
+  snapshotVersion: number;
+  restore: {
+    ok: boolean;
+    artifacts: ProfileImportRestoredArtifact[];
+    failure?: string;
+  };
+  warnings: string[];
 }
 
 export interface ProxiesClient {
@@ -141,6 +212,17 @@ const tauriClient: ProfilesClient = {
   stop_profile: (id) => invoke<void>('stop_profile', { id }),
   export_profile_cookies: (id) => invoke<string>('export_profile_cookies', { id }),
   list_font_families: (os) => invoke<string[]>('list_font_families', { os }),
+  export_profile_file: (id, destPath, passphrase, profilePassword, options) =>
+    invoke<ProfileExportReport>('export_profile_file', {
+      id,
+      destPath,
+      passphrase,
+      profilePassword,
+      options,
+    }),
+  inspect_profile_file: (path) => invoke<ProfileImportPreview>('inspect_profile_file', { path }),
+  import_profile_file: (path, passphrase, nameOverride) =>
+    invoke<ProfileImportReport>('import_profile_file', { path, passphrase, nameOverride }),
 };
 
 const tauriProxiesClient: ProxiesClient = {
@@ -260,7 +342,16 @@ function seedMockStore(): void {
       tags: ['retail', 'us'],
       folder: 'Shopping',
     },
-    { name: 'EU Social — Lobium', engine: 'lobium', os: 'macos_arm', tags: ['social', 'eu'] },
+    // Proxied on purpose: the profile row renders a completely different proxy cell when one is
+    // attached (flag chip, exit IP, check + edit) and without this every dev/screenshot run only
+    // ever showed the empty "Add proxy" state.
+    {
+      name: 'EU Social — Lobium',
+      engine: 'lobium',
+      os: 'macos_arm',
+      tags: ['social', 'eu'],
+      proxyId: 'px-de-1',
+    },
     { name: 'Lobium QA', engine: 'lobium', os: 'linux', tags: ['qa'], folder: 'Internal' },
   ];
   for (const sample of samples) {
@@ -279,7 +370,10 @@ function seedMockStore(): void {
         port: 9443,
         label: 'US Residential Gateway',
       },
-      location: 'United States · New York',
+      // Same shape the app really writes: `resultLocation()` in ProxiesView joins
+      // countryCode · region · city, so the leading token is the 2-letter code the row's flag chip
+      // parses. A mock that spelled the country out could not produce a flag in dev.
+      location: 'US · New York · New York',
       timezone: 'America/New_York',
     },
     {
@@ -292,7 +386,7 @@ function seedMockStore(): void {
         port: 1080,
         label: 'DE Datacenter Backup',
       },
-      location: 'Germany · Frankfurt',
+      location: 'DE · Hesse · Frankfurt',
       timezone: 'Europe/Berlin',
     },
     {
@@ -305,7 +399,7 @@ function seedMockStore(): void {
         port: 443,
         label: 'Hive US Mobile Pool',
       },
-      location: 'United States · rotating',
+      location: 'US · rotating',
       timezone: 'Auto from exit IP',
     },
   ];
@@ -427,6 +521,18 @@ const mockClient: ProfilesClient = {
     return '[]';
   },
   list_font_families: async () => [],
+  // Export/import touch the real filesystem and the snapshot ledger, neither of which exists in the
+  // browser. Rejecting is the honest mock: a fake "exported!" would make the dialog look correct in
+  // dev and hide the fact that nothing was written.
+  export_profile_file: async () => {
+    throw new Error('Exporting a profile needs the desktop app.');
+  },
+  inspect_profile_file: async () => {
+    throw new Error('Reading a profile file needs the desktop app.');
+  },
+  import_profile_file: async () => {
+    throw new Error('Importing a profile needs the desktop app.');
+  },
 };
 
 const mockProxiesClient: ProxiesClient = {

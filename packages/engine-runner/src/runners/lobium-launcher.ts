@@ -811,7 +811,27 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
         env,
         detached: process.platform !== 'win32',
         stdio: 'ignore',
-        windowsHide: true,
+        // MUST stay false: this is the human's browser and it has to appear on screen.
+        //
+        // `windowsHide: true` makes Node set STARTF_USESHOWWINDOW with wShowWindow=SW_HIDE in the
+        // child's STARTUPINFO. For a GUI process that is not merely "no console" — per MSDN, the
+        // FIRST ShowWindow() call ignores its argument and uses the STARTUPINFO value instead.
+        //
+        // That only bites when we also pass `--window-size` (we always do — it carries the persona's
+        // screen dimensions). With overridden bounds Chromium reaches
+        // HWNDMessageHandler::Show() with kNormal, computes SW_SHOWNORMAL, and its ::ShowWindow() is
+        // the process's first — so Windows silently substitutes SW_HIDE. Chromium's own
+        // "correct SW_HIDE back to SW_SHOWNORMAL" guard tests its LOCAL variable, which still reads
+        // SW_SHOWNORMAL, so the correction never runs and the window is never shown. Without
+        // `--window-size` a different bounds path runs and the window appears, which is why this
+        // looked like a window-size bug rather than a spawn-flag bug.
+        //
+        // Measured on this engine (win-x64 152.0.7977.42) and reproduced identically on stock Edge:
+        //   hide=true  + no --window-size -> visible      hide=true  + --window-size -> HIDDEN
+        //   hide=false + no --window-size -> visible      hide=false + --window-size -> visible
+        // Symptom when wrong: the profile launches, CDP answers, status flips to "running", and no
+        // window ever appears. chrome.exe is a GUI subsystem binary, so false costs no console flash.
+        windowsHide: false,
       });
       let networkFailure: string | undefined;
       adapter?.onFailure((message) => {
