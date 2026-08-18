@@ -286,9 +286,9 @@ export function ProfileList({
   if (profiles.length === 0) {
     return (
       <EmptyState
-        icon={<Icon name="LockClosedIcon" aria-hidden />}
+        icon={<Icon name="MagnifyingGlassIcon" aria-hidden />}
         title="No matching profiles"
-        description="Adjust the current filters to see more profiles."
+        description="Clear the search or widen the filters to see more."
       />
     );
   }

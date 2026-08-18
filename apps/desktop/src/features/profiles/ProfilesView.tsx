@@ -166,8 +166,11 @@ function AccessibleModalOverlay({
  */
 export function ProfilesView({
   createProfileSignal = 0,
+  onProfileCountChange,
 }: {
   createProfileSignal?: number;
+  /** Called whenever the profile set changes, so the shell's allowance meter can keep up. */
+  onProfileCountChange?: (count: number) => void;
 } = {}): JSX.Element {
   const toast = useToast();
   const {
@@ -185,6 +188,10 @@ export function ProfilesView({
     launch,
     stop,
   } = useProfiles();
+
+  useEffect(() => {
+    if (!loading) onProfileCountChange?.(profiles.length);
+  }, [loading, profiles.length, onProfileCountChange]);
 
   const [showForm, setShowForm] = useState(false);
   const [showToolbarMenu, setShowToolbarMenu] = useState(false);
@@ -675,8 +682,11 @@ export function ProfilesView({
     <section className="page profiles-view">
       <header className="table-toolbar">
         <div className="toolbar-total">
-          <strong>{profiles.length}</strong>
-          <span>{profiles.length === 1 ? 'profile' : 'profiles'}</span>
+          <strong>{filteredProfiles.length}</strong>
+          <span>{filteredProfiles.length === 1 ? 'profile' : 'profiles'}</span>
+          {filteredProfiles.length !== profiles.length && (
+            <span className="toolbar-total__of">of {profiles.length}</span>
+          )}
           {runningCount > 0 && (
             <>
               <span className="toolbar-total__sep" aria-hidden>

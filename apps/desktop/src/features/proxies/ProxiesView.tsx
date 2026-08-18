@@ -204,17 +204,30 @@ function AddProxyModal({
       size="sm"
       footer={
         <>
-          <button type="button" className="btn btn--secondary" onClick={onClose}>
-            Cancel
-          </button>
           <button
-            type="submit"
-            form="add-proxy-form"
-            className="btn btn--primary"
-            disabled={!canSubmit || submitting}
+            type="button"
+            className="btn btn--outline"
+            onClick={() => {
+              void handleCheck();
+            }}
+            disabled={checking || !canSubmit}
           >
-            {submitting ? 'Adding…' : 'Add proxy'}
+            <Icon name="ArrowPathIcon" aria-hidden />
+            {checking ? 'Checking…' : 'Check proxy'}
           </button>
+          <div className="modal-footer-actions">
+            <button type="button" className="btn btn--secondary" onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              type="submit"
+              form="add-proxy-form"
+              className="btn btn--primary"
+              disabled={!canSubmit || submitting}
+            >
+              {submitting ? 'Adding…' : 'Add proxy'}
+            </button>
+          </div>
         </>
       }
     >
@@ -226,7 +239,7 @@ function AddProxyModal({
       >
         <label className="field field--wide">
           <span className="field__label">
-            Title <span className="required">*</span>
+            Title<span className="required">*</span>
           </span>
           <input
             className="input"
@@ -239,7 +252,7 @@ function AddProxyModal({
 
         <div className="field field--wide">
           <span className="field__label">
-            Proxy <span className="required">*</span>
+            Proxy<span className="required">*</span>
           </span>
           <div className="proxy-input-row">
             <select
@@ -258,23 +271,25 @@ function AddProxyModal({
               placeholder="Enter IP or domain"
               onChange={(e) => set('host', e.target.value)}
             />
+            <input
+              className="input"
+              type="text"
+              value={form.port}
+              aria-label="Port"
+              placeholder="Port"
+              onChange={(e) => set('port', e.target.value)}
+            />
             <button
               type="button"
               className="proxy-mini-button"
               aria-label="Paste proxy URL"
+              title="Paste a full proxy URL"
               onClick={() => {
                 void pasteProxy();
               }}
             >
               <Icon name="ClipboardDocumentIcon" aria-hidden />
             </button>
-            <input
-              className="input"
-              type="text"
-              value={form.port}
-              aria-label="Port"
-              onChange={(e) => set('port', e.target.value)}
-            />
           </div>
         </div>
 
@@ -305,21 +320,12 @@ function AddProxyModal({
             className="input"
             type="url"
             value={form.rotateUrl}
+            placeholder="https://provider.example/rotate"
             onChange={(e) => set('rotateUrl', e.target.value)}
           />
         </label>
 
-        <button
-          type="button"
-          className="btn btn--outline modal-check-button"
-          onClick={() => {
-            void handleCheck();
-          }}
-          disabled={checking || !canSubmit}
-        >
-          <Icon name="ArrowPathIcon" aria-hidden />
-          {checking ? 'Checking...' : 'Check Proxy'}
-        </button>
+
 
         {message ? (
           <p className="notice" role="status">

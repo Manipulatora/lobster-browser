@@ -211,7 +211,7 @@ input[type='checkbox'] {
   margin-top: auto;
   padding: 8px 10px;
   color: var(--text-soft);
-  font-size: 12px;
+  font-size: var(--fs-base);
 }
 
 .main {
@@ -265,6 +265,10 @@ input[type='checkbox'] {
 .toolbar-total__sep {
   color: var(--text-soft);
   margin: 0 1px;
+}
+
+.toolbar-total__of {
+  color: var(--text-soft);
 }
 
 .toolbar-online {
@@ -759,7 +763,7 @@ select.lb-select:disabled {
 }
 .proxy-flag {
   flex: none;
-  font-size: 14px;
+  font-size: var(--fs-lg);
   line-height: 1;
 }
 .proxy-cell--empty {
@@ -781,7 +785,7 @@ select.lb-select:disabled {
   border-radius: 8px;
   background: var(--surface);
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--fs-lg);
   cursor: pointer;
   transition:
     border-color 0.12s ease,
@@ -1079,9 +1083,10 @@ select.lb-select:disabled {
   inset: 0;
   z-index: var(--z-modal);
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 20px;
+  padding: 7vh 20px 20px;
+  overflow: auto;
   background: var(--overlay);
   backdrop-filter: blur(2px);
   animation: modal-fade var(--dur) var(--ease-out);
@@ -1158,7 +1163,7 @@ select.lb-select:disabled {
 .modal-subtitle {
   margin: 2px 0 0;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-base);
 }
 
 .modal-header-actions {
@@ -1168,7 +1173,7 @@ select.lb-select:disabled {
 }
 
 .modal-body {
-  max-height: min(680px, calc(100dvh - 180px));
+  max-height: min(680px, calc(100dvh - 260px));
   overflow: auto;
   /* Matches `.modal-header` and `.subtabs`: the title, the tab strip and the first field all start
      on the same vertical line. They used to sit at 22px, 24px and 28px respectively. */
@@ -1296,10 +1301,10 @@ select.lb-select:disabled {
 }
 
 .wizard-body {
-  /* Fixed height (not just a min) so the modal never resizes when switching between the top tabs —
-     short tabs (General/Security) no longer collapse and tall tabs (Fingerprint) no longer grow the
-     dialog. Content taller than this scrolls inside via .modal-body's overflow:auto. */
-  height: min(680px, calc(100dvh - 180px));
+  /* A floor, not a fixed height. Short tabs no longer collapse the dialog to a sliver, tall ones
+     grow it downward only (see the note on `.modal-overlay`), and anything past `.modal-body`'s cap
+     scrolls. */
+  min-height: 300px;
 }
 
 .wizard-section,
@@ -1323,6 +1328,23 @@ select.lb-select:disabled {
 
 .field--wide {
   grid-column: 1 / -1;
+}
+
+/* A row of form actions, sized to their labels and pushed to the trailing edge. Without this a lone
+   `.btn` in a `.field` stretches to the full grid width, which makes a secondary action the widest
+   element on the panel. */
+.field--actions {
+  flex-direction: row;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+/* Three parts of one decision — engine, OS, OS version — on one line. Split across a two-column
+   grid they left a half-width hole that reads as a field that failed to render. */
+.field-triple {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px 16px;
 }
 
 .os-version-row {
@@ -1624,8 +1646,7 @@ select.lb-select:disabled {
 
 .extension-list {
   display: grid;
-  gap: 10px;
-  margin-top: 16px;
+  gap: var(--space-2);
 }
 
 .extension-row {
@@ -1745,7 +1766,7 @@ select.lb-select:disabled {
 .mobile-targets em {
   margin-left: auto;
   color: var(--text-soft);
-  font-size: 11px;
+  font-size: var(--fs-sm);
   font-style: normal;
 }
 
@@ -1772,9 +1793,10 @@ select.lb-select:disabled {
 .drop-zone {
   position: relative;
   display: grid;
-  gap: 6px;
-  min-height: 120px;
+  gap: var(--space-1);
+  min-height: 104px;
   place-items: center;
+  align-content: center;
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
   background: var(--surface);
@@ -1849,7 +1871,7 @@ select.lb-select:disabled {
 
 .proxy-input-row {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr) 42px 80px;
+  grid-template-columns: 96px minmax(0, 1fr) 84px 40px;
 }
 
 .proxy-input-row .input {
@@ -1861,20 +1883,29 @@ select.lb-select:disabled {
   border-bottom-left-radius: var(--radius);
 }
 
+/* The segmented row ended in a square corner because only the leading control was rounded. */
+.proxy-input-row > :last-child {
+  border-top-right-radius: var(--radius);
+  border-bottom-right-radius: var(--radius);
+}
+
 .proxy-mini-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border: 1px solid var(--border-strong);
   border-left: 0;
-  border-right: 0;
   background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
 }
 
-.modal-check-button {
-  width: 214px;
-  justify-self: start;
+.proxy-mini-button:hover {
+  background: var(--surface-muted);
+  color: var(--accent);
 }
+
+
 
 .fp-editor {
   display: flex;
@@ -2033,7 +2064,7 @@ select.lb-select:disabled {
 .metric-label {
   display: block;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-base);
 }
 
 .usage-band strong {
@@ -2096,7 +2127,7 @@ code {
   border-radius: 3px;
   background: var(--surface-muted);
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-base);
 }
 
 .topbar-search {
@@ -2472,7 +2503,7 @@ code {
 
 .auth-screen__error {
   margin: 20px 0 0;
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   line-height: 1.5;
   color: var(--danger);
   /* The browser-launch failure path prints the URL to visit by hand, which must not
@@ -2533,7 +2564,7 @@ code {
   border: 0;
   background: none;
   color: var(--text-muted, var(--n-500));
-  font-size: 12.5px;
+  font-size: var(--fs-md);
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;

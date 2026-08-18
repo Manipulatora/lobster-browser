@@ -27,13 +27,20 @@ export type NavKey = (typeof NAV_ITEMS)[number]['key'];
 function ActiveView({
   active,
   createProfileSignal,
+  onProfileCountChange,
 }: {
   active: NavKey;
   createProfileSignal: number;
+  onProfileCountChange: (count: number) => void;
 }): JSX.Element {
   switch (active) {
     case 'profiles':
-      return <ProfilesView createProfileSignal={createProfileSignal} />;
+      return (
+        <ProfilesView
+          createProfileSignal={createProfileSignal}
+          onProfileCountChange={onProfileCountChange}
+        />
+      );
     case 'proxies':
       return <ProxiesView />;
     case 'templates':
@@ -165,6 +172,18 @@ function Dashboard({
       cancelled = true;
     };
   }, [user, profiles.length]);
+
+  // The reported count is the trigger, not the state: the shell refetches the list, because the
+  // palette and quick-launch read it too and a bare number would leave those stale.
+  const knownProfileCount = useRef(-1);
+  const handleProfileCountChange = useCallback((count: number) => {
+    if (knownProfileCount.current === count) return;
+    knownProfileCount.current = count;
+    void profilesClient
+      .list_profiles()
+      .then(setProfiles)
+      .catch(() => undefined);
+  }, []);
 
   // Keep a lightweight profile list for command-palette search / quick-launch.
   useEffect(() => {
@@ -417,7 +436,11 @@ function Dashboard({
         </aside>
 
         <main className="main">
-          <ActiveView active={active} createProfileSignal={createProfileSignal} />
+          <ActiveView
+            active={active}
+            createProfileSignal={createProfileSignal}
+            onProfileCountChange={handleProfileCountChange}
+          />
         </main>
       </div>
 

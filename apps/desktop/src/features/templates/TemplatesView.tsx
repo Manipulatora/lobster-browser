@@ -1,4 +1,3 @@
-
 import { useEffect, useState } from 'react';
 
 import type {
@@ -141,56 +140,58 @@ function CreateTemplateModal({
               className="input"
               type="text"
               value={form.name}
-              placeholder="Template name"
+              placeholder="Enter template name"
               onChange={(e) => set('name', e.target.value)}
               autoFocus
             />
           </label>
-          <label className="field">
-            <span className="field__label">Engine</span>
-            <select
-              className="input"
-              value={form.engine}
-              onChange={(e) => set('engine', e.target.value as EngineKind)}
-            >
-              {ENGINE_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span className="field__label">OS</span>
-            <select
-              className="input"
-              value={form.os}
-              onChange={(e) => {
-                const os = e.target.value as ProfileOsTarget;
-                setForm((prev) => ({ ...prev, os, osVersion: OS_VERSION_OPTIONS[os][0] }));
-              }}
-            >
-              {OS_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span className="field__label">OS version</span>
-            <select
-              className="input"
-              value={form.osVersion}
-              onChange={(e) => set('osVersion', e.target.value)}
-            >
-              {OS_VERSION_OPTIONS[form.os].map((version) => (
-                <option key={version} value={version}>
-                  {version}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="field-triple field--wide">
+            <label className="field">
+              <span className="field__label">Engine</span>
+              <select
+                className="input"
+                value={form.engine}
+                onChange={(e) => set('engine', e.target.value as EngineKind)}
+              >
+                {ENGINE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span className="field__label">OS</span>
+              <select
+                className="input"
+                value={form.os}
+                onChange={(e) => {
+                  const os = e.target.value as ProfileOsTarget;
+                  setForm((prev) => ({ ...prev, os, osVersion: OS_VERSION_OPTIONS[os][0] }));
+                }}
+              >
+                {OS_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span className="field__label">OS version</span>
+              <select
+                className="input"
+                value={form.osVersion}
+                onChange={(e) => set('osVersion', e.target.value)}
+              >
+                {OS_VERSION_OPTIONS[form.os].map((version) => (
+                  <option key={version} value={version}>
+                    {version}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
           <label className="field field--wide">
             <span className="field__label">Preset parameters</span>
             <input
@@ -216,7 +217,7 @@ function CreateTemplateModal({
               className="input"
               type="text"
               value={form.tags}
-              placeholder="comma separated"
+              placeholder="Separate tags with commas"
               onChange={(e) => set('tags', e.target.value)}
             />
           </label>

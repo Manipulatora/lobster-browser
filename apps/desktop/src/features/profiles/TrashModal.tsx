@@ -3,6 +3,7 @@ import type { Profile } from '@lobster/shared-types';
 
 import appIcon from '../../assets/brand/icon.png';
 import { osLabel } from './options';
+import { EmptyState } from '../../ui';
 import { Icon } from '../../ui/Icon';
 
 interface TrashModalProps {
@@ -71,10 +72,11 @@ export function TrashModal({
         {error ? <p className="notice notice--error">{error}</p> : null}
         {loading ? <p className="notice">Loading trash...</p> : null}
         {!loading && profiles.length === 0 ? (
-          <div className="empty-state empty-state--compact">
-            <h3>Trash is empty</h3>
-            <p>Profiles moved to trash will appear here.</p>
-          </div>
+          <EmptyState
+            icon={<Icon name="TrashIcon" aria-hidden />}
+            title="Trash is empty"
+            description="Profiles you move to trash appear here, and can be restored from it."
+          />
         ) : null}
 
         {!loading && profiles.length > 0 ? (

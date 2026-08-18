@@ -1108,7 +1108,7 @@ export function NewProfileForm({
 
               <label className="field field--wide">
                 <span className="field__label">
-                  Profile name <span className="required">*</span>
+                  Profile name<span className="required">*</span>
                 </span>
                 <input
                   className="input"
@@ -1172,7 +1172,7 @@ export function NewProfileForm({
                 <div className="field-grid field--wide custom-proxy-grid">
                   <label className="field field--wide">
                     <span className="field__label">
-                      Proxy title <span className="required">*</span>
+                      Proxy title<span className="required">*</span>
                     </span>
                     <input
                       className="input"
@@ -1196,7 +1196,7 @@ export function NewProfileForm({
                   </label>
                   <label className="field">
                     <span className="field__label">
-                      Host <span className="required">*</span>
+                      Host<span className="required">*</span>
                     </span>
                     <input
                       className="input"
@@ -1211,7 +1211,7 @@ export function NewProfileForm({
                   </label>
                   <label className="field">
                     <span className="field__label">
-                      Port <span className="required">*</span>
+                      Port<span className="required">*</span>
                     </span>
                     <input
                       className="input"
@@ -1879,7 +1879,7 @@ export function NewProfileForm({
                   }}
                 />
               </label>
-              <div className="field field--wide">
+              <div className="field field--wide field--actions">
                 <button type="button" className="btn btn--secondary" onClick={addExtension}>
                   Add extension
                 </button>
