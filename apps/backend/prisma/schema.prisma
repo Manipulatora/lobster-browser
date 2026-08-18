@@ -448,7 +448,7 @@ model CreditTransaction {
 model Deposit {
   id                String        @id @default(uuid())
   teamId            String
-  // Which processor produced this (e.g. "cryptomus"). Stored per-row, not assumed globally, so a
+  // Which processor produced this (e.g. "nowpayments"). Stored per-row, not assumed globally, so a
   // processor swap leaves historical rows correctly attributed and both can run at once.
   provider          String
   // The processor's own id for the payment. Unique across providers by construction (each

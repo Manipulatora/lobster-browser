@@ -1,4 +1,10 @@
-import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+  type OnModuleInit,
+} from '@nestjs/common';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { ConfigService } from '@nestjs/config';
 import type { DepositStatus } from '@lobster/shared-types';
@@ -6,6 +12,9 @@ import type { DepositStatus } from '@lobster/shared-types';
 import type { CreatedDeposit, ParsedWebhook, PaymentProvider } from './payment-provider';
 
 const API_BASE = 'https://api.nowpayments.io/v1';
+
+/** How long a loaded currency list is trusted before a background refresh is triggered. */
+const CURRENCY_TTL_MS = 60 * 60 * 1000;
 
 /**
  * NOWPayments payment statuses, and what each means for a Credit deposit.
@@ -43,7 +52,7 @@ const STATUS_MAP: Record<string, DepositStatus> = {
  * per chain and defaulting to a cheap one, not here. See `deposit-chains.ts`.
  */
 @Injectable()
-export class NowPaymentsProvider implements PaymentProvider {
+export class NowPaymentsProvider implements PaymentProvider, OnModuleInit {
   readonly name = 'nowpayments';
 
   private readonly logger = new Logger(NowPaymentsProvider.name);
@@ -53,21 +62,19 @@ export class NowPaymentsProvider implements PaymentProvider {
   private readonly feePaidByUser: boolean;
   private readonly fixedRate: boolean;
 
+  /** null until the first successful load — see `supportsCurrency` for why that means "allow". */
+  private currencies: Set<string> | null = null;
+  private currenciesFetchedAt = 0;
+  private currenciesInFlight = false;
+
   constructor(config: ConfigService) {
     this.apiKey = config.get<string>('NOWPAYMENTS_API_KEY') ?? '';
     this.ipnSecret = config.get<string>('NOWPAYMENTS_IPN_SECRET') ?? '';
     this.ipnCallbackUrl = config.get<string>('NOWPAYMENTS_IPN_CALLBACK_URL') ?? '';
     // Both default OFF, and are only sent when switched on.
     //
-    // These two request fields could not be confirmed against a live spec at build time (the
-    // Postman documentation renders client-side and the public OpenAPI excerpt omits request
-    // bodies). Defaulting them off means the request we send by default contains only fields
-    // verified from the response schema; if a name turns out to be wrong, the failure appears
-    // when an operator opts in, not on every payment. Confirm both against the account's own API
-    // reference before enabling.
-    //
     // `is_fee_paid_by_user` shifts the processor's commission onto the customer.
-    // `fixed_rate` locks the quoted crypto→USD rate for the payment window.
+    // `is_fixed_rate` locks the quoted crypto→USD rate for the payment window.
     this.feePaidByUser = config.get<string>('NOWPAYMENTS_FEE_PAID_BY_USER') === 'true';
     this.fixedRate = config.get<string>('NOWPAYMENTS_FIXED_RATE') === 'true';
   }
@@ -76,12 +83,63 @@ export class NowPaymentsProvider implements PaymentProvider {
     return this.apiKey.length > 0 && this.ipnSecret.length > 0;
   }
 
+  /** Warm the currency list at boot so the first deposit page does not race the first fetch. */
+  onModuleInit(): void {
+    if (this.isConfigured()) void this.refreshCurrencies();
+  }
+
   /**
-   * NOWPayments takes the curated codes as-is — it has no per-account rail gating for these — so
-   * every catalogue entry is offerable whenever the account is configured.
+   * Is this rail actually on offer right now?
+   *
+   * CHECKED AGAINST THE PROCESSOR, not assumed. This used to answer `isConfigured()` for every
+   * code — i.e. "yes" — and the first time it was checked for real, four of the catalogue's
+   * codes turned out not to exist at NOWPayments at all. Each would have rendered as a deposit
+   * option and failed only after the user picked it and committed to an amount.
+   *
+   * FAIL OPEN, DELIBERATELY. If the list has not loaded — first call, or their API is down — this
+   * returns true rather than hiding every rail. The catalogue is verified, `createDeposit` still
+   * fails closed against the live API, and an outage at NOWPayments taking our deposit page from
+   * "some rails are missing" to "deposits appear impossible" is the worse of the two failures.
    */
-  supportsCurrency(_currencyCode: string): boolean {
-    return this.isConfigured();
+  supportsCurrency(currencyCode: string): boolean {
+    if (!this.isConfigured()) return false;
+    if (Date.now() - this.currenciesFetchedAt > CURRENCY_TTL_MS) void this.refreshCurrencies();
+    return this.currencies === null || this.currencies.has(currencyCode.toLowerCase());
+  }
+
+  /**
+   * Reload the supported-currency list.
+   *
+   * `GET /v1/currencies` is unauthenticated and returns `{ currencies: string[] }` — the
+   * platform-wide list. The per-account list lives behind `/v1/merchant/coins`, which would be
+   * the stricter check; it is not used here because its response shape has not been observed
+   * against a real account, and guessing at a schema is what put a wrong field name in the
+   * payment request in the first place.
+   */
+  private async refreshCurrencies(): Promise<void> {
+    if (this.currenciesInFlight) return;
+    this.currenciesInFlight = true;
+    // Stamped BEFORE the request, not after: on a failure this is what stops every call to
+    // `supportsCurrency` from starting another one against an API that is already struggling.
+    this.currenciesFetchedAt = Date.now();
+    try {
+      const res = await fetch(`${API_BASE}/currencies`, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as { currencies?: unknown };
+      if (!Array.isArray(json.currencies)) throw new Error('no currencies array in response');
+      this.currencies = new Set(json.currencies.map((c) => String(c).toLowerCase()));
+      this.logger.log(`loaded ${this.currencies.size} supported currencies`);
+    } catch (err) {
+      // Left as-is: a stale list beats an empty one, and null keeps the fail-open path.
+      this.logger.warn(
+        `could not refresh the currency list (${err instanceof Error ? err.message : String(err)})` +
+          ' — every catalogue rail stays offerable until it loads',
+      );
+    } finally {
+      this.currenciesInFlight = false;
+    }
   }
 
   async createDeposit(args: {
@@ -102,7 +160,7 @@ export class NowPaymentsProvider implements PaymentProvider {
     };
     if (this.ipnCallbackUrl) body.ipn_callback_url = this.ipnCallbackUrl;
     if (this.feePaidByUser) body.is_fee_paid_by_user = true;
-    if (this.fixedRate) body.fixed_rate = true;
+    if (this.fixedRate) body.is_fixed_rate = true;
 
     const res = await fetch(`${API_BASE}/payment`, {
       method: 'POST',
@@ -113,9 +171,18 @@ export class NowPaymentsProvider implements PaymentProvider {
 
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      // Log the processor's own message (it names the actual problem — unsupported currency,
-      // below minimum amount) but do not surface it: it can contain account context.
       this.logger.error(`createDeposit failed: HTTP ${res.status} ${detail.slice(0, 300)}`);
+
+      // A 400 here is nearly always the amount being under this coin's minimum, which varies by
+      // coin and moves with its price — so it is the user's to fix, and telling them "could not
+      // create a deposit address" strands them with no idea what to change. The processor's own
+      // message names the real limit; it is forwarded only for the below-minimum case, because
+      // their other errors can carry account context.
+      if (res.status === 400 && /minimal|minimum|too small/i.test(detail)) {
+        throw new BadRequestException(
+          `That amount is below the minimum for this coin. ${extractMinimumHint(detail)}`.trim(),
+        );
+      }
       throw new ServiceUnavailableException('could not create a deposit address');
     }
 
@@ -212,6 +279,20 @@ export class NowPaymentsProvider implements PaymentProvider {
       raw: payload,
     };
   }
+}
+
+/**
+ * Pull the stated minimum out of a NOWPayments 400 so the user is told the number, not just that
+ * one exists. Their message reads like `minimalAmount is 8.5 usdtbsc`; anything that does not
+ * match yields an empty string and the caller's sentence stands on its own.
+ */
+function extractMinimumHint(detail: string): string {
+  const match = /minimal\w*\s*(?:amount)?\s*(?:is|:)?\s*([0-9]*\.?[0-9]+)\s*([a-z0-9]+)?/i.exec(
+    detail,
+  );
+  if (!match) return '';
+  const [, amount, asset] = match;
+  return `The minimum is ${amount}${asset ? ` ${asset.toUpperCase()}` : ''}.`;
 }
 
 /**

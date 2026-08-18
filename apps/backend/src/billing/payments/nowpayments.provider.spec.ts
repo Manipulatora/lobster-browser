@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 
 import type { ConfigService } from '@nestjs/config';
 
@@ -184,4 +184,114 @@ test('nested objects are sorted recursively', () => {
   });
 
   assert.ok(event, 'recursively sorted payloads must verify');
+});
+
+// --- The payment request -------------------------------------------------------------------
+//
+// These exist because the request body was NOT covered before, and a wrong field name in it is
+// silent: NOWPayments ignores what it does not recognise and returns 200, so `fixed_rate` (the
+// real spelling is `is_fixed_rate`) disabled the rate lock for every payment while looking like
+// it worked. Nothing failed, no log line appeared, and the only symptom was money.
+
+/** Capture the outgoing request without reaching the network. */
+function captureRequest(overrides: Record<string, string> = {}): {
+  body: () => Record<string, unknown>;
+  provider: NowPaymentsProvider;
+} {
+  let captured: Record<string, unknown> = {};
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    if (String(url).endsWith('/currencies')) {
+      return new Response(JSON.stringify({ currencies: ['usdtbsc'] }), { status: 200 });
+    }
+    captured = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+    return new Response(
+      JSON.stringify({
+        payment_id: '4444444444',
+        pay_address: '0xabc',
+        pay_amount: 49.5,
+        pay_currency: 'usdtbsc',
+      }),
+      { status: 200 },
+    );
+  }) as typeof globalThis.fetch;
+  after(() => {
+    globalThis.fetch = original;
+  });
+  return { body: () => captured, provider: provider(overrides) };
+}
+
+test('the rate lock is sent as is_fixed_rate, the name the API actually reads', async () => {
+  const { body, provider: p } = captureRequest({ NOWPAYMENTS_FIXED_RATE: 'true' });
+  await p.createDeposit({ amountCents: 5_000, currencyCode: 'usdtbsc', orderId: 'ord_1' });
+
+  assert.equal(body().is_fixed_rate, true);
+  assert.equal(
+    'fixed_rate' in body(),
+    false,
+    'fixed_rate is not a field NOWPayments reads — sending it silently does nothing',
+  );
+});
+
+test('optional flags are omitted entirely when off, not sent as false', async () => {
+  const { body, provider: p } = captureRequest();
+  await p.createDeposit({ amountCents: 5_000, currencyCode: 'usdtbsc', orderId: 'ord_2' });
+
+  assert.equal('is_fixed_rate' in body(), false);
+  assert.equal('is_fee_paid_by_user' in body(), false);
+});
+
+test('the amount is sent in dollars, not cents', async () => {
+  const { body, provider: p } = captureRequest();
+  await p.createDeposit({ amountCents: 5_000, currencyCode: 'usdtbsc', orderId: 'ord_3' });
+
+  // Sending 5000 here would quote a $5,000 payment for a $50 deposit.
+  assert.equal(body().price_amount, 50);
+  assert.equal(body().price_currency, 'usd');
+  assert.equal(body().pay_currency, 'usdtbsc');
+  assert.equal(body().order_id, 'ord_3');
+});
+
+// --- Rail availability ---------------------------------------------------------------------
+
+test('a rail the processor does not offer is not offerable', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify({ currencies: ['usdtbsc', 'usdcsol'] }), {
+      status: 200,
+    })) as typeof globalThis.fetch;
+  after(() => {
+    globalThis.fetch = original;
+  });
+
+  const p = provider();
+  await p.onModuleInit();
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(p.supportsCurrency('usdtbsc'), true);
+  // `dot` was in our catalogue and does not exist at NOWPayments. It must not reach the UI.
+  assert.equal(p.supportsCurrency('dot'), false);
+  assert.equal(p.supportsCurrency('USDCSOL'), true, 'codes are compared case-insensitively');
+});
+
+test('an unreachable currency list leaves every rail offerable rather than none', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error('network down');
+  }) as typeof globalThis.fetch;
+  after(() => {
+    globalThis.fetch = original;
+  });
+
+  const p = provider();
+  await p.onModuleInit();
+  await new Promise((r) => setImmediate(r));
+
+  // Hiding every deposit option because their status endpoint blipped is worse than showing one
+  // that then fails closed at createDeposit.
+  assert.equal(p.supportsCurrency('usdtbsc'), true);
+});
+
+test('an unconfigured account offers nothing', () => {
+  assert.equal(provider({ NOWPAYMENTS_API_KEY: '' }).supportsCurrency('usdtbsc'), false);
 });

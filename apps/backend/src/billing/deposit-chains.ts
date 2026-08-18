@@ -17,10 +17,17 @@ import type { DepositChainOption } from '@lobster/shared-types';
  * FIGURES ARE INDICATIVE, an order of magnitude rather than a quote — they move with gas and token
  * prices. Re-measure before relying on the exact numbers.
  *
- * THIS LIST IS ASPIRATIONAL UNTIL VERIFIED. Which pairs a processor actually offers is an account
- * fact, not a constant: `CryptomusProvider.assertServicesCover()` checks every code here against
- * the live service table and refuses any it cannot find, so an entry that turns out to be
- * unsupported fails closed at deposit time instead of stranding a payment.
+ * CODES ARE THE PROCESSOR'S, NOT OURS, so this list can drift out from under us when the processor
+ * changes what it offers. It is checked rather than trusted: `NowPaymentsProvider` fetches the live
+ * currency list and `supportsCurrency` returns false for anything missing from it, so an entry that
+ * stops being offered disappears from the deposit UI instead of failing after the user has chosen
+ * it. Four entries — `bnb`, `dot`, `usdctrc20`, `usdcerc20` — were removed when that check was
+ * first run against the live API; three do not exist there at all and BNB's real code is `bnbbsc`.
+ *
+ * ADDING AN ENTRY MEANS CONFIRMING ITS NETWORK, not just that the code resolves. The code alone
+ * does not say which chain the address will be on — NOWPayments has a bare `usdc` whose network is
+ * only visible through the authenticated `/v1/full-currencies` — and a wrong `chain` label here
+ * tells the user to send on a chain the address cannot receive, which loses the deposit.
  */
 export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
   // --- Stablecoins on cheap rails: what most people should use --------------
@@ -35,7 +42,7 @@ export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
   // --- Native coins ---------------------------------------------------------
   // No `networkIcon`: the asset IS the chain, so a badge would repeat the icon underneath it.
   { code: 'sol',       chain: 'Solana',                  asset: 'SOL',  icon: 'sol',                        networkFeeUsd: 0.001, recommended: false, stable: false },
-  { code: 'bnb',       chain: 'BNB Smart Chain (BEP20)', asset: 'BNB',  icon: 'bnb',                        networkFeeUsd: 0.005, recommended: false, stable: false },
+  { code: 'bnbbsc',    chain: 'BNB Smart Chain (BEP20)', asset: 'BNB',  icon: 'bnb',                        networkFeeUsd: 0.005, recommended: false, stable: false },
   { code: 'matic',     chain: 'Polygon',                 asset: 'POL',  icon: 'matic',                      networkFeeUsd: 0.005, recommended: false, stable: false },
   { code: 'xlm',       chain: 'Stellar',                 asset: 'XLM',  icon: 'xlm',                        networkFeeUsd: 0.001, recommended: false, stable: false },
   { code: 'xrp',       chain: 'XRP Ledger',              asset: 'XRP',  icon: 'xrp',                        networkFeeUsd: 0.01,  recommended: false, stable: false },
@@ -43,7 +50,6 @@ export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
   { code: 'ltc',       chain: 'Litecoin',                asset: 'LTC',  icon: 'ltc',                        networkFeeUsd: 0.02,  recommended: false, stable: false },
   { code: 'dash',      chain: 'Dash',                    asset: 'DASH', icon: 'dash',                       networkFeeUsd: 0.02,  recommended: false, stable: false },
   { code: 'xmr',       chain: 'Monero',                  asset: 'XMR',  icon: 'xmr',                        networkFeeUsd: 0.02,  recommended: false, stable: false },
-  { code: 'dot',       chain: 'Polkadot',                asset: 'DOT',  icon: 'dot',                        networkFeeUsd: 0.05,  recommended: false, stable: false },
   { code: 'ada',       chain: 'Cardano',                 asset: 'ADA',  icon: 'ada',                        networkFeeUsd: 0.12,  recommended: false, stable: false },
   { code: 'doge',      chain: 'Dogecoin',                asset: 'DOGE', icon: 'doge',                       networkFeeUsd: 0.15,  recommended: false, stable: false },
   { code: 'trx',       chain: 'Tron (TRC20)',            asset: 'TRX',  icon: 'trx',                        networkFeeUsd: 0.3,   recommended: false, stable: false },
@@ -53,9 +59,7 @@ export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
 
   // --- Stablecoins on rails that are popular but genuinely expensive --------
   { code: 'usdttrc20', chain: 'Tron (TRC20)',            asset: 'USDT', icon: 'usdt', networkIcon: 'trx',   networkFeeUsd: 1.2,   recommended: false, stable: true },
-  { code: 'usdctrc20', chain: 'Tron (TRC20)',            asset: 'USDC', icon: 'usdc', networkIcon: 'trx',   networkFeeUsd: 1.2,   recommended: false, stable: true },
   { code: 'usdterc20', chain: 'Ethereum (ERC20)',        asset: 'USDT', icon: 'usdt', networkIcon: 'eth',   networkFeeUsd: 3.0,   recommended: false, stable: true },
-  { code: 'usdcerc20', chain: 'Ethereum (ERC20)',        asset: 'USDC', icon: 'usdc', networkIcon: 'eth',   networkFeeUsd: 3.0,   recommended: false, stable: true },
 ];
 
 /** Look up a chain by its processor code. Unknown codes are rejected, never forwarded. */

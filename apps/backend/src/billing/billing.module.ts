@@ -7,7 +7,6 @@ import { BILLING_REPOSITORY } from './billing.repository';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
 import { InMemoryBillingRepository } from './in-memory-billing.repository';
-import { CryptomusProvider } from './payments/cryptomus.provider';
 import { NowPaymentsProvider } from './payments/nowpayments.provider';
 import { PAYMENT_PROVIDER } from './payments/payment-provider';
 import { PrismaBillingRepository } from './prisma-billing.repository';
@@ -41,26 +40,14 @@ import { RenewalService } from './renewal.service';
     },
     {
       // One provider, bound behind a token. The rest of the codebase never names a processor, so
-      // adding or swapping one is a change to ./payments and this binding.
+      // swapping one is a change to ./payments and this binding.
+      //
+      // There is no env-var selector. It existed to choose between two processors; with one, a
+      // selector is a way for a deployment to typo itself into a boot failure, and its default
+      // silently decided which company handles the money.
       provide: PAYMENT_PROVIDER,
       inject: [ConfigService],
-      /**
-       * Selected by `PAYMENT_PROVIDER`, defaulting to NOWPayments so an existing deployment that
-       * never sets it keeps the processor it already had. An unrecognised value throws at boot
-       * rather than silently falling back: quietly charging through a different processor than the
-       * one configured is not a failure mode worth being lenient about.
-       */
-      useFactory: (config: ConfigService) => {
-        const choice = (config.get<string>('PAYMENT_PROVIDER') ?? 'nowpayments').toLowerCase();
-        switch (choice) {
-          case 'cryptomus':
-            return new CryptomusProvider(config);
-          case 'nowpayments':
-            return new NowPaymentsProvider(config);
-          default:
-            throw new Error(`unknown PAYMENT_PROVIDER "${choice}"`);
-        }
-      },
+      useFactory: (config: ConfigService) => new NowPaymentsProvider(config),
     },
   ],
   exports: [BillingService, BILLING_REPOSITORY],

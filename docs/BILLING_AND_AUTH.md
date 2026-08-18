@@ -142,10 +142,33 @@ than invoiced, and each sweep can charge a given subscription at most once. Cove
 | `NOWPAYMENTS_FEE_PAID_BY_USER` | Optional, default off — charge the commission to the customer |
 | `NOWPAYMENTS_FIXED_RATE` | Optional, default off — lock the quoted rate |
 
-The last two **could not be verified** against a live API reference (the docs render client-side;
-the public OpenAPI excerpt omits request bodies). They default off so the default request contains
-only fields confirmed from the response schema. Confirm the field names in your account's API
-reference before enabling either.
+The last two are sent as `is_fee_paid_by_user` and **`is_fixed_rate`** — note the `is_` prefix on
+the rate lock. It was previously sent as `fixed_rate`, which NOWPayments ignores: the request still
+returned 200, nothing was logged, and every payment ran unlocked while the config said otherwise.
+Both default off and are omitted from the request entirely unless set.
+
+There is no `PAYMENT_PROVIDER` selector. One processor is bound directly in `billing.module.ts`;
+a selector whose default silently decided which company handled the money was not worth keeping.
+
+### Which rails are offered
+
+`deposit-chains.ts` is our curated catalogue, but the codes in it are NOWPayments' and can stop
+being valid without notice. `NowPaymentsProvider` loads the live list from the unauthenticated
+`GET /v1/currencies` at boot (refreshed hourly) and `supportsCurrency` filters the catalogue
+against it, so a rail that is no longer offered disappears from the deposit page rather than
+failing after the user has chosen it and committed to an amount.
+
+The first time that check ran for real it removed four entries: `bnb` (the code is `bnbbsc`),
+`dot`, `usdctrc20` and `usdcerc20` — the last three do not exist at NOWPayments at all.
+
+If the list cannot be loaded the check **fails open** and every catalogue rail stays offerable.
+`createDeposit` still fails closed against the live API, and an outage turning the page from
+"some rails missing" into "deposits look impossible" is the worse failure.
+
+Adding an entry means confirming its **network**, not just that the code resolves — the code alone
+does not say which chain the address will be on (NOWPayments has a bare `usdc` whose network is
+only visible through the authenticated `/v1/full-currencies`), and a wrong `chain` label tells the
+user to send on a chain the address cannot receive.
 
 ### IPN signature — the unusual part
 
@@ -299,7 +322,9 @@ The web app resolves its API origin from the page origin (`api.<host>`), falling
 
 ## 8. Known gaps
 
-- **The two optional NOWPayments request fields are unverified.** Default off; confirm before use.
+- **`/v1/merchant/coins` is not used.** It is the per-account rail list and would be the stricter
+  check than the platform-wide `/v1/currencies`; its response shape has not been observed against a
+  real account, and guessing at a schema is what produced the `fixed_rate` bug.
 - **Network fee figures are a point-in-time measurement** (2026-08-14) and are not refreshed
   automatically.
 - **No password-reset backend.** `/auth/forgot-password` is still a UI-only shell.
