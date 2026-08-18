@@ -1036,7 +1036,10 @@ export function NewProfileForm({
 
   return (
     <form
-      className="wizard modal"
+      // `wizard` was a marker with no rule anywhere — `.modal` does the styling and the children
+      // carry their own `wizard-*` classes. A class that styles nothing is a class the next person
+      // has to check before they can change anything.
+      className="modal"
       onSubmit={handleSubmit}
       role="dialog"
       aria-modal="true"

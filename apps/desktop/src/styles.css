@@ -101,6 +101,35 @@ input[type='checkbox'] {
   flex: 1;
 }
 
+/* RESTORED, AND THIS ONE BROKE THE WHOLE APP.
+ *
+ * The original listed fifteen selectors sharing `display: inline-flex; align-items: center;`. A
+ * cleanup pass removed the single dead one in that list (`.account-switcher`) by deleting the
+ * entire rule — so every button, toolbar, search field, status pill, table cell and modal footer
+ * lost its layout at once. Buttons went inline, icons stopped centring, toolbars collapsed.
+ *
+ * The lesson is in the shape of the mistake: matching a dead class against a selector LIST and
+ * dropping the rule is only safe when the list has one entry. Anything shared has to have that one
+ * selector removed from the list instead.
+ */
+.topbar__actions,
+.nav-item,
+.btn,
+.icon-button,
+.profile-button,
+.search-field,
+.status,
+.proxy-cell,
+.profile-title-cell,
+.table-toolbar,
+.toolbar-total,
+.toolbar-actions,
+.modal-footer-actions,
+.check-row {
+  display: inline-flex;
+  align-items: center;
+}
+
 /* One control now — the Credit chip. The gap remains so a second ever added does not collide. */
 .topbar__actions {
   gap: var(--space-2);
@@ -149,8 +178,13 @@ input[type='checkbox'] {
   cursor: pointer;
 }
 
+/* SELECTION MUST OUTRANK HOVER, and it did not.
+   Hover used `--active-muted` (#e9edf2, a mid grey) while the selected item uses `--accent-soft`
+   (#f5f3ff, a very pale violet) — so pointing at any nav item made it visibly DARKER than the page
+   you were actually on, and the selected item looked like the unselected one. Hover is now the
+   lighter surface tint; selection keeps the violet, the violet text and the heavier weight. */
 .nav-item:hover {
-  background: var(--active-muted);
+  background: var(--surface-muted);
   color: var(--text);
 }
 
@@ -160,6 +194,12 @@ input[type='checkbox'] {
   /* Control weight, not medium: at 500 against Light body text the nav shouted, and the active
      state is already carried by the tint and the colour. */
   font-weight: var(--fw-control);
+}
+
+/* Hovering the page you are already on must not grey it out. */
+.nav-item--active:hover {
+  background: var(--accent-soft);
+  color: var(--brand-700);
 }
 
 .nav-item__icon {
@@ -1015,7 +1055,13 @@ select.lb-select:disabled {
   color: var(--text-muted);
 }
 
+/* RESTORED. This was `.notice, .info-strip { … }`, and a cleanup pass that removed the dead
+   `.info-strip` deleted the whole rule with it — taking the padding and colour off every error
+   banner in the app, all fourteen of them. A selector LIST is not a selector. */
 .notice {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--text-muted);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);

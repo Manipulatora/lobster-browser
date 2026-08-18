@@ -523,14 +523,16 @@ export function ProxiesView(): JSX.Element {
 
       {!loading && rows.length > 0 ? (
         <div className="data-panel">
-          <table className="data-table">
+          {/* Eight columns of short, known-shape values. Left to `table-layout: auto` the browser
+              gives width to whichever row happens to have the longest string, so one long hostname
+              squeezed Location into a three-line wrap. Fixed widths keep the row one line tall. */}
+          <table className="data-table proxies-table">
             <thead>
               <tr>
                 <th>Proxy</th>
                 <th>Type</th>
                 <th>Endpoint</th>
                 <th>Location</th>
-                <th>Timezone</th>
                 <th>Latency</th>
                 <th>Status</th>
                 <th>Actions</th>
@@ -549,9 +551,20 @@ export function ProxiesView(): JSX.Element {
                       ) : null}
                     </td>
                     <td>{typeLabel(proxy.config.type)}</td>
-                    <td>{endpointLabel(proxy)}</td>
-                    <td>{locationLabel(proxy)}</td>
-                    <td>{timezoneLabel(proxy)}</td>
+                    {/* host:port is one token to a reader and must not break across lines; it wrapped
+                        as "us-" / "east.proxy.local:9443", which reads as two different addresses.
+                        Nowrap comes from the table rule; `title` gives back the full value when the
+                        column is too narrow for it. */}
+                    <td title={endpointLabel(proxy)}>{endpointLabel(proxy)}</td>
+                    {/* LOCATION AND TIMEZONE ARE ONE FACT — where this proxy comes out — and they
+                        were two columns. Eight columns do not fit 976px without something wrapping
+                        to three lines or being clipped, and the fix is not narrower columns but
+                        fewer. Stacked here in the same title/subtitle pattern the Proxy column
+                        already uses. */}
+                    <td>
+                      <div className="table-title">{locationLabel(proxy)}</div>
+                      <div className="table-subtitle">{timezoneLabel(proxy)}</div>
+                    </td>
                     <td>{checking ? 'Checking...' : latencyLabel(proxy)}</td>
                     <td>
                       <span className={`status status--${status.toLowerCase()}`}>
