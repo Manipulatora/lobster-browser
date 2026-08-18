@@ -12,4 +12,4 @@ export { ToastProvider, useToast } from './Toast';
 export type { ToastTone } from './Toast';
 export { CommandPalette } from './CommandPalette';
 export type { Command } from './CommandPalette';
-export { Spinner, Skeleton, EmptyState, Tooltip, Kbd, CodeBlock } from './misc';
+export { Spinner, Skeleton, EmptyState, Tooltip, CodeBlock } from './misc';

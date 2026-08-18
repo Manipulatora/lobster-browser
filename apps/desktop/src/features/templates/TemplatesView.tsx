@@ -320,11 +320,6 @@ export function TemplatesView(): JSX.Element {
         <EmptyState
           icon={<Icon name="DocumentDuplicateIcon" aria-hidden />}
           title={query.trim() ? 'No matching templates' : 'No templates yet'}
-          description={
-            query.trim()
-              ? 'Try a different search term.'
-              : 'Save a reusable profile preset — engine, OS, proxy, and fingerprint policy.'
-          }
           action={
             query.trim() ? undefined : (
               <button

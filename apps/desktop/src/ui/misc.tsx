@@ -34,22 +34,28 @@ export function Skeleton({
 }
 
 /** Centered empty/zero state with an icon, title, description, and optional action. */
+/**
+ * An empty state is an icon, a fact, and the way out of it.
+ *
+ * THERE IS DELIBERATELY NO `description`. Every one that existed restated the title in a longer
+ * sentence ("Trash is empty" / "Profiles you move to trash appear here") or explained the product
+ * to someone already inside it ("Create your first browser profile to get a coherent, isolated
+ * identity"). It is the natural home for filler, so the slot is gone rather than left empty for
+ * the next person to fill.
+ */
 export function EmptyState({
   icon,
   title,
-  description,
   action,
 }: {
   icon: ReactNode;
   title: string;
-  description?: string;
   action?: ReactNode;
 }): JSX.Element {
   return (
     <div className="lb-empty">
       <div className="lb-empty__icon">{icon}</div>
       <div className="lb-empty__title">{title}</div>
-      {description ? <p className="lb-empty__desc">{description}</p> : null}
       {action}
     </div>
   );
@@ -65,11 +71,6 @@ export function Tooltip({ label, children }: { label: string; children: ReactNod
       </span>
     </span>
   );
-}
-
-/** Keyboard key chip. */
-export function Kbd({ children }: { children: ReactNode }): JSX.Element {
-  return <kbd className="lb-kbd">{children}</kbd>;
 }
 
 /** A code block with a copy-to-clipboard button (used by the automation panel). */

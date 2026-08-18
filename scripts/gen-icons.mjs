@@ -3,6 +3,7 @@
 // Fetches Google's own sources rather than transcribing paths by hand, so the glyphs are the real
 // Material Symbols and a future refresh is a re-run instead of an eyeballing exercise.
 import { writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // Heroicon name -> Material Symbol name. Chosen to preserve the existing meaning at each call site,
 // not merely to find a similar-looking glyph.
@@ -29,6 +30,9 @@ const MAP = {
   StopIcon: 'stop',
   TrashIcon: 'delete',
   UserGroupIcon: 'group',
+  // The Credit balance in the topbar. `account_balance_wallet` rather than `payments` (a card, and
+  // this product takes no cards) or `savings` (a piggy bank).
+  WalletIcon: 'account_balance_wallet',
   XMarkIcon: 'close',
 };
 
@@ -91,5 +95,12 @@ ${entries}
 export type IconName = keyof typeof ICON_PATHS;
 `;
 
-writeFileSync(process.argv[2], file, 'utf8');
-console.log(`wrote ${process.argv[2]} (${Object.keys(out).length} icons)`);
+// Defaulted rather than required. Omitting it used to fetch all 24 icons over the network and only
+// then die with `ERR_INVALID_ARG_TYPE: The "path" argument must be of type string` from deep inside
+// fs — which says nothing about the actual mistake. There is exactly one file this generates.
+const outPath =
+  process.argv[2] ??
+  fileURLToPath(new URL('../apps/desktop/src/ui/icons.tsx', import.meta.url));
+
+writeFileSync(outPath, file, 'utf8');
+console.log(`wrote ${outPath} (${Object.keys(out).length} icons)`);

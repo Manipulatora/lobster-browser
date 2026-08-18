@@ -194,7 +194,6 @@ export function ProfilesView({
   }, [loading, profiles.length, onProfileCountChange]);
 
   const [showForm, setShowForm] = useState(false);
-  const [showToolbarMenu, setShowToolbarMenu] = useState(false);
   const [showTrash, setShowTrash] = useState(false);
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
   const [saving, setSaving] = useState(false);
@@ -223,7 +222,6 @@ export function ProfilesView({
   const [pendingAction, setPendingAction] = useState<PendingProfileAction | null>(null);
   const [actionInput, setActionInput] = useState('');
   const [actionBusy, setActionBusy] = useState(false);
-  const toolbarMenuRef = useRef<HTMLDivElement | null>(null);
   const prevCreateSignal = useRef(createProfileSignal);
 
   // Stable identity so the create/edit modal's font-catalog effect (keyed on this prop) does NOT
@@ -265,27 +263,6 @@ export function ProfilesView({
     };
   }, []);
 
-  useEffect(() => {
-    if (!showToolbarMenu) return undefined;
-
-    function closeIfOutside(event: PointerEvent): void {
-      const target = event.target;
-      if (target instanceof Node && toolbarMenuRef.current?.contains(target)) return;
-      setShowToolbarMenu(false);
-    }
-
-    function closeOnEscape(event: KeyboardEvent): void {
-      if (event.key === 'Escape') setShowToolbarMenu(false);
-    }
-
-    document.addEventListener('pointerdown', closeIfOutside);
-    document.addEventListener('keydown', closeOnEscape);
-    return () => {
-      document.removeEventListener('pointerdown', closeIfOutside);
-      document.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [showToolbarMenu]);
-
   function setBusy(id: string, on: boolean): void {
     setBusyIds((prev) => {
       const next = new Set(prev);
@@ -318,7 +295,6 @@ export function ProfilesView({
   }
 
   async function handleOpenTrash(): Promise<void> {
-    setShowToolbarMenu(false);
     setShowTrash(true);
     await refreshTrash();
   }
@@ -727,32 +703,20 @@ export function ProfilesView({
             <Icon name="PlusIcon" aria-hidden />
             Create Profile
           </button>
-          <div className="toolbar-menu" ref={toolbarMenuRef}>
-            <button
-              type="button"
-              className="btn btn--primary btn--square"
-              aria-label="More actions"
-              aria-expanded={showToolbarMenu}
-              onClick={() => setShowToolbarMenu((current) => !current)}
-            >
-              <Icon name="EllipsisHorizontalIcon" aria-hidden />
-            </button>
-            {showToolbarMenu ? (
-              <div className="action-menu toolbar-action-menu" role="menu">
-                <button
-                  type="button"
-                  className="menu-item"
-                  role="menuitem"
-                  onClick={() => {
-                    void handleOpenTrash();
-                  }}
-                >
-                  <Icon name="TrashIcon" aria-hidden />
-                  Trash
-                </button>
-              </div>
-            ) : null}
-          </div>
+          {/* Trash, directly. This was a second primary-coloured square button opening a menu whose
+              only item was Trash — two clicks and an extra control to reach one action, and a
+              second accent-filled button competing with Create Profile beside it. A menu is worth
+              its own button at three items, not one. */}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              void handleOpenTrash();
+            }}
+          >
+            <Icon name="TrashIcon" aria-hidden />
+            Trash
+          </button>
         </div>
       </header>
 
@@ -897,7 +861,6 @@ export function ProfilesView({
           <EmptyState
             icon={<Icon name="UserGroupIcon" aria-hidden />}
             title={t('profiles.empty.title')}
-            description={t('profiles.empty.desc')}
             action={
               <button type="button" className="btn btn--primary" onClick={() => setShowForm(true)}>
                 <Icon name="PlusIcon" aria-hidden />

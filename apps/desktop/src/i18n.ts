@@ -14,9 +14,7 @@ const en: Catalog = {
   'action.createProfile': 'Create Profile',
   'action.launch': 'Launch',
   'action.stop': 'Stop',
-  'profiles.empty.title': 'No profiles yet',
-  'profiles.empty.desc': 'Create your first browser profile to get a coherent, isolated identity.',
-  'profiles.count': '{count} profiles',
+  'profiles.empty.title': 'No profiles yet',  'profiles.count': '{count} profiles',
   'palette.placeholder': 'Search profiles, actions, pages…',
 };
 

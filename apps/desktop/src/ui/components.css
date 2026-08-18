@@ -506,11 +506,6 @@
   font-size: var(--fs-lg);
   font-weight: var(--fw-medium);
 }
-.lb-empty__desc {
-  max-width: 360px;
-  color: var(--text-muted);
-}
-
 /* --- Skeleton ----------------------------------------------------------------------------------- */
 .lb-skeleton {
   border-radius: var(--radius-sm);
@@ -641,20 +636,6 @@
   right: var(--space-2);
 }
 
-/* --- kbd ---------------------------------------------------------------------------------------- */
-.lb-kbd {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border: 1px solid var(--border-strong);
-  border-bottom-width: 2px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  color: var(--text-muted);
-}
-
 /* --- Segmented control -------------------------------------------------------------------------- */
 .lb-segmented {
   display: inline-flex;
@@ -711,11 +692,17 @@
   border-color: var(--border-strong);
 }
 
-
-
 .wallet-chip:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+}
+
+/* Muted, not accent-coloured. The number is the content; the icon is only there to say what the
+   number is, and a violet glyph beside it competes with the one primary action on screen. */
+.wallet-chip__icon {
+  width: 16px;
+  height: 16px;
+  color: var(--text-soft);
 }
 
 /* --- Plan + profile allowance, sidebar foot ---------------------------------------------------- */
@@ -818,6 +805,3 @@
   color: var(--text-muted);
 }
 
-.plan-usage + .sidebar-footer {
-  margin-top: 0;
-}

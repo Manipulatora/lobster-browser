@@ -508,7 +508,6 @@ export function ProxiesView(): JSX.Element {
         <EmptyState
           icon={<Icon name="ServerStackIcon" aria-hidden />}
           title="No proxies yet"
-          description="Add a SOCKS5 or HTTP(S) proxy to assign it to profiles."
           action={
             <button
               type="button"
@@ -604,14 +603,6 @@ export function ProxiesView(): JSX.Element {
           </table>
         </div>
       ) : null}
-
-      <div className="info-strip">
-        <Icon name="SignalIcon" aria-hidden />
-        <span>
-          Check reports the exit IP, round-trip latency and timezone a profile will present, and
-          warns when the address looks like a datacenter.
-        </span>
-      </div>
 
       {showAddProxy ? (
         <AddProxyModal

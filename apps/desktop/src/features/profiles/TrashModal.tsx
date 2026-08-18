@@ -75,7 +75,6 @@ export function TrashModal({
           <EmptyState
             icon={<Icon name="TrashIcon" aria-hidden />}
             title="Trash is empty"
-            description="Profiles you move to trash appear here, and can be restored from it."
           />
         ) : null}
 

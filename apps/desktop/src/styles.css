@@ -101,29 +101,9 @@ input[type='checkbox'] {
   flex: 1;
 }
 
-/* The three topbar pills are the same size and shape, so they need air between them or they read as
-   one segmented control. */
+/* One control now — the Credit chip. The gap remains so a second ever added does not collide. */
 .topbar__actions {
   gap: var(--space-2);
-}
-
-.topbar__actions,
-.account-switcher,
-.nav-item,
-.btn,
-.icon-button,
-.profile-button,
-.search-field,
-.status,
-.proxy-cell,
-.profile-title-cell,
-.table-toolbar,
-.toolbar-total,
-.toolbar-actions,
-.modal-footer-actions,
-.check-row {
-  display: inline-flex;
-  align-items: center;
 }
 
 .workspace {
@@ -141,30 +121,10 @@ input[type='checkbox'] {
   background: var(--sidebar);
 }
 
-.account-switcher {
-  gap: 10px;
-  min-height: 36px;
-  padding: 0 4px;
-}
-
 .row-mark {
   display: block;
   flex: 0 0 auto;
   object-fit: contain;
-}
-
-.account-name {
-  max-width: 170px;
-  overflow: hidden;
-  font-size: var(--fs-md);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-version {
-  margin-left: auto;
-  color: var(--text-soft);
-  font-size: var(--fs-sm);
 }
 
 .nav {
@@ -207,11 +167,45 @@ input[type='checkbox'] {
   height: 20px;
 }
 
-.sidebar-footer {
-  margin-top: auto;
-  padding: 8px 10px;
-  color: var(--text-soft);
-  font-size: var(--fs-base);
+.sidebar-account__button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 36px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  cursor: pointer;
+}
+
+.sidebar-account__button:hover {
+  background: var(--active-muted);
+  color: var(--text);
+}
+
+/* An email is long and the sidebar is 244px. Truncate rather than wrap: a two-line account row
+   shifts the plan block above it every time a different account signs in. */
+.sidebar-account__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Opens UPWARD. `.action-menu` anchors below its trigger, which at the bottom of the sidebar would
+   render the menu off the bottom of the window. */
+.sidebar-account__menu {
+  top: auto;
+  right: auto;
+  bottom: calc(100% + 6px);
+  left: 0;
+  min-width: 100%;
 }
 
 .main {
@@ -289,11 +283,6 @@ input[type='checkbox'] {
 
 .toolbar-actions {
   gap: 8px;
-}
-
-.toolbar-menu {
-  position: relative;
-  display: inline-flex;
 }
 
 .search-field {
@@ -487,11 +476,6 @@ select.lb-select:disabled {
   border-color: var(--accent-hover);
   background: var(--accent-hover);
   color: var(--on-brand);
-}
-
-.btn--square {
-  width: 40px;
-  padding: 0;
 }
 
 .btn--secondary {
@@ -906,10 +890,6 @@ select.lb-select:disabled {
   z-index: var(--z-dropdown);
 }
 
-.toolbar-action-menu {
-  min-width: 132px;
-}
-
 .menu-item {
   display: inline-flex;
   align-items: center;
@@ -1032,13 +1012,6 @@ select.lb-select:disabled {
 }
 
 .muted {
-  color: var(--text-muted);
-}
-
-.notice,
-.info-strip {
-  margin: 0;
-  padding: 10px 12px;
   color: var(--text-muted);
 }
 
@@ -2114,47 +2087,12 @@ select.lb-select:disabled {
   color: var(--accent);
 }
 
-.info-strip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
 code {
   padding: 1px 5px;
   border-radius: 3px;
   background: var(--surface-muted);
   color: var(--text);
   font-size: var(--fs-base);
-}
-
-.topbar-search {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: auto;
-  height: 32px;
-  padding: 0 var(--space-2) 0 var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text-muted);
-}
-
-.topbar-search:hover {
-  background: var(--surface-muted);
-  color: var(--text);
-}
-
-.topbar-search .lb-kbd {
-  display: none;
-}
-
-@media (min-width: 1100px) {
-  .topbar-search .lb-kbd {
-    display: inline-flex;
-  }
 }
 
 .bulk-bar {
@@ -2329,7 +2267,10 @@ code {
   }
 
   .nav-item span,
-  .sidebar-footer {
+  /* The account row collapses with the nav labels: at this width the sidebar is an icon rail, and
+     a truncated email in it is noise rather than information. Sign-out stays reachable by widening
+     the window, which is the same trade the nav labels already make. */
+  .sidebar-account {
     display: none;
   }
 

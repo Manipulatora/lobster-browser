@@ -3,14 +3,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { accountClient, formatCredit, type AccountSummary } from './api/account';
 import { authClient, type CloudUser } from './api/auth';
-import { isDesktopRuntime, profilesClient } from './api/tauri';
+import { profilesClient } from './api/tauri';
 import { AuthScreen } from './features/auth/AuthScreen';
 import { ProfilesView } from './features/profiles/ProfilesView';
 import { ProxiesView } from './features/proxies/ProxiesView';
 import { TemplatesView } from './features/templates/TemplatesView';
 import siteLogo from './assets/brand/site-logo.png';
 import { PlanUsage } from './ui/PlanUsage';
-import { ActionDialog, CommandPalette, ErrorDialog, Kbd, type Command } from './ui';
+import { ActionDialog, CommandPalette, ErrorDialog, type Command } from './ui';
 import type { Profile } from '@lobster/shared-types';
 import { Icon, type IconName } from './ui/Icon';
 
@@ -145,10 +145,6 @@ function Dashboard({
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [account, setAccount] = useState<AccountSummary | null>(null);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
-  const isMac = useMemo(
-    () => typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform),
-    [],
-  );
 
   // Balance, plan and cap. Re-fetched when the profile set changes so the usage figure in the
   // sidebar cannot drift from the list beside it — a cap that reads 11/200 next to twelve rows is
@@ -342,60 +338,28 @@ function Dashboard({
         </div>
         <div className="topbar__spacer" />
         <div className="topbar__actions">
-          {/* Credit, in the topbar because it is the number that decides whether the user can do
-              the thing they came to do. Hidden entirely rather than shown as a zero while unknown:
-              a balance that flickers 0.00 -> 12.00 on every start reads as money briefly missing. */}
+          {/* THE ONLY THING IN THE TOPBAR NOW.
+
+              The command-palette button and the account dropdown that used to sit here are gone.
+              Ctrl+K is a shortcut people either know or never use, and a permanent button
+              advertising it is chrome; the shortcut still works. The account belonged next to the
+              plan it pays for, so it moved to the sidebar footer -- which also keeps sign-out
+              reachable, the one thing that button was load-bearing for.
+
+              Credit stays because it is the number that decides whether the user can do the thing
+              they came to do. Hidden rather than shown as a zero while unknown: a balance that
+              flickers 0.00 -> 12.00 on every start reads as money briefly missing. */}
           {account ? (
             <button
               type="button"
               className="wallet-chip"
               onClick={() => void accountClient.openBilling()}
-              title="Credit balance — open billing"
+              title="Credit balance - open billing"
             >
+              <Icon name="WalletIcon" className="wallet-chip__icon" aria-hidden />
               <span className="wallet-chip__value">{formatCredit(account.balanceCents)}</span>
             </button>
           ) : null}
-          <button
-            type="button"
-            className="icon-button topbar-search"
-            aria-label="Open command palette"
-            onClick={() => setPaletteOpen(true)}
-            title="Command palette"
-          >
-            <Icon name="MagnifyingGlassIcon" aria-hidden />
-            <Kbd>{isMac ? 'âŒ˜K' : 'Ctrl K'}</Kbd>
-          </button>
-          {/* The only place the signed-in account is visible, and the only way out of it: before
-              this, auth_sign_out had no caller anywhere, so the sole escape from a wrong account
-              was clearing the OS keychain by hand. It sits in the topbar rather than the sidebar
-              footer because that footer is display:none below 900px wide. */}
-          <div className="row-menu" ref={accountMenuRef}>
-            <button
-              type="button"
-              className="btn"
-              aria-haspopup="menu"
-              aria-expanded={accountMenuOpen}
-              onClick={() => setAccountMenuOpen((open) => !open)}
-              title={accountLabel}
-            >
-              <span className="account-name">{accountLabel}</span>
-              <Icon name="ChevronDownIcon" aria-hidden />
-            </button>
-            {accountMenuOpen ? (
-              <div className="action-menu" role="menu">
-                <button
-                  type="button"
-                  className="menu-item"
-                  role="menuitem"
-                  onClick={() => {
-                    void handleSignOut();
-                  }}
-                >
-                  Sign out
-                </button>
-              </div>
-            ) : null}
-          </div>
         </div>
       </header>
 
@@ -430,8 +394,40 @@ function Dashboard({
               onUpgrade={() => void accountClient.openBilling()}
             />
           ) : null}
-          <div className="sidebar-footer">
-            <span>{isDesktopRuntime() ? 'Desktop runtime' : 'Dev mock runtime'}</span>
+          {/* The account, and the only way out of it.
+
+              This replaced "Desktop runtime" / "Dev mock runtime" — a developer's build-mode
+              readout that told a user nothing and was on screen permanently. The account sits here
+              rather than the topbar because it belongs beside the plan it pays for, and because
+              sign-out has to live somewhere: before it existed anywhere in the UI, `auth_sign_out`
+              had no caller at all and the only escape from a wrong account was clearing the OS
+              keychain by hand. */}
+          <div className="sidebar-account" ref={accountMenuRef}>
+            <button
+              type="button"
+              className="sidebar-account__button"
+              aria-haspopup="menu"
+              aria-expanded={accountMenuOpen}
+              onClick={() => setAccountMenuOpen((open) => !open)}
+              title={accountLabel}
+            >
+              <span className="sidebar-account__name">{accountLabel}</span>
+              <Icon name="ChevronUpIcon" aria-hidden />
+            </button>
+            {accountMenuOpen ? (
+              <div className="action-menu sidebar-account__menu" role="menu">
+                <button
+                  type="button"
+                  className="menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    void handleSignOut();
+                  }}
+                >
+                  Sign out
+                </button>
+              </div>
+            ) : null}
           </div>
         </aside>
 

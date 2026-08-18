@@ -288,7 +288,6 @@ export function ProfileList({
       <EmptyState
         icon={<Icon name="MagnifyingGlassIcon" aria-hidden />}
         title="No matching profiles"
-        description="Clear the search or widen the filters to see more."
       />
     );
   }
