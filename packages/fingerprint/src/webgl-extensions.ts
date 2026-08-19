@@ -159,11 +159,7 @@ export interface WebGlExtensionOptions {
   appleSilicon?: boolean;
 }
 
-function select(
-  order: readonly string[],
-  os: OsFamily,
-  opts: WebGlExtensionOptions,
-): string[] {
+function select(order: readonly string[], os: OsFamily, opts: WebGlExtensionOptions): string[] {
   const apple = Boolean(opts.appleSilicon);
   return order.filter((name) => {
     if (name === PVRTC) return false;

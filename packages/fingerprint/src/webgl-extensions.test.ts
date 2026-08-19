@@ -25,7 +25,11 @@ test('the extension list is in Chrome registration order, never alphabetical', (
       positions.every((p) => p >= 0),
       `${os} emitted a name absent from the registration order`,
     );
-    assert.deepEqual(positions, [...positions].sort((a, b) => a - b), `${os} order scrambled`);
+    assert.deepEqual(
+      positions,
+      [...positions].sort((a, b) => a - b),
+      `${os} order scrambled`,
+    );
   }
 });
 
@@ -82,7 +86,10 @@ test('WebGL2 is a different list, not a superset of WebGL1', () => {
     'OES_texture_float',
     'OES_element_index_uint',
   ]) {
-    assert.ok(!gl2.has(foldedIntoCore), `${foldedIntoCore} is core in WebGL2 and must not be listed`);
+    assert.ok(
+      !gl2.has(foldedIntoCore),
+      `${foldedIntoCore} is core in WebGL2 and must not be listed`,
+    );
   }
   assert.ok(gl2.has('EXT_color_buffer_float'), 'WebGL2-only extension missing');
   assert.notDeepEqual(webgl1ExtensionsFor('windows'), webgl2ExtensionsFor('windows'));
@@ -91,13 +98,24 @@ test('WebGL2 is a different list, not a superset of WebGL1', () => {
 test('no name is duplicated and none is empty', () => {
   for (const order of [WEBGL1_REGISTRATION_ORDER, WEBGL2_REGISTRATION_ORDER]) {
     assert.equal(new Set(order).size, order.length, 'duplicate extension name');
-    assert.ok(order.every((n) => /^[A-Z][A-Za-z0-9_]+$/.test(n)), 'malformed extension name');
+    assert.ok(
+      order.every((n) => /^[A-Z][A-Za-z0-9_]+$/.test(n)),
+      'malformed extension name',
+    );
   }
 });
 
 test('isAppleSiliconRenderer recognises the M-series renderer strings', () => {
-  assert.ok(isAppleSiliconRenderer('ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Pro, Unspecified Version)'));
-  assert.ok(!isAppleSiliconRenderer('ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)'));
+  assert.ok(
+    isAppleSiliconRenderer(
+      'ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Pro, Unspecified Version)',
+    ),
+  );
+  assert.ok(
+    !isAppleSiliconRenderer(
+      'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+    ),
+  );
 });
 
 test('a derived persona actually carries the deep WebGL surfaces', () => {

@@ -75,12 +75,12 @@ test('the Windows font catalog contains every family Blink resolves a CSS generi
   const fonts = new Set(defaultFontsForOs('windows').map((f) => f.toLowerCase()));
   const generics = [
     'Times New Roman', // standard + serif
-    'Arial',           // sans-serif
-    'Consolas',        // monospace
-    'Courier New',     // monospace fallback
-    'Comic Sans MS',   // cursive
-    'Impact',          // fantasy
-    'Cambria Math',    // math
+    'Arial', // sans-serif
+    'Consolas', // monospace
+    'Courier New', // monospace fallback
+    'Comic Sans MS', // cursive
+    'Impact', // fantasy
+    'Cambria Math', // math
   ];
   const missing = generics.filter((f) => !fonts.has(f.toLowerCase()));
   assert.deepEqual(missing, [], 'Windows persona font catalog is missing generic-family defaults');
@@ -100,6 +100,10 @@ test('every OS font catalog is free of duplicates and blank entries', () => {
       seen.add(key);
     }
     assert.deepEqual(dupes, [], `${os} font catalog has duplicates`);
-    assert.equal(list.filter((f) => f.trim() === '').length, 0, `${os} font catalog has blank entries`);
+    assert.equal(
+      list.filter((f) => f.trim() === '').length,
+      0,
+      `${os} font catalog has blank entries`,
+    );
   }
 });

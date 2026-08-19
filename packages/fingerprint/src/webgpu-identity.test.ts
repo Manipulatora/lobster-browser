@@ -59,11 +59,7 @@ test('no catalog device is ever a CPU adapter, so isFallbackAdapter stays false'
   // to true, contradicting every other GPU surface the same page can read.
   for (const tpl of Object.values(DEVICE_TEMPLATES)) {
     for (const device of tpl.devices) {
-      assert.notEqual(
-        webgpuIdentityFor(device.webgl).adapterType,
-        'cpu',
-        device.webgl.renderer,
-      );
+      assert.notEqual(webgpuIdentityFor(device.webgl).adapterType, 'cpu', device.webgl.renderer);
     }
   }
 });

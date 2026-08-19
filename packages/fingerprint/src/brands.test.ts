@@ -83,6 +83,10 @@ test('the derived persona carries the algorithmic list, not a hardcoded one', ()
 
 test('rejects a non-numeric major rather than emitting an impossible list', () => {
   for (const bad of ['', 'abc', '-1', '15.2']) {
-    assert.throws(() => buildChromeBrands(bad), /invalid Chrome major/, `input ${JSON.stringify(bad)}`);
+    assert.throws(
+      () => buildChromeBrands(bad),
+      /invalid Chrome major/,
+      `input ${JSON.stringify(bad)}`,
+    );
   }
 });
