@@ -1,146 +1,174 @@
 # Project Status — What Exists, What Runs Where
 
-Status date: 2026-08-15. Written as the orientation document for an engineer or agent picking this
+Status date: 2026-08-19. This is the orientation document for an engineer or agent picking this
 repository up on a new machine. It records what is true today, not what is planned; the plans live in
-[`ENGINEERING.md`](ENGINEERING.md) §5 and [`LOBEE_AGENT_ROADMAP.md`](LOBEE_AGENT_ROADMAP.md).
+[`ENGINEERING.md`](ENGINEERING.md) §5 and [`LOBEE_AGENT_ROADMAP.md`](subsystems/agent.md).
 
-> **Read [`ENGINE_AUDIT.md`](ENGINE_AUDIT.md) before making any anti-detect claim about this build.**
-> An end-to-end, adversarially-verified audit of the engine (2026-08-14) returned **79 findings — 10
-> critical, 19 high**, most of them still open. Four of the criticals are Windows-specific: timezone
-> is not spoofed at all, fonts are not isolated at all, WebGPU is enabled and completely unhooked, and
-> WebGL2 is largely uncovered. The engine is a solid native foundation with real gaps, not a finished
-> anti-detect product.
+> **No anti-detect claim in this repository has been measured against the current patch series.**
+>
+> The series closes several critical findings from [`ENGINE_AUDIT.md`](subsystems/engine-audit.md) — see §5.1 —
+> but "closed in the series" is not "measured in a browser". The only published engine artifact is
+> `linux-x64` at `152.0.7928.0`, which predates those patches, and **the product's own launcher
+> refuses it**: it advertises 12 native capabilities and the launcher requires 5 it does not have.
+> So the in-browser gates cannot run against anything shippable, and `gate:oracles` exits `BLOCKED`
+> rather than scoring it. Until a rebuilt binary is published, treat every closure in §5.1 as
+> *compiled and reviewed*, not *verified*.
+>
+> The audit itself (2026-08-14) returned **79 findings — 10 critical, 19 high**. Most remain open.
+> This is a solid native foundation with real, documented gaps, not a finished anti-detect product.
 
 ## 1. What this repository contains
 
-Four deliverables share one monorepo:
+Six deliverables share one monorepo:
 
 | Deliverable | Path | State |
 | --- | --- | --- |
-| **Desktop app** — Tauri 2 (Rust) + React UI, the product | `apps/desktop` | Builds and runs on Linux. Linux-only bundle target. |
-| **Lobium engine** — Chromium 152 fork with native fingerprinting | `lobium/` (build scripts + patches) | Builds on Linux. Windows build path now exists and configures cleanly (`lobium/build.ps1`); a first Windows binary is being produced. |
-| **Marketing site** — Angular 22 SSR/SSG | `apps/web` | Live at `lobrowser.com`, deployed from this machine. |
-| **Cloud backend** — NestJS (auth, teams, sync, billing) | `apps/backend` | In-repo; not covered by this document. |
+| **Desktop app** — Tauri 2 (Rust) + React UI, the product | `apps/desktop` | Builds and runs on Linux and Windows. Per-platform bundle targets (`deb` / `nsis`). |
+| **Lobium engine** — Chromium fork with native fingerprinting | `lobium/` (build scripts + patches) | Series is cut against `152.0.7977.42`. Built on the owner's Windows PC; **not buildable on the Linux dev host today** — see §3. |
+| **Sidecar** — profile lifecycle, CDP, agent bridge | `packages/engine-runner` | Ships on Linux and Windows. |
+| **Lobee agent** — in-browser side panel | `packages/agent`, `packages/lobee-app` | Ships. Plus/Pro/Max only, metered per call. See [`subsystems/agent.md`](subsystems/agent.md). |
+| **Cloud backend** — NestJS (auth, teams, sync, billing, model proxy) | `apps/backend` | Live at `api.lobrowser.com`. See [`subsystems/billing-and-auth.md`](subsystems/billing-and-auth.md). |
+| **Marketing site + dashboard** — Angular 22 SSR/SSG | `apps/web` | Live at `lobrowser.com`. |
 
 The engine is **not** bundled into the installer. `apps/desktop/src-tauri/resources/engine-manifest.json`
-declares a URL + SHA256, and the Rust core streams and extracts that tarball on first run. This is why the
-`.deb` is small and why platform support is a manifest question as much as a build question.
+declares a per-platform URL + SHA-256, and the Rust core streams and extracts the archive on first run.
+This is why the installer is small and why platform support is a manifest question as much as a build
+question.
 
-**Engine version — rebuild outstanding (2026-08-14).** The repo was pinned to Chromium `152.0.7928.0`,
-which is a **canary nightly**, not a release. For an anti-detect product that is worse than being stale:
-`getHighEntropyValues(['fullVersionList'])` returns the real build, so a nightly nobody runs is close to a
-globally unique identifier. It went unnoticed because `scripts/track-upstream.mjs` compared version
-ordering only — `152 > 151` read as "UP TO DATE". The source pins now target `152.0.7977.42` (M152
-beta-frozen; M152 scheduled stable 2026-08-25) and both halves are enforced (`track-upstream.mjs` checks
-channel membership online, `ci/validation/version-coherence.test.mjs` gates offline on every PR).
-**The published engine tarball is still the old build** — `engine-manifest.json` declares this as
-`rebuildPending`, and clearing it needs the Linux build host (see `docs/OPERATIONS.md` §1.1).
+**Engine version — rebuild outstanding.** The repo was pinned to Chromium `152.0.7928.0`, which is a
+**canary nightly**, not a release. For an anti-detect product that is worse than being stale:
+`getHighEntropyValues(['fullVersionList'])` returns the real build, so a nightly nobody runs is close to
+a globally unique identifier. It went unnoticed because `scripts/track-upstream.mjs` compared version
+ordering only — `152 > 151` read as "UP TO DATE". The source pins now target `152.0.7977.42` and both
+halves are enforced (`track-upstream.mjs` checks channel membership online,
+`ci/validation/version-coherence.test.mjs` gates offline on every push).
+
+**The published engine tarball is still the old build.** `engine-manifest.json` declares this in a
+`rebuildPending` block, and clearing it needs a completed engine build (§3).
 
 ## 2. Platform support — the honest matrix
 
-| Component | Linux x64 | Windows x64 | macOS |
+**Windows x64 is the owner's first target platform.** Linux x64 is the development platform and the only
+one with a published engine artifact. macOS is neither built nor configured.
+
+| Component | Windows x64 | Linux x64 | macOS |
 | --- | --- | --- | --- |
-| Rust/Tauri core | Ships | **Builds and runs** (2026-08-14) | Untested |
-| Sidecar (`engine-runner`) | Ships | **Verified** — bundled sidecar answers `ping`/`status` over stdio under the vendored `node.exe`, and the Lobee loopback bridge binds | Untested |
-| Vendored Node runtime | Ships | **Fixed** — official win-x64 `node.exe`, SHA256-verified against nodejs.org | Untested |
-| Lobium engine | Ships | **Built** — 152.0.7977.42, `is_official_build` + PGO + ThinLTO. Binary not yet published to a manifest. | Does not exist |
-| Installer bundle target | `deb` | `nsis` (`tauri.windows.conf.json`) | Not configured |
-| Font isolation | Ships (fontconfig) | **Ships (DirectWrite)** — native filter + font-pack sideload | Not implemented |
-| Runtime packaging | `package-lobium-runtime.sh` | `package-lobium-runtime.ps1` | Not implemented |
-| Fingerprint personas | Ships | Ships (~1.8k Windows presets) | Ships (~200 presets) |
+| Rust/Tauri core | Builds and runs | Builds and runs | Untested |
+| Sidecar (`engine-runner`) | Verified — bundled sidecar answers `ping`/`status` over stdio under the vendored `node.exe`, and the Lobee loopback bridge binds | Ships | Untested |
+| Vendored Node runtime | Official win-x64 `node.exe`, SHA-256 verified against nodejs.org | Ships | Not implemented |
+| Lobium engine | **Built** — `152.0.7977.42`, `is_official_build` + PGO + ThinLTO. **Not published to the manifest.** | Published artifact is `152.0.7928.0` and is **refused by the launcher** (§5) | Does not exist |
+| Installer bundle target | `nsis` (`tauri.windows.conf.json`) | `deb` (`tauri.linux.conf.json`) | Not configured |
+| Engine archive form | `.zip` | `.tar.gz` | — |
+| Font isolation | Native (DirectWrite filter + font-pack sideload) | Environmental (`FONTCONFIG_FILE` + private pack) | Not implemented |
+| Runtime packaging | `package-lobium-runtime.ps1` | `package-lobium-runtime.sh` | Not implemented |
+| Fingerprint personas | Ships (~1.8k presets) | Ships (~1.6k presets) | Ships (~200 presets) |
 
-Build it with `scripts/build-windows-product.ps1` (the Windows counterpart to
-`build-linux-product.sh`); see [`OPERATIONS.md`](OPERATIONS.md) §2.3.
+Build the desktop app with `scripts/build-windows-product.ps1` or `scripts/build-linux-product.sh`; see
+[`OPERATIONS.md`](OPERATIONS.md) §2.
 
-Of the three blockers this section used to list, all three are now closed, and one packaging step
-remains:
+### What is left before a Windows launch works
 
-1. **Windows engine — built; the published artifact is what is left.**
-   The engine compiles and links natively on this host at 152.0.7977.42 with `is_official_build`,
-   PGO and ThinLTO. Chromium cannot be cross-compiled from Linux to Windows and cannot be built from
-   WSL, so this needed a *native* Windows host, which now exists and is configured (see §3).
+**One step: publish a `win-x64` engine archive.** The engine is built and its hooks were verified
+in-browser on the build host. `engine-manifest.json` has no `win-x64` entry, deliberately — naming a URL
+before the artifact exists means every Windows first run 404s after an ~840 MB download. An absent entry
+fails immediately and says why.
 
-   `engine-manifest.json` is now a **per-platform map**. That was not cosmetic: the flat manifest
-   would have handed a Windows install the `linux-x64` tarball, unpacked a `chrome` ELF, reported
-   provisioning success, and failed at first launch with an unrelated-looking error. A platform with
-   no entry now fails immediately and says why. The `win-x64` entry is deliberately absent until an
-   archive is uploaded — naming a URL before the artifact exists means every Windows first run 404s
-   after an ~840 MB download.
+Until then the Windows app installs, opens, and manages profiles, proxies and templates but **cannot
+launch a profile**: `startProfile` refuses any engine but Lobium, so it fails closed rather than falling
+back to an unprotected browser.
 
-   Until then the Windows app installs, opens, and manages profiles/proxies but **cannot launch a
-   profile**: `startProfile` refuses any engine but Lobium, so it fails closed rather than falling
-   back to an unprotected browser.
+The manifest is a **per-platform map**, which was not cosmetic. The flat manifest would have handed a
+Windows install the `linux-x64` tarball, unpacked a `chrome` ELF, reported provisioning success, and
+failed at first launch with an unrelated-looking error. Its shape today:
 
-   The two correctness blockers that had to close before a Windows launch was *correct* rather than
-   merely possible are both closed in the engine:
-   - `timezone-tz-env-noop-on-windows` → `fingerprint/native-timezone.patch`. The fix is hooked at
-     `TimeZoneController::OnTimeZoneChange`, not at renderer start: the browser's
-     `device::TimeZoneMonitor` pushes the host zone to every renderer shortly after startup and
-     overwrites anything adopted earlier.
-   - `fonts-fontconfig-inert-on-windows` → `fingerprint/windows-font-isolation.patch` (see below).
-2. ~~The vendored Node binary is a Linux ELF~~ — **closed.** `build-windows-product.ps1` downloads the
-   official win-x64 archive and verifies it against `SHASUMS256.txt` instead of copying the build host's
-   interpreter. `resolve_node_bin` now probes `node.exe`.
-3. ~~`targets: ["deb"]`~~ — **closed.** Platform configs (`tauri.windows.conf.json` /
-   `tauri.linux.conf.json`) select `nsis` / `deb`, and Windows sets
-   `webviewInstallMode: downloadBootstrapper` since WebView2 is not guaranteed on Windows 10.
+```
+{ engine, note, platforms: { "<platform-id>": { version, url, sha256 } },
+  rebuildPending: { targetVersion, why, howToClear },
+  win-x64Pending: { why, howToClear } }
+```
 
-**Font isolation now exists on Windows, through a different mechanism.** Fontconfig does not exist
-there — Chromium resolves fonts through DirectWrite in the *browser* process — so the isolation is
-native rather than environmental. `buildLobiumLaunchEnv()` no longer throws on Windows; it returns
-early without the POSIX locale variables, because setting `TZ` there would look like the timezone was
-handled when ICU ignores it.
+`rebuildPending` and `win-x64Pending` are top-level siblings of `platforms`, not entries inside it. The
+Rust core (`engine_provision.rs`) reads neither — they exist for the coherence gate and for humans. It
+resolves `platforms[engine_platform_id()]`, where the id comes from the **compile target**, not a runtime
+probe, so Rosetta or Windows-on-ARM cannot mislead it. A platform with no entry is a hard error naming
+the ids that do exist; no download is attempted.
 
-Three surfaces are filtered, because a filter on one is bypassed by the others: `FindFamily` (behind
-every `font-family:` resolution and the width-measurement probe), `MatchUniqueFont` (behind
-`src: local(...)`, which bypasses `FindFamily` entirely), and the Local Font Access enumerator.
+Correctness work that had to land before a Windows launch was *correct* rather than merely possible:
 
-**Filtering is only half of it, and the other half is packaging.** A filter can subtract host fonts
-the persona does not claim; it cannot add fonts the persona claims that the host lacks, and a persona
-measurably *missing* fonts is its own tell. The engine sideloads the profile's font pack into its
-DirectWrite collection from `fontPackDir`.
+- `timezone-tz-env-noop-on-windows` → `fingerprint/native-timezone.patch`. Hooked at
+  `TimeZoneController::OnTimeZoneChange`, not at renderer start: the browser's `device::TimeZoneMonitor`
+  pushes the host zone to every renderer shortly after startup and overwrites anything adopted earlier.
+- `fonts-fontconfig-inert-on-windows` → `fingerprint/windows-font-isolation.patch` (below).
+- The engine archive is a `.zip` on Windows and `extract_and_swap` was hard-wired to gzip + tar. The
+  archive form is now read from the file's own magic bytes (`1f 8b` gzip, `PK` zip) rather than from the
+  URL, because a release asset can be redirected, renamed, or served with any content-type.
 
-The pack rides with the **engine archive**, not the installer: `package-lobium-runtime.ps1` writes it
-to `fonts/` beside `chrome.exe`, which is the first location `resolveFontsBaseDir()` checks. So
-`tauri.windows.conf.json` needs no `resources/fonts` entry — the pack and the engine that consumes it
-travel together, and an installer can never be out of step with the engine over it.
+**Font isolation on Windows works through a different mechanism.** Fontconfig does not exist there —
+Chromium resolves fonts through DirectWrite in the *browser* process — so the isolation is native rather
+than environmental. `buildLobiumLaunchEnv()` returns early on Windows without the POSIX locale variables,
+because setting `TZ` there would look like the timezone was handled when ICU ignores it.
 
-Without a pack the measurable set is host ∩ persona: narrower than claimed, but never wider than the
-host — degraded, not leaking, which is why this path fails open where the Linux one fails closed.
+Three surfaces are filtered, because a filter on one is bypassed by the others: `FindFamily` (behind every
+`font-family:` resolution and the width-measurement probe), `MatchUniqueFont` (behind `src: local(...)`,
+which bypasses `FindFamily` entirely), and the Local Font Access enumerator.
 
-One consequence worth recording: populating `fonts` in the native config was previously refused
-because the browser base64s the whole config document onto the renderer command line, Windows caps
-that line at 32767 characters, and exceeding the engine's 28 KiB guard makes the browser drop the
-switch — so every renderer reports the *host* platform and hardware concurrency. The engine now
-strips `fonts` and `fontPackDir` from the renderer copy (they are browser-only), which is what makes
-shipping the full list safe.
+**Filtering is only half of it; the other half is packaging.** A filter can subtract host fonts the persona
+does not claim; it cannot add fonts the persona claims that the host lacks, and a persona measurably
+*missing* fonts is its own tell. The engine sideloads the profile's font pack into its DirectWrite
+collection from `fontPackDir`. The pack rides with the **engine archive**, not the installer, so an
+installer can never be out of step with the engine over it. Without a pack the measurable set is
+host ∩ persona: narrower than claimed, never wider than the host — degraded, not leaking, which is why
+this path fails open where the Linux one fails closed.
 
-Windows-specific defects found and fixed on 2026-08-14 (all were silent failures):
-`user_engine_runtime_dir()` read `HOME`, which is unset on Windows, so engine provisioning could never
-resolve a path; `engine_present()` and the discovery candidates hard-coded `chrome` rather than
-`chrome.exe`; `resolve_node_bin` probed only POSIX names; `bundle-sidecar.mjs` spawned `npm` (a `.cmd`
-that Node refuses to exec without a shell since CVE-2024-27980) and exited 1 printing nothing; and
-`build-lobee.mjs` ran `node node_modules/.bin/vite`, which is a shell shim on Windows.
+One consequence worth recording: populating `fonts` in the native config was previously refused because
+the browser base64s the whole config document onto the renderer command line, Windows caps that line at
+32767 characters, and exceeding the engine's 28 KiB guard makes the browser drop the switch — so every
+renderer reports the *host* platform and hardware concurrency. The engine now strips `fonts` and
+`fontPackDir` from the renderer copy (they are browser-only), which is what makes shipping the full list
+safe.
 
-## 3. Build hosts — what can be built where
+Windows-specific defects found and fixed, all of which were silent failures: `user_engine_runtime_dir()`
+read `HOME`, which is unset on Windows; `engine_present()` and the discovery candidates hard-coded
+`chrome` rather than `chrome.exe`; `resolve_node_bin` probed only POSIX names; `bundle-sidecar.mjs`
+spawned `npm` (a `.cmd` that Node refuses to exec without a shell since CVE-2024-27980) and exited 1
+printing nothing; `build-lobee.mjs` ran `node node_modules/.bin/vite`, which is a shell shim on Windows;
+`verify-series.mjs` joined patch paths with a literal backslash and defaulted the tree to
+`E:\lobium-build\src`; and `LOBSTER_UPLOAD_ROOTS` was split on a literal `':'`, which turns
+`C:\Users\me\uploads` into two roots that resolve to nothing, so every upload was refused.
+
+## 3. Build hosts — where the engine can actually be built
+
+**The engine cannot be built on the Linux dev host today, and the owner builds it on their own Windows
+PC.** Two things make that concrete rather than a preference:
+
+- The Linux Chromium checkout at `~/lobium-build/src` is at `152.0.7928.0` while the series is cut
+  against `152.0.7977.42`. Building the current series there means a full `gclient sync` to the new tag
+  first, which is a fetch of tens of gigabytes before a compile that takes most of a day.
+- `npm run gate:series` consequently **fails on this host**: six patches do not apply to the pristine
+  tree, because the tree is a different Chromium. That is the gate working correctly — it is a
+  reproducibility check against the checkout, and the checkout is stale — but it means the Linux host
+  cannot certify a series it also cannot build. See §5.
+
+The last engine actually produced on this host is from July and lacks five of the capabilities the
+launcher now requires; it is a development artifact, not a candidate.
 
 Chromium's own requirements, checked against `lobium/gn-args.gn.example`:
 
-- **Disk:** the args set `symbol_level = 0` and `blink_symbol_level = 0`, which is the biggest saver. Source
-  checkout (~50–70GB on Windows) + `out/` (~30–60GB without symbols) + VS/SDK (~20–30GB) lands near the
-  ~150GB the `lobium/build.sh` header quotes.
-- **RAM:** `is_official_build` + `use_thin_lto` makes the `chrome.dll` link the peak. 16GB is the documented
-  minimum, 32GB the comfortable figure. On 24GB, set `concurrent_links = 1` or the link can OOM.
-- **CPU:** 8 cores is fine but slow. **Measured on this host** (8 vCPU EPYC 7B13, 24GB, output on a
-  fast local volume): a steady **160 compile steps/minute**, so ~4.7h of compilation for the ~48k
-  steps of `chrome`, plus the ThinLTO link. Budget 6–8h wall clock for a clean official build.
+- **Disk:** the args set `symbol_level = 0` and `blink_symbol_level = 0`, the biggest saver. Source
+  checkout (~50–70 GB on Windows) + `out/` (~30–60 GB without symbols) + VS/SDK (~20–30 GB) lands near the
+  ~150 GB the `lobium/build.sh` header quotes.
+- **RAM:** `is_official_build` + `use_thin_lto` makes the `chrome.dll` link the peak. 16 GB is the
+  documented minimum, 32 GB the comfortable figure. On less, set `concurrent_links = 1` or the link can
+  OOM. `build.ps1` also takes `-Jobs`, because `autoninja` picks parallelism from core count alone and
+  each `cl.exe` holds 1–2 GB: eight of them on a 16 GB machine page to disk and finish slower than six.
+- **CPU:** 8 cores is fine but slow. Budget 6–8 h wall clock for a clean official build, plus the ThinLTO
+  link.
 
 ### 3.1 Windows build host — the prerequisites that are not obvious
 
-`lobium/build.ps1` is the native Windows driver (`build.sh` is bash-only, and its `quilt push -a`
-step has no Windows equivalent — that is what the note at the end of this section used to describe).
-It stages, patches, configures and builds, and it is idempotent. Its preflight exists because every
-one of these failed silently or late on a fresh host:
+`lobium/build.ps1` is the native Windows driver (`build.sh` is bash-only, and its `quilt push -a` step has
+no Windows equivalent). It stages, patches, configures and builds, and it is idempotent. Its preflight
+exists because every one of these failed silently or late on a fresh host:
 
 | Prerequisite | Symptom when missing |
 | --- | --- |
@@ -151,41 +179,42 @@ one of these failed silently or late on a fresh host:
 | The **V8 builtins** PGO profile (a second, separate artifact) | ninja schedules everything, then fails with `v8/tools/builtins-pgo/profiles/x64-rl.profile … missing and no known rule to make it` |
 | NTP brand icons staged into the tree | `branding/ntp-branding.patch` adds four PNGs to a `generate_grd` input list; GN fails if they are absent. `build.ps1` stages them from `lobium/assets/ntp-icons/` |
 
-Windows Defender must exclude the checkout and the compiler processes, or the build roughly halves
-in speed.
+Windows Defender must exclude the checkout and the compiler processes, or the build roughly halves in
+speed.
 
 **GitHub Actions cannot build the engine on a hosted runner.** A hosted `windows-latest` gives roughly
-4 vCPU / 16GB / ~14GB free disk against a ~150GB requirement, jobs are killed at 6 hours, and the Actions
-cache is capped at 10GB per repository so `out/` cannot be checkpointed between jobs. The engine build must
-run on a **self-hosted** runner. This repository already uses that pattern —
-`.github/workflows/agent-battery.yml` runs on `[self-hosted, agent-battery]` with a 240-minute timeout, and
-`real-gpu-gate.yml` on `[self-hosted, gpu]`.
+4 vCPU / 16 GB / ~14 GB free disk against a ~150 GB requirement, jobs are killed at 6 hours, and the
+Actions cache is capped at 10 GB per repository so `out/` cannot be checkpointed between jobs. The engine
+build must run on a **self-hosted** runner. This repository already uses that pattern:
+`.github/workflows/agent-battery.yml` runs on `[self-hosted, agent-battery]` with a 240-minute timeout,
+`real-gpu-gate.yml` on `[self-hosted, gpu]`, and the series-replay job on `[self-hosted, lobium-build]`.
 
-The **installer** has no such problem: a hosted `windows-latest` runner builds a Tauri bundle in minutes.
-Splitting the two matches how often each changes — the engine per Chromium bump, the installer per release.
+The **installer** has no such problem: a hosted runner builds a Tauri bundle in minutes. Splitting the two
+matches how often each changes — the engine per Chromium bump, the installer per release.
 
 ### 3.2 The patch series
 
-The series was refreshed onto `152.0.7977.42` and restructured on 2026-08-14. It had rotted in a way
-that made it unbuildable: `core/config-channel.patch` was 64KB across 19 files, and **21 of its 55
-hunks were byte-identical copies of hunks in three other patches**, so `patch --forward` reported
-those three as "previously applied", exited non-zero, and aborted the whole apply. It is now one
-patch per concern — the transport, `navigator`/UA-CH, canvas, and WebGL each own their own hunks —
-with the restructure proven behaviour-preserving by a byte-identical tree diff.
+The series was refreshed onto `152.0.7977.42` and restructured. It had rotted in a way that made it
+unbuildable: `core/config-channel.patch` was 64 KB across 19 files, and **21 of its 55 hunks were
+byte-identical copies of hunks in three other patches**, so `patch --forward` reported those three as
+"previously applied", exited non-zero, and aborted the whole apply. It is now one patch per concern — the
+transport, `navigator`/UA-CH, canvas, and WebGL each own their own hunks — with the restructure proven
+behaviour-preserving by a byte-identical tree diff.
 
 `ci/validation/patch-series.test.mjs` locks the invariants offline: no hunk body in two patches, no
-malformed header, hunk counts matching their bodies, no overlapping hunks, LF-only UTF-8 without a
-BOM (CRLF applied under GNU patch but `git apply` rejected it outright), ASCII-only added source, and
-the ordering chains that must hold because later patches are cut against earlier ones.
+malformed header, hunk counts matching their bodies, no overlapping hunks, LF-only UTF-8 without a BOM
+(CRLF applied under GNU patch but `git apply` rejected it outright), ASCII-only added source, the ordering
+chains that must hold because later patches are cut against earlier ones, and the capability contract
+agreeing across the native list, the TypeScript mirror, and the series.
 
 `node lobium/regen-patch.mjs <patch>` folds an edit made in the checkout back into its patch, and
-**refuses** to regenerate a patch that shares a file with another — `git diff` would silently absorb
-the other patch's hunks. `lobium/hooks.md` documents every hook point and, more importantly, the
-coverage boundary.
+**refuses** to regenerate a patch that shares a file with another — `git diff` would silently absorb the
+other patch's hunks. [`../lobium/hooks.md`](../lobium/hooks.md) documents every hook point and, more
+importantly, the coverage boundary.
 
 ## 4. What a fresh clone does not include
 
-`.gitignore` correctly excludes build output and secrets, so a clone is ~84MB and needs provisioning:
+`.gitignore` correctly excludes build output and secrets, so a clone needs provisioning:
 
 | Missing | Restore with |
 | --- | --- |
@@ -196,63 +225,71 @@ coverage boundary.
 | The Lobium engine | Downloaded on first run per `engine-manifest.json`, or pointed at a local build via `LOBSTER_LOBIUM_BIN` |
 | `ci/validation/reports/` | Regenerated by the validation harnesses |
 
-`engine-manifest.json` **is** tracked — it is configuration, not build output, and it is the only file under
-`resources/` in git.
+`engine-manifest.json` **is** tracked — it is configuration, not build output, and it is the only file
+under `resources/` in git.
 
 Profile data (`profiles.sqlite`, `secrets.key`, per-profile dirs) lives in the OS app-data directory
-(`~/.local/share/com.lobster.browser/` on Linux), never in the repository. It does not travel with a clone,
-and uninstalling the app does not remove it.
+(`~/.local/share/com.lobster.browser/` on Linux), never in the repository. It does not travel with a
+clone, and uninstalling the app does not remove it.
 
 ## 5. Verification status
 
-Read [`ENGINEERING.md`](ENGINEERING.md) §4 and [`LOBEE_AGENT_ROADMAP.md`](LOBEE_AGENT_ROADMAP.md) §4 for the
-full picture. The short version, because it is easy to overstate:
+Read [`ENGINEERING.md`](ENGINEERING.md) §4 and [`LOBEE_AGENT_ROADMAP.md`](subsystems/agent.md) §4 for
+the full picture. The short version, because it is easy to overstate:
 
-- The **software gate** (`regression-gate.mjs`) runs anywhere: coherence, device-class diversity floors, and
-  fingerprint unit contracts. It reads no baseline and launches no browser.
-- The **offline structural gates** run anywhere and are fast: `patch-series.test.mjs` (no duplicated
-  hunk, no malformed header, LF+ASCII, ordering chains, and the capability contract agreeing across
-  the native list / the TypeScript mirror / the series), `version-coherence.test.mjs` (the three
-  version pins agree, none is a canary, and every platform entry in the engine manifest is well
-  formed), and `lobium/test/run.ps1` — property tests that compile the SHIPPING canvas and audio
-  kernels from `lobium/src/` and assert the detection oracles directly (a solid fill reads back
-  byte-exact, a 1x1 read agrees with a full read, the putImageData round trip is a fixed point, a
-  constant audio input renders constant, the canonical audio sum stays inside the honest population
-  spread).
-- The **series reproducibility gate** (`npm run gate:series`) needs the Chromium checkout but no
-  browser. It replays the whole series into a scratch tree built from pristine git blobs and diffs
-  the result against the checkout. This is the only check that the patches produce the binary that
-  was actually tested — a hook present in the checkout but missing from its patch would otherwise
-  ship a clean build with the hook gone, while the capability manifest still advertised it (the
-  manifest lives in the staged module, not in a patch). Currently: **29 patches apply cleanly to
-  pristine and reproduce all 64 patched files exactly.**
-- The **audit oracle gate** (`audit-oracles.mjs`) needs the native binary. It runs the detection
-  oracles from `ENGINE_AUDIT.md` *in the browser*, which is the only way to prove a kernel fix
-  actually reaches the page. It distinguishes a **regression** (a finding marked fixed that fails
-  again — non-zero exit) from a **known-open** finding (reported, does not fail), so a green run
-  never implies the audit is closed.
-- The **font-isolation gate** (`npm run gate:fonts`) needs the native binary and its own launch,
-  because its whole method is a deliberately unrealistic config: three claimed families, then measure
-  which families the page can still resolve. Against a realistic persona this measurement is nearly
-  blind — the persona claims most of what a Windows host has installed, so "resolves" and "should
-  resolve" agree whether or not the filter runs. With three, every extra resolution is a leak, and a
-  negative control (a family that exists nowhere) proves the measurement itself discriminates.
+- The **software gate** (`regression-gate.mjs`) runs anywhere: coherence, device-class diversity floors,
+  and fingerprint unit contracts. It reads no baseline and launches no browser.
+- The **offline structural gates** run anywhere and are fast: `npm run gate:engine` (patch-series
+  structure, version coherence, source hygiene — 18 tests), `npm run gate:desktop-css`, and
+  `npm run gate:migrations`. All three run in CI on every push. `lobium/test/run.ps1`
+  (`npm run gate:kernels`) is a PowerShell entry point for the Windows build host: property tests that
+  compile the SHIPPING canvas and audio kernels from `lobium/src/` and assert the detection oracles
+  directly.
+- The **series reproducibility gate** (`npm run gate:series`) needs the Chromium checkout but no browser.
+  It replays the whole series into a scratch tree built from pristine git blobs and diffs the result
+  against the checkout. This is the only check that the patches produce the binary that was actually
+  tested. **It fails on any host whose checkout is stale, including this one** — six patches currently do
+  not apply to the pristine `152.0.7928.0` tree they are diffed against, because the series is cut
+  against `152.0.7977.42`. CI runs it as an opt-in job on the `lobium-build` self-hosted runner, gated
+  behind `vars.LOBSTER_ENABLE_SERIES_REPLAY`, for exactly this reason.
+- The **audit oracle gate** (`npm run gate:oracles`) needs the native binary. It runs the detection
+  oracles from `ENGINE_AUDIT.md` *in the browser*, which is the only way to prove a kernel fix actually
+  reaches the page. It has three outcomes, and the distinction is the point:
+  - `0` PASS — every declared aspect green.
+  - `1` FAIL — an oracle for a finding marked *fixed* measured and failed. A fact about the **engine**.
+  - `2` BLOCKED — nothing conclusive was measured. A fact about the **environment**.
+
+  It exits BLOCKED when there is no binary, or when the binary's advertised capabilities do not cover
+  what the launcher requires. That second case is why the 13 "regressions" once on record described
+  nothing: they were scored against a build the product itself refuses. It also takes its persona OS from
+  `LOBIUM_ORACLE_OS` (default `windows`) rather than from `process.platform`, because a Linux runner
+  taking the persona from the host only ever measured a Linux persona and left every Windows-only surface
+  unmeasured while reporting "all oracles pass". `process.platform` survives only as `hostPlatform`
+  provenance in the report.
+- The **font-isolation gate** (`npm run gate:fonts`) needs the native binary and its own launch, because
+  its whole method is a deliberately unrealistic config: three claimed families, then measure which
+  families the page can still resolve. Against a realistic persona the measurement is nearly blind — the
+  persona claims most of what a Windows host has installed. With three, every extra resolution is a leak,
+  and a negative control (a family that exists nowhere) proves the measurement discriminates.
 - The **engine gates** (`battle-test.mjs`, `deep-probe-50.mjs`) need the native binary, and
   `battle-test.mjs` reports a deep-GPU tell on a software renderer — so this host cannot produce a
   release-valid verdict from them.
-- The **real-GPU detection gate** is the release blocker and requires real hardware; the evidence policy in
-  `detector-matrix.json` rejects software renderers.
+- The **real-GPU detection gate** is the release blocker and requires real hardware; the evidence policy
+  in `detector-matrix.json` rejects software renderers. `real-gpu-gate.yml` runs it on a self-hosted
+  `gpu` runner on a nightly schedule and on demand; its `pull_request` trigger is deliberately commented
+  out until the runner is reliably online.
 - The **paid live agent battery** has not been run. Deterministic grader success is not a live
   model/browser pass.
 
 This build host has no real GPU (SwiftShader only), so W1 data capture and the W5 live detection gate
 cannot execute here — only their code and schemas can.
 
-### 5.1 Audit findings closed in the engine
+### 5.1 Audit findings closed in the patch series
 
 `ENGINE_AUDIT.md` is generated and must not be hand-edited, so progress against it is recorded here.
-Each of these is closed by a patch in the series and compiles into the shipping binary; the ones with
-an oracle are additionally checked in-browser by `audit-oracles.mjs`.
+Each of these is closed by a patch in the series and compiles into a binary built from it. **Read the
+blockquote at the top of this file first**: no published artifact contains them, so the "Oracle" column
+names the check that *would* confirm it, not a check that has passed on a shipping build.
 
 | Finding | Closed by | Oracle |
 | --- | --- | --- |
@@ -260,25 +297,60 @@ an oracle are additionally checked in-browser by `audit-oracles.mjs`.
 | `timezone-tz-env-noop-on-windows` (critical) | `fingerprint/native-timezone.patch` | `timezone-is-the-persona-zone`, `timezone-agrees-in-worker` |
 | `fonts-fontconfig-inert-on-windows` (critical) | `fingerprint/windows-font-isolation.patch` | `fonts-limited-to-the-persona-set`, plus the dedicated `gate:fonts` |
 | `webgpu-adapter-unhooked` (critical) | `fingerprint/webgpu-adapter.patch` | `webgpu-adapter-matches-webgl-renderer` |
-| `webgl2-extension-list-served-from-webgl1-persona` | `fingerprint/webgl-bypass-closures.patch` | `webgl2-extensions-are-the-webgl2-list` |
+| `webgl2-extension-list-served-from-webgl1-persona` | `fingerprint/webgl-bypass-closures.patch` — `getExtension()` now filters WebGL2 contexts against the WebGL2 list, matching `getSupportedExtensions()` | `webgl2-extensions-are-the-webgl2-list` |
+| `getextension-case-sensitive-allowlist` | the same patch — the comparison is case-insensitive, matching `ExtensionTracker::MatchesName` | — |
 | `webgl2-getparameter-never-hooked` (partly) | `fingerprint/webgl2-surfaces.patch` — the component limits; the feature-level constants are deliberately left honest, see `hooks.md` §5 | `webgl2-components-are-4x-webgl1-vectors` |
 | `contract-is-a-hardcoded-literal`, `phantom-capabilities-timezone-acceptlang` | the list moved to `components/lobium_fp/lobium_capabilities.cc` beside the hooks, `font-isolation` is `BUILDFLAG(IS_WIN)`-gated, and CI cross-checks the three copies | — |
-| `media-devices-id-shape` | `lobium_media_devices.{h,cc}` reproduces Chrome's origin-keyed HMAC-SHA256 construction | `mediadevices-ids-have-chrome-shape` |
+
+Findings **found outside the audit** and closed in the same series, recorded here because nothing else
+tracks them:
+
+- `mediaDevices.enumerateDevices()` exposed stable hashed `deviceId`s and the true device count with no
+  capture permission and always-empty labels — a combination real Chrome never emits, since a `deviceId`
+  without permission is impossible and a blank label after a grant is too. It now shapes the reply the way
+  the browser process does: one blank entry per kind until the frame holds the permission, then hashed ids
+  with OS-shaped labels and `groupId`s. `lobium_media_devices.{h,cc}` reproduces Chrome's origin-keyed
+  HMAC-SHA256 construction. Oracle: `mediadevices-ids-have-chrome-shape`.
+- Derivation drew renderer strings from the raw `pci.ids` arrays rather than the filtered product catalog,
+  so roughly seven in ten Windows personas shipped a string like `GeForce 6800 Ultra]` — an unbalanced
+  bracket on a 2004 card claiming D3D11. The macOS catalog offered GPUs Apple never shipped (Iris Xe,
+  Radeon W7900) alongside SKU rows like `Apple M1 7-Core GPU`, which Metal never reports. Both now draw
+  from what the vendor actually shipped.
 
 Two fixes that a source-only review would have gotten wrong, recorded so they are not retried:
 
-- **Timezone.** The audit's suggestion was to hook `RenderThreadImpl::Init`. That does not survive:
-  the browser's `device::TimeZoneMonitor` pushes the host zone to every renderer shortly after
-  startup and overwrites anything adopted earlier. The hook is at
-  `TimeZoneController::OnTimeZoneChange`, the receiving end of that push.
-- **Fonts.** The first implementation hooked `DWriteFontProxyImpl`, which every older Chromium source
-  and every guide describes as the Windows font path. It had **no effect at all** — measured in the
-  running browser, every installed family still resolved while the config listed three. M152 sets
-  `kFontDataServiceAllWebContents` to `FEATURE_ENABLED_BY_DEFAULT`, so `InitializeFontIntegration`
-  routes the renderer to `font_data_service::FontDataManager` and the DWrite proxy is off the CSS
-  matching path entirely. Both are now hooked, since either can be live depending on flags. This is
-  the clearest argument for the in-browser gates: the patch read as complete and compiled clean.
+- **Timezone.** The audit's suggestion was to hook `RenderThreadImpl::Init`. That does not survive: the
+  browser's `device::TimeZoneMonitor` pushes the host zone to every renderer shortly after startup and
+  overwrites anything adopted earlier. The hook is at `TimeZoneController::OnTimeZoneChange`, the
+  receiving end of that push.
+- **Fonts.** The first implementation hooked `DWriteFontProxyImpl`, which every older Chromium source and
+  every guide describes as the Windows font path. It had **no effect at all** — measured in the running
+  browser, every installed family still resolved while the config listed three. M152 sets
+  `kFontDataServiceAllWebContents` to `FEATURE_ENABLED_BY_DEFAULT`, so `InitializeFontIntegration` routes
+  the renderer to `font_data_service::FontDataManager` and the DWrite proxy is off the CSS matching path
+  entirely. Both are now hooked, since either can be live depending on flags. This is the clearest
+  argument for the in-browser gates: the patch read as complete and compiled clean.
 
-Two capability gaps that the new CI cross-check surfaced, neither previously tracked in the audit:
-`screen-metrics` and `mobile-persona` were shipped, compiled surfaces with no capability name, so the
-sidecar could not require them and therefore could not guarantee them. Both now have one.
+Three capability gaps the CI cross-check surfaced, none previously tracked in the audit: `screen-metrics`,
+`mobile-persona` and `navigator-ua-ch` were shipped, compiled surfaces with no capability name, so the
+sidecar could not require them and therefore could not guarantee them. `navigator-ua-ch` was the worst of
+the three — a build carrying the config channel but not that patch passed the launcher's gate and then
+silently reported the **host's** UA, platform, cores and memory, which looks exactly like success. All
+three now have a capability name.
+
+### 5.2 Why the published Linux artifact is refused
+
+`packages/engine-runner/src/lobium-capabilities.ts` asks the exact executable that will be spawned which
+hooks it contains (`--lobium-fingerprint-capabilities`) and refuses to launch if the required set is not
+covered. Filename and version claims are deliberately not trusted.
+
+The `152.0.7928.0` binary advertises 12 capabilities. The launcher's unconditional requirement includes
+five it does not have: **`navigator-ua-ch`, `webgl2-deep`, `screen-metrics`, `webgpu-adapter`,
+`native-timezone`**. Launch fails with `Lobium build lacks required native fingerprint hooks: …`.
+
+This is the gate doing its job. Each of those five was made *required* rather than optional because its
+absence is a silent, page-visible leak that looks like a working profile: an unhooked `navigator-ua-ch`
+reports the host identity on the surfaces detectors read first; a WebGL2 context reporting the host while
+WebGL1 reports the persona is worse than neither being spoofed; an unhooked WebGPU adapter names the real
+card next to a spoofed WebGL renderer; and on Windows the process-locale timezone route is a no-op, so
+without `native-timezone` the persona timezone does not apply at all.

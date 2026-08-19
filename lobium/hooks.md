@@ -6,7 +6,7 @@ source of truth for the *reasoning*, and for the honest coverage boundary.
 
 Engine: Chromium **152.0.7977.42**. Primary target: **Windows x64**.
 
-> Findings referenced as `` `some-id` `` below are from [`../docs/ENGINE_AUDIT.md`](../docs/ENGINE_AUDIT.md),
+> Findings referenced as `` `some-id` `` below are from [`../docs/ENGINE_AUDIT.md`](../docs/subsystems/engine-audit.md),
 > the adversarially-verified audit of this engine. Where a hook has a confirmed defect it is stated
 > here rather than left for someone to rediscover.
 

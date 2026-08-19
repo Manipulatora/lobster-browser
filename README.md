@@ -1,72 +1,86 @@
-# 🦞 Lobster Browser
+# Lobster Browser
 
-A production-grade **anti-detect browser + SaaS**, feature-comparable to Octo Browser / Multilogin: a
-Rust + Tauri desktop agent that manages profiles and proxies and launches **Lobium**, our own
-Chromium-based browser kernel with native, per-profile fingerprinting.
+An **anti-detect browser + SaaS**, in the class of Octo Browser / Multilogin: a Tauri desktop app that
+manages profiles and proxies and launches **Lobium**, our own Chromium fork with native, per-profile
+fingerprinting.
 
-Each browser **profile** gets a coherent, stable, real-looking device + network identity, fully isolated
-from every other profile, consistent enough to pass modern anti-bot systems. Fingerprints are applied
-**inside the engine (C++)**, never by a JavaScript/CDP overlay.
+Each browser **profile** is its own computer — a coherent, stable, real-looking device and network
+identity, isolated from every other profile. The identity is applied **inside the engine (C++)**, never
+by a JavaScript or CDP overlay, because an overlay is itself detectable.
+
+**Read [`docs/STATUS.md`](docs/STATUS.md) before making any claim about what this build detects as.**
+The short version: the engine is a solid native foundation with measured, documented gaps, and the
+currently published engine artifact is older than the current patch series and is refused by the
+product's own launcher. Nothing in the current series has been measured end to end.
 
 ## Documentation
 
-Start with **STATUS** if you are new to the repository or setting it up on a new machine.
+[`docs/README.md`](docs/README.md) is the index — it maps every document and gives reading paths for
+"new here", "shipping a release" and "working on subsystem X". The four you will want first:
 
 | Doc | Covers |
 | --- | --- |
-| **This README** | What it is, architecture, repo layout, quick start. |
-| [`docs/STATUS.md`](docs/STATUS.md) | Current state: platform support, build hosts, what a fresh clone lacks, what is actually verified. |
-| [`docs/ENGINEERING.md`](docs/ENGINEERING.md) | The engine, the fingerprint model, the anti-detect design, the web agent, and the top-1% roadmap. |
-| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Building Lobium, packaging and installing the product, deploying the site, validation gates, runtime contracts. |
-| [`docs/LOBEE_AGENT_ROADMAP.md`](docs/LOBEE_AGENT_ROADMAP.md) | The Lobee agent's implementation plan, security invariants, milestones, and release gates. |
+| [`docs/STATUS.md`](docs/STATUS.md) | What is true today: platform matrix, build hosts, what is verified and what is not. |
+| [`docs/ENGINEERING.md`](docs/ENGINEERING.md) | The anti-detect design, the fingerprint model, the validation tiers, the roadmap. |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Runbooks: build the engine, package and install, deploy, run the gates. |
+| [`docs/subsystems/`](docs/subsystems/) | One doc per subsystem — desktop, sidecar, fingerprint, agent. |
 
 ## Architecture
 
 ```
-User ── Tauri desktop app (Rust core + React/TS UI)
-          │  spawns + JSON-RPC over stdio
+User ── Tauri 2 desktop app (Rust core + React/TS UI)      apps/desktop
+          │  spawns; line-delimited JSON-RPC over stdio
           ▼
-        engine-runner sidecar (Node/TS)  ── profile lifecycle + guarded web-agent loop + raw CDP driver
-          │  spawns the native binary; drives it via a first-party raw-DevTools CDP client (cdp-client.ts)
+        engine-runner sidecar (Node/TS)                    packages/engine-runner
+          │  spawns the native binary; drives it over a first-party raw-CDP client
           ▼
-        Lobium  (Chromium 152 fork, C++)  ── applies the fingerprint natively at the Blink surface
+        Lobium (Chromium fork, C++)                        lobium/ + components/lobium_fp/
+             └── Lobee side panel (MV3 extension)          packages/lobee-app + packages/agent
 ```
 
-The deep anti-detect is native (the Chromium fork). The sidecar is orchestration only and never
-fingerprints over the wire. The optional cloud backend (NestJS) handles auth, teams, encrypted profile
-sync, and billing. **Lobium is the only shipping engine** (`ENGINE_KINDS = ['lobium']`); there is no
-uncustomized-Chromium fallback — if no Lobium binary is found, launch fails clearly.
+Two more surfaces sit beside that stack:
 
-The installer does **not** carry the ~840MB engine. `apps/desktop/src-tauri/resources/engine-manifest.json`
-declares a URL + SHA256 and the Rust core streams/extracts it on first run.
+- **`apps/backend`** — NestJS cloud SaaS: accounts, teams, encrypted profile sync, Credit billing, and
+  the managed model proxy Lobee runs against.
+- **`apps/web`** — Angular marketing site **and** signed-in dashboard, served at `lobrowser.com`.
+
+The deep anti-detect is native. The sidecar is orchestration only and never fingerprints over the wire.
+**Lobium is the only shipping engine** (`ENGINE_KINDS = ['lobium']`): there is no uncustomized-Chromium
+fallback, and the sidecar refuses a binary that cannot prove it carries the hooks the profile needs, so a
+launch fails closed rather than quietly handing the user an unprotected browser.
+
+The installer does **not** carry the ~840 MB engine.
+`apps/desktop/src-tauri/resources/engine-manifest.json` declares a per-platform URL + SHA-256 and the Rust
+core streams and extracts it on first run.
 
 ## Monorepo layout
 
 ```
 apps/
-  desktop/     Rust + Tauri agent (src-tauri/) + React/TS UI (src/) + local automation API
-  backend/     NestJS cloud SaaS (auth, teams, sync, billing)
-  web/         Angular 22 SSR/SSG marketing site — deployed to lobrowser.com
+  desktop/     Tauri 2 app — Rust core (src-tauri/) + React/TS UI (src/) + local automation API
+  backend/     NestJS cloud SaaS (auth, teams, sync, billing, managed agent proxy)
+  web/         Angular 22 SSR/SSG marketing site + dashboard — deployed to lobrowser.com
 packages/
-  shared-types/    TS types shared across front/back/sidecar
-  fingerprint/     seed → coherent device fingerprint (thousands of real, coherent classes)
-  engine-runner/   the sidecar: launch, cdp-client, cookie inject, mobile emulation, host calibration,
-                   and the agent bridge/manager (src/agent/)
+  shared-types/    types shared across desktop, backend, sidecar and web (incl. PLAN_CATALOG)
+  fingerprint/     seed -> coherent device fingerprint (thousands of real, coherent device classes)
+  engine-runner/   the sidecar: launch, cdp-client, cookie inject, mobile emulation, agent bridge
+  agent/           Lobee's brain: perception, policy, tool loop, executor, encrypted memory + journal
+  lobee-app/       the Lobee side-panel UI (React/TS/Tailwind, MV3) — source
+  lobee/           the built extension, generated by scripts/build-lobee.mjs (not committed)
   proxy/           proxy testing + exit-IP geo derivation
   cookies/         Netscape/JSON cookie parse + validate
-  agent/           text-first perception, policy, tool loop, LLM adapters, encrypted local memory + journal
-  lobee-app/       the Lobee side-panel extension UI (React/TS/Tailwind, MV3) — source
-  lobee/           the built extension, generated by scripts/build-lobee.mjs (not committed)
   crypto/          at-rest encryption helpers
   local-api-sdk/   client SDK (js/ + python/) for the local automation API
   android-machine/ Android device modelling
-lobium/            Chromium fork build scripts, GN args, quilt patch series, native config-channel spec
-ci/validation/     the anti-detect validation harnesses + real-GPU gate
-scripts/           build/packaging/deploy drivers (see docs/OPERATIONS.md)
-deploy/            deployment assets
+lobium/            Chromium fork: build scripts, GN args, quilt patch series, native hook reference
+ci/validation/     anti-detect validation harnesses, audit oracles, real-GPU gate
+scripts/           build/packaging/deploy drivers
+deploy/            production nginx + systemd for the backend and the site
+docs/              see docs/README.md
 ```
 
-`components/lobium_fp/` (inside the Chromium source tree) is the native fingerprint config parser/applier.
+`components/lobium_fp/` lives **inside the Chromium source tree**, not in this repo; it is the native
+fingerprint config parser and applier. `lobium/src/` holds the copies that CI compiles and tests.
 
 ## Prerequisites
 
@@ -74,9 +88,10 @@ deploy/            deployment assets
 |------|---------|---------|
 | Node | `>=22.12 <25` (`.nvmrc`) | all TS packages, backend, sidecar, web |
 | npm  | `>=10` | workspace manager |
-| Rust | pinned in `rust-toolchain.toml` | desktop agent (Tauri) — install via `rustup` |
+| Rust | pinned in `rust-toolchain.toml` | the desktop app (Tauri) — install via `rustup` |
 
-The Rust toolchain is only needed for `apps/desktop`; the TS packages/backend/sidecar/web build without it.
+The Rust toolchain is only needed for `apps/desktop`. Building the **engine** is a different and much
+larger undertaking — see [`docs/OPERATIONS.md`](docs/OPERATIONS.md) §1.
 
 ## Quick start
 
@@ -85,26 +100,30 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install   # workspace deps
 npm run build                                    # build all packages
 npm test                                         # unit tests
 
-# Point the sidecar at a built Lobium binary (see docs/OPERATIONS.md to build one)
-export LOBSTER_LOBIUM_BIN=$HOME/lobium-build/src/out/LobiumOfficial/chrome
+# Point the sidecar at a Lobium binary you built (docs/OPERATIONS.md §1)
+export LOBSTER_LOBIUM_BIN=/path/to/lobium/chrome
 
-npm run -w apps/desktop dev                       # run the desktop app
+npm run -w apps/desktop dev                      # run the desktop app
 ```
 
-A fresh clone is ~84MB and deliberately excludes `node_modules/`, the packaged `resources/`, the built
-Lobee extension, and `.env`. [`docs/STATUS.md`](docs/STATUS.md) §4 lists what to regenerate and how.
+A fresh clone deliberately excludes `node_modules/`, the packaged `resources/`, the built Lobee
+extension, and `.env`. [`docs/STATUS.md`](docs/STATUS.md) §4 lists what to regenerate and how.
 
-Building the Lobium engine, installing the packaged product, deploying the site, and running the
-anti-detect validation gates are all covered in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+`apps/web` is **not** an npm workspace — it pins its own Angular/TypeScript versions, so install and
+build it from its own directory.
 
 ## Platform support
 
-Linux x64 is the only platform that ships today. **There is no Windows build of the Lobium engine**, the
-Tauri bundle target is `deb` only, and the packaging script vendors this host's Linux `node` binary. See
-[`docs/STATUS.md`](docs/STATUS.md) §2–3 for the exact blockers and the build-host requirements.
+**Windows x64 is the owner's first target platform.** Linux x64 is the development platform and the
+only one with a published engine artifact today. macOS is not built and not configured.
+
+The desktop app builds and runs on both Windows and Linux, with per-platform bundle targets (`nsis` /
+`deb`). The gap is the engine: no `win-x64` archive has been published yet, so a Windows install manages
+profiles and proxies but cannot launch one. [`docs/STATUS.md`](docs/STATUS.md) §2 has the full matrix and
+the exact remaining step.
 
 ## License & sourcing
 
-This repository is currently `UNLICENSED`: its source is visible to collaborators, but no public reuse
-license is granted. External agent projects are architectural references only; product code is implemented
-in this repository and third-party packages retain their own licenses.
+This repository is `UNLICENSED`: its source is visible to collaborators, but no public reuse license is
+granted. External agent projects are architectural references only; product code is implemented in this
+repository, and third-party packages retain their own licenses.
