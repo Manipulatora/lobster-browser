@@ -58,7 +58,8 @@ export interface BillingOverview {
   depositsAvailable: boolean;
 }
 
-export type CreditTxKind = 'deposit' | 'purchase' | 'renewal' | 'refund' | 'adjustment';
+export type CreditTxKind =
+  'deposit' | 'purchase' | 'renewal' | 'refund' | 'adjustment' | 'agent_usage';
 
 export interface CreditTransaction {
   id: string;

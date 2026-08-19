@@ -8,6 +8,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { AgentModelInfo, AgentModelsResult } from '@lobster/shared-types';
 
+import { AgentSpendService } from '../billing/agent-spend.service';
+import type { AgentUsageRow } from '../billing/billing.repository';
+import type { AgentPrincipal } from './agent-auth.guard';
+import { insufficientCredit, modelUnpriced } from './agent-refusal';
+
 /**
  * Curated roster surfaced first in the Lobee picker. This is the SOURCE OF TRUTH for the model list —
  * the panel no longer owns it. Ids are OpenRouter model ids; live availability + reasoning support are
@@ -71,11 +76,38 @@ interface ChatBody {
   [key: string]: unknown;
 }
 
+/**
+ * What the provider reports about one completion.
+ *
+ * THE THREE FIGURES ARE NOT INTERCHANGEABLE. `prompt_tokens` includes the cached ones, output is
+ * billed several times input, and cache reads are billed at about a tenth — so `total_tokens`, the
+ * number a naive meter reads, cannot be priced at all. `cost` is OpenRouter's own charge for the
+ * call in USD and wins over anything we compute, because it already reflects the provider it
+ * actually routed to.
+ */
 interface OpenRouterUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  cost?: number;
+  prompt_tokens_details?: { cached_tokens?: number } | null;
 }
+
+/** Everything the metering needs once a call has been authorised, carried between the two paths. */
+interface PreparedCall {
+  key: string;
+  forward: ChatBody;
+  timeoutMs: number;
+  model: string;
+  /**
+   * Prompt size guessed from the request body, used for the reserve check and as the input figure
+   * when the provider never reports one. Four characters per token is the usual rule of thumb.
+   */
+  promptTokens: number;
+}
+
+/** The rule-of-thumb characters-per-token used wherever a real count is unavailable. */
+const CHARS_PER_TOKEN = 4;
 
 /**
  * The managed LLM path. It holds the SERVER's OpenRouter key and brokers the sidecar's OpenAI-compatible
@@ -85,18 +117,25 @@ interface OpenRouterUsage {
  * can't burn the balance on an expensive model or an unbounded response.
  *
  * Streaming IS supported, and is used by Ask mode: `chatCompletionStream` forwards the SSE body through
- * `meterStreamedUsage`, so a streamed answer is metered exactly like a buffered one. Agent-mode steps
+ * `meterStream`, so a streamed answer is metered exactly like a buffered one. Agent-mode steps
  * stay non-streaming — a forced tool call produces one structured object with no prose to reveal
  * progressively, so streaming it would add reassembly risk for no benefit.
+ *
+ * EVERY CALL IS CHARGED TO A TEAM. Metering used to be two process-wide counters: every tenant summed
+ * together, no model, no cost, reset on restart. They could not answer the only question metering is
+ * for — what does this team owe — so the counters are gone. Each call now reserves against the team's
+ * Credit before it runs and debits it after, through `AgentSpendService`; the wallet is the only
+ * ledger and there is no second, softer record of what was spent.
  */
 @Injectable()
 export class AgentLlmService {
   private readonly logger = new Logger(AgentLlmService.name);
-  private meteredTokens = 0;
-  private meteredRequests = 0;
   private modelsCache?: { at: number; payload: AgentModelsResult };
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly spend: AgentSpendService,
+  ) {}
 
   /**
    * Lobee's model roster, synced from the live OpenRouter catalog and cached for about an hour. Text-chat
@@ -219,14 +258,16 @@ export class AgentLlmService {
    * feels slow — the wait before anything appears.
    *
    * Metering still happens, just at the end: `stream_options.include_usage` makes OpenRouter emit a
-   * final chunk carrying usage, which {@link meterStreamedUsage} reads as the bytes pass through. The
+   * final chunk carrying usage, which {@link meterStream} reads as the bytes pass through. The
    * proxy therefore never has to buffer the response to account for it.
    */
   async chatCompletionStream(
     raw: ChatBody,
+    principal: AgentPrincipal,
     signal?: AbortSignal,
   ): Promise<{ status: number; stream: ReadableStream<Uint8Array> | null; body?: unknown }> {
-    const { key, forward, timeoutMs } = await this.prepare(raw);
+    const prepared = await this.prepare(raw, principal);
+    const { key, forward, timeoutMs } = prepared;
     const streaming: ChatBody = {
       ...forward,
       stream: true,
@@ -259,106 +300,99 @@ export class AgentLlmService {
     }
 
     if (!res.ok || !res.body) {
-      const body = (await res.json().catch(() => ({}))) as OpenRouterErrorBody;
+      const body = (await res.json().catch(() => ({}))) as OpenRouterErrorBody & {
+        usage?: OpenRouterUsage;
+      };
       this.logger.warn(
         `agent/llm upstream_error stream model=${String(forward.model)} status=${res.status} code=${diagnosticCode(body.error?.code ?? body.error?.type)}`,
       );
+      await this.settleFailure(prepared, principal, body.usage);
       return { status: res.status, stream: null, body };
     }
     return {
       status: res.status,
-      stream: res.body.pipeThrough(this.meterStreamedUsage(String(forward.model))),
+      stream: res.body.pipeThrough(this.meterStream(prepared, principal)),
     };
   }
 
   /**
-   * Pass SSE bytes through untouched while watching for the usage chunk.
+   * Pass SSE bytes through untouched while accounting for what flows past.
    *
    * Deliberately a transform and not a parse: the panel needs the frames verbatim, and the only thing
    * the server needs from them is the accounting. Message content is never logged (anonymity product).
+   *
+   * THE HOLE THIS CLOSES. A streamed call was charged only if the final usage chunk arrived, so the
+   * two cases where it does not — the user closes the panel mid-answer, or the upstream connection
+   * dies part-way — produced a completed generation the provider billed us for and we billed nobody
+   * for. The delta lengths are therefore counted as they pass, giving a real output figure to fall
+   * back on when the authoritative one never comes. Length, never content.
    */
-  private meterStreamedUsage(model: string): TransformStream<Uint8Array, Uint8Array> {
+  private meterStream(
+    prepared: PreparedCall,
+    principal: AgentPrincipal,
+  ): TransformStream<Uint8Array, Uint8Array> {
     const decoder = new TextDecoder();
-    let tail = '';
-    let counted = false;
-    const meter = (usage: OpenRouterUsage): void => {
-      if (counted) return;
-      counted = true;
-      const used = (usage.prompt_tokens ?? 0) + (usage.completion_tokens ?? 0);
-      this.meteredTokens += used;
-      this.meteredRequests += 1;
-      this.logger.log(
-        `agent/llm model=${model} in=${usage.prompt_tokens ?? 0} out=${usage.completion_tokens ?? 0} lifetimeTokens=${this.meteredTokens} streamed=1`,
-      );
+    let pending = '';
+    let settled = false;
+    let observedChars = 0;
+
+    const settle = (usage?: OpenRouterUsage): void => {
+      if (settled) return;
+      settled = true;
+      void this.charge(prepared, principal, usage, {
+        tokensIn: prepared.promptTokens,
+        tokensOut: Math.ceil(observedChars / CHARS_PER_TOKEN),
+      });
     };
+
     return new TransformStream<Uint8Array, Uint8Array>({
       transform: (chunk, controller) => {
         controller.enqueue(chunk);
-        // Keep only the trailing partial line; a usage chunk is small and arrives whole in practice.
-        tail = (tail + decoder.decode(chunk, { stream: true })).slice(-16_384);
-        for (const line of tail.split('\n')) {
+        // Each complete line is read EXACTLY ONCE — the trailing partial frame is carried to the
+        // next chunk instead. Re-scanning a rolling window would count the same deltas repeatedly
+        // and inflate the fallback figure a client is charged on.
+        pending += decoder.decode(chunk, { stream: true });
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        // No SSE frame we care about is this long; a buffer that big is a stuck parse, not a usage
+        // chunk, and holding it would grow without bound.
+        if (pending.length > 64_000) pending = '';
+        for (const line of lines) {
           const payload = line.startsWith('data:') ? line.slice(5).trim() : '';
           if (!payload || payload === '[DONE]') continue;
           try {
-            const parsed = JSON.parse(payload) as { usage?: OpenRouterUsage };
-            if (parsed.usage) meter(parsed.usage);
+            const parsed = JSON.parse(payload) as {
+              usage?: OpenRouterUsage;
+              choices?: Array<{ delta?: { content?: unknown; reasoning?: unknown } }>;
+            };
+            for (const choice of parsed.choices ?? []) {
+              observedChars +=
+                textLength(choice.delta?.content) + textLength(choice.delta?.reasoning);
+            }
+            if (parsed.usage) settle(parsed.usage);
           } catch {
             // A partial frame at the boundary — the next chunk completes it.
           }
         }
       },
-      flush: () => {
-        if (!counted) this.meteredRequests += 1;
-      },
+      // Both endings settle: `flush` for a stream that finished, `cancel` for a client that walked
+      // away. Whichever fires first wins, and the other is a no-op.
+      flush: () => settle(),
+      cancel: () => settle(),
     });
   }
 
-  /** Shared validation + guard rails for both the streaming and non-streaming paths. */
-  private async prepare(
-    raw: ChatBody,
-  ): Promise<{ key: string; forward: ChatBody; timeoutMs: number }> {
+  /**
+   * Shared validation, guard rails and PRE-FLIGHT SPEND CHECK for both paths.
+   *
+   * The reserve check lives here rather than in the guard because it needs the model and the output
+   * ceiling, which only exist once the body has been validated and capped. Refusing before the call
+   * is what bounds an exhausted team's overspend to one call instead of a whole run: the cost of a
+   * completion is not knowable until it has been produced, so the charge cannot come first.
+   */
+  private async prepare(raw: ChatBody, principal: AgentPrincipal): Promise<PreparedCall> {
     const key = this.config.get<string>('OPENROUTER_API_KEY')?.trim();
     if (!key) throw new ServiceUnavailableException('OPENROUTER_API_KEY is not configured');
-    if (typeof raw.model !== 'string' || !Array.isArray(raw.messages)) {
-      throw new BadRequestException('body must include a string `model` and a `messages` array');
-    }
-    const model = raw.model;
-    if (model.length > 300 || !MODEL_ID.test(model)) {
-      throw new BadRequestException('body contains an invalid `model` id');
-    }
-    if (raw.tools !== undefined && !Array.isArray(raw.tools)) {
-      throw new BadRequestException('`tools` must be an array when provided');
-    }
-    const requiresTools = Array.isArray(raw.tools) && raw.tools.length > 0;
-    if (!requiresTools && raw.tool_choice !== undefined) {
-      throw new BadRequestException('`tool_choice` requires at least one tool');
-    }
-    await this.assertModelAllowed(model, requiresTools);
-    const cap = toBoundedPositiveInt(this.config.get('AGENT_MAX_OUTPUT_TOKENS'), 8192, 32_768);
-    const requested = toPositiveInt(raw.max_tokens, cap);
-    return {
-      key,
-      forward: {
-        ...raw,
-        model,
-        max_tokens: Math.min(requested, cap),
-        ...(requiresTools && model.startsWith('anthropic/') ? { tool_choice: 'auto' } : {}),
-      },
-      timeoutMs: toBoundedPositiveInt(
-        this.config.get('AGENT_UPSTREAM_TIMEOUT_MS'),
-        DEFAULT_COMPLETION_TIMEOUT_MS,
-        120_000,
-      ),
-    };
-  }
-
-  async chatCompletion(
-    raw: ChatBody,
-    signal?: AbortSignal,
-  ): Promise<{ status: number; body: unknown }> {
-    const key = this.config.get<string>('OPENROUTER_API_KEY')?.trim();
-    if (!key) throw new ServiceUnavailableException('OPENROUTER_API_KEY is not configured');
-
     if (typeof raw.model !== 'string' || !Array.isArray(raw.messages)) {
       throw new BadRequestException('body must include a string `model` and a `messages` array');
     }
@@ -378,21 +412,60 @@ export class AgentLlmService {
     // The loop allows up to 8k for reasoning-heavy steps; cap there by default instead of silently
     // truncating the loop's request to 2k. Deployments can still choose a lower spend ceiling.
     const cap = toBoundedPositiveInt(this.config.get('AGENT_MAX_OUTPUT_TOKENS'), 8192, 32_768);
-    const requested = toPositiveInt(raw.max_tokens, cap);
-    const forward: ChatBody = {
-      ...raw,
+    const maxTokensOut = Math.min(toPositiveInt(raw.max_tokens, cap), cap);
+    const promptTokens = estimatePromptTokens(raw);
+
+    const estimatedMicros = this.spend.estimateMicros({
       model,
-      max_tokens: Math.min(requested, cap),
-      // Defense-in-depth for older desktop bundles: Claude thinking rejects forced tool selection.
-      ...(requiresTools && model.startsWith('anthropic/') ? { tool_choice: 'auto' } : {}),
+      tokensIn: promptTokens,
+      maxTokensOut,
+    });
+    // A model we cannot price is refused rather than served: the alternative is the operator paying
+    // for it out of their own OpenRouter balance and finding out at the end of the month.
+    if (estimatedMicros === undefined) throw modelUnpriced(model, principal.tier);
+
+    const affordability = await this.spend.canAfford(principal.teamId, estimatedMicros);
+    if (!affordability.ok) {
+      throw insufficientCredit({
+        currentTier: principal.tier,
+        balanceCents: affordability.balanceCents,
+        requiredCents: affordability.requiredCents,
+      });
+    }
+
+    return {
+      key,
+      forward: {
+        ...raw,
+        model,
+        max_tokens: maxTokensOut,
+        // Defense-in-depth for older desktop bundles: Claude thinking rejects forced tool selection.
+        ...(requiresTools && model.startsWith('anthropic/') ? { tool_choice: 'auto' } : {}),
+        // Ask OpenRouter to return what it actually charged. That figure is authoritative — it
+        // already reflects the provider it routed to and the discounts that applied — and the local
+        // price table is only the fallback for a response that carries no cost. Placed AFTER the
+        // spread so a client cannot switch its own billing off.
+        usage: { include: true },
+      },
+      timeoutMs: toBoundedPositiveInt(
+        this.config.get('AGENT_UPSTREAM_TIMEOUT_MS'),
+        DEFAULT_COMPLETION_TIMEOUT_MS,
+        120_000,
+      ),
+      model,
+      promptTokens,
     };
+  }
+
+  async chatCompletion(
+    raw: ChatBody,
+    principal: AgentPrincipal,
+    signal?: AbortSignal,
+  ): Promise<{ status: number; body: unknown }> {
+    const prepared = await this.prepare(raw, principal);
+    const { key, forward, timeoutMs, model } = prepared;
 
     let res: Response;
-    const timeoutMs = toBoundedPositiveInt(
-      this.config.get('AGENT_UPSTREAM_TIMEOUT_MS'),
-      DEFAULT_COMPLETION_TIMEOUT_MS,
-      120_000,
-    );
     try {
       res = await fetchWithTimeout(
         'https://openrouter.ai/api/v1/chat/completions',
@@ -421,29 +494,94 @@ export class AgentLlmService {
 
     const body = (await res.json().catch(() => ({}))) as OpenRouterErrorBody & {
       usage?: OpenRouterUsage;
+      choices?: Array<{ message?: { content?: unknown } }>;
     };
-    if (res.ok && body.usage) {
-      const used = (body.usage.prompt_tokens ?? 0) + (body.usage.completion_tokens ?? 0);
-      this.meteredTokens += used;
-      this.meteredRequests += 1;
-      // Log ONLY aggregate accounting — never message content (anonymity product).
-      this.logger.log(
-        `agent/llm model=${forward.model} in=${body.usage.prompt_tokens ?? 0} out=${body.usage.completion_tokens ?? 0} lifetimeTokens=${this.meteredTokens}`,
-      );
-    } else if (!res.ok) {
+    if (res.ok) {
+      // A 2xx with no usage block still produced tokens someone paid for. Fall back to the prompt
+      // estimate and the length of what came back rather than serving the call for free.
+      await this.charge(prepared, principal, body.usage, {
+        tokensIn: prepared.promptTokens,
+        tokensOut: Math.ceil(
+          (body.choices ?? []).reduce((sum, c) => sum + textLength(c.message?.content), 0) /
+            CHARS_PER_TOKEN,
+        ),
+      });
+    } else {
       const code = diagnosticCode(body.error?.code ?? body.error?.type);
       const requestId = diagnosticCode(
         res.headers.get('x-request-id') ?? res.headers.get('openrouter-request-id'),
       );
       this.logger.warn(
-        `agent/llm upstream_error model=${model} status=${res.status} code=${code} requestId=${requestId} tools=${requiresTools}`,
+        `agent/llm upstream_error model=${model} status=${res.status} code=${code} requestId=${requestId}`,
       );
+      await this.settleFailure(prepared, principal, body.usage);
     }
     return { status: res.status, body };
   }
 
-  usage(): { meteredTokens: number; meteredRequests: number } {
-    return { meteredTokens: this.meteredTokens, meteredRequests: this.meteredRequests };
+  /** Newest-first per-team usage, for the panel's spend view and for explaining a charge. */
+  async usage(teamId: string, limit = 50): Promise<AgentUsageRow[]> {
+    return this.spend.listUsage(teamId, limit);
+  }
+
+  /**
+   * Account for a call the upstream refused.
+   *
+   * Only when the provider reported usage. A rejected request usually generated nothing and must
+   * not be charged for — but a generation that was cut off part-way HAS been billed to us, and the
+   * usage block is the only evidence of it. Metering nothing in either case, which is what happened
+   * before, means every truncated generation was free to the customer and paid for by the operator.
+   */
+  private async settleFailure(
+    prepared: PreparedCall,
+    principal: AgentPrincipal,
+    usage: OpenRouterUsage | undefined,
+  ): Promise<void> {
+    if (!usage) return;
+    await this.charge(prepared, principal, usage, { tokensIn: 0, tokensOut: 0 });
+  }
+
+  /**
+   * Turn one call's usage into a charge against the team's Credit.
+   *
+   * `fallback` is used per-field: the provider's figure wins whenever it exists, and each missing
+   * one is replaced individually, so a payload that reports input but not output is not treated as
+   * a payload that reports nothing.
+   *
+   * NEVER THROWS. The answer has already been served — the customer has their tokens whatever
+   * happens here — so a metering failure is logged and swallowed rather than turned into a 500 on a
+   * request that succeeded. The accrual is idempotent-by-carry: unflushed micros stay owed.
+   */
+  private async charge(
+    prepared: PreparedCall,
+    principal: AgentPrincipal,
+    usage: OpenRouterUsage | undefined,
+    fallback: { tokensIn: number; tokensOut: number },
+  ): Promise<void> {
+    const tokensIn = usage?.prompt_tokens ?? fallback.tokensIn;
+    const tokensOut = usage?.completion_tokens ?? fallback.tokensOut;
+    const cachedIn = Math.min(usage?.prompt_tokens_details?.cached_tokens ?? 0, tokensIn);
+    try {
+      const result = await this.spend.charge({
+        teamId: principal.teamId,
+        userId: principal.userId,
+        profileId: principal.profileId,
+        sessionId: principal.sessionId,
+        model: prepared.model,
+        tokensIn,
+        tokensOut,
+        cachedIn,
+        ...(typeof usage?.cost === 'number' ? { providerCostUsd: usage.cost } : {}),
+      });
+      // Log ONLY accounting — never message content (anonymity product).
+      this.logger.log(
+        `agent/llm model=${prepared.model} team=${principal.teamId} in=${tokensIn} cached=${cachedIn} out=${tokensOut} micros=${result.costMicros} cents=${result.chargedCents} measured=${usage ? 1 : 0}`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `agent/llm charge_failed team=${principal.teamId} model=${prepared.model} kind=${diagnosticKind(error)}`,
+      );
+    }
   }
 
   private async assertModelAllowed(model: string, requiresTools: boolean): Promise<void> {
@@ -547,4 +685,38 @@ function toPositiveInt(value: unknown, fallback: number): number {
 
 function toBoundedPositiveInt(value: unknown, fallback: number, maximum: number): number {
   return Math.min(toPositiveInt(value, fallback), maximum);
+}
+
+/**
+ * Length of a message part, whether it is a plain string or the multi-part content array the
+ * OpenAI schema also allows. Only the LENGTH is ever read — the text itself is never inspected,
+ * stored or logged.
+ */
+function textLength(value: unknown): number {
+  if (typeof value === 'string') return value.length;
+  if (!Array.isArray(value)) return 0;
+  let total = 0;
+  for (const part of value) {
+    const text = (part as { text?: unknown } | null)?.text;
+    if (typeof text === 'string') total += text.length;
+  }
+  return total;
+}
+
+/**
+ * Prompt size before the call, for the reserve check.
+ *
+ * A real tokenizer would be more accurate and would also mean shipping a per-model vocabulary and
+ * running it on every request. This is used to RESERVE, not to bill — the charge is always made
+ * against what the provider reports — so being within a few percent is enough, and the direction
+ * that matters (under-reserving) is covered by the estimate pricing the full authorised output.
+ */
+function estimatePromptTokens(raw: ChatBody): number {
+  let chars = 0;
+  for (const message of Array.isArray(raw.messages) ? raw.messages : []) {
+    const content = (message as { content?: unknown } | null)?.content;
+    chars += textLength(content);
+  }
+  if (Array.isArray(raw.tools)) chars += JSON.stringify(raw.tools).length;
+  return Math.ceil(chars / CHARS_PER_TOKEN);
 }

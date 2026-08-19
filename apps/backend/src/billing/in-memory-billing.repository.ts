@@ -9,7 +9,13 @@ import type {
   Subscription,
 } from '@lobster/shared-types';
 
-import type { BillingRepository, DepositReversal, StoredDeposit } from './billing.repository';
+import type {
+  AgentUsageEntry,
+  AgentUsageRow,
+  BillingRepository,
+  DepositReversal,
+  StoredDeposit,
+} from './billing.repository';
 
 /**
  * In-memory Credit store. Active whenever `DATABASE_URL` is unset, so the app and its tests boot
@@ -28,6 +34,8 @@ export class InMemoryBillingRepository implements BillingRepository {
   private readonly ledger: CreditTransaction[] = [];
   private readonly deposits = new Map<string, StoredDeposit>();
   private readonly subscriptions = new Map<string, Subscription>();
+  private readonly agentAccruals = new Map<string, number>();
+  private readonly agentUsage: AgentUsageRow[] = [];
 
   // --- Wallet ---------------------------------------------------------------
 
@@ -64,6 +72,39 @@ export class InMemoryBillingRepository implements BillingRepository {
   async listTransactions(teamId: string, limit: number): Promise<CreditTransaction[]> {
     return this.ledger
       .filter((t) => t.teamId === teamId)
+      .slice()
+      .reverse()
+      .slice(0, limit);
+  }
+
+  // --- Agent metering -------------------------------------------------------
+
+  async accrueAgentMicros(teamId: string, micros: number): Promise<number> {
+    const next = (this.agentAccruals.get(teamId) ?? 0) + micros;
+    this.agentAccruals.set(teamId, next);
+    return next;
+  }
+
+  async claimAgentMicros(teamId: string, micros: number): Promise<boolean> {
+    // Same contract as the Prisma conditional UPDATE: an accrual smaller than the claim matches
+    // nothing and nothing moves, so two flushes racing for the same cent cannot both take it.
+    const current = this.agentAccruals.get(teamId) ?? 0;
+    if (current < micros) return false;
+    this.agentAccruals.set(teamId, current - micros);
+    return true;
+  }
+
+  async getAgentAccruedMicros(teamId: string): Promise<number> {
+    return this.agentAccruals.get(teamId) ?? 0;
+  }
+
+  async recordAgentUsage(entry: AgentUsageEntry): Promise<void> {
+    this.agentUsage.push({ ...entry, id: randomUUID(), createdAt: new Date().toISOString() });
+  }
+
+  async listAgentUsage(teamId: string, limit: number): Promise<AgentUsageRow[]> {
+    return this.agentUsage
+      .filter((row) => row.teamId === teamId)
       .slice()
       .reverse()
       .slice(0, limit);

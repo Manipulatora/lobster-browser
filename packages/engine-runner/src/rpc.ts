@@ -13,6 +13,7 @@ import type {
   StopParams,
 } from '@lobster/shared-types';
 import { forgetProfile, provisionProfile } from './agent/bridge-registry.js';
+import { clearManagedCredential, setManagedCredential } from './agent/managed-credential.js';
 import { listModels } from '@lobster/agent';
 import type { EngineRunner } from './runner.js';
 import type { AgentManager } from './agent/manager.js';
@@ -159,6 +160,16 @@ export async function dispatch(
           params.profileId === undefined ? undefined : requireString(params.profileId, 'profileId'),
         );
         return { id: req.id, ok: true, result };
+      }
+      // The managed agent credential the desktop mints from its signed-in session, pushed here (and
+      // re-pushed before it expires) so panel-started runs can authenticate as the user who owns
+      // them. `{ refusal }` instead of a token is how the desktop reports that this account may not
+      // run Lobee at all, which the panel renders as a named upsell rather than a failed run.
+      case 'agent.setCredential': {
+        const params = requireObject(req.params, 'agent.setCredential params');
+        if (params.clear === true) clearManagedCredential();
+        else setManagedCredential(params);
+        return { id: req.id, ok: true, result: { accepted: true } };
       }
       case 'agent.listModels': {
         // Stateless: validate the BYOK key + list its usable chat models (no profile/session needed).

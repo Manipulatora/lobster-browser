@@ -33,7 +33,11 @@ export type SidecarMethod =
   | 'agent.attachBrowser'
   | 'agent.sendInput'
   | 'agent.status'
-  | 'agent.listModels';
+  | 'agent.listModels'
+  // The managed agent credential the desktop mints from its signed-in session. Pushed rather than
+  // read from the environment: it names one user and one team, expires in half an hour, and only the
+  // desktop can read the session it is minted from.
+  | 'agent.setCredential';
 
 /**
  * An out-of-band, un-correlated message the sidecar pushes to the Rust core (NOT a response to any
@@ -43,6 +47,15 @@ export type SidecarMethod =
 export interface SidecarNotification<E = unknown> {
   notify: 'agent';
   event: E;
+}
+
+/**
+ * The sidecar asking for a freshly minted managed agent token, because the one it holds was rejected
+ * mid-run. The desktop answers with `agent.setCredential`; the waiting model call retries with the
+ * new token instead of ending a run over an expiry the user did not cause.
+ */
+export interface SidecarCredentialRequest {
+  notify: 'agentCredential';
 }
 
 export interface SidecarRequest<M extends SidecarMethod = SidecarMethod, P = unknown> {

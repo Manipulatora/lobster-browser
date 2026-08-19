@@ -12,6 +12,7 @@ import { brandIcon } from './icons';
 import { findSnapshotForThread } from './history';
 import { renderMarkdown, stableBlockBoundary } from './md';
 import {
+  fetchEntitlement,
   fetchModels,
   fetchStatus,
   fetchThread,
@@ -44,7 +45,7 @@ import {
   type Turn,
 } from './turns';
 import { chatTimestamp } from './util';
-import type { AgentEvent, Effort, Mode, ModelInfo } from './types';
+import type { AgentEntitlement, AgentEvent, Effort, Mode, ModelInfo } from './types';
 
 // ---------------------------------------------------------------------------------------------------
 /**
@@ -510,6 +511,12 @@ export function App() {
   const [rosterLive, setRosterLive] = useState(false);
   /** null while the first bridge.json read is still in flight. */
   const [bridgeReady, setBridgeReady] = useState<boolean | null>(null);
+  /**
+   * What this account may do with Lobee. `null` means unknown — the panel opened before the app
+   * pushed an answer, or the service is restarting — and must keep the composer usable, because
+   * refusing on a question we never got an answer to is the same lie as offering what is refused.
+   */
+  const [entitlement, setEntitlement] = useState<AgentEntitlement | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -527,6 +534,8 @@ export function App() {
   const transcriptReady = transcriptState === 'ready';
   const [historyError, setHistoryError] = useState('');
   const [historyRetry, setHistoryRetry] = useState(0);
+  /** Bumped to re-ask what the account may do — after a reconnect, and after any refused run. */
+  const [entitlementRetry, setEntitlementRetry] = useState(0);
   const [menu, setMenu] = useState<'chats' | 'mode' | 'model' | 'effort' | 'policy' | null>(null);
   const [query, setQuery] = useState('');
   /** Conversation the composer writes into; hydrated from storage, replaced by "New chat". */
@@ -683,6 +692,21 @@ export function App() {
     };
   }, []);
 
+  // What this account may do with Lobee, re-asked whenever the answer could have changed: the bridge
+  // came up, the app pushed a new credential, or a run was refused. A `null` answer (service
+  // restarting, no bridge) deliberately leaves the previous one standing rather than locking a panel
+  // on a question that was never answered.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const answer = await fetchEntitlement();
+      if (alive && answer) setEntitlement(answer);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [entitlementRetry, bridgeReady]);
+
   // Ask can use any live text-chat model; Agent mode requires forced structured tool calls. If a
   // mode switch makes the current model incompatible, choose a genuinely compatible model instead
   // of sending a request that the provider must reject.
@@ -756,7 +780,12 @@ export function App() {
 
   const patchTurn = useCallback((id: number, ev: AgentEvent) => {
     setTurns((prev) => prev.map((t) => (t.id === id ? applyEvent(t, ev) : t)));
-    if (ev.type === 'run.finished') setBusy(false);
+    if (ev.type !== 'run.finished') return;
+    setBusy(false);
+    // A run can also die because the wallet emptied or the package lapsed WHILE it was running. The
+    // sidecar records that refusal, so re-asking here is what turns "something failed" into the one
+    // screen that says what to do about it.
+    if (ev.status === 'error') setEntitlementRetry((value) => value + 1);
   }, []);
 
   // Restore capped terminal history, then reconcile the sidecar's retained latest snapshot. Running
@@ -998,8 +1027,11 @@ export function App() {
     [autogrow],
   );
 
+  /** This account is known not to be allowed to run Lobee at all — see {@link AgentLocked}. */
+  const locked = entitlement !== null && !entitlement.entitled;
+
   /** Whether a new message can be sent right now — the one condition Retry and the composer share. */
-  const canSubmit = transcriptState !== 'loading' && composerReady && !busy;
+  const canSubmit = transcriptState !== 'loading' && composerReady && !busy && !locked;
 
   const submit = useCallback(async () => {
     const el = inputRef.current;
@@ -1052,6 +1084,7 @@ export function App() {
       },
       {
         onEvent: (ev) => patchTurn(id, ev),
+        onRefusal: setEntitlement,
       },
     );
     if (start === 'unavailable') {
@@ -1131,6 +1164,7 @@ export function App() {
     const bridge = await getBridge(true);
     setBridgeReady(bridge !== null);
     setHistoryRetry((value) => value + 1);
+    setEntitlementRetry((value) => value + 1);
   }, []);
 
   const visibleTurns = turns.filter((turn) => turn.task || turn.status === 'running');
@@ -1260,281 +1294,289 @@ export function App() {
               onStop={() => void requestStop()}
             />
           ))}
-          {visibleTurns.length === 0 && transcriptState !== 'loading' && bridgeReady !== false && (
-            <EmptyState mode={mode} modelLabel={modelLabel} onPick={fillComposer} />
-          )}
+          {visibleTurns.length === 0 &&
+            transcriptState !== 'loading' &&
+            bridgeReady !== false &&
+            !locked && <EmptyState mode={mode} modelLabel={modelLabel} onPick={fillComposer} />}
         </div>
       </main>
 
-      <form
-        className="m-3 mt-2 rounded-2xl border border-violet-600 bg-white transition-shadow focus-within:shadow-[0_0_0_3px_var(--color-violet-100)]"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-      >
-        <textarea
-          ref={inputRef}
-          aria-label="Message Lobee"
-          disabled={transcriptState === 'loading' || !composerReady}
-          rows={1}
-          placeholder={
-            transcriptState === 'loading'
-              ? 'Loading conversation…'
-              : composerReady
-                ? 'Message Lobee…'
-                : mode === 'agent'
-                  ? 'No Agent-compatible model is available'
-                  : 'No chat model is available'
-          }
-          onInput={autogrow}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              void submit();
-            }
-          }}
-          className="block max-h-[168px] min-h-[38px] w-full resize-none border-0 bg-transparent px-3 pb-1 pt-2.5 text-ink outline-none placeholder:text-ink-soft"
+      {locked && entitlement ? (
+        <AgentLocked
+          entitlement={entitlement}
+          onRecheck={() => setEntitlementRetry((value) => value + 1)}
         />
-        <div className="flex items-center gap-0.5 px-1.5 pb-1.5">
-          {/* Mode */}
-          <div className="relative min-w-0">
-            <Trigger
-              open={menu === 'mode'}
-              controls="lobee-mode-menu"
-              onToggle={(trigger) => openMenu('mode', trigger)}
-            >
-              <span>{mode === 'ask' ? 'Ask' : 'Agent'}</span>
-            </Trigger>
-            {menu === 'mode' && (
-              <Popover
-                id="lobee-mode-menu"
-                role="menu"
-                label="Mode"
-                className={`${menuCls} ${upward} left-0 w-[200px]`}
-                triggerRef={menuTriggerRef}
-                onDismiss={() => closeMenu(false)}
-              >
-                {(
-                  [
-                    ['agent', 'Agent', 'Web tasks + browser control'],
-                    ['ask', 'Ask', 'Chat only, no browser'],
-                  ] as const
-                ).map(([val, name, hint]) => (
-                  <button
-                    key={val}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={mode === val}
-                    className="flex w-full flex-col gap-px rounded-lg px-2.5 py-2 text-left hover:bg-violet-50"
-                    onClick={() => {
-                      setMode(val);
-                      store.set({ mode: val });
-                      closeMenu();
-                    }}
-                  >
-                    <span
-                      className={`text-[13px] font-semibold ${mode === val ? 'text-violet-700' : 'text-ink'}`}
-                    >
-                      {name}
-                    </span>
-                    <span className="text-[11px] text-ink-soft">{hint}</span>
-                  </button>
-                ))}
-              </Popover>
-            )}
-          </div>
-
-          {/* Model */}
-          <div className="relative min-w-0">
-            <Trigger
-              open={menu === 'model'}
-              controls="lobee-model-menu"
-              onToggle={(trigger) => openMenu('model', trigger)}
-            >
-              <span className="inline-flex shrink-0">
-                {brandIcon(current?.brand ?? '', 'h-3.5 w-3.5')}
-              </span>
-              <span className="min-w-0 max-w-[150px] truncate">{current?.label ?? 'Model'}</span>
-            </Trigger>
-            {menu === 'model' && (
-              <Popover
-                id="lobee-model-menu"
-                role="menu"
-                label="Model"
-                className={`${menuCls} ${upward} left-0 w-[260px]`}
-                triggerRef={menuTriggerRef}
-                onDismiss={() => closeMenu(false)}
-              >
-                <ModelMenu
-                  models={models}
-                  mode={mode}
-                  selected={model}
-                  query={query}
-                  setQuery={setQuery}
-                  onPick={(id) => {
-                    setModel(id);
-                    store.set({ model: id });
-                    setQuery('');
-                    closeMenu();
-                  }}
-                />
-              </Popover>
-            )}
-          </div>
-
-          {/* Run policy */}
-          <div className="relative ml-auto min-w-0">
-            <Trigger
-              open={menu === 'policy'}
-              controls="lobee-policy-menu"
-              haspopup="dialog"
-              onToggle={(trigger) => openMenu('policy', trigger)}
-            >
-              <span>{autonomy === 'confirm' ? 'Review' : 'Auto'}</span>
-            </Trigger>
-            {menu === 'policy' && (
-              <Popover
-                id="lobee-policy-menu"
-                role="dialog"
-                label="Run policy"
-                className={`${menuCls} ${upward} right-0 w-[280px] p-3`}
-                triggerRef={menuTriggerRef}
-                onDismiss={() => closeMenu(false)}
-              >
-                <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-ink-soft">
-                  Run policy
-                </div>
-                <div
-                  role="radiogroup"
-                  aria-label="Run policy"
-                  className="grid grid-cols-2 gap-1 rounded-lg bg-violet-50 p-1"
-                >
-                  {(
-                    [
-                      ['confirm', 'Review changes'],
-                      ['auto', 'Run automatically'],
-                    ] as const
-                  ).map(([value, label]) => (
-                    <button
-                      key={value}
-                      type="button"
-                      role="radio"
-                      aria-checked={autonomy === value}
-                      className={`rounded-md px-2 py-1.5 text-[11.5px] font-semibold ${
-                        autonomy === value
-                          ? 'bg-white text-violet-700 shadow-sm'
-                          : 'text-ink-soft hover:text-ink'
-                      }`}
-                      onClick={() => {
-                        setAutonomy(value);
-                        store.set({ autonomy: value });
-                      }}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                <p className="mt-1.5 text-[10.5px] leading-4 text-ink-soft">
-                  Review pauses before every browser change. Critical actions always ask in either
-                  mode.
-                </p>
-
-                <label className="mt-3 block text-[11.5px] font-semibold text-ink">
-                  Allowed domains
-                  <input
-                    type="text"
-                    value={allowedDomainsText}
-                    placeholder="Any domain (unrestricted)"
-                    onChange={(event) => setAllowedDomainsText(event.target.value)}
-                    onBlur={(event) => {
-                      const result = parseAllowedDomains(event.target.value);
-                      if (!result.ok) return;
-                      setAllowedDomainsText(result.domains.join(', '));
-                      store.set({ allowedDomains: result.domains });
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') event.preventDefault();
-                    }}
-                    className="mt-1 w-full rounded-lg border border-line-strong bg-white px-2.5 py-2 text-[12px] font-normal outline-none focus:border-violet-600"
-                  />
-                </label>
-                <p className="mt-1 text-[10.5px] leading-4 text-ink-soft">
-                  Comma-separated. Empty means unrestricted browsing.
-                </p>
-                {!allowedDomains.ok && (
-                  <p role="alert" className="mt-1 text-[10.5px] leading-4 text-red-600">
-                    {allowedDomains.error}
-                  </p>
-                )}
-
-                <label className="mt-3 block text-[11.5px] font-semibold text-ink">
-                  Token budget
-                  <select
-                    value={tokenBudget ?? ''}
-                    onChange={(event) => {
-                      const value = event.target.value ? Number(event.target.value) : null;
-                      setTokenBudget(value);
-                      store.set({ tokenBudget: value });
-                    }}
-                    className="mt-1 w-full rounded-lg border border-line-strong bg-white px-2.5 py-2 text-[12px] font-normal outline-none focus:border-violet-600"
-                  >
-                    <option value="25000">25,000 tokens</option>
-                    <option value="50000">50,000 tokens</option>
-                    <option value="100000">100,000 tokens</option>
-                    <option value="250000">250,000 tokens</option>
-                    <option value="">Unlimited</option>
-                  </select>
-                </label>
-              </Popover>
-            )}
-          </div>
-
-          {/* Effort (hidden for non-reasoning models) */}
-          {efforts.length > 0 && (
+      ) : (
+        <form
+          className="m-3 mt-2 rounded-2xl border border-violet-600 bg-white transition-shadow focus-within:shadow-[0_0_0_3px_var(--color-violet-100)]"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit();
+          }}
+        >
+          <textarea
+            ref={inputRef}
+            aria-label="Message Lobee"
+            disabled={transcriptState === 'loading' || !composerReady}
+            rows={1}
+            placeholder={
+              transcriptState === 'loading'
+                ? 'Loading conversation…'
+                : composerReady
+                  ? 'Message Lobee…'
+                  : mode === 'agent'
+                    ? 'No Agent-compatible model is available'
+                    : 'No chat model is available'
+            }
+            onInput={autogrow}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                void submit();
+              }
+            }}
+            className="block max-h-[168px] min-h-[38px] w-full resize-none border-0 bg-transparent px-3 pb-1 pt-2.5 text-ink outline-none placeholder:text-ink-soft"
+          />
+          <div className="flex items-center gap-0.5 px-1.5 pb-1.5">
+            {/* Mode */}
             <div className="relative min-w-0">
               <Trigger
-                open={menu === 'effort'}
-                controls="lobee-effort-menu"
-                onToggle={(trigger) => openMenu('effort', trigger)}
+                open={menu === 'mode'}
+                controls="lobee-mode-menu"
+                onToggle={(trigger) => openMenu('mode', trigger)}
               >
-                <span>{EFFORT_LABEL[effort]}</span>
+                <span>{mode === 'ask' ? 'Ask' : 'Agent'}</span>
               </Trigger>
-              {menu === 'effort' && (
+              {menu === 'mode' && (
                 <Popover
-                  id="lobee-effort-menu"
+                  id="lobee-mode-menu"
                   role="menu"
-                  label="Reasoning effort"
-                  className={`${menuCls} ${upward} right-0 min-w-[130px]`}
+                  label="Mode"
+                  className={`${menuCls} ${upward} left-0 w-[200px]`}
                   triggerRef={menuTriggerRef}
                   onDismiss={() => closeMenu(false)}
                 >
-                  {ALL_EFFORTS.filter((e) => efforts.includes(e)).map((e) => (
+                  {(
+                    [
+                      ['agent', 'Agent', 'Web tasks + browser control'],
+                      ['ask', 'Ask', 'Chat only, no browser'],
+                    ] as const
+                  ).map(([val, name, hint]) => (
                     <button
-                      key={e}
+                      key={val}
                       type="button"
                       role="menuitemradio"
-                      aria-checked={effort === e}
-                      className="flex w-full rounded-lg px-2.5 py-2 text-left hover:bg-violet-50"
+                      aria-checked={mode === val}
+                      className="flex w-full flex-col gap-px rounded-lg px-2.5 py-2 text-left hover:bg-violet-50"
                       onClick={() => {
-                        setEffort(e);
-                        store.set({ effort: e });
+                        setMode(val);
+                        store.set({ mode: val });
                         closeMenu();
                       }}
                     >
                       <span
-                        className={`text-[13px] font-semibold ${effort === e ? 'text-violet-700' : 'text-ink'}`}
+                        className={`text-[13px] font-semibold ${mode === val ? 'text-violet-700' : 'text-ink'}`}
                       >
-                        {EFFORT_LABEL[e]}
+                        {name}
                       </span>
+                      <span className="text-[11px] text-ink-soft">{hint}</span>
                     </button>
                   ))}
                 </Popover>
               )}
             </div>
-          )}
-        </div>
-      </form>
+
+            {/* Model */}
+            <div className="relative min-w-0">
+              <Trigger
+                open={menu === 'model'}
+                controls="lobee-model-menu"
+                onToggle={(trigger) => openMenu('model', trigger)}
+              >
+                <span className="inline-flex shrink-0">
+                  {brandIcon(current?.brand ?? '', 'h-3.5 w-3.5')}
+                </span>
+                <span className="min-w-0 max-w-[150px] truncate">{current?.label ?? 'Model'}</span>
+              </Trigger>
+              {menu === 'model' && (
+                <Popover
+                  id="lobee-model-menu"
+                  role="menu"
+                  label="Model"
+                  className={`${menuCls} ${upward} left-0 w-[260px]`}
+                  triggerRef={menuTriggerRef}
+                  onDismiss={() => closeMenu(false)}
+                >
+                  <ModelMenu
+                    models={models}
+                    mode={mode}
+                    selected={model}
+                    query={query}
+                    setQuery={setQuery}
+                    onPick={(id) => {
+                      setModel(id);
+                      store.set({ model: id });
+                      setQuery('');
+                      closeMenu();
+                    }}
+                  />
+                </Popover>
+              )}
+            </div>
+
+            {/* Run policy */}
+            <div className="relative ml-auto min-w-0">
+              <Trigger
+                open={menu === 'policy'}
+                controls="lobee-policy-menu"
+                haspopup="dialog"
+                onToggle={(trigger) => openMenu('policy', trigger)}
+              >
+                <span>{autonomy === 'confirm' ? 'Review' : 'Auto'}</span>
+              </Trigger>
+              {menu === 'policy' && (
+                <Popover
+                  id="lobee-policy-menu"
+                  role="dialog"
+                  label="Run policy"
+                  className={`${menuCls} ${upward} right-0 w-[280px] p-3`}
+                  triggerRef={menuTriggerRef}
+                  onDismiss={() => closeMenu(false)}
+                >
+                  <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-ink-soft">
+                    Run policy
+                  </div>
+                  <div
+                    role="radiogroup"
+                    aria-label="Run policy"
+                    className="grid grid-cols-2 gap-1 rounded-lg bg-violet-50 p-1"
+                  >
+                    {(
+                      [
+                        ['confirm', 'Review changes'],
+                        ['auto', 'Run automatically'],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        role="radio"
+                        aria-checked={autonomy === value}
+                        className={`rounded-md px-2 py-1.5 text-[11.5px] font-semibold ${
+                          autonomy === value
+                            ? 'bg-white text-violet-700 shadow-sm'
+                            : 'text-ink-soft hover:text-ink'
+                        }`}
+                        onClick={() => {
+                          setAutonomy(value);
+                          store.set({ autonomy: value });
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-1.5 text-[10.5px] leading-4 text-ink-soft">
+                    Review pauses before every browser change. Critical actions always ask in either
+                    mode.
+                  </p>
+
+                  <label className="mt-3 block text-[11.5px] font-semibold text-ink">
+                    Allowed domains
+                    <input
+                      type="text"
+                      value={allowedDomainsText}
+                      placeholder="Any domain (unrestricted)"
+                      onChange={(event) => setAllowedDomainsText(event.target.value)}
+                      onBlur={(event) => {
+                        const result = parseAllowedDomains(event.target.value);
+                        if (!result.ok) return;
+                        setAllowedDomainsText(result.domains.join(', '));
+                        store.set({ allowedDomains: result.domains });
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') event.preventDefault();
+                      }}
+                      className="mt-1 w-full rounded-lg border border-line-strong bg-white px-2.5 py-2 text-[12px] font-normal outline-none focus:border-violet-600"
+                    />
+                  </label>
+                  <p className="mt-1 text-[10.5px] leading-4 text-ink-soft">
+                    Comma-separated. Empty means unrestricted browsing.
+                  </p>
+                  {!allowedDomains.ok && (
+                    <p role="alert" className="mt-1 text-[10.5px] leading-4 text-red-600">
+                      {allowedDomains.error}
+                    </p>
+                  )}
+
+                  <label className="mt-3 block text-[11.5px] font-semibold text-ink">
+                    Token budget
+                    <select
+                      value={tokenBudget ?? ''}
+                      onChange={(event) => {
+                        const value = event.target.value ? Number(event.target.value) : null;
+                        setTokenBudget(value);
+                        store.set({ tokenBudget: value });
+                      }}
+                      className="mt-1 w-full rounded-lg border border-line-strong bg-white px-2.5 py-2 text-[12px] font-normal outline-none focus:border-violet-600"
+                    >
+                      <option value="25000">25,000 tokens</option>
+                      <option value="50000">50,000 tokens</option>
+                      <option value="100000">100,000 tokens</option>
+                      <option value="250000">250,000 tokens</option>
+                      <option value="">Unlimited</option>
+                    </select>
+                  </label>
+                </Popover>
+              )}
+            </div>
+
+            {/* Effort (hidden for non-reasoning models) */}
+            {efforts.length > 0 && (
+              <div className="relative min-w-0">
+                <Trigger
+                  open={menu === 'effort'}
+                  controls="lobee-effort-menu"
+                  onToggle={(trigger) => openMenu('effort', trigger)}
+                >
+                  <span>{EFFORT_LABEL[effort]}</span>
+                </Trigger>
+                {menu === 'effort' && (
+                  <Popover
+                    id="lobee-effort-menu"
+                    role="menu"
+                    label="Reasoning effort"
+                    className={`${menuCls} ${upward} right-0 min-w-[130px]`}
+                    triggerRef={menuTriggerRef}
+                    onDismiss={() => closeMenu(false)}
+                  >
+                    {ALL_EFFORTS.filter((e) => efforts.includes(e)).map((e) => (
+                      <button
+                        key={e}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={effort === e}
+                        className="flex w-full rounded-lg px-2.5 py-2 text-left hover:bg-violet-50"
+                        onClick={() => {
+                          setEffort(e);
+                          store.set({ effort: e });
+                          closeMenu();
+                        }}
+                      >
+                        <span
+                          className={`text-[13px] font-semibold ${effort === e ? 'text-violet-700' : 'text-ink'}`}
+                        >
+                          {EFFORT_LABEL[e]}
+                        </span>
+                      </button>
+                    ))}
+                  </Popover>
+                )}
+              </div>
+            )}
+          </div>
+        </form>
+      )}
     </div>
   );
 }
@@ -1654,6 +1696,92 @@ function Notice({
       <span className="min-w-0 break-words">{detail}</span>
       <button type="button" className="font-semibold text-violet-700 underline" onClick={onAction}>
         {action}
+      </button>
+    </div>
+  );
+}
+
+/** Display name for a tier id. Unknown ids read as themselves rather than as a wrong package name. */
+function tierLabel(tier: string | undefined): string {
+  if (!tier) return 'your current package';
+  const known: Record<string, string> = {
+    free: 'Free',
+    light: 'Light',
+    plus: 'Plus',
+    pro: 'Pro',
+    max: 'Max',
+  };
+  return known[tier] ?? tier;
+}
+
+/**
+ * What the panel shows when this account cannot run Lobee.
+ *
+ * IT REPLACES THE COMPOSER RATHER THAN FAILING AFTER ONE. A free or Light account used to get the
+ * whole agent UI, type a task, watch it start, and read a provider error — the refusal arrived after
+ * the effort, in the one form that cannot be acted on. Here the reason is the first thing on screen,
+ * it names the package the account is actually on, and it distinguishes the two states that look
+ * identical in a generic error and need opposite responses: a package that does not include the
+ * agent (upgrade) and a wallet with nothing in it (top up).
+ *
+ * NO LINK TO THE WEBSITE, DELIBERATELY. This page lives inside an anti-detect profile: opening the
+ * billing page here would put a first-party visit to a Lobster domain on that profile's proxy IP and
+ * fingerprint, tying a disguised identity to the account paying for it. Billing belongs in the
+ * Lobster app, and it is the app the user is told to go to.
+ */
+function AgentLocked({
+  entitlement,
+  onRecheck,
+}: {
+  entitlement: AgentEntitlement;
+  onRecheck: () => void;
+}) {
+  const minimum = tierLabel(entitlement.minimumTier ?? 'plus');
+  const included = (entitlement.requiredTiers ?? ['plus', 'pro', 'max']).map(tierLabel).join(', ');
+  const screen =
+    entitlement.code === 'insufficient_credit'
+      ? {
+          headline: 'Your Credit has run out',
+          detail: `Agent time is charged against your Credit balance. Top up in the Lobster app, under Account → Billing, and Lobee picks up where it left off.`,
+          action: 'Check again',
+        }
+      : entitlement.code === 'signed_out'
+        ? {
+            headline: 'Sign in to use Lobee',
+            detail:
+              'Lobee runs on your Lobster account. Sign in from the Lobster app, then reopen this panel.',
+            action: 'Check again',
+          }
+        : entitlement.code === 'plan_required'
+          ? {
+              headline: `Lobee is included with ${minimum}`,
+              detail: `Your team is on ${tierLabel(entitlement.tier)}. ${included} include the agent — upgrade in the Lobster app, under Account → Billing, to run tasks in this profile.`,
+              action: 'Check again',
+            }
+          : {
+              headline: 'Lobee is not connected yet',
+              detail:
+                entitlement.message ||
+                'The Lobster app has not authorised this profile for the agent yet. This usually clears within a moment of signing in.',
+              action: 'Try again',
+            };
+
+  return (
+    <div
+      role="status"
+      className="m-3 mt-2 flex flex-col items-start gap-2 rounded-2xl border border-violet-200 bg-violet-50 px-3.5 py-3"
+    >
+      <div className="flex items-center gap-2">
+        <img src="./icons/lobee-48.png" alt="" className="h-5 w-5 rounded-md" />
+        <span className="text-[13px] font-semibold text-ink">{screen.headline}</span>
+      </div>
+      <p className="text-[12.5px] leading-5 text-ink-soft">{screen.detail}</p>
+      <button
+        type="button"
+        onClick={onRecheck}
+        className="text-[12px] font-semibold text-violet-700 underline"
+      >
+        {screen.action}
       </button>
     </div>
   );

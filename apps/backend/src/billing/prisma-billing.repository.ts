@@ -9,7 +9,13 @@ import type {
 } from '@lobster/shared-types';
 
 import type { PrismaService } from '../prisma/prisma.service';
-import type { BillingRepository, DepositReversal, StoredDeposit } from './billing.repository';
+import type {
+  AgentUsageEntry,
+  AgentUsageRow,
+  BillingRepository,
+  DepositReversal,
+  StoredDeposit,
+} from './billing.repository';
 
 /**
  * Thrown inside `renewSubscription`'s transaction to abort it when Credit is short.
@@ -102,6 +108,51 @@ export class PrismaBillingRepository implements BillingRepository {
       take: limit,
     });
     return rows.map(toTransaction);
+  }
+
+  // --- Agent metering -------------------------------------------------------
+
+  async accrueAgentMicros(teamId: string, micros: number): Promise<number> {
+    // Upsert-then-increment inside one transaction, and the increment is done by the database
+    // rather than in JavaScript: two agent calls landing together would otherwise both read the
+    // same accrual and both write their own total, silently discarding one team's spend.
+    return this.prisma.$transaction(async (tx) => {
+      await tx.wallet.upsert({ where: { teamId }, create: { teamId }, update: {} });
+      const wallet = await tx.wallet.update({
+        where: { teamId },
+        data: { agentAccruedMicros: { increment: micros } },
+      });
+      return wallet.agentAccruedMicros;
+    });
+  }
+
+  async claimAgentMicros(teamId: string, micros: number): Promise<boolean> {
+    // The same conditional-UPDATE shape as `move`, and for the same reason. Two calls that both
+    // cross the same cent boundary both compute "one cent to flush"; the predicate means the row
+    // matches only once, so exactly one of them charges it and the other backs off.
+    const res = await this.prisma.wallet.updateMany({
+      where: { teamId, agentAccruedMicros: { gte: micros } },
+      data: { agentAccruedMicros: { decrement: micros } },
+    });
+    return res.count > 0;
+  }
+
+  async getAgentAccruedMicros(teamId: string): Promise<number> {
+    const wallet = await this.prisma.wallet.findUnique({ where: { teamId } });
+    return wallet?.agentAccruedMicros ?? 0;
+  }
+
+  async recordAgentUsage(entry: AgentUsageEntry): Promise<void> {
+    await this.prisma.agentUsage.create({ data: entry });
+  }
+
+  async listAgentUsage(teamId: string, limit: number): Promise<AgentUsageRow[]> {
+    const rows = await this.prisma.agentUsage.findMany({
+      where: { teamId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+    return rows.map(toAgentUsage);
   }
 
   // --- Deposits -------------------------------------------------------------
@@ -447,6 +498,23 @@ function toTransaction(row: any): CreditTransaction {
     balanceAfterCents: row.balanceAfterCents,
     description: row.description,
     metadata: row.metadata ?? {},
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function toAgentUsage(row: any): AgentUsageRow {
+  return {
+    id: row.id,
+    teamId: row.teamId,
+    userId: row.userId ?? undefined,
+    profileId: row.profileId ?? undefined,
+    sessionId: row.sessionId ?? undefined,
+    model: row.model,
+    tokensIn: row.tokensIn,
+    tokensOut: row.tokensOut,
+    cachedIn: row.cachedIn,
+    costMicros: row.costMicros,
+    chargedCents: row.chargedCents,
     createdAt: row.createdAt.toISOString(),
   };
 }

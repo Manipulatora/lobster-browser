@@ -11,6 +11,7 @@
 //! Launch button and external automation clients behave identically. See README.md.
 
 mod account;
+mod agent_proxy;
 mod agent_secrets;
 mod blob_crypto;
 mod cloud_auth;
@@ -152,7 +153,10 @@ async fn auth_status() -> Result<AuthState, String> {
 /// splitting it would mean holding the PendingSignIn (with its listener and PKCE verifier) in
 /// shared state, where an abandoned attempt leaks a bound port.
 #[tauri::command]
-async fn auth_sign_in(mode: String) -> Result<cloud_auth::CloudUser, String> {
+async fn auth_sign_in(
+    state: State<'_, AppState>,
+    mode: String,
+) -> Result<cloud_auth::CloudUser, String> {
     let (handle, pending) = cloud_auth::begin(&mode).await.map_err(|e| e.to_string())?;
 
     open_in_browser(&handle.url).map_err(|e| {
@@ -162,7 +166,14 @@ async fn auth_sign_in(mode: String) -> Result<cloud_auth::CloudUser, String> {
         )
     })?;
 
-    pending.wait().await.map_err(|e| e.to_string())
+    let user = pending.wait().await.map_err(|e| e.to_string())?;
+    // Signing in is the moment the agent becomes usable (or the moment we learn this package cannot
+    // use it). Handing the sidecar the answer now means a panel opened straight afterwards paints
+    // the truth instead of the pre-sign-in "not configured" state.
+    if let Some(sidecar) = state.sidecar.as_ref() {
+        agent_proxy::push(sidecar, true).await;
+    }
+    Ok(user)
 }
 
 /// Whether this session can seal and open snapshots for other machines.
@@ -189,8 +200,16 @@ async fn vault_status(state: State<'_, AppState>) -> Result<serde_json::Value, S
 }
 
 #[tauri::command]
-fn auth_sign_out() {
+async fn auth_sign_out(state: State<'_, AppState>) -> Result<(), String> {
     cloud_auth::clear_token();
+    // The agent token outlives the session that minted it by up to half an hour. Revoking it here is
+    // what stops a signed-out machine from continuing to spend the previous user's Credit.
+    if let Some(sidecar) = state.sidecar.as_ref() {
+        agent_proxy::clear(sidecar).await;
+    } else {
+        agent_proxy::forget();
+    }
+    Ok(())
 }
 
 /// Hand a URL to the OS default browser.
@@ -1191,16 +1210,38 @@ async fn agent_start(
         (byok_key, memory_key)
     };
     if managed {
-        // Managed runs go through the backend proxy: inject its URL + access token from operator env,
-        // never an OpenRouter key. The sidecar's managed client uses `apiKey` as the proxy bearer token.
-        let proxy_url = std::env::var("LOBSTER_AGENT_PROXY_URL").map_err(|_| {
-            "managed mode requires LOBSTER_AGENT_PROXY_URL (the backend /agent/llm base)"
-                .to_string()
-        })?;
-        let proxy_token = std::env::var("LOBSTER_AGENT_PROXY_TOKEN")
-            .map_err(|_| "managed mode requires LOBSTER_AGENT_PROXY_TOKEN".to_string())?;
-        llm_obj.insert("baseUrl".to_string(), serde_json::Value::String(proxy_url));
-        llm_obj.insert("apiKey".to_string(), serde_json::Value::String(proxy_token));
+        // Managed runs go through the backend proxy: its base follows the API origin this app signs
+        // in against, and the bearer is a short-lived agent token minted from that session — never an
+        // OpenRouter key. The sidecar's managed client uses `apiKey` as the proxy bearer token, and
+        // resolves it again per model call so a token that turns over mid-run does not end the run.
+        let access = agent_proxy::access(false)
+            .await
+            .map_err(|e| e.to_string())?;
+        let credential = match access {
+            // A refusal is the product answer, not a failure: the account is on a package that does
+            // not include Lobee, has no Credit left, or is not signed in. The backend's own sentence
+            // is what the user reads, so the desktop and the panel never disagree about why.
+            agent_proxy::Access::Denied(refusal) => return Err(refusal.message),
+            agent_proxy::Access::Granted(credential) => credential,
+        };
+        llm_obj.insert(
+            "baseUrl".to_string(),
+            serde_json::Value::String(credential.base_url.clone()),
+        );
+        llm_obj.insert(
+            "apiKey".to_string(),
+            serde_json::Value::String(credential.token.clone()),
+        );
+        if let Some(sidecar) = state.sidecar.as_ref() {
+            // Keep the sidecar's copy in step with the run's, so its mid-run renewal continues from
+            // the same token rather than one minted under a session that has since changed.
+            let _ = sidecar
+                .call(
+                    "agent.setCredential",
+                    agent_proxy::sidecar_params(&agent_proxy::Access::Granted(credential)),
+                )
+                .await;
+        }
     } else if let Some(key) = byok_key {
         llm_obj.insert("apiKey".to_string(), serde_json::Value::String(key));
     }
@@ -1502,10 +1543,24 @@ pub fn run() {
                 let attach_db = db.clone();
                 let attach_cipher = cipher.clone();
                 let attach_profiles_dir = profiles_dir.clone();
+                let credential_sidecar = sc.clone();
                 tauri::async_runtime::spawn(async move {
                     loop {
                         match rx.recv().await {
                             Ok(v) => {
+                                // A run whose agent token was rejected asks for a new one rather than
+                                // dying. Minting is forced: the sidecar only asks after the proxy
+                                // refused what it had, so the cached copy is exactly what must not be
+                                // handed back.
+                                if v.get("notify").and_then(serde_json::Value::as_str)
+                                    == Some("agentCredential")
+                                {
+                                    let sidecar = credential_sidecar.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        agent_proxy::push(&sidecar, true).await;
+                                    });
+                                    continue;
+                                }
                                 let payload = v.get("event").cloned().unwrap_or(v);
                                 if payload.get("type").and_then(serde_json::Value::as_str)
                                     == Some("run.needsBrowser")
@@ -1573,6 +1628,21 @@ pub fn run() {
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
+                    }
+                });
+
+                // Hand the sidecar an agent credential at startup and keep it current.
+                //
+                // Nothing else can: the token is minted from the session in the OS keychain, which
+                // only this process can read, and the in-browser Lobee panel starts runs through the
+                // sidecar without the desktop in the loop. Without this push, a panel run had no
+                // credential at all — which is exactly how managed Lobee came to be dead in a real
+                // install while looking perfectly alive in the UI.
+                let renew_sidecar = sc.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        agent_proxy::push(&renew_sidecar, false).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
                     }
                 });
             }

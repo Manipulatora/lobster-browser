@@ -9,6 +9,7 @@ import type { AgentStartParams } from '@lobster/shared-types';
 import type { AgentEvent, AgentRunSnapshot } from '@lobster/shared-types';
 import { AgentBridge, uploadRoots } from './bridge.js';
 import { forgetProfile, issueBridgeToken, provisionProfile } from './bridge-registry.js';
+import { __resetManagedCredentialForTests, setManagedCredential } from './managed-credential.js';
 import type { AgentManager } from './manager.js';
 
 test('loopback bridge authenticates status and replays SSE events after a cursor', async () => {
@@ -241,6 +242,66 @@ test('loopback run requests preserve validated panel policy', async () => {
   } finally {
     await bridge.close();
     forgetProfile(profileId);
+    if (previousUrl === undefined) delete process.env.LOBSTER_AGENT_PROXY_URL;
+    else process.env.LOBSTER_AGENT_PROXY_URL = previousUrl;
+    if (previousToken === undefined) delete process.env.LOBSTER_AGENT_PROXY_TOKEN;
+    else process.env.LOBSTER_AGENT_PROXY_TOKEN = previousToken;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a refused package is answered as a typed refusal and never starts a run', async () => {
+  const profileId = `bridge-refusal-${Date.now()}`;
+  const token = issueBridgeToken(profileId);
+  const root = await mkdtemp(join(tmpdir(), 'lobee-bridge-refusal-'));
+  provisionProfile(profileId, {
+    memoryDir: join(root, 'agent'),
+    memoryKey: randomBytes(32).toString('base64'),
+  });
+  let starts = 0;
+  const agents = {
+    setPresenceProbe: () => {},
+    start: async () => {
+      starts += 1;
+      return { sessionId: 'session-should-not-exist', profileId };
+    },
+  } as unknown as AgentManager;
+  const bridge = new AgentBridge(agents);
+  const previousUrl = process.env.LOBSTER_AGENT_PROXY_URL;
+  const previousToken = process.env.LOBSTER_AGENT_PROXY_TOKEN;
+  // The operator pair would authorise the run; this account is refused on its own merits.
+  delete process.env.LOBSTER_AGENT_PROXY_URL;
+  delete process.env.LOBSTER_AGENT_PROXY_TOKEN;
+  __resetManagedCredentialForTests();
+  setManagedCredential({ refusal: 'plan_required', tier: 'light' });
+  const origin = await bridge.start();
+  try {
+    const refused = await fetch(`${origin}/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-lobee-token': token },
+      body: JSON.stringify({
+        requestId: 'refused-run-request-00000001',
+        task: "spend somebody else's money",
+        model: 'test/model',
+      }),
+    });
+    assert.equal(refused.status, 403, 'a plan refusal is a 403, not a generic failure');
+    const body = (await refused.json()) as Record<string, unknown>;
+    assert.equal(body.code, 'plan_required');
+    assert.equal(body.tier, 'light');
+    assert.deepEqual(body.requiredTiers, ['plus', 'pro', 'max']);
+    assert.equal(body.minimumTier, 'plus');
+    assert.equal(starts, 0, 'a refused account must not reach the agent manager at all');
+
+    const entitlement = await fetch(`${origin}/entitlement`, {
+      headers: { 'x-lobee-token': token },
+    });
+    assert.equal(entitlement.status, 200);
+    assert.equal(((await entitlement.json()) as { entitled: boolean }).entitled, false);
+  } finally {
+    await bridge.close();
+    forgetProfile(profileId);
+    __resetManagedCredentialForTests();
     if (previousUrl === undefined) delete process.env.LOBSTER_AGENT_PROXY_URL;
     else process.env.LOBSTER_AGENT_PROXY_URL = previousUrl;
     if (previousToken === undefined) delete process.env.LOBSTER_AGENT_PROXY_TOKEN;

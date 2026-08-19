@@ -412,6 +412,79 @@ test('lost input responses reconcile authoritative status instead of leaving a s
   assert.match(requestId, /^[0-9a-f-]{36}$/);
 });
 
+test('a refused run is reported as a named entitlement, not as a generic failure', async () => {
+  globalThis.fetch = async (url, init = {}) => {
+    const target = String(url);
+    if (target.startsWith('chrome-extension://')) {
+      return json({ origin: 'http://127.0.0.1:40140', token: 'token-refused', profileId: 'p1' });
+    }
+    if (target.includes('/events?')) return eventsResponse(init.signal);
+    if (target.endsWith('/run')) {
+      return json(
+        {
+          ok: false,
+          code: 'plan_required',
+          error: 'Lobee is included with Plus, Pro and Max. Your team is on Light.',
+          tier: 'light',
+          requiredTiers: ['plus', 'pro', 'max'],
+          minimumTier: 'plus',
+        },
+        403,
+      );
+    }
+    if (target.endsWith('/status')) return json({ runs: [] });
+    throw new Error(`unexpected request: ${target}`);
+  };
+
+  const refusals = [];
+  const events = [];
+  const result = await bridge.runTask(
+    'do something expensive',
+    { mode: 'agent', model: 'test/model' },
+    { onEvent: (event) => events.push(event), onRefusal: (value) => refusals.push(value) },
+  );
+
+  assert.equal(result, 'failed');
+  // The panel can only offer "upgrade to Plus" if the tiers survive the refusal as data; a sentence
+  // in an error field cannot be turned back into a button.
+  assert.deepEqual(refusals, [
+    {
+      entitled: false,
+      code: 'plan_required',
+      tier: 'light',
+      requiredTiers: ['plus', 'pro', 'max'],
+      minimumTier: 'plus',
+      message: 'Lobee is included with Plus, Pro and Max. Your team is on Light.',
+    },
+  ]);
+  assert.equal(events.at(-1).status, 'error');
+});
+
+test('an unreachable entitlement question is unknown, never a refusal', async () => {
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.startsWith('chrome-extension://')) {
+      return json({ origin: 'http://127.0.0.1:40141', token: 'token-entitle', profileId: 'p1' });
+    }
+    if (target.endsWith('/entitlement')) return json({ error: 'nope' }, 503);
+    throw new Error(`unexpected request: ${target}`);
+  };
+  // Locking the panel on an unanswered question is the same lie as offering what is refused.
+  assert.equal(await bridge.fetchEntitlement(), null);
+});
+
+test('an entitled account reports its package and nothing to act on', async () => {
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.startsWith('chrome-extension://')) {
+      return json({ origin: 'http://127.0.0.1:40142', token: 'token-entitled', profileId: 'p1' });
+    }
+    if (target.endsWith('/entitlement')) return json({ ok: true, entitled: true, tier: 'pro' });
+    throw new Error(`unexpected request: ${target}`);
+  };
+  assert.deepEqual(await bridge.fetchEntitlement(), { entitled: true, tier: 'pro' });
+});
+
 async function waitUntil(predicate, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {

@@ -110,6 +110,25 @@ const TOKEN_TTL = '7d';
  */
 const DESKTOP_TOKEN_TTL = '365d';
 
+/**
+ * How long a Lobee agent token lasts, in seconds.
+ *
+ * Minutes, not days, and that asymmetry with {@link DESKTOP_TOKEN_TTL} is the point. This token
+ * authorises spend against the operator's model key on behalf of one team, and it travels to a
+ * sidecar process rather than living in the OS keychain. Renewing it costs one call the desktop
+ * already holds a session for, so there is no user-visible price for keeping the window short.
+ */
+export const AGENT_TOKEN_TTL_SECONDS = 30 * 60;
+
+/**
+ * Who a token was minted for.
+ *
+ * A SCOPE, not a label. An `agent` token carries a team and buys model time; it is deliberately
+ * NOT a session, and {@link JwtAuthGuard} refuses it on the ordinary API — otherwise the
+ * short-lived, narrow credential handed to a sidecar would open every account endpoint.
+ */
+export type TokenAudience = 'web' | 'desktop' | 'agent';
+
 /** What the auth endpoints hand back to a client: the public user + a bearer token. */
 export interface AuthResult {
   user: User;
@@ -121,6 +140,17 @@ export interface AuthResult {
 export interface JwtPayload {
   sub: string;
   email: string;
+  /** Absent on tokens issued before scoping existed; those are ordinary sessions. */
+  aud?: TokenAudience;
+  /** The team an `agent` token spends for. Never present on a session token. */
+  teamId?: string;
+}
+
+/** An agent token plus what the caller needs to renew it before it expires. */
+export interface AgentTokenResult {
+  token: string;
+  teamId: string;
+  expiresInSeconds: number;
 }
 
 /**
@@ -292,11 +322,36 @@ export class AuthService {
    * have established the identity first.
    */
   issueTokenFor(userId: string, email: string, audience: 'web' | 'desktop' = 'web'): string {
-    const payload: JwtPayload = { sub: userId, email };
+    const payload: JwtPayload = { sub: userId, email, aud: audience };
     return this.jwt.sign(payload, {
       secret: this.jwtSecret,
       expiresIn: audience === 'desktop' ? DESKTOP_TOKEN_TTL : TOKEN_TTL,
     });
+  }
+
+  /**
+   * Mint a short-lived token scoped to ONE team's agent spend.
+   *
+   * Exchanged for by a desktop that already holds a session, so it authenticates nothing itself —
+   * the caller must have resolved the user and verified their membership of `teamId` first. The
+   * team is baked into the claims rather than read from a request body at spend time: a body-borne
+   * team id on a metered endpoint is a way to charge someone else's wallet.
+   */
+  issueAgentToken(args: { userId: string; email: string; teamId: string }): AgentTokenResult {
+    const payload: JwtPayload = {
+      sub: args.userId,
+      email: args.email,
+      aud: 'agent',
+      teamId: args.teamId,
+    };
+    return {
+      token: this.jwt.sign(payload, {
+        secret: this.jwtSecret,
+        expiresIn: AGENT_TOKEN_TTL_SECONDS,
+      }),
+      teamId: args.teamId,
+      expiresInSeconds: AGENT_TOKEN_TTL_SECONDS,
+    };
   }
 
   private signToken(user: StoredUser): string {

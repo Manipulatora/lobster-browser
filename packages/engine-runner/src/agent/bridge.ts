@@ -14,6 +14,12 @@ import {
 import type { RunRecoveryResolution } from '@lobster/agent';
 import type { AgentManager } from './manager.js';
 import { getBridgeOrigin, resolveBridgeToken, setBridgeOrigin } from './bridge-registry.js';
+import {
+  currentManagedCredential,
+  managedEntitlement,
+  managedLlmConfig,
+  refusalStatus,
+} from './managed-credential.js';
 
 const PANEL_DEFAULT_TOKEN_BUDGET = 100_000;
 const MUTATION_DEDUP_TTL_MS = 15 * 60_000;
@@ -42,8 +48,9 @@ const mutationRequests = new Map<string, MutationRequest>();
  *
  * Binds 127.0.0.1 on an ephemeral port (never a public interface). Every request authenticates with the
  * per-profile token from the registry (injected into that profile's Lobee snapshot, unreadable by web
- * pages), so a panel can only act on its own profile. The managed LLM proxy URL + access token come from
- * this process's env (never the client), so the OpenRouter key stays server-side. Agent events for a
+ * pages), so a panel can only act on its own profile. The managed LLM proxy URL + agent token come from
+ * the desktop core's signed-in session (never the client), so the OpenRouter key stays server-side and
+ * the spend is attributed to the user who authorised it. Agent events for a
  * profile are streamed to its panel over SSE. No page-visible surface — this is browser-chrome ↔ sidecar
  * plumbing and adds no anti-detect tell.
  */
@@ -131,6 +138,11 @@ export class AgentBridge {
       }
       if (req.method === 'GET' && url.pathname === '/models') {
         return await this.models(res);
+      }
+      // What this account may do with Lobee, read on mount and again after any refused run. The
+      // panel paints from it rather than discovering the answer by starting a run and failing.
+      if (req.method === 'GET' && url.pathname === '/entitlement') {
+        return json(res, 200, { ok: true, ...managedEntitlement() });
       }
       if (req.method === 'GET' && url.pathname === '/thread') {
         return await this.thread(res, entry, url.searchParams.get('id') ?? '');
@@ -290,20 +302,23 @@ export class AgentBridge {
     if (!entry.memoryDir || !entry.memoryKey) {
       return reply(409, { ok: false, error: 'this profile is not provisioned for Lobee runs' });
     }
-    const proxyUrl = process.env.LOBSTER_AGENT_PROXY_URL;
-    const proxyToken = process.env.LOBSTER_AGENT_PROXY_TOKEN;
-    if (!proxyUrl || !proxyToken) {
-      return reply(503, { ok: false, error: 'managed LLM proxy is not configured' });
+    // Entitlement is decided BEFORE the run, not at the first model call. A refused account that
+    // has already watched the agent open a browser has been charged attention for something it was
+    // never going to be allowed to do, and the panel cannot turn a mid-run provider error into a
+    // named upsell. The proxy re-checks the plan on every call regardless — this is the copy that
+    // makes the refusal legible, not the copy that makes it safe.
+    const managed = managedLlmConfig(model, effort);
+    if (!managed.ok) {
+      return reply(refusalStatus(managed.refusal.code), {
+        ok: false,
+        error: managed.refusal.message,
+        code: managed.refusal.code,
+        tier: managed.refusal.tier,
+        requiredTiers: managed.refusal.requiredTiers,
+        minimumTier: managed.refusal.minimumTier,
+      });
     }
-
-    const llm: AgentLlmConfig = {
-      provider: 'openrouter',
-      model,
-      managed: true,
-      baseUrl: proxyUrl,
-      apiKey: proxyToken,
-      ...(effort ? { effort } : {}),
-    };
+    const llm: AgentLlmConfig = managed.llm;
     const result = await this.agents.start({
       profileId: entry.profileId,
       origin: 'panel',
@@ -468,17 +483,16 @@ export class AgentBridge {
 
   /** Proxy the backend's live model roster to the panel (the OpenRouter key stays on the server). */
   private async models(res: ServerResponse): Promise<void> {
-    const proxyUrl = process.env.LOBSTER_AGENT_PROXY_URL;
-    const proxyToken = process.env.LOBSTER_AGENT_PROXY_TOKEN;
+    const credential = await currentManagedCredential();
     const fallback = {
       updatedAt: new Date().toISOString(),
       stale: true,
       models: [] as unknown[],
     };
-    if (!proxyUrl || !proxyToken) return json(res, 200, fallback);
+    if (!credential) return json(res, 200, fallback);
     try {
-      const upstream = await fetch(`${proxyUrl.replace(/\/$/, '')}/models`, {
-        headers: { authorization: `Bearer ${proxyToken}` },
+      const upstream = await fetch(`${credential.baseUrl.replace(/\/$/, '')}/models`, {
+        headers: { authorization: `Bearer ${credential.token}` },
         signal: AbortSignal.timeout(15_000),
       });
       const body = await upstream.json().catch(() => fallback);

@@ -67,6 +67,9 @@ enum CreditTxKind {
   refund     // credit returned (proration, support action)
   adjustment // a correction that is neither a sale nor a payment — an operator fix, or Credit
              // clawed back when a settled deposit was refunded; always carries a reason in `metadata`
+  agent_usage // metered Lobee spend, flushed in whole cents from the team's micro-USD accrual;
+              // its own kind rather than an `adjustment` because an adjustment means a human
+              // decided something, and this is machine-generated many times a day
 }
 
 // Lifecycle of an inbound crypto payment.
@@ -221,6 +224,7 @@ model Team {
   auditLogs    AuditLog[]
   wallet       Wallet?
   deposits     Deposit[]
+  agentUsage   AgentUsage[]
 
   @@index([ownerUserId])
   @@map("teams")
@@ -430,6 +434,18 @@ model Subscription {
 model Wallet {
   teamId       String   @id
   balanceCents Int      @default(0)
+
+  /// Agent spend that has been incurred but is not yet worth a whole cent, in MICRO-USD
+  /// (1 cent = 10,000). A single Lobee call routinely costs a fraction of a cent, so charging each
+  /// one to a whole-cent wallet would either overcharge a chatty session by an order of magnitude
+  /// or, rounded the other way, make the agent free. Calls accumulate here and only whole cents are
+  /// flushed to `balanceCents`, so the remainder survives both the next call and a restart.
+  ///
+  /// It also holds spend the balance could not cover, which is why it is not bounded by one cent.
+  /// That debt is bounded instead by the pre-flight reserve check refusing the NEXT call, so it can
+  /// never approach the Int ceiling (~$2,147).
+  agentAccruedMicros Int @default(0)
+
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -438,6 +454,51 @@ model Wallet {
   transactions CreditTransaction[]
 
   @@map("wallets")
+}
+
+/// One metered Lobee call.
+///
+/// A ledger row for agent spend says "Lobee — 3¢" and can say nothing more: it is the sum of many
+/// calls, flushed when the accrual crossed a cent. This table is what those cents were. Rows are
+/// INSERTed and read, never updated — the same append-only discipline as the ledger, for the same
+/// reason: it is evidence, and evidence that can be edited explains nothing.
+///
+/// `costMicros` and `chargedCents` disagree on almost every row, and that is the point — the
+/// difference is the sub-cent remainder carried on `Wallet.agentAccruedMicros`.
+model AgentUsage {
+  id     String @id @default(uuid())
+  teamId String
+
+  /// The member whose session spent this; null for a system-originated run.
+  userId    String?
+  /// The browser profile the run drove, when it ran in one.
+  profileId String?
+  /// The Lobee run this call belonged to, so a whole run can be totalled from its calls.
+  sessionId String?
+
+  model String
+
+  /// Total prompt tokens, with `cachedIn` as a SUBSET — the provider's own shape, kept verbatim so
+  /// a row can be re-priced later against the table that was in force. Kept apart because they are
+  /// billed at wildly different rates: output is several times fresh input, cached input a tenth.
+  tokensIn  Int
+  tokensOut Int
+  cachedIn  Int
+
+  /// What the call cost in micro-USD, margin already applied.
+  costMicros   Int
+  /// Whole cents this call flushed to the wallet — usually 0, occasionally 1 or more.
+  chargedCents Int
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  /// Every read of this table is one team over a time range — a statement line, a monthly total,
+  /// or a dispute.
+  @@index([teamId, createdAt])
+  @@map("agent_usage")
 }
 
 // Append-only Credit ledger. Rows are INSERTed and read, never updated or deleted.

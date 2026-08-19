@@ -24,6 +24,10 @@ export interface AuthenticatedRequest {
  * Protects routes with a Bearer JWT: extracts the token from the `Authorization` header,
  * verifies its signature/expiry, confirms the user still exists, and attaches the public
  * user (id included) to `request.user` for downstream handlers.
+ *
+ * An `agent`-audience token is refused here. It is signed with the same secret, so without this
+ * check the narrow, short-lived credential the desktop hands to a sidecar would also open the
+ * account, billing and profile endpoints — a scope that only exists if it is enforced.
  */
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
@@ -44,6 +48,10 @@ export class JwtAuthGuard implements CanActivate {
       payload = await this.jwt.verifyAsync<JwtPayload>(token, { secret: this.auth.jwtSecret });
     } catch {
       throw new UnauthorizedException('invalid or expired token');
+    }
+
+    if (payload.aud === 'agent') {
+      throw new UnauthorizedException('agent tokens are not valid on this endpoint');
     }
 
     request.user = await this.auth.validateUser(payload.sub);

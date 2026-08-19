@@ -4,11 +4,77 @@ import { test } from 'node:test';
 import { BadRequestException, GatewayTimeoutException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 
+import type {
+  AgentChargeRequest,
+  AgentChargeResult,
+  AgentSpendService,
+} from '../billing/agent-spend.service';
+import type { AgentPrincipal } from './agent-auth.guard';
 import { AgentLlmService } from './agent-llm.service';
+import { AgentRefusalException } from './agent-refusal';
 
-function createService(values: Record<string, unknown> = {}): AgentLlmService {
+/** The spender every test bills to, unless it is testing what happens when it may not. */
+const PRINCIPAL: AgentPrincipal = { userId: 'user-1', teamId: 'team-1', tier: 'plus' };
+
+/**
+ * Stands in for `AgentSpendService`, recording what it was asked to charge. The arithmetic is the
+ * billing module's own concern and tested there; what matters here is WHICH figures the proxy hands
+ * over — that is where the under-metering lived.
+ */
+class FakeSpend {
+  readonly charges: AgentChargeRequest[] = [];
+  priced = true;
+  affordable = true;
+  balanceCents = 500;
+  requiredCents = 2;
+
+  estimateMicros(args: { tokensIn: number; maxTokensOut: number }): number | undefined {
+    return this.priced ? args.tokensIn * 2 + args.maxTokensOut : undefined;
+  }
+
+  async canAfford(): Promise<{ ok: boolean; balanceCents: number; requiredCents: number }> {
+    return {
+      ok: this.affordable,
+      balanceCents: this.balanceCents,
+      requiredCents: this.requiredCents,
+    };
+  }
+
+  async charge(request: AgentChargeRequest): Promise<AgentChargeResult> {
+    this.charges.push(request);
+    return {
+      priced: true,
+      costMicros: 100,
+      chargedCents: 0,
+      pendingMicros: 100,
+      unpaidCents: 0,
+    };
+  }
+
+  async listUsage(): Promise<[]> {
+    return [];
+  }
+}
+
+function createService(
+  values: Record<string, unknown> = {},
+  spend: FakeSpend = new FakeSpend(),
+): AgentLlmService {
   const config = { get: (key: string): unknown => values[key] } as unknown as ConfigService;
-  return new AgentLlmService(config);
+  return new AgentLlmService(config, spend as unknown as AgentSpendService);
+}
+
+/** Drain a streamed body the way the controller does, returning the bytes the client would see. */
+async function drain(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  const received: string[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received.push(decoder.decode(value));
+  }
+  return received.join('');
 }
 
 function modelCatalog(): { data: Array<Record<string, unknown>> } {
@@ -130,35 +196,41 @@ test('managed completion gates incompatible models and normalizes Claude tool ch
     const service = createService({ OPENROUTER_API_KEY: 'server-secret' });
     await service.listModels();
     await assert.rejects(
-      service.chatCompletion({
-        model: 'openai/ask-model',
-        messages: [],
-        tools: [{ type: 'function' }],
-        tool_choice: 'required',
-      }),
+      service.chatCompletion(
+        {
+          model: 'openai/ask-model',
+          messages: [],
+          tools: [{ type: 'function' }],
+          tool_choice: 'required',
+        },
+        PRINCIPAL,
+      ),
       BadRequestException,
     );
     await assert.rejects(
-      service.chatCompletion({ model: 'openai/not-real', messages: [] }),
+      service.chatCompletion({ model: 'openai/not-real', messages: [] }, PRINCIPAL),
       BadRequestException,
     );
     assert.equal(calls, 1);
 
-    const claudeResult = await service.chatCompletion({
-      model: 'anthropic/mandatory-thinking',
-      messages: [],
-      tools: [{ type: 'function' }],
-      tool_choice: { type: 'function', function: { name: 'act' } },
-      reasoning: { effort: 'medium' },
-    });
+    const claudeResult = await service.chatCompletion(
+      {
+        model: 'anthropic/mandatory-thinking',
+        messages: [],
+        tools: [{ type: 'function' }],
+        tool_choice: { type: 'function', function: { name: 'act' } },
+        reasoning: { effort: 'medium' },
+      },
+      PRINCIPAL,
+    );
     assert.equal(claudeResult.status, 200);
     assert.equal(completionBody.tool_choice, 'auto');
     assert.equal(calls, 2);
 
-    const askResult = await service.chatCompletion({
-      model: 'openai/ask-model',
-      messages: [{ role: 'user', content: 'hello' }],
-    });
+    const askResult = await service.chatCompletion(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hello' }] },
+      PRINCIPAL,
+    );
     assert.equal(askResult.status, 200);
     assert.equal(calls, 3);
   } finally {
@@ -188,14 +260,18 @@ test('managed completion has a hard timeout and aborts on caller cancellation', 
     });
     await service.listModels();
     await assert.rejects(
-      service.chatCompletion({ model: 'openai/tool-model', messages: [] }),
+      service.chatCompletion({ model: 'openai/tool-model', messages: [] }, PRINCIPAL),
       GatewayTimeoutException,
     );
 
     const cancellation = new AbortController();
     cancellation.abort();
     await assert.rejects(
-      service.chatCompletion({ model: 'openai/tool-model', messages: [] }, cancellation.signal),
+      service.chatCompletion(
+        { model: 'openai/tool-model', messages: [] },
+        PRINCIPAL,
+        cancellation.signal,
+      ),
       /upstream OpenRouter request failed/,
     );
     assert.equal(calls, 2, 'pre-cancelled requests must not start another upstream fetch');
@@ -234,10 +310,10 @@ test('upstream error logs retain codes but never provider messages', async () =>
       },
     };
     await service.listModels();
-    const result = await service.chatCompletion({
-      model: 'openai/ask-model',
-      messages: [{ role: 'user', content: 'private input' }],
-    });
+    const result = await service.chatCompletion(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'private input' }] },
+      PRINCIPAL,
+    );
     assert.equal(result.status, 400);
     assert.match(warnings.join('\n'), /provider_error/);
     assert.match(warnings.join('\n'), /request-123/);
@@ -253,7 +329,7 @@ test('a streamed completion pipes SSE through untouched and still meters usage',
   const frames = [
     'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
     'data: {"choices":[{"delta":{"content":" there"}}]}\n\n',
-    'data: {"choices":[],"usage":{"prompt_tokens":21,"completion_tokens":6}}\n\n',
+    'data: {"choices":[],"usage":{"prompt_tokens":21,"completion_tokens":6,"cost":0.00042,"prompt_tokens_details":{"cached_tokens":5}}}\n\n',
     'data: [DONE]\n\n',
   ];
   globalThis.fetch = (async (input, init) => {
@@ -275,30 +351,265 @@ test('a streamed completion pipes SSE through untouched and still meters usage',
   }) as typeof fetch;
 
   try {
-    const service = createService({ OPENROUTER_API_KEY: 'server-key' });
-    const { status, stream } = await service.chatCompletionStream({
-      model: 'openai/ask-model',
-      messages: [{ role: 'user', content: 'hi' }],
-      stream: true,
-    });
+    const spend = new FakeSpend();
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' }, spend);
+    const { status, stream } = await service.chatCompletionStream(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }], stream: true },
+      PRINCIPAL,
+    );
     assert.equal(status, 200);
     assert.ok(stream);
 
     // Usage must be requested, or a streamed run would silently go unbilled.
     assert.deepEqual(forwarded.stream_options, { include_usage: true });
+    assert.deepEqual(forwarded.usage, { include: true });
     assert.equal(forwarded.stream, true);
 
-    const received: string[] = [];
-    const reader = stream!.getReader();
-    const decoder = new TextDecoder();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      received.push(decoder.decode(value));
-    }
     // Bytes reach the client exactly as they arrived — the proxy must not reshape frames.
-    assert.equal(received.join(''), frames.join(''));
-    assert.deepEqual(service.usage(), { meteredTokens: 27, meteredRequests: 1 });
+    assert.equal(await drain(stream!), frames.join(''));
+
+    assert.equal(spend.charges.length, 1);
+    const [charge] = spend.charges;
+    // Input, cached input and output are carried SEPARATELY: they are billed at three different
+    // rates, so a single summed figure cannot be priced.
+    assert.equal(charge.tokensIn, 21);
+    assert.equal(charge.tokensOut, 6);
+    assert.equal(charge.cachedIn, 5);
+    assert.equal(charge.providerCostUsd, 0.00042);
+    assert.equal(charge.teamId, 'team-1');
+    assert.equal(charge.userId, 'user-1');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a streamed answer whose usage chunk never arrives is still charged for', async () => {
+  const original = globalThis.fetch;
+  // No usage frame and no [DONE]: the shape of an upstream that truncated, or a run the panel
+  // closed part-way. The generation happened and the provider billed us for it.
+  const frames = [
+    'data: {"choices":[{"delta":{"content":"0123456789012345"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"0123456789012345"}}]}\n\n',
+  ];
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(encoder.encode(frame));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const spend = new FakeSpend();
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' }, spend);
+    const { stream } = await service.chatCompletionStream(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }], stream: true },
+      PRINCIPAL,
+    );
+    await drain(stream!);
+
+    assert.equal(spend.charges.length, 1, 'an unmeasured stream must not be served for free');
+    const [charge] = spend.charges;
+    // 32 delta characters at four characters per token, counted once each — a rolling re-scan
+    // would bill the same frames several times over.
+    assert.equal(charge.tokensOut, 8);
+    assert.ok(charge.tokensIn > 0, 'the prompt estimate stands in for the missing input figure');
+    assert.equal(charge.providerCostUsd, undefined);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a client that walks away mid-stream is charged for what was generated', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode('data: {"choices":[{"delta":{"content":"abcd"}}]}\n\n'),
+          );
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const spend = new FakeSpend();
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' }, spend);
+    const { stream } = await service.chatCompletionStream(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }], stream: true },
+      PRINCIPAL,
+    );
+    const reader = stream!.getReader();
+    await reader.read();
+    await reader.cancel();
+
+    assert.equal(spend.charges.length, 1, 'a closed panel is not a refund');
+    assert.equal(spend.charges[0].tokensOut, 1);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a non-2xx upstream that reports usage is charged for the generation it billed us', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    return new Response(
+      JSON.stringify({
+        error: { code: 'upstream_cutoff' },
+        usage: { prompt_tokens: 400, completion_tokens: 120, cost: 0.0031 },
+      }),
+      { status: 502, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const spend = new FakeSpend();
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' }, spend);
+    const result = await service.chatCompletion(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }] },
+      PRINCIPAL,
+    );
+    assert.equal(result.status, 502);
+    assert.equal(spend.charges.length, 1);
+    assert.equal(spend.charges[0].tokensOut, 120);
+    assert.equal(spend.charges[0].providerCostUsd, 0.0031);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a failure that generated nothing is charged for nothing', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    return new Response(JSON.stringify({ error: { code: 'rate_limited' } }), { status: 429 });
+  }) as typeof fetch;
+
+  try {
+    const spend = new FakeSpend();
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' }, spend);
+    const result = await service.chatCompletion(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }] },
+      PRINCIPAL,
+    );
+    assert.equal(result.status, 429);
+    assert.deepEqual(spend.charges, []);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a team that cannot afford the next call is refused before the upstream is contacted', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    throw new Error('an unaffordable call must never reach the provider');
+  }) as typeof fetch;
+
+  try {
+    const spend = new FakeSpend();
+    spend.affordable = false;
+    spend.balanceCents = 3;
+    spend.requiredCents = 11;
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' }, spend);
+    await assert.rejects(
+      service.chatCompletion(
+        { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }] },
+        PRINCIPAL,
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof AgentRefusalException);
+        // 402, not 403: an empty wallet is a top-up, not an upgrade, and the panel branches on it.
+        assert.equal(error.getStatus(), 402);
+        assert.equal(error.body.reason, 'insufficient_credit');
+        assert.equal(error.body.balanceCents, 3);
+        assert.equal(error.body.requiredCents, 11);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a model with no known price is refused rather than served at a guessed rate', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    throw new Error('an unpriced model must never reach the provider');
+  }) as typeof fetch;
+
+  try {
+    const spend = new FakeSpend();
+    spend.priced = false;
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' }, spend);
+    await assert.rejects(
+      service.chatCompletion(
+        { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }] },
+        PRINCIPAL,
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof AgentRefusalException);
+        assert.equal(error.body.reason, 'model_unpriced');
+        assert.equal(error.body.model, 'openai/ask-model');
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a client cannot switch its own billing off through the forwarded body', async () => {
+  const original = globalThis.fetch;
+  let forwarded: Record<string, unknown> = {};
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    forwarded = JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ choices: [], usage: { prompt_tokens: 1 } }), {
+      status: 200,
+    });
+  }) as typeof fetch;
+
+  try {
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' });
+    await service.chatCompletion(
+      {
+        model: 'openai/ask-model',
+        messages: [{ role: 'user', content: 'hi' }],
+        usage: { include: false },
+        max_tokens: 1_000_000,
+      },
+      PRINCIPAL,
+    );
+    assert.deepEqual(forwarded.usage, { include: true });
+    assert.equal(forwarded.max_tokens, 8192);
   } finally {
     globalThis.fetch = original;
   }
@@ -315,11 +626,10 @@ test('a streamed request for a model outside the roster is refused before any by
   try {
     const service = createService({ OPENROUTER_API_KEY: 'server-key' });
     await assert.rejects(
-      service.chatCompletionStream({
-        model: 'evil/model',
-        messages: [{ role: 'user', content: 'hi' }],
-        stream: true,
-      }),
+      service.chatCompletionStream(
+        { model: 'evil/model', messages: [{ role: 'user', content: 'hi' }], stream: true },
+        PRINCIPAL,
+      ),
       BadRequestException,
     );
   } finally {

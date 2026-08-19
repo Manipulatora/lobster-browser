@@ -1,8 +1,14 @@
 import { createInterface } from 'node:readline';
-import type { AgentEvent, SidecarNotification, SidecarRequest } from '@lobster/shared-types';
+import type {
+  AgentEvent,
+  SidecarCredentialRequest,
+  SidecarNotification,
+  SidecarRequest,
+} from '@lobster/shared-types';
 import { dispatch } from './rpc.js';
 import { AgentManager } from './agent/manager.js';
 import { AgentBridge } from './agent/bridge.js';
+import { setCredentialRefresher } from './agent/managed-credential.js';
 import { CompositeRunner } from './runners/composite.js';
 import { buildLaunchers } from './runners/default-launchers.js';
 import { buildDevShmArgs } from './dev-shm.js';
@@ -50,6 +56,14 @@ async function main(): Promise<void> {
   const writeLine = (payload: unknown): void => {
     process.stdout.write(JSON.stringify(payload) + '\n');
   };
+
+  // The managed agent token expires in half an hour, which is well inside the length of a real run.
+  // This is how a run in flight asks the desktop for the next one: the desktop answers with an
+  // `agent.setCredential` call, and the waiting model call picks it up instead of failing.
+  setCredentialRefresher(() => {
+    const request: SidecarCredentialRequest = { notify: 'agentCredential' };
+    writeLine(request);
+  });
 
   let bridge: AgentBridge | undefined;
   const emitAgentEvent = (event: AgentEvent): void => {

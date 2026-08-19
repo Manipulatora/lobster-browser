@@ -55,6 +55,27 @@ export interface AgentRunSnapshot {
   error?: string;
 }
 
+/** Why the agent said no. Mirrors the backend's refusal codes; the panel shows a screen per code. */
+export type AgentRefusalCode =
+  'plan_required' | 'insufficient_credit' | 'signed_out' | 'unconfigured';
+
+/**
+ * What this account may do with Lobee right now, as the sidecar reports it.
+ *
+ * The panel reads this on mount rather than discovering the answer by starting a run: a package that
+ * does not include the agent is a product state with a next action, and a composer that accepts a
+ * task it can never run is a promise the product cannot keep.
+ */
+export interface AgentEntitlement {
+  entitled: boolean;
+  /** The package the account is on, when known — the upsell has to be able to name it. */
+  tier?: string;
+  requiredTiers?: string[];
+  minimumTier?: string;
+  code?: AgentRefusalCode;
+  message?: string;
+}
+
 export type Mode = 'ask' | 'agent';
 export type Effort = 'low' | 'medium' | 'high';
 

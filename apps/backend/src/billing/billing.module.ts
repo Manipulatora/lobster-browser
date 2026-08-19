@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 
 import { AuthModule } from '../auth/auth.module';
 import { PrismaService } from '../prisma/prisma.service';
+import { AgentSpendService } from './agent-spend.service';
 import { BILLING_REPOSITORY } from './billing.repository';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
@@ -14,7 +15,7 @@ import { PrismaBillingRepository } from './prisma-billing.repository';
 import { RenewalService } from './renewal.service';
 
 /**
- * Credit, deposits and packages.
+ * Credit, deposits, packages and metered agent spend.
  *
  * Imports AuthModule for the shared `JwtAuthGuard` and `TEAMS_REPOSITORY` (resolving the caller's
  * team rather than trusting the request body — on a billing endpoint that distinction is what
@@ -32,6 +33,7 @@ import { RenewalService } from './renewal.service';
     BillingService,
     RenewalService,
     DepositReconciliationService,
+    AgentSpendService,
     {
       provide: BILLING_REPOSITORY,
       inject: [ConfigService, PrismaService],
@@ -52,6 +54,8 @@ import { RenewalService } from './renewal.service';
       useFactory: (config: ConfigService) => new NowPaymentsProvider(config),
     },
   ],
-  exports: [BillingService, BILLING_REPOSITORY],
+  // `AgentSpendService` is exported for AgentModule: metering agent calls is billing's job, and the
+  // agent module has no business owning a second way to move Credit.
+  exports: [BillingService, AgentSpendService, BILLING_REPOSITORY],
 })
 export class BillingModule {}

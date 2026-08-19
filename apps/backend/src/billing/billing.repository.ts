@@ -37,6 +37,40 @@ export interface DepositReversal {
 }
 
 /**
+ * One metered Lobee call, as written to the usage audit.
+ *
+ * WHY EVERY FIELD IS HERE. A charge on a statement reads "Lobee — 3¢" and nothing else. When a
+ * team asks what those three cents were, this row is the only answer available: which model ran,
+ * whose session it was, which profile it ran in, how the tokens split, and what the split priced
+ * at BEFORE the sub-cent accrual turned it into whole cents. `costMicros` and `chargedCents`
+ * deliberately disagree on most rows — that difference IS the accrual, and hiding it would make
+ * the audit unable to explain the very rounding it exists to justify.
+ */
+export interface AgentUsageEntry {
+  teamId: string;
+  /** The member whose session spent this. Absent for a run started by a system job. */
+  userId?: string;
+  /** The browser profile the run drove, when it ran in one. */
+  profileId?: string;
+  /** The Lobee run this call belonged to, so a whole run can be totalled. */
+  sessionId?: string;
+  model: string;
+  /** Total prompt tokens; `cachedIn` is a subset, exactly as the provider reports it. */
+  tokensIn: number;
+  tokensOut: number;
+  cachedIn: number;
+  /** What the call cost in micro-USD, margin included. */
+  costMicros: number;
+  /** Whole cents this call actually flushed to the wallet — usually 0, occasionally 1 or more. */
+  chargedCents: number;
+}
+
+export interface AgentUsageRow extends AgentUsageEntry {
+  id: string;
+  createdAt: string;
+}
+
+/**
  * Persistence boundary for Credit, deposits and subscriptions.
  *
  * WHY THE METHODS ARE OPERATIONS, NOT ACCESSORS. There is deliberately no `setBalance`, and
@@ -83,6 +117,33 @@ export interface BillingRepository {
 
   /** Newest-first ledger page for the account statement. */
   listTransactions(teamId: string, limit: number): Promise<CreditTransaction[]>;
+
+  // --- Agent metering -------------------------------------------------------
+
+  /**
+   * Add micro-USD of agent spend to the team's un-flushed accrual and return the NEW total.
+   *
+   * Increment-and-return in one call for the same reason `move` is one call: a read followed by a
+   * write loses one of two concurrent agent calls, and the lost one is spend nobody is charged for.
+   */
+  accrueAgentMicros(teamId: string, micros: number): Promise<number>;
+
+  /**
+   * Take `micros` back out of the accrual so they can be charged as whole cents.
+   *
+   * Refuses (returns false) when the accrual is smaller than the claim, which is what makes two
+   * concurrent flushes safe: both compute the same cent to charge, exactly one claims it.
+   */
+  claimAgentMicros(teamId: string, micros: number): Promise<boolean>;
+
+  /** Micro-USD accrued and not yet charged — sub-cent change plus anything the balance could not cover. */
+  getAgentAccruedMicros(teamId: string): Promise<number>;
+
+  /** Append one per-call usage row. Append-only, like the ledger it explains. */
+  recordAgentUsage(entry: AgentUsageEntry): Promise<void>;
+
+  /** Newest-first usage page, for explaining a charge to the team that disputes it. */
+  listAgentUsage(teamId: string, limit: number): Promise<AgentUsageRow[]>;
 
   // --- Deposits -------------------------------------------------------------
 

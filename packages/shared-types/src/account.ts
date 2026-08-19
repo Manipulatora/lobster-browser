@@ -101,6 +101,27 @@ export const PLAN_CATALOG: readonly PlanDefinition[] = [
 ] as const;
 
 /**
+ * The packages the Lobee agent is included with.
+ *
+ * LIGHT IS EXCLUDED DELIBERATELY, and it is a paid package. Agent time is metered spend against a
+ * managed model key rather than a seat, and the entry package is not priced to carry it — the
+ * pricing page has always sold the agent from Plus upward, and this constant is what makes the
+ * product agree with the page.
+ *
+ * THE single definition: the entitlement check, the panel's upsell copy and the pricing page all
+ * resolve here, so an agent refusal can never disagree with what the storefront promised.
+ */
+export const AGENT_ENABLED_TIERS: readonly PlanTier[] = ['plus', 'pro', 'max'] as const;
+
+/** Whether a team on this tier may run Lobee. `free` and `light` may not. */
+export function planAllowsAgent(tier: PlanTier): boolean {
+  return AGENT_ENABLED_TIERS.includes(tier);
+}
+
+/** The package a refused team is told to move to — the cheapest one that includes the agent. */
+export const AGENT_MINIMUM_TIER: PaidPlanTier = 'plus';
+
+/**
  * Profile allowance for a team that has never bought a package.
  *
  * THE single definition. The Prisma default on `Subscription.profileLimit` and
@@ -175,7 +196,16 @@ export interface Wallet {
   balanceCents: number;
 }
 
-export type CreditTxKind = 'deposit' | 'purchase' | 'renewal' | 'refund' | 'adjustment';
+/**
+ * What moved Credit.
+ *
+ * `agent_usage` is metered Lobee spend and is deliberately its OWN kind rather than an
+ * `adjustment`. An adjustment means a human decided something; agent spend is machine-generated,
+ * arrives many times a day, and has to be separable from operator corrections for a statement — or
+ * a dispute — to mean anything.
+ */
+export type CreditTxKind =
+  'deposit' | 'purchase' | 'renewal' | 'refund' | 'adjustment' | 'agent_usage';
 
 /**
  * One entry in the append-only Credit ledger. `amountCents` is SIGNED: deposits and refunds are

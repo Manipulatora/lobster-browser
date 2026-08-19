@@ -78,15 +78,43 @@ check(
 check('old PlanTier_new type was renamed away', !(await typeExists('PlanTier_new')));
 
 // --- The dropped Stripe column really is gone --------------------------------
-check('subscriptions.stripeCustomerId dropped', !(await columnExists('subscriptions', 'stripeCustomerId')));
-for (const col of ['priceCents', 'currentPeriodEnd', 'autoRenew', 'lastRenewalAt', 'lastFailureCode']) {
+check(
+  'subscriptions.stripeCustomerId dropped',
+  !(await columnExists('subscriptions', 'stripeCustomerId')),
+);
+for (const col of [
+  'priceCents',
+  'currentPeriodEnd',
+  'autoRenew',
+  'lastRenewalAt',
+  'lastFailureCode',
+]) {
   check(`subscriptions.${col} added`, await columnExists('subscriptions', col));
 }
 
 // --- New tables ---------------------------------------------------------------
-for (const table of ['wallets', 'credit_transactions', 'deposits', 'desktop_auth_grants']) {
+for (const table of [
+  'wallets',
+  'credit_transactions',
+  'deposits',
+  'desktop_auth_grants',
+  'agent_usage',
+]) {
   check(`table ${table} exists`, await tableExists(table));
 }
+
+// --- Agent spend has a ledger kind of its own, not a borrowed 'adjustment' ----
+const kinds = await db.query(`
+  SELECT e.enumlabel FROM pg_enum e
+  JOIN pg_type t ON t.oid = e.enumtypid
+  WHERE t.typname = 'CreditTxKind' ORDER BY e.enumsortorder
+`);
+check(
+  "CreditTxKind includes 'agent_usage'",
+  kinds.rows.some((r) => r.enumlabel === 'agent_usage'),
+  `got ${JSON.stringify(kinds.rows.map((r) => r.enumlabel))}`,
+);
+check('wallets.agentAccruedMicros added', await columnExists('wallets', 'agentAccruedMicros'));
 
 // --- The idempotency constraint that stops double-crediting -------------------
 const uniq = await db.query(`
@@ -155,15 +183,28 @@ check('first credit claims the deposit', firstClaim.rows.length === 1);
 check('second credit claims nothing (exactly-once)', secondClaim.rows.length === 0);
 
 // Wei-precision amounts must survive the round trip without loss.
-await db.exec(
-  `UPDATE deposits SET "amountCrypto" = 123.456789012345678901 WHERE id = 'd1'`,
-);
+await db.exec(`UPDATE deposits SET "amountCrypto" = 123.456789012345678901 WHERE id = 'd1'`);
 const precise = await db.query(`SELECT "amountCrypto"::text AS v FROM deposits WHERE id = 'd1'`);
 check(
   'DECIMAL(38,18) keeps 18 fractional digits',
   precise.rows[0].v.startsWith('123.456789012345678'),
   `got ${precise.rows[0].v}`,
 );
+
+// The sub-cent accrual claim. Two agent calls that both cross the same cent boundary compute the
+// same cent to flush; the predicate must let exactly one of them take it, or the team is charged
+// twice for one cent.
+await db.exec(`UPDATE wallets SET "agentAccruedMicros" = 12000 WHERE "teamId" = 't1'`);
+const firstFlush = await db.query(
+  `UPDATE wallets SET "agentAccruedMicros" = "agentAccruedMicros" - 10000
+   WHERE "teamId" = 't1' AND "agentAccruedMicros" >= 10000 RETURNING "agentAccruedMicros"`,
+);
+const secondFlush = await db.query(
+  `UPDATE wallets SET "agentAccruedMicros" = "agentAccruedMicros" - 10000
+   WHERE "teamId" = 't1' AND "agentAccruedMicros" >= 10000 RETURNING "agentAccruedMicros"`,
+);
+check('accrual flush takes the cent once', firstFlush.rows[0]?.agentAccruedMicros === 2000);
+check('a racing flush claims nothing and leaves the remainder', secondFlush.rows.length === 0);
 
 // Renewal compare-and-swap: a stale expected period must match nothing.
 await db.exec(`
@@ -184,15 +225,24 @@ check('renewal CAS rejects a stale period', staleCas.rows.length === 0);
 check('renewal CAS accepts the current period', freshCas.rows.length === 1);
 
 // Deleting a team must take its money records with it.
+await db.exec(`
+  INSERT INTO agent_usage (id, "teamId", model, "tokensIn", "tokensOut", "cachedIn",
+                           "costMicros", "chargedCents")
+    VALUES ('au1', 't1', 'anthropic/claude-opus-4.8', 1000, 500, 400, 23550, 2);
+`);
 await db.exec(`DELETE FROM teams WHERE id = 't1'`);
 const orphans = await db.query(`
-  SELECT (SELECT count(*) FROM wallets)  AS w,
-         (SELECT count(*) FROM deposits) AS d,
-         (SELECT count(*) FROM subscriptions) AS s
+  SELECT (SELECT count(*) FROM wallets)       AS w,
+         (SELECT count(*) FROM deposits)      AS d,
+         (SELECT count(*) FROM subscriptions) AS s,
+         (SELECT count(*) FROM agent_usage)   AS a
 `);
 check(
-  'team deletion cascades to wallet/deposits/subscription',
-  Number(orphans.rows[0].w) === 0 && Number(orphans.rows[0].d) === 0 && Number(orphans.rows[0].s) === 0,
+  'team deletion cascades to wallet/deposits/subscription/agent usage',
+  Number(orphans.rows[0].w) === 0 &&
+    Number(orphans.rows[0].d) === 0 &&
+    Number(orphans.rows[0].s) === 0 &&
+    Number(orphans.rows[0].a) === 0,
   JSON.stringify(orphans.rows[0]),
 );
 

@@ -1,7 +1,7 @@
 // The panel talks DIRECTLY to the sidecar's loopback agent bridge (the manifest allows
 // `connect-src http://127.0.0.1:*`). No ephemeral service-worker relay to be recycled mid-run. A run
 // reconnects with replay rather than guessing that a slow model has failed.
-import type { AgentEvent, AgentRunSnapshot } from './types';
+import type { AgentEntitlement, AgentEvent, AgentRefusalCode, AgentRunSnapshot } from './types';
 
 export interface BridgeConfig {
   origin: string;
@@ -23,6 +23,57 @@ export interface RunConfig {
 }
 export interface RunHandlers {
   onEvent: (e: AgentEvent) => void;
+  /**
+   * The run was refused for a reason the panel can act on (the wrong package, an empty wallet).
+   * Separate from `onEvent` because a refusal is not a failed run: nothing was spent, nothing was
+   * done, and the only useful response is a named upsell rather than a retry.
+   */
+  onRefusal?: (entitlement: AgentEntitlement) => void;
+}
+
+const REFUSAL_CODES: readonly string[] = [
+  'plan_required',
+  'insufficient_credit',
+  'signed_out',
+  'unconfigured',
+];
+
+function asRefusal(body: Record<string, unknown>): AgentEntitlement | null {
+  const code = typeof body.code === 'string' ? body.code : '';
+  if (!REFUSAL_CODES.includes(code)) return null;
+  return {
+    entitled: false,
+    code: code as AgentRefusalCode,
+    ...(typeof body.tier === 'string' ? { tier: body.tier } : {}),
+    ...(Array.isArray(body.requiredTiers)
+      ? { requiredTiers: body.requiredTiers.filter((t): t is string => typeof t === 'string') }
+      : {}),
+    ...(typeof body.minimumTier === 'string' ? { minimumTier: body.minimumTier } : {}),
+    ...(typeof body.error === 'string' ? { message: body.error } : {}),
+  };
+}
+
+/**
+ * What this account may do with Lobee, straight from the sidecar.
+ *
+ * `null` means the question could not be asked (no bridge, service restarting) — which is NOT the
+ * same as "not entitled", and must never be rendered as an upsell.
+ */
+export async function fetchEntitlement(): Promise<AgentEntitlement | null> {
+  try {
+    const res = await bridgeFetch('/entitlement');
+    if (!res.ok) return null;
+    const body = (await res.json()) as Record<string, unknown>;
+    if (typeof body.entitled !== 'boolean') return null;
+    return body.entitled
+      ? { entitled: true, ...(typeof body.tier === 'string' ? { tier: body.tier } : {}) }
+      : {
+          ...(asRefusal({ ...body, error: body.message }) ?? { entitled: false }),
+          entitled: false,
+        };
+  } catch {
+    return null;
+  }
 }
 
 interface ActiveRun {
@@ -510,7 +561,7 @@ export async function runTask(
         true,
         requestBridgeIdentity,
       );
-      const data = (await res.json().catch(() => ({}))) as {
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown> & {
         ok?: boolean;
         error?: string;
         sessionId?: string;
@@ -529,6 +580,10 @@ export async function runTask(
       sessionId?: string;
     };
     if (!res.ok || typedData.ok === false) {
+      // A refusal names the account's package and what would lift it, so the panel can offer the one
+      // action that helps instead of a Retry that will be refused identically.
+      const refusal = asRefusal(data);
+      if (refusal && active === run) handlers.onRefusal?.(refusal);
       if (active === run) {
         handlers.onEvent({
           type: 'run.finished',

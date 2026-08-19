@@ -563,6 +563,15 @@ export const LOBEE_EXTENSION_ID = 'opbicdcjjlpehmibpmkmkconpnnkijel';
  * auto-loaded into EVERY profile. The directory comes from `LOBSTER_LOBEE_DIR` (set by the installer)
  * or an explicit override. It is snapshotted into the profile like any unpacked extension. Returns
  * `undefined` when Lobee isn't configured (dev/CI without the bundle) so launches still work.
+ *
+ * IT IS LOADED FOR EVERY PACKAGE, INCLUDING THE ONES THAT MAY NOT RUN IT, and the panel locks itself
+ * instead. Entitlement is decided by the credential the desktop pushes (see `managed-credential.ts`)
+ * and read by the panel from the bridge's `/entitlement`, not baked into this snapshot — because a
+ * snapshot is written once at launch and an upgrade bought five minutes later would otherwise need a
+ * browser restart to take effect. Withholding the extension entirely would also make an advertised
+ * feature simply absent, which reads as a broken build rather than as a package boundary; a panel
+ * that names the user's package and what Plus unlocks is the honest version of "not for this plan".
+ * Runs are refused by the bridge and again by the proxy regardless of what the panel shows.
  */
 export async function prepareDefaultLobeeExtension(
   userDataDir: string,

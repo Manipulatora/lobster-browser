@@ -10,7 +10,6 @@ import type {
   AgentUsage,
 } from '@lobster/shared-types';
 import {
-  createLlmClient,
   FileMemoryStore,
   projectRunRecovery,
   resolveConfig,
@@ -20,6 +19,7 @@ import {
 import type { RunJournalSnapshot } from '@lobster/agent';
 import type { AgentAction } from '@lobster/shared-types';
 import { LazyBrowserDriver } from './lazy-driver.js';
+import { createRunLlmClient } from './managed-llm.js';
 import { resolveProfileNetworkRoute } from './bridge-registry.js';
 import { createNavigationEgressPreflight } from './navigation-egress.js';
 
@@ -140,7 +140,7 @@ export class AgentManager {
     }
 
     const config = resolveConfig(params.config);
-    const llm = createLlmClient(params.llm); // throws clearly on unsupported provider / missing key
+    const llm = createRunLlmClient(params.llm); // throws clearly on unsupported provider / missing key
     const memory = new FileMemoryStore(params.memoryDir, {
       encryptionKey: params.memoryKey as string,
     });
