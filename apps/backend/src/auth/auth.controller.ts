@@ -1,12 +1,17 @@
-import { Body, Controller, Get, HttpCode, Post, Req, UnauthorizedException, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Post,
+  Req,
+  UnauthorizedException,
+  UseGuards,
+} from '@nestjs/common';
 import type { User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
-import {
-  AuthService,
-  type AuthResult,
-  type PendingRegistrationResult,
-} from './auth.service';
+import { AuthService, type AuthResult, type PendingRegistrationResult } from './auth.service';
 import { DesktopAuthService } from './desktop-auth.service';
 import { DesktopExchangeDto, DesktopGrantDto } from './dto/desktop-auth.dto';
 import { LoginDto } from './dto/login.dto';

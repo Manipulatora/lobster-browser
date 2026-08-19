@@ -1,11 +1,8 @@
 import { Injectable } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
-import type {
-  AcquireLeaseInput,
-  LeasesRepository,
-  ProfileLease,
-} from './leases.repository';
+import { MissingProfileError } from './leases.repository';
+import type { AcquireLeaseInput, LeasesRepository, ProfileLease } from './leases.repository';
 
 interface LeaseRow {
   profileId: string;
@@ -38,7 +35,16 @@ export class PrismaLeasesRepository implements LeasesRepository {
         },
       });
       return { ok: true, lease: this.toLease(row as LeaseRow) };
-    } catch {
+    } catch (err) {
+      // ONLY a duplicate primary key (P2002) means "a row already exists", which is the case the
+      // takeover below heals. `profileId` is also a foreign key, so a profile deleted between the
+      // caller's visibility check and this insert fails with P2003 — and any other code is a real
+      // database fault. Both used to fall through here and end as "vanished mid-acquire", a 500
+      // that named neither cause.
+      const code = (err as { code?: string }).code;
+      if (code === 'P2003') throw new MissingProfileError(input.profileId);
+      if (code !== 'P2002') throw err;
+
       // A row exists. Take it over ONLY if it has expired — conditional in the WHERE clause, so the
       // check and the write are one statement and two callers cannot both win a lapsed lease.
       const takenOver = await this.prisma.profileLease.updateMany({
@@ -82,6 +88,10 @@ export class PrismaLeasesRepository implements LeasesRepository {
     const row = await this.prisma.profileLease.findUnique({ where: { profileId } });
     if (!row || row.expiresAt <= now) return null;
     return this.toLease(row as LeaseRow);
+  }
+
+  async purgeExpired(now: Date): Promise<void> {
+    await this.prisma.profileLease.deleteMany({ where: { expiresAt: { lt: now } } });
   }
 
   private toLease(row: LeaseRow): ProfileLease {

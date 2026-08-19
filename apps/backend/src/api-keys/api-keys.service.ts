@@ -63,7 +63,7 @@ export class ApiKeysService {
    * once. The secret is unrecoverable afterwards — the caller must store it now or discard it.
    */
   async create(userId: string, dto: CreateApiKeyDto, teamId?: string): Promise<CreatedApiKey> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await this.resolveAdminTeamId(userId, teamId);
 
     // secret = 'lb_live_' + 24 random bytes as hex; the prefix is the safe-to-display leading slice.
     const secret = `${SECRET_PREFIX}${randomBytes(SECRET_ENTROPY_BYTES).toString('hex')}`;
@@ -105,7 +105,7 @@ export class ApiKeysService {
     id: string,
     teamId?: string,
   ): Promise<{ id: string; revoked: true }> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await this.resolveAdminTeamId(userId, teamId);
     const removed = await this.apiKeys.remove(ownerTeamId, id);
     if (!removed) {
       throw new NotFoundException('api key not found');
@@ -168,5 +168,22 @@ export class ApiKeysService {
       throw new ForbiddenException('you do not belong to any team');
     }
     return first.id;
+  }
+
+  /**
+   * Resolve the team for an operation that MINTS OR DESTROYS a live credential.
+   *
+   * A key authenticates as the whole team, outlives the session that made it and cannot be
+   * recovered once shown, so creating one is the same class of act as inviting a member or changing
+   * a role — all of which require the admin role. Listing stays open to any member: display fields
+   * carry no secret, and a member has to be able to see which keys exist on their own team.
+   */
+  private async resolveAdminTeamId(userId: string, teamId?: string): Promise<string> {
+    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const membership = await this.teams.getMembership(ownerTeamId, userId);
+    if (membership?.role !== 'admin') {
+      throw new ForbiddenException('this action requires the admin role');
+    }
+    return ownerTeamId;
   }
 }

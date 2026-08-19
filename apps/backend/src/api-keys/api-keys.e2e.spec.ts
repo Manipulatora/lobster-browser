@@ -10,6 +10,7 @@ import request from 'supertest';
 import { PrismaModule } from '../prisma/prisma.module';
 import { MailModule } from '../mail/mail.module';
 import { AuthModule } from '../auth/auth.module';
+import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 import { ApiKeysModule } from './api-keys.module';
 import { ApiKeysService } from './api-keys.service';
 import { createMailCapture, signUpOverHttp, type MailCapture } from '../testing/e2e-auth';
@@ -179,6 +180,48 @@ test("keys are isolated per team: deleting another team's key is 404 and never l
     .get('/api-keys')
     .set({ Authorization: `Bearer ${tokenA}` });
   assert.equal(listA.body.data.length, 1);
+});
+
+test('a plain member can list keys but cannot mint or revoke one', async () => {
+  const admin = await signUpOverHttp(app, mailCapture, 'api-keys-admin@gmail.com');
+  const member = await signUpOverHttp(app, mailCapture, 'api-keys-member@gmail.com');
+  const adminAuth = { Authorization: `Bearer ${admin.token}` };
+  const memberAuth = { Authorization: `Bearer ${member.token}` };
+
+  // Join the member to the admin's personal team through the repository: the invite flow lives in
+  // TeamsModule, which this spec does not boot, and the role is the only part under test here.
+  const teams = app.get<TeamsRepository>(TEAMS_REPOSITORY);
+  const [adminTeam] = await teams.findTeamsForUser(admin.userId);
+  assert.ok(adminTeam);
+  await teams.addMember(adminTeam.id, member.userId, 'member');
+
+  const created = await request(app.getHttpServer())
+    .post('/api-keys')
+    .set(adminAuth)
+    .send({ name: 'admin key' });
+  const id: string = created.body.data.apiKey.id;
+
+  // A key authenticates as the entire team and cannot be shown again, so minting one is an admin
+  // act like inviting a member — while seeing which keys exist is not.
+  const minted = await request(app.getHttpServer())
+    .post('/api-keys')
+    .query({ teamId: adminTeam.id })
+    .set(memberAuth)
+    .send({ name: 'member key' });
+  assert.equal(minted.status, 403);
+
+  const revoked = await request(app.getHttpServer())
+    .delete(`/api-keys/${id}`)
+    .query({ teamId: adminTeam.id })
+    .set(memberAuth);
+  assert.equal(revoked.status, 403);
+
+  const listed = await request(app.getHttpServer())
+    .get('/api-keys')
+    .query({ teamId: adminTeam.id })
+    .set(memberAuth);
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.data.length, 1, "a member still sees the team's keys");
 });
 
 test('an empty or over-long name is rejected with 400 by the validation pipe', async () => {

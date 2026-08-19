@@ -90,7 +90,12 @@ export class MailService {
   }
 
   /** Receipt for a settled deposit. Sent only after the Credit is actually recorded. */
-  async sendDepositReceipt(to: string, amount: string, balance: string, asset: string): Promise<boolean> {
+  async sendDepositReceipt(
+    to: string,
+    amount: string,
+    balance: string,
+    asset: string,
+  ): Promise<boolean> {
     return this.send(
       to,
       `Payment received — ${amount} added to your Credit`,
@@ -110,11 +115,11 @@ export class MailService {
 }
 
 function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string,
+  return s.replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string,
   );
 }
-
 
 /**
  * Where the logo is fetched from. Overridable so a staging deployment does not hotlink production.
@@ -134,7 +139,8 @@ const ASSET_BASE = (process.env.MAIL_ASSET_BASE ?? 'https://lobrowser.com').repl
  * The `@import` below serves the clients that DO honour it (Apple Mail, some desktop clients); it
  * is harmless where it is stripped.
  */
-const FONT_STACK = "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+const FONT_STACK =
+  "'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 /**
  * Table-based layout with inline styles — the only thing mail clients render consistently.

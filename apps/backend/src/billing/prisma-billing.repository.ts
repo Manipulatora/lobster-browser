@@ -9,7 +9,7 @@ import type {
 } from '@lobster/shared-types';
 
 import type { PrismaService } from '../prisma/prisma.service';
-import type { BillingRepository } from './billing.repository';
+import type { BillingRepository, DepositReversal, StoredDeposit } from './billing.repository';
 
 /**
  * Thrown inside `renewSubscription`'s transaction to abort it when Credit is short.
@@ -110,6 +110,7 @@ export class PrismaBillingRepository implements BillingRepository {
     teamId: string;
     provider: string;
     providerPaymentId: string;
+    amountCents: number;
     chain: string;
     asset: string;
     address?: string;
@@ -120,6 +121,7 @@ export class PrismaBillingRepository implements BillingRepository {
         teamId: deposit.teamId,
         provider: deposit.provider,
         providerPaymentId: deposit.providerPaymentId,
+        amountCents: deposit.amountCents,
         chain: deposit.chain,
         asset: deposit.asset,
         address: deposit.address,
@@ -129,9 +131,9 @@ export class PrismaBillingRepository implements BillingRepository {
     return toDeposit(row);
   }
 
-  async findDepositByProviderId(providerPaymentId: string): Promise<Deposit | null> {
+  async findDepositByProviderId(providerPaymentId: string): Promise<StoredDeposit | null> {
     const row = await this.prisma.deposit.findUnique({ where: { providerPaymentId } });
-    return row ? toDeposit(row) : null;
+    return row ? toStoredDeposit(row) : null;
   }
 
   async listDeposits(teamId: string, limit: number): Promise<Deposit[]> {
@@ -141,6 +143,22 @@ export class PrismaBillingRepository implements BillingRepository {
       take: limit,
     });
     return rows.map(toDeposit);
+  }
+
+  async findUnsettledDeposits(args: {
+    createdBefore: Date;
+    createdAfter: Date;
+    limit: number;
+  }): Promise<StoredDeposit[]> {
+    const rows = await this.prisma.deposit.findMany({
+      where: {
+        status: { in: ['pending', 'confirming'] },
+        createdAt: { lt: args.createdBefore, gt: args.createdAfter },
+      },
+      orderBy: { createdAt: 'asc' },
+      take: args.limit,
+    });
+    return rows.map(toStoredDeposit);
   }
 
   async updateDepositStatus(
@@ -210,10 +228,84 @@ export class PrismaBillingRepository implements BillingRepository {
           amountCents: args.creditedCents,
           balanceAfterCents: wallet.balanceCents,
           description: `Deposit — ${deposit.asset} on ${deposit.chain}`,
-          metadata: { depositId: deposit.id, providerPaymentId, txHash: args.txHash ?? null } as never,
+          metadata: {
+            depositId: deposit.id,
+            providerPaymentId,
+            txHash: args.txHash ?? null,
+          } as never,
         },
       });
       return true;
+    });
+  }
+
+  async reverseDeposit(
+    providerPaymentId: string,
+    status: DepositStatus,
+    patch: { txHash?: string; amountCrypto?: string; providerPayload?: unknown },
+  ): Promise<DepositReversal> {
+    const data = {
+      status,
+      txHash: patch.txHash,
+      amountCrypto: patch.amountCrypto,
+      providerPayload: (patch.providerPayload ?? {}) as never,
+    };
+
+    return this.prisma.$transaction(async (tx) => {
+      const deposit = await tx.deposit.findUnique({ where: { providerPaymentId } });
+      // Unknown payment: a no-op, for the same reason `updateDepositStatus` is one.
+      if (!deposit) return { reversed: false, clawedBackCents: 0, unrecoveredCents: 0 };
+
+      // The claim, and the exactly-once guard. Only a deposit that actually minted Credit and has
+      // not already been given back can match, so a redelivered refund callback falls through to
+      // the plain status write below instead of debiting the wallet a second time.
+      const claimed = await tx.deposit.updateMany({
+        where: { providerPaymentId, creditedAt: { not: null }, reversedAt: null },
+        data: { ...data, reversedAt: new Date() },
+      });
+      if (claimed.count === 0) {
+        await tx.deposit.updateMany({ where: { providerPaymentId }, data });
+        return { reversed: false, clawedBackCents: 0, unrecoveredCents: 0 };
+      }
+
+      const owed = deposit.creditedCents ?? 0;
+      if (owed <= 0) return { reversed: true, clawedBackCents: 0, unrecoveredCents: 0 };
+
+      await tx.wallet.upsert({
+        where: { teamId: deposit.teamId },
+        create: { teamId: deposit.teamId },
+        update: {},
+      });
+      const before = await tx.wallet.findUniqueOrThrow({ where: { teamId: deposit.teamId } });
+
+      // Clamped at the balance. The Credit may already be spent on a package, and a wallet that can
+      // go negative is a debt this product has no way to collect or explain; the part that could not
+      // be recovered is reported to the caller, which logs it for a human.
+      const clawedBackCents = Math.min(owed, Math.max(before.balanceCents, 0));
+      const unrecoveredCents = owed - clawedBackCents;
+      if (clawedBackCents === 0) return { reversed: true, clawedBackCents: 0, unrecoveredCents };
+
+      const wallet = await tx.wallet.update({
+        where: { teamId: deposit.teamId },
+        data: { balanceCents: { decrement: clawedBackCents } },
+      });
+      await tx.creditTransaction.create({
+        data: {
+          teamId: deposit.teamId,
+          kind: 'adjustment',
+          amountCents: -clawedBackCents,
+          balanceAfterCents: wallet.balanceCents,
+          description: `Deposit reversed — ${deposit.asset} on ${deposit.chain}`,
+          metadata: {
+            reason: 'deposit_reversed',
+            depositId: deposit.id,
+            providerPaymentId,
+            creditedCents: owed,
+            unrecoveredCents,
+          } as never,
+        },
+      });
+      return { reversed: true, clawedBackCents, unrecoveredCents };
     });
   }
 
@@ -266,51 +358,53 @@ export class PrismaBillingRepository implements BillingRepository {
     newPeriodEnd: Date;
     description: string;
   }): Promise<'renewed' | 'insufficient_credit' | 'not_due'> {
-    return this.prisma.$transaction(async (tx) => {
-      // 1. CLAIM. Compare-and-swap on the period end. Exactly one concurrent attempt can match a
-      //    given `expectedPeriodEnd`, because the first one to commit changes it.
-      const claimed = await tx.subscription.updateMany({
-        where: { teamId: args.teamId, currentPeriodEnd: new Date(args.expectedPeriodEnd) },
-        data: {
-          currentPeriodEnd: args.newPeriodEnd,
-          status: 'active',
-          lastRenewalAt: new Date(),
-          lastFailureCode: null,
-        },
-      });
-      if (claimed.count === 0) return 'not_due' as const;
+    return this.prisma
+      .$transaction(async (tx) => {
+        // 1. CLAIM. Compare-and-swap on the period end. Exactly one concurrent attempt can match a
+        //    given `expectedPeriodEnd`, because the first one to commit changes it.
+        const claimed = await tx.subscription.updateMany({
+          where: { teamId: args.teamId, currentPeriodEnd: new Date(args.expectedPeriodEnd) },
+          data: {
+            currentPeriodEnd: args.newPeriodEnd,
+            status: 'active',
+            lastRenewalAt: new Date(),
+            lastFailureCode: null,
+          },
+        });
+        if (claimed.count === 0) return 'not_due' as const;
 
-      // 2. CHARGE, same transaction. If this returns 0 rows the balance is short, and throwing
-      //    below rolls the claim back — the period is NOT extended and no Credit moves.
-      await tx.wallet.upsert({
-        where: { teamId: args.teamId },
-        create: { teamId: args.teamId },
-        update: {},
-      });
-      const debited = await tx.wallet.updateMany({
-        where: { teamId: args.teamId, balanceCents: { gte: args.priceCents } },
-        data: { balanceCents: { decrement: args.priceCents } },
-      });
-      if (debited.count === 0) throw new InsufficientCreditRollback();
+        // 2. CHARGE, same transaction. If this returns 0 rows the balance is short, and throwing
+        //    below rolls the claim back — the period is NOT extended and no Credit moves.
+        await tx.wallet.upsert({
+          where: { teamId: args.teamId },
+          create: { teamId: args.teamId },
+          update: {},
+        });
+        const debited = await tx.wallet.updateMany({
+          where: { teamId: args.teamId, balanceCents: { gte: args.priceCents } },
+          data: { balanceCents: { decrement: args.priceCents } },
+        });
+        if (debited.count === 0) throw new InsufficientCreditRollback();
 
-      const wallet = await tx.wallet.findUniqueOrThrow({ where: { teamId: args.teamId } });
-      await tx.creditTransaction.create({
-        data: {
-          teamId: args.teamId,
-          kind: 'renewal',
-          amountCents: -args.priceCents,
-          balanceAfterCents: wallet.balanceCents,
-          description: args.description,
-          metadata: { periodEnd: args.newPeriodEnd.toISOString() } as never,
-        },
+        const wallet = await tx.wallet.findUniqueOrThrow({ where: { teamId: args.teamId } });
+        await tx.creditTransaction.create({
+          data: {
+            teamId: args.teamId,
+            kind: 'renewal',
+            amountCents: -args.priceCents,
+            balanceAfterCents: wallet.balanceCents,
+            description: args.description,
+            metadata: { periodEnd: args.newPeriodEnd.toISOString() } as never,
+          },
+        });
+        return 'renewed' as const;
+      })
+      .catch((err: unknown) => {
+        // The sentinel is control flow, not a fault: it is how "insufficient Credit" unwinds the
+        // claim. Anything else is a real error and must not be swallowed into a billing outcome.
+        if (err instanceof InsufficientCreditRollback) return 'insufficient_credit' as const;
+        throw err;
       });
-      return 'renewed' as const;
-    }).catch((err: unknown) => {
-      // The sentinel is control flow, not a fault: it is how "insufficient Credit" unwinds the
-      // claim. Anything else is a real error and must not be swallowed into a billing outcome.
-      if (err instanceof InsufficientCreditRollback) return 'insufficient_credit' as const;
-      throw err;
-    });
   }
 
   async markPastDue(teamId: string, failureCode: string): Promise<void> {
@@ -371,6 +465,16 @@ function toDeposit(row: any): Deposit {
     txHash: row.txHash ?? undefined,
     creditedCents: row.creditedCents ?? undefined,
     createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function toStoredDeposit(row: any): StoredDeposit {
+  return {
+    ...toDeposit(row),
+    providerPaymentId: row.providerPaymentId,
+    amountCents: row.amountCents ?? undefined,
+    creditedAt: row.creditedAt ? row.creditedAt.toISOString() : undefined,
+    reversedAt: row.reversedAt ? row.reversedAt.toISOString() : undefined,
   };
 }
 

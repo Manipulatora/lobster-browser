@@ -55,4 +55,10 @@ export class InMemoryLeasesRepository implements LeasesRepository {
     if (!existing || new Date(existing.expiresAt) <= now) return null;
     return { ...existing };
   }
+
+  async purgeExpired(now: Date): Promise<void> {
+    for (const [profileId, lease] of this.rows) {
+      if (new Date(lease.expiresAt) <= now) this.rows.delete(profileId);
+    }
+  }
 }

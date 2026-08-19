@@ -6,6 +6,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { BILLING_REPOSITORY } from './billing.repository';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
+import { DepositReconciliationService } from './deposit-reconciliation.service';
 import { InMemoryBillingRepository } from './in-memory-billing.repository';
 import { NowPaymentsProvider } from './payments/nowpayments.provider';
 import { PAYMENT_PROVIDER } from './payments/payment-provider';
@@ -30,6 +31,7 @@ import { RenewalService } from './renewal.service';
   providers: [
     BillingService,
     RenewalService,
+    DepositReconciliationService,
     {
       provide: BILLING_REPOSITORY,
       inject: [ConfigService, PrismaService],

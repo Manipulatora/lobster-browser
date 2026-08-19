@@ -14,6 +14,7 @@ import type { MailService } from '../mail/mail.service';
 import { AuthService, type JwtPayload } from './auth.service';
 import { DEV_JWT_SECRET } from './jwt-secret';
 import { InMemoryUsersRepository } from './in-memory-users.repository';
+import { LOGIN_ATTEMPTS_BEFORE_BACKOFF, LOGIN_BACKOFF_MAX_MS } from './users.repository';
 import { InMemoryTeamsRepository } from '../teams/in-memory-teams.repository';
 
 /**
@@ -159,10 +160,7 @@ test('a code is single-use', async () => {
 
   await service.completeRegistration(EMAIL, code);
   // Replaying it must not produce a second account or a second session.
-  await assert.rejects(
-    () => service.completeRegistration(EMAIL, code),
-    /incorrect or has expired/,
-  );
+  await assert.rejects(() => service.completeRegistration(EMAIL, code), /incorrect or has expired/);
 });
 
 test('the code dies after too many wrong guesses', async () => {
@@ -179,10 +177,7 @@ test('the code dies after too many wrong guesses', async () => {
     );
   }
   // The real code is now worthless too — the attempts were spent against it.
-  await assert.rejects(
-    () => service.completeRegistration(EMAIL, code),
-    /incorrect or has expired/,
-  );
+  await assert.rejects(() => service.completeRegistration(EMAIL, code), /incorrect or has expired/);
 });
 
 test('re-sending supersedes the previous code and restores the attempt budget', async () => {
@@ -290,6 +285,45 @@ test('login with a wrong password throws UnauthorizedException', async () => {
     () => s.service.login({ email: EMAIL, password: 'wrong-password' }),
     UnauthorizedException,
   );
+});
+
+test('a run of wrong passwords backs the account off, and the right one clears it', async () => {
+  const s = makeService();
+  const registered = await signUp(s);
+
+  for (let i = 0; i < LOGIN_ATTEMPTS_BEFORE_BACKOFF; i += 1) {
+    await assert.rejects(() => s.service.login({ email: EMAIL, password: 'wrong' }));
+  }
+  // Still free at the threshold: someone who mistypes a handful of times is not a spray.
+  assert.equal((await s.users.findById(registered.id))?.lockedUntil, undefined);
+
+  await assert.rejects(() => s.service.login({ email: EMAIL, password: 'wrong' }));
+  const lockedUntil = (await s.users.findById(registered.id))?.lockedUntil;
+  assert.ok(lockedUntil && new Date(lockedUntil) > new Date(), 'the account is now backing off');
+
+  // The CORRECT password is refused too while the window is open — otherwise the delay bounds
+  // nothing, because a guesser only ever needs the attempt that happens to be right.
+  await assert.rejects(
+    () => s.service.login({ email: EMAIL, password: PASSWORD }),
+    UnauthorizedException,
+  );
+
+  // Same generic sentence as a wrong password: "too many attempts" would say which addresses have
+  // accounts.
+  await assert.rejects(
+    () => s.service.login({ email: EMAIL, password: 'wrong' }),
+    (err: unknown) =>
+      err instanceof UnauthorizedException &&
+      JSON.stringify(err.getResponse()).includes('invalid email or password'),
+  );
+
+  // Once the window passes, the real password works again and the streak is forgotten.
+  await s.users.registerFailedLogin(registered.id, new Date(Date.now() - LOGIN_BACKOFF_MAX_MS));
+  const cleared = await s.service.login({ email: EMAIL, password: PASSWORD });
+  assert.equal(cleared.user.id, registered.id);
+  const after = await s.users.findById(registered.id);
+  assert.equal(after?.failedLoginAttempts, 0);
+  assert.equal(after?.lockedUntil, undefined);
 });
 
 test('login with an unknown email throws UnauthorizedException', async () => {

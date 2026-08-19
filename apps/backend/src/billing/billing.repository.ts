@@ -8,6 +8,35 @@ import type {
 } from '@lobster/shared-types';
 
 /**
+ * A deposit row as STORED, which is more than the wire type carries.
+ *
+ * `amountCents` (what the user asked for), `creditedAt` and `reversedAt` are settlement bookkeeping:
+ * the client has no use for them, but crediting, reconciling and clawing back all turn on them.
+ */
+export interface StoredDeposit extends Deposit {
+  /** The processor's own id, namespaced by provider. Never sent to a client. */
+  providerPaymentId: string;
+  /** What the user asked to deposit when the address was issued. Absent on rows that predate it. */
+  amountCents?: number;
+  creditedAt?: string;
+  reversedAt?: string;
+}
+
+/**
+ * Outcome of {@link BillingRepository.reverseDeposit}.
+ *
+ * `unrecoveredCents` is the part of a refunded deposit the wallet could not give back because it
+ * had already been spent. It is reported rather than forced through: a negative balance is a debt
+ * the product has no concept of, so the shortfall is surfaced for a human instead of invented.
+ */
+export interface DepositReversal {
+  /** True when THIS call reversed a credit that was still standing. */
+  reversed: boolean;
+  clawedBackCents: number;
+  unrecoveredCents: number;
+}
+
+/**
  * Persistence boundary for Credit, deposits and subscriptions.
  *
  * WHY THE METHODS ARE OPERATIONS, NOT ACCESSORS. There is deliberately no `setBalance`, and
@@ -61,15 +90,31 @@ export interface BillingRepository {
     teamId: string;
     provider: string;
     providerPaymentId: string;
+    /** What the user asked for, in USD cents — the figure the settled amount is reconciled against. */
+    amountCents: number;
     chain: string;
     asset: string;
     address?: string;
     amountCrypto?: string;
   }): Promise<Deposit>;
 
-  findDepositByProviderId(providerPaymentId: string): Promise<Deposit | null>;
+  findDepositByProviderId(providerPaymentId: string): Promise<StoredDeposit | null>;
 
   listDeposits(teamId: string, limit: number): Promise<Deposit[]>;
+
+  /**
+   * Deposits that have not reached a terminal state, for the reconciliation sweep.
+   *
+   * Bounded at BOTH ends on purpose. `createdBefore` skips payments too young to have settled, so
+   * the sweep does not poll the processor about every address the moment it is issued;
+   * `createdAfter` stops it re-asking forever about addresses nobody ever sent to, which is the
+   * normal fate of an abandoned deposit page.
+   */
+  findUnsettledDeposits(args: {
+    createdBefore: Date;
+    createdAfter: Date;
+    limit: number;
+  }): Promise<StoredDeposit[]>;
 
   /** Record a non-crediting status change (waiting → confirming, or a terminal failure). */
   updateDepositStatus(
@@ -92,8 +137,34 @@ export interface BillingRepository {
    */
   creditDeposit(
     providerPaymentId: string,
-    args: { creditedCents: number; txHash?: string; amountCrypto?: string; providerPayload?: unknown },
+    args: {
+      creditedCents: number;
+      txHash?: string;
+      amountCrypto?: string;
+      providerPayload?: unknown;
+    },
   ): Promise<boolean>;
+
+  /**
+   * Record a terminal failure AND take back the Credit it had already minted, if any.
+   *
+   * WHY THIS IS NOT `updateDepositStatus`. A processor can refund or charge back a payment it has
+   * already settled, and that callback arrives as an ordinary terminal status. Writing only the
+   * status would leave the user holding both the returned crypto and the Credit — the merchant pays
+   * for the deposit twice. The debit therefore has to happen in the SAME transaction as the status
+   * write, or a crash between them loses one half of the reversal.
+   *
+   * EXACTLY-ONCE in the other direction, guarded exactly as `creditDeposit` is: the claim matches
+   * only a deposit that WAS credited and has NOT been reversed, so a redelivered refund callback
+   * debits nothing the second time. A deposit that never minted Credit is a plain status write.
+   *
+   * The debit is clamped at the current balance — see {@link DepositReversal.unrecoveredCents}.
+   */
+  reverseDeposit(
+    providerPaymentId: string,
+    status: DepositStatus,
+    patch: { txHash?: string; amountCrypto?: string; providerPayload?: unknown },
+  ): Promise<DepositReversal>;
 
   // --- Subscription ---------------------------------------------------------
 

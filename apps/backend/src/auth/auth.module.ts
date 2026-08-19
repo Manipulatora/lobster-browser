@@ -34,7 +34,8 @@ import { USERS_REPOSITORY } from './users.repository';
     }),
   ],
   controllers: [AuthController],
-  providers: [EmailVerifiedGuard, 
+  providers: [
+    EmailVerifiedGuard,
     AuthService,
     DesktopAuthService,
     JwtAuthGuard,
@@ -71,6 +72,15 @@ import { USERS_REPOSITORY } from './users.repository';
   ],
   // Re-export JwtModule so modules that import AuthModule to reuse JwtAuthGuard (Teams, Profiles)
   // can resolve the guard's JwtService dependency in their own context.
-  exports: [AuthService, JwtAuthGuard, EmailVerifiedGuard, JwtModule, USERS_REPOSITORY, TEAMS_REPOSITORY],
+  exports: [
+    AuthService,
+    JwtAuthGuard,
+    EmailVerifiedGuard,
+    JwtModule,
+    USERS_REPOSITORY,
+    TEAMS_REPOSITORY,
+    // For the housekeeping sweep, which has to reach the same grant store the handoff writes to.
+    DESKTOP_AUTH_REPOSITORY,
+  ],
 })
 export class AuthModule {}

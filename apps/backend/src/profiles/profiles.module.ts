@@ -86,6 +86,8 @@ export function resolveBlobStore(config: ConfigService): BlobStore {
       useFactory: (config: ConfigService) => resolveBlobStore(config),
     },
   ],
-  exports: [ProfilesService],
+  // PROFILES_REPOSITORY is exported so LeasesModule can check profile ownership against the SAME
+  // store this module writes to, rather than binding a second (and, in-memory, empty) one.
+  exports: [ProfilesService, PROFILES_REPOSITORY],
 })
 export class ProfilesModule {}

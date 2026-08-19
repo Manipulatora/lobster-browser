@@ -2,10 +2,7 @@ import { BadRequestException, Inject, Injectable, UnauthorizedException } from '
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import { AuthService, type AuthResult } from './auth.service';
-import {
-  DESKTOP_AUTH_REPOSITORY,
-  type DesktopAuthRepository,
-} from './desktop-auth.repository';
+import { DESKTOP_AUTH_REPOSITORY, type DesktopAuthRepository } from './desktop-auth.repository';
 
 /**
  * How long a code stays redeemable.
@@ -112,11 +109,7 @@ export class DesktopAuthService {
    * "wrong verifier" would tell someone probing with a captured code exactly which part of their
    * attempt was wrong.
    */
-  async exchange(args: {
-    code: string;
-    state: string;
-    codeVerifier: string;
-  }): Promise<AuthResult> {
+  async exchange(args: { code: string; state: string; codeVerifier: string }): Promise<AuthResult> {
     const invalid = (): never => {
       throw new UnauthorizedException('invalid or expired authorization code');
     };

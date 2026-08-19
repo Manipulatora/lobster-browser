@@ -2,12 +2,13 @@ import { randomUUID } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
 
-import type {
-  CreateUserInput,
-  PendingRegistrationInput,
-  StoredPendingRegistration,
-  StoredUser,
-  UsersRepository,
+import {
+  loginBackoffUntil,
+  type CreateUserInput,
+  type PendingRegistrationInput,
+  type StoredPendingRegistration,
+  type StoredUser,
+  type UsersRepository,
 } from './users.repository';
 
 /** Mirrors the Prisma repository's cap; see it for why a 6-digit code needs one. */
@@ -44,10 +45,7 @@ export class InMemoryUsersRepository implements UsersRepository {
 
   // --- Pending sign-ups ------------------------------------------------------
 
-  private readonly pending = new Map<
-    string,
-    PendingRegistrationInput & { attempts: number }
-  >();
+  private readonly pending = new Map<string, PendingRegistrationInput & { attempts: number }>();
 
   async upsertPendingRegistration(input: PendingRegistrationInput): Promise<void> {
     // Replaces, so re-registering supersedes the previous code and resets the attempt cap — the cap
@@ -102,6 +100,12 @@ export class InMemoryUsersRepository implements UsersRepository {
     }
   }
 
+  async purgeExpiredEmailVerifications(now: Date): Promise<void> {
+    for (const [key, row] of this.verifications) {
+      if (row.consumed || row.expiresAt < now.getTime()) this.verifications.delete(key);
+    }
+  }
+
   async findByEmail(email: string): Promise<StoredUser | null> {
     const id = this.idByEmail.get(this.normalizeEmail(email));
     return id ? (this.byId.get(id) ?? null) : null;
@@ -109,6 +113,22 @@ export class InMemoryUsersRepository implements UsersRepository {
 
   async findById(id: string): Promise<StoredUser | null> {
     return this.byId.get(id) ?? null;
+  }
+
+  async registerFailedLogin(userId: string, now: Date): Promise<{ lockedUntil: Date | null }> {
+    const user = this.byId.get(userId);
+    if (!user) return { lockedUntil: null };
+    user.failedLoginAttempts = (user.failedLoginAttempts ?? 0) + 1;
+    const lockedUntil = loginBackoffUntil(user.failedLoginAttempts, now);
+    user.lockedUntil = lockedUntil?.toISOString();
+    return { lockedUntil };
+  }
+
+  async clearFailedLogins(userId: string): Promise<void> {
+    const user = this.byId.get(userId);
+    if (!user) return;
+    user.failedLoginAttempts = 0;
+    user.lockedUntil = undefined;
   }
 
   private readonly verifications = new Map<

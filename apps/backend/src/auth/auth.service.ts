@@ -66,9 +66,7 @@ const ALLOWED_EMAIL_DOMAINS = new Set([
 function assertAllowedEmailProvider(email: string): void {
   const domain = email.slice(email.lastIndexOf('@') + 1);
   if (!ALLOWED_EMAIL_DOMAINS.has(domain)) {
-    throw new BadRequestException(
-      'sign-up is currently limited to Gmail and Outlook addresses',
-    );
+    throw new BadRequestException('sign-up is currently limited to Gmail and Outlook addresses');
   }
 }
 
@@ -246,14 +244,28 @@ export class AuthService {
   }
 
   async login(dto: LoginDto): Promise<AuthResult> {
+    const now = new Date();
     const user = await this.users.findByEmail(this.normalizeEmail(dto.email));
     // ALWAYS run one bcrypt.compare of the same cost, even when the email is unknown (against a
     // precomputed DUMMY_HASH), so an unknown email is indistinguishable in time from a wrong
     // password. The generic message avoids leaking which half was wrong.
     const passwordMatches = await bcrypt.compare(dto.password, user?.passwordHash ?? DUMMY_HASH);
-    if (!user || !passwordMatches) {
+
+    // A run of wrong passwords slows the account down — see `loginBackoffUntil`. Checked AFTER the
+    // compare and answered with the same sentence as a wrong password, because a distinct
+    // "too many attempts" would turn sign-in into an oracle for which addresses have accounts.
+    // The correct password during a backoff window is still refused: otherwise the delay bounds
+    // nothing, since a guesser only ever needs the one attempt that happens to be right.
+    if (user?.lockedUntil && new Date(user.lockedUntil) > now) {
       throw new UnauthorizedException('invalid email or password');
     }
+
+    if (!user || !passwordMatches) {
+      if (user) await this.users.registerFailedLogin(user.id, now);
+      throw new UnauthorizedException('invalid email or password');
+    }
+
+    await this.users.clearFailedLogins(user.id);
     return { user: this.toPublicUser(user), token: this.signToken(user) };
   }
 

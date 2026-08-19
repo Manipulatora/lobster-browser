@@ -35,6 +35,9 @@ class LeaseIdDto {
  * A profile is one browser identity; running it from two machines means the same account arriving
  * from two IPs, which is the signal an anti-detect profile exists to avoid. Acquire therefore REFUSES
  * rather than queues, matching Octo — "you can work with it in turns".
+ *
+ * Every route is scoped to a profile the caller's own teams own; a profile they cannot see reads as
+ * missing. See {@link LeasesService.assertVisible}.
  */
 @Controller('profiles/:id/lease')
 @UseGuards(JwtAuthGuard)
@@ -43,8 +46,11 @@ export class LeasesController {
 
   /** The current holder, or null when the profile is free to launch. */
   @Get()
-  async current(@Param('id') id: string): Promise<ApiResponse<ProfileLease | null>> {
-    return ok(await this.leases.current(id));
+  async current(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+  ): Promise<ApiResponse<ProfileLease | null>> {
+    return ok(await this.leases.current(user.id, id));
   }
 
   /** Claim it. 409 with the holder's device name when someone else has it. */
@@ -56,7 +62,7 @@ export class LeasesController {
     @Body() dto: AcquireLeaseDto,
   ): Promise<ApiResponse<ProfileLease>> {
     return ok(
-      await this.leases.acquire(id, user.id, dto.deviceId, dto.deviceLabel ?? dto.deviceId),
+      await this.leases.acquire(user.id, id, dto.deviceId, dto.deviceLabel ?? dto.deviceId),
     );
   }
 
@@ -64,19 +70,21 @@ export class LeasesController {
   @Post('refresh')
   @HttpCode(200)
   async refresh(
+    @CurrentUser() user: User,
     @Param('id') id: string,
     @Body() dto: LeaseIdDto,
   ): Promise<ApiResponse<ProfileLease>> {
-    return ok(await this.leases.refresh(id, dto.leaseId));
+    return ok(await this.leases.refresh(user.id, id, dto.leaseId));
   }
 
   @Delete()
   @HttpCode(200)
   async release(
+    @CurrentUser() user: User,
     @Param('id') id: string,
     @Body() dto: LeaseIdDto,
   ): Promise<ApiResponse<{ released: true }>> {
-    await this.leases.release(id, dto.leaseId);
+    await this.leases.release(user.id, id, dto.leaseId);
     return ok({ released: true as const });
   }
 }

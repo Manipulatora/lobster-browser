@@ -36,7 +36,10 @@ test('every version is retained, so a point-in-time restore is possible', async 
   }
   // The in-memory store keeps only the latest; this one keeps the history on purpose.
   assert.equal((await readFile(join(root, 'team-1', 'p1', 'v0000000001.blob'))).toString(), 'one');
-  assert.equal((await readFile(join(root, 'team-1', 'p1', 'v0000000003.blob'))).toString(), 'three');
+  assert.equal(
+    (await readFile(join(root, 'team-1', 'p1', 'v0000000003.blob'))).toString(),
+    'three',
+  );
   await rm(root, { recursive: true, force: true });
 });
 
@@ -69,9 +72,12 @@ test('put with a stale expectedVersion throws BlobVersionConflictError without w
 
 test('expectedVersion 0 means "must not exist yet"', async () => {
   const { store: s, root } = await store();
-  assert.deepEqual(await s.put('team-1/fresh', Buffer.from('first'), { ...META, expectedVersion: 0 }), {
-    version: 1,
-  });
+  assert.deepEqual(
+    await s.put('team-1/fresh', Buffer.from('first'), { ...META, expectedVersion: 0 }),
+    {
+      version: 1,
+    },
+  );
   await assert.rejects(
     () => s.put('team-1/fresh', Buffer.from('again'), { ...META, expectedVersion: 0 }),
     BlobVersionConflictError,

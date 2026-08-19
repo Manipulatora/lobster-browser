@@ -1,4 +1,14 @@
-import { Body, Controller, Get, HttpCode, Inject, Post, Query, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Inject,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString } from 'class-validator';
 import { Type } from 'class-transformer';
 import type { CreditTransaction, Deposit, PaidPlanTier, Subscription } from '@lobster/shared-types';
@@ -7,11 +17,7 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { EmailVerifiedGuard } from '../auth/email-verified.guard';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ok, type ApiResponse } from '../common/api-response';
-import {
-  BillingService,
-  type BillingOverview,
-  type DepositInstruction,
-} from './billing.service';
+import { BillingService, type BillingOverview, type DepositInstruction } from './billing.service';
 import { DEPOSIT_CHAINS } from './deposit-chains';
 import { PAYMENT_PROVIDER, type PaymentProvider } from './payments/payment-provider';
 

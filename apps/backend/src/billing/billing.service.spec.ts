@@ -5,6 +5,8 @@ import { BadRequestException, ConflictException, ForbiddenException } from '@nes
 import type { ConfigService } from '@nestjs/config';
 import { PLAN_CATALOG, planByTier } from '@lobster/shared-types';
 
+import type { UsersRepository } from '../auth/users.repository';
+import type { MailService } from '../mail/mail.service';
 import type { TeamsRepository } from '../teams/teams.repository';
 import { BillingService } from './billing.service';
 import { InMemoryBillingRepository } from './in-memory-billing.repository';
@@ -23,7 +25,33 @@ function teamsStub(): TeamsRepository {
       teamId === TEAM && userId === USER
         ? { teamId, userId, role: 'admin' as const, createdAt: '' }
         : null,
+    listMembers: async (teamId: string) =>
+      teamId === TEAM ? [{ teamId, userId: USER, role: 'admin' as const, createdAt: '' }] : [],
   } as unknown as TeamsRepository;
+}
+
+function usersStub(): UsersRepository {
+  return {
+    findById: async (id: string) =>
+      id === USER ? { id, email: 'payer@gmail.com', passwordHash: '', createdAt: '' } : null,
+  } as unknown as UsersRepository;
+}
+
+/** Records the receipts the service asked for, so "was the user told" is assertable. */
+interface MailStub extends MailService {
+  receipts: Array<{ to: string; amount: string; balance: string }>;
+}
+
+function mailStub(): MailStub {
+  const receipts: MailStub['receipts'] = [];
+  return {
+    receipts,
+    isConfigured: () => true,
+    sendDepositReceipt: async (to: string, amount: string, balance: string) => {
+      receipts.push({ to, amount, balance });
+      return true;
+    },
+  } as unknown as MailStub;
 }
 
 function paymentsStub(): PaymentProvider {
@@ -43,13 +71,15 @@ function paymentsStub(): PaymentProvider {
       };
     },
     verifyWebhook: () => null,
+    fetchPayment: async () => null,
   };
 }
 
-function makeService(): { svc: BillingService; repo: InMemoryBillingRepository } {
+function makeService(): { svc: BillingService; repo: InMemoryBillingRepository; mail: MailStub } {
   const repo = new InMemoryBillingRepository();
-  const svc = new BillingService(repo, teamsStub(), paymentsStub());
-  return { svc, repo };
+  const mail = mailStub();
+  const svc = new BillingService(repo, teamsStub(), paymentsStub(), usersStub(), mail);
+  return { svc, repo, mail };
 }
 
 /** Put `cents` of Credit into TEAM's wallet without going through a real deposit. */
@@ -220,7 +250,10 @@ test('a caller cannot spend a team they do not belong to', async () => {
   const { svc, repo } = makeService();
   await fund(repo, 30_000);
 
-  await assert.rejects(() => svc.purchasePlan(USER, 'pro', 'someone-elses-team'), ForbiddenException);
+  await assert.rejects(
+    () => svc.purchasePlan(USER, 'pro', 'someone-elses-team'),
+    ForbiddenException,
+  );
 });
 
 // --- Deposits ----------------------------------------------------------------
@@ -256,6 +289,93 @@ test('a non-final webhook records status without crediting', async () => {
 
   assert.equal(credited, false);
   assert.equal(await repo.getBalanceCents(TEAM), 0, 'unconfirmed money is not spendable');
+});
+
+test('a refund after settlement takes the Credit back with it', async () => {
+  const { svc, repo } = makeService();
+  await svc.createDeposit(USER, 5_000, 'usdtbsc');
+
+  await svc.applyWebhook({
+    providerPaymentId: 'pay-1',
+    status: 'confirmed',
+    creditCents: 5_000,
+    raw: {},
+  });
+  assert.equal(await repo.getBalanceCents(TEAM), 5_000);
+
+  // NOWPayments maps both `refunded` and `failed` onto this status. The money went back to the
+  // user; keeping the Credit would be paying for the same deposit twice.
+  const refund = { providerPaymentId: 'pay-1', status: 'failed' as const, raw: {} };
+  assert.equal(await svc.applyWebhook(refund), false);
+  assert.equal(await repo.getBalanceCents(TEAM), 0, 'the credit is clawed back');
+
+  // Processors redeliver. The second one must not debit again.
+  await svc.applyWebhook(refund);
+  await svc.applyWebhook(refund);
+  assert.equal(await repo.getBalanceCents(TEAM), 0, 'reversal is exactly-once');
+
+  const ledger = await repo.listTransactions(TEAM, 10);
+  const reversals = ledger.filter((t) => t.metadata?.reason === 'deposit_reversed');
+  assert.equal(reversals.length, 1, 'exactly one reversing ledger row');
+  assert.equal(reversals[0]?.amountCents, -5_000);
+});
+
+test('a refund of Credit that was already spent claws back what it can, and no more', async () => {
+  const { svc, repo } = makeService();
+  await svc.createDeposit(USER, 5_000, 'usdtbsc');
+  await svc.applyWebhook({
+    providerPaymentId: 'pay-1',
+    status: 'confirmed',
+    creditCents: 5_000,
+    raw: {},
+  });
+  // The user buys Light for $10 before the refund lands.
+  await svc.purchasePlan(USER, 'light');
+  assert.equal(await repo.getBalanceCents(TEAM), 4_000);
+
+  await svc.applyWebhook({ providerPaymentId: 'pay-1', status: 'failed', raw: {} });
+
+  // A negative wallet is a debt with no way to collect it; the shortfall is logged for a human
+  // instead of invented into the balance.
+  assert.equal(await repo.getBalanceCents(TEAM), 0);
+});
+
+test('a failed deposit that never credited is only a status change', async () => {
+  const { svc, repo } = makeService();
+  await svc.createDeposit(USER, 5_000, 'usdtbsc');
+  await fund(repo, 2_000);
+
+  assert.equal(
+    await svc.applyWebhook({ providerPaymentId: 'pay-1', status: 'failed', raw: {} }),
+    false,
+  );
+
+  assert.equal(await repo.getBalanceCents(TEAM), 2_000, 'unrelated Credit is untouched');
+  const deposit = await repo.findDepositByProviderId('stub:pay-1');
+  assert.equal(deposit?.status, 'failed');
+});
+
+test('a settled deposit sends the payer a receipt naming the amount and the new balance', async () => {
+  const { svc, mail } = makeService();
+  await svc.createDeposit(USER, 5_000, 'usdtbsc');
+
+  await svc.applyWebhook({
+    providerPaymentId: 'pay-1',
+    status: 'confirmed',
+    creditCents: 5_000,
+    raw: {},
+  });
+
+  assert.deepEqual(mail.receipts, [{ to: 'payer@gmail.com', amount: '$50.00', balance: '$50.00' }]);
+
+  // A redelivery credits nothing, so it must not send a second receipt either.
+  await svc.applyWebhook({
+    providerPaymentId: 'pay-1',
+    status: 'confirmed',
+    creditCents: 5_000,
+    raw: {},
+  });
+  assert.equal(mail.receipts.length, 1);
 });
 
 test('deposits below the minimum and on unknown chains are refused', async () => {

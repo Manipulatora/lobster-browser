@@ -8,6 +8,7 @@ import { MailModule } from './mail/mail.module';
 import { AuthModule } from './auth/auth.module';
 import { BillingModule } from './billing/billing.module';
 import { HealthModule } from './health/health.module';
+import { HousekeepingModule } from './housekeeping/housekeeping.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { ProfilesModule } from './profiles/profiles.module';
 import { LeasesModule } from './leases/leases.module';
@@ -36,6 +37,7 @@ import { VaultModule } from './vault/vault.module';
     AuditModule,
     BillingModule,
     AgentModule,
+    HousekeepingModule,
   ],
 })
 export class AppModule {}

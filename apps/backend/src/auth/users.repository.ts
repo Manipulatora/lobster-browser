@@ -9,6 +9,37 @@ export interface StoredUser extends User {
   passwordHash: string;
   /** ISO instant the address was proven; undefined while unverified. */
   emailVerifiedAt?: string;
+  /** Consecutive failed sign-ins since the last successful one. */
+  failedLoginAttempts?: number;
+  /** ISO instant before which sign-in is refused regardless of the password. */
+  lockedUntil?: string;
+}
+
+/** Wrong passwords tolerated at full speed before sign-in starts backing off. */
+export const LOGIN_ATTEMPTS_BEFORE_BACKOFF = 5;
+
+/** Ceiling on the backoff. See {@link loginBackoffUntil} for why there has to be one. */
+export const LOGIN_BACKOFF_MAX_MS = 15 * 60 * 1000;
+
+/**
+ * When an account may next be tried, given its consecutive-failure count.
+ *
+ * BACKOFF, NOT A LOCKOUT, and the distinction is the whole design. A hard lock after N failures
+ * hands anybody who knows an email address a way to keep its owner out of their account for free —
+ * the countermeasure becomes the attack. A delay that doubles instead makes guessing at any useful
+ * rate impossible while leaving a real user at worst a few minutes behind, and it clears the moment
+ * they get in.
+ *
+ * The cap exists for the same reason: unbounded doubling is a permanent lock with extra steps.
+ *
+ * Shared by both repositories so the policy has exactly one definition — an in-memory store that
+ * throttled differently from Postgres would make the tests prove the wrong thing.
+ */
+export function loginBackoffUntil(attempts: number, now: Date): Date | null {
+  if (attempts <= LOGIN_ATTEMPTS_BEFORE_BACKOFF) return null;
+  const doublings = attempts - LOGIN_ATTEMPTS_BEFORE_BACKOFF - 1;
+  const delay = Math.min(LOGIN_BACKOFF_MAX_MS, 1000 * 2 ** doublings);
+  return new Date(now.getTime() + delay);
 }
 
 /** Fields required to create a user. The repository owns `id` + `createdAt`. */
@@ -55,6 +86,19 @@ export interface UsersRepository {
   create(input: CreateUserInput): Promise<StoredUser>;
   findByEmail(email: string): Promise<StoredUser | null>;
   findById(id: string): Promise<StoredUser | null>;
+
+  /**
+   * Count one failed sign-in against an account and return when it may next be tried.
+   *
+   * PER-ACCOUNT, and stored WITH the account, because the per-IP limiter in front of the app is
+   * per-instance and per-address: spraying one password across many accounts from many addresses
+   * never fills any one bucket, so the only place the pattern is visible is the account being
+   * guessed. Kept in the same store as the password so every instance sees the same count.
+   */
+  registerFailedLogin(userId: string, now: Date): Promise<{ lockedUntil: Date | null }>;
+
+  /** Forget the failures. Called on a successful sign-in, so a legitimate user is never punished. */
+  clearFailedLogins(userId: string): Promise<void>;
 
   /**
    * Record an issued verification code. Only its SHA-256 is ever stored.
@@ -107,6 +151,13 @@ export interface UsersRepository {
 
   /** Housekeeping. Expiry is already enforced in `consumePendingRegistration`. */
   purgeExpiredPendingRegistrations(now: Date): Promise<void>;
+
+  /**
+   * Housekeeping. Expiry and single-use are already enforced in `consumeEmailVerification`, and a
+   * re-send supersedes the previous code by expiring it — so this table accumulates a row per
+   * verification attempt for the life of the deployment unless something drops the dead ones.
+   */
+  purgeExpiredEmailVerifications(now: Date): Promise<void>;
 }
 
 /**

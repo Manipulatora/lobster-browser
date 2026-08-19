@@ -76,7 +76,28 @@ export interface PaymentProvider {
    *                parsed object is not good enough on its own.
    * @returns the normalised event, or null if the signature did not verify.
    */
-  verifyWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>): ParsedWebhook | null;
+  verifyWebhook(
+    rawBody: Buffer,
+    headers: Record<string, string | string[] | undefined>,
+  ): ParsedWebhook | null;
+
+  /**
+   * Ask the processor, over an authenticated call, what a payment's state actually is.
+   *
+   * THIS IS THE FLOOR UNDER THE WEBHOOK. Verifying an IPN means reproducing the processor's own
+   * serialisation of the payload byte for byte (see the NOWPayments implementation), and if that
+   * ever diverges — one number rendered `5.0` where JavaScript renders `5` — then EVERY callback
+   * fails verification at once. Without a second path the failure is total and silent: users send
+   * real crypto, every deposit stays pending, and nothing but a log line says so.
+   *
+   * Pulling the state instead of waiting to be told removes the dependency on that reproduction
+   * entirely: the answer arrives on our own authenticated request, so the worst case degrades from
+   * "no deposit is ever credited" to "deposits are credited a few minutes late".
+   *
+   * @returns the same normalised event a webhook would have carried, or null when the payment is
+   *          unknown or the processor cannot be reached.
+   */
+  fetchPayment(providerPaymentId: string): Promise<ParsedWebhook | null>;
 }
 
 /** Nest DI token for the active `PaymentProvider`. */

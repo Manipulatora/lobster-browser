@@ -46,7 +46,14 @@ export function createMailCapture(): MailCapture {
 /**
  * Mail providers the API accepts at sign-up. Mirrors `ALLOWED_EMAIL_DOMAINS` in AuthService.
  */
-const ALLOWED_DOMAINS = ['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com'];
+const ALLOWED_DOMAINS = [
+  'gmail.com',
+  'googlemail.com',
+  'outlook.com',
+  'hotmail.com',
+  'live.com',
+  'msn.com',
+];
 
 /**
  * Force an address onto an accepted provider, keeping its local part.
@@ -61,7 +68,9 @@ export function acceptableEmail(email: string): string {
   const at = email.lastIndexOf('@');
   if (at < 0) return `${email}@gmail.com`;
   const domain = email.slice(at + 1).toLowerCase();
-  return ALLOWED_DOMAINS.includes(domain) ? email.toLowerCase() : `${email.slice(0, at).toLowerCase()}@gmail.com`;
+  return ALLOWED_DOMAINS.includes(domain)
+    ? email.toLowerCase()
+    : `${email.slice(0, at).toLowerCase()}@gmail.com`;
 }
 
 export interface SignedUpUser {
@@ -87,7 +96,10 @@ export async function signUpOverHttp(
   const reg = await request(app.getHttpServer())
     .post('/auth/register')
     .send({ email, password, fullName: 'Test User' });
-  assert.ok([200, 201].includes(reg.status), `register status ${reg.status}: ${JSON.stringify(reg.body)}`);
+  assert.ok(
+    [200, 201].includes(reg.status),
+    `register status ${reg.status}: ${JSON.stringify(reg.body)}`,
+  );
   assert.equal(reg.body.data?.pending, true, 'register must return a pending acknowledgement');
   assert.equal(reg.body.data?.token, undefined, 'register must NOT return a session');
 

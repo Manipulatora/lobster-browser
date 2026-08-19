@@ -1,12 +1,13 @@
 import { Injectable } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
-import type {
-  CreateUserInput,
-  PendingRegistrationInput,
-  StoredPendingRegistration,
-  StoredUser,
-  UsersRepository,
+import {
+  loginBackoffUntil,
+  type CreateUserInput,
+  type PendingRegistrationInput,
+  type StoredPendingRegistration,
+  type StoredUser,
+  type UsersRepository,
 } from './users.repository';
 
 /** Failed guesses allowed against one 6-digit code before it is dead. */
@@ -17,9 +18,12 @@ interface UserRow {
   id: string;
   email: string;
   displayName: string | null;
+  company: string | null;
   passwordHash: string | null;
   createdAt: Date;
   emailVerifiedAt: Date | null;
+  failedLoginAttempts: number;
+  lockedUntil: Date | null;
 }
 
 /**
@@ -124,6 +128,14 @@ export class PrismaUsersRepository implements UsersRepository {
     await this.prisma.pendingRegistration.deleteMany({ where: { expiresAt: { lt: now } } });
   }
 
+  async purgeExpiredEmailVerifications(now: Date): Promise<void> {
+    // A consumed row is as dead as an expired one — the code is single-use, so nothing reads it
+    // again — but it may still be inside its window, hence the two conditions rather than one.
+    await this.prisma.emailVerification.deleteMany({
+      where: { OR: [{ expiresAt: { lt: now } }, { consumedAt: { not: null } }] },
+    });
+  }
+
   async findByEmail(email: string): Promise<StoredUser | null> {
     const row = await this.prisma.user.findUnique({ where: { email } });
     return row ? this.toStoredUser(row) : null;
@@ -187,16 +199,46 @@ export class PrismaUsersRepository implements UsersRepository {
     return row ? this.toStoredUser(row) : null;
   }
 
+  async registerFailedLogin(userId: string, now: Date): Promise<{ lockedUntil: Date | null }> {
+    return this.prisma.$transaction(async (tx) => {
+      // Increment in the statement rather than read-then-write: several guesses land at once by
+      // design here, and counting them in JavaScript would let a parallel spray register as one.
+      const row = await tx.user.update({
+        where: { id: userId },
+        data: { failedLoginAttempts: { increment: 1 } },
+      });
+      const lockedUntil = loginBackoffUntil(row.failedLoginAttempts, now);
+      if (lockedUntil) {
+        await tx.user.update({ where: { id: userId }, data: { lockedUntil } });
+      }
+      return { lockedUntil };
+    });
+  }
+
+  async clearFailedLogins(userId: string): Promise<void> {
+    await this.prisma.user.updateMany({
+      // Scoped so the ordinary sign-in — the overwhelming majority — costs no write at all.
+      where: {
+        id: userId,
+        OR: [{ failedLoginAttempts: { gt: 0 } }, { lockedUntil: { not: null } }],
+      },
+      data: { failedLoginAttempts: 0, lockedUntil: null },
+    });
+  }
+
   private toStoredUser(row: UserRow): StoredUser {
     return {
       id: row.id,
       email: row.email,
       displayName: row.displayName ?? undefined,
+      company: row.company ?? undefined,
       // A user created through AuthService always has a hash; default to '' defensively
       // for any legacy row that predates password auth.
       passwordHash: row.passwordHash ?? '',
       createdAt: row.createdAt.toISOString(),
       emailVerifiedAt: row.emailVerifiedAt?.toISOString(),
+      failedLoginAttempts: row.failedLoginAttempts,
+      lockedUntil: row.lockedUntil?.toISOString(),
     };
   }
 }

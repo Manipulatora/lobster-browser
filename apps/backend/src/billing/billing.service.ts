@@ -17,8 +17,14 @@ import {
   type Subscription,
 } from '@lobster/shared-types';
 
+import { USERS_REPOSITORY, type UsersRepository } from '../auth/users.repository';
+import { MailService } from '../mail/mail.service';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
-import { BILLING_REPOSITORY, type BillingRepository } from './billing.repository';
+import {
+  BILLING_REPOSITORY,
+  type BillingRepository,
+  type StoredDeposit,
+} from './billing.repository';
 import {
   DEPOSIT_CHAINS,
   depositChainByCode,
@@ -75,6 +81,8 @@ export class BillingService {
     @Inject(BILLING_REPOSITORY) private readonly repo: BillingRepository,
     @Inject(TEAMS_REPOSITORY) private readonly teams: TeamsRepository,
     @Inject(PAYMENT_PROVIDER) private readonly payments: PaymentProvider,
+    @Inject(USERS_REPOSITORY) private readonly users: UsersRepository,
+    private readonly mail: MailService,
   ) {}
 
   /**
@@ -114,7 +122,11 @@ export class BillingService {
     };
   }
 
-  async listTransactions(userId: string, limit = 50, teamId?: string): Promise<CreditTransaction[]> {
+  async listTransactions(
+    userId: string,
+    limit = 50,
+    teamId?: string,
+  ): Promise<CreditTransaction[]> {
     const team = await this.resolveTeamId(userId, teamId);
     return this.repo.listTransactions(team, Math.min(Math.max(limit, 1), 200));
   }
@@ -182,6 +194,9 @@ export class BillingService {
       provider: this.payments.name,
       // Namespaced so ids from two processors can never collide in the unique column.
       providerPaymentId: `${this.payments.name}:${created.providerPaymentId}`,
+      // Persisted, not just returned to the client: what the user asked for is the only thing the
+      // amount the webhook later settles at can be reconciled against.
+      amountCents,
       chain: chain.chain,
       asset: created.asset,
       address: created.address,
@@ -217,11 +232,37 @@ export class BillingService {
     const key = `${this.payments.name}:${event.providerPaymentId}`;
 
     if (event.status !== 'confirmed') {
-      await this.repo.updateDepositStatus(key, event.status, {
+      const patch = {
         txHash: event.txHash,
         amountCrypto: event.amountCrypto,
         providerPayload: event.raw,
-      });
+      };
+
+      // A REFUND OR CHARGEBACK ARRIVES AS AN ORDINARY TERMINAL STATUS. The payment may already have
+      // settled and minted Credit, and writing only the status would leave the user holding both the
+      // returned crypto and the balance it bought — the merchant pays for one deposit twice, with no
+      // operator surface to undo it. `reverseDeposit` takes the Credit back in the same transaction
+      // as the status write, and is a plain status write for the ordinary case of a payment that
+      // never settled at all.
+      if (event.status === 'failed' || event.status === 'expired') {
+        const reversal = await this.repo.reverseDeposit(key, event.status, patch);
+        if (reversal.reversed) {
+          this.logger.warn(
+            `deposit ${key} was reversed after settling — clawed back ${reversal.clawedBackCents} cents`,
+          );
+          if (reversal.unrecoveredCents > 0) {
+            // The balance was already spent. Nothing automatic can recover it: the wallet is not
+            // allowed to go negative, so this is a real loss and has to reach a person.
+            this.logger.error(
+              `deposit ${key} reversal is ${reversal.unrecoveredCents} cents short — the Credit ` +
+                'had already been spent and the wallet cannot go negative',
+            );
+          }
+        }
+        return false;
+      }
+
+      await this.repo.updateDepositStatus(key, event.status, patch);
       return false;
     }
 
@@ -238,6 +279,10 @@ export class BillingService {
       return false;
     }
 
+    // Read BEFORE the credit, while the row still says what was asked for and nothing has been
+    // stamped on it. Used for the reconciliation check and to address the receipt.
+    const deposit = await this.repo.findDepositByProviderId(key);
+
     const credited = await this.repo.creditDeposit(key, {
       creditedCents: cents,
       txHash: event.txHash,
@@ -245,14 +290,79 @@ export class BillingService {
       providerPayload: event.raw,
     });
 
-    if (credited) {
-      this.logger.log(`credited ${cents} cents for ${key}`);
-    } else {
+    if (!credited) {
       // Either a duplicate delivery or an unknown payment. Both are expected; neither is an error
       // the processor should retry.
       this.logger.log(`no-op for ${key} (already credited, or unknown payment)`);
+      return false;
     }
-    return credited;
+
+    this.logger.log(`credited ${cents} cents for ${key}`);
+    if (deposit) {
+      this.reconcile(key, deposit, cents);
+      await this.sendReceipt(deposit, cents);
+    }
+    return true;
+  }
+
+  /**
+   * Compare what settled against what was asked for.
+   *
+   * A settled deposit is worth what the PROCESSOR says it is worth: under- and overpayment are
+   * ordinary on a chain, and refusing to credit a mismatch would strand real money that has already
+   * arrived. What is NOT ordinary is a payment settling for an amount unrelated to the one it was
+   * quoted at — the shape a processor bug or a crossed payment takes — and that used to be
+   * invisible, because the requested figure was never stored. It is a loud log rather than a hold
+   * for the same reason: the money is already ours, and the useful thing is that a human can see it.
+   */
+  private reconcile(key: string, deposit: StoredDeposit, creditedCents: number): void {
+    const requested = deposit.amountCents;
+    if (requested === undefined || requested <= 0) return;
+
+    const drift = Math.abs(creditedCents - requested);
+    // Wide on purpose: a partial payment or a generous rounding is not worth a log line every time.
+    if (drift <= 100 || drift / requested <= 0.05) return;
+
+    this.logger.warn(
+      `deposit ${key} settled at ${usd(creditedCents)} against a requested ${usd(requested)} — ` +
+        'expected for an under/overpayment, worth investigating if it repeats',
+    );
+  }
+
+  /**
+   * Tell the payer their money landed.
+   *
+   * This is the receipt `EmailVerifiedGuard` exists for: a deposit is gated on a proven address
+   * precisely so there is somewhere to send this, and a payment that produces no confirmation
+   * leaves the user watching a page for a balance that already changed.
+   *
+   * BEST-EFFORT, and deliberately last. The Credit is already recorded; a missing mailbox, an
+   * unconfigured SMTP host or a lookup failure must not turn a settled payment into an error the
+   * processor retries. It goes to the team's admins, because the team — not the browsing session —
+   * is what holds the balance.
+   */
+  private async sendReceipt(deposit: StoredDeposit, creditedCents: number): Promise<void> {
+    try {
+      const members = await this.teams.listMembers(deposit.teamId);
+      const admins = members.filter((m) => m.role === 'admin');
+      const recipient = (admins[0] ?? members[0])?.userId;
+      if (!recipient) return;
+
+      const user = await this.users.findById(recipient);
+      if (!user) return;
+
+      const balance = await this.repo.getBalanceCents(deposit.teamId);
+      await this.mail.sendDepositReceipt(
+        user.email,
+        usd(creditedCents),
+        usd(balance),
+        deposit.asset,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `deposit receipt not sent for ${deposit.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // --- Packages -------------------------------------------------------------

@@ -8,7 +8,12 @@
 //   A profile's sensitive payload (cookies, storage, the full user-data-dir snapshot)
 //   is encrypted CLIENT-SIDE and stored in S3-compatible object storage. Postgres holds
 //   ONLY a reference to that blob (`encryptedBlobRef`) plus non-secret metadata and the
-//   deterministic `fingerprintSeed`. The server never sees plaintext profile contents.
+//   deterministic `fingerprintSeed`. No plaintext profile payload is ever sent to the server.
+//
+//   THIS IS NOT ZERO-KNOWLEDGE, and describing it that way would be a lie by omission. The key
+//   those blobs are encrypted under is `VaultKey.dataKey`, which this database holds and which is
+//   served to any client that can sign in — see that model for why, and for what wrapping it at
+//   rest does and does not protect against.
 
 generator client {
   provider = "prisma-client-js"
@@ -60,7 +65,8 @@ enum CreditTxKind {
   purchase   // user bought a package
   renewal    // monthly auto-renew charge
   refund     // credit returned (proration, support action)
-  adjustment // manual correction by an operator; always carries a reason in `metadata`
+  adjustment // a correction that is neither a sale nor a payment — an operator fix, or Credit
+             // clawed back when a settled deposit was refunded; always carries a reason in `metadata`
 }
 
 // Lifecycle of an inbound crypto payment.
@@ -91,6 +97,14 @@ model User {
   /// Null until the address is proven. Nullable-timestamp rather than a boolean so we keep WHEN,
   /// which matters for disputes and for expiring stale unverified accounts.
   emailVerifiedAt DateTime?
+
+  /// Consecutive wrong passwords since the last successful sign-in, and the instant before which
+  /// sign-in is refused outright. Kept ON THE ACCOUNT, not in the process: the per-IP limiter in
+  /// front of the app has one bucket per instance per address, so spraying one password across many
+  /// accounts from many addresses fills no bucket anywhere. The account being guessed is the only
+  /// place the pattern exists. See `loginBackoffUntil` for why this backs off rather than locks.
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
 
   // Relations
   ownedTeams        Team[]              @relation("TeamOwner")
@@ -145,10 +159,19 @@ model PendingRegistration {
 /// nothing support can do. That is a worse product than the risk it avoids for an operator who runs
 /// their own server. Signing in is therefore all a user needs to get their profiles back, and a
 /// password reset costs them nothing.
+///
+/// SO BE HONEST ABOUT WHAT THAT COSTS. Because the server holds this key and serves it to any
+/// session, a stolen token is a profile-data breach and not merely an account takeover, and anyone
+/// holding both this table and the blob store can read every snapshot. The column is wrapped under
+/// a deployment master key (`VAULT_MASTER_KEY`, see key-wrapping.ts) so a database dump alone is
+/// not sufficient — that is defence in depth, not end-to-end encryption, and the difference is not
+/// something to blur.
 model VaultKey {
   userId String @id
 
-  /// 32 random bytes. Never derived from anything the user types.
+  /// 32 random bytes, never derived from anything the user types, stored wrapped — a version byte,
+  /// nonce, tag and ciphertext under the deployment master key. Rows written before wrapping
+  /// existed are the bare 32 bytes and are still read; their own length says which they are.
   dataKey Bytes
 
   createdAt DateTime @default(now())
@@ -315,6 +338,9 @@ model ApiKey {
   team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
 
   @@index([teamId])
+  // Every automation request authenticates by looking a key up on this column, so without the index
+  // each one — including every invalid `lb_live_` bearer sprayed at the API — scans the whole table.
+  @@index([hashedKey])
   @@map("api_keys")
 }
 
@@ -456,6 +482,11 @@ model Deposit {
   providerPaymentId String        @unique
   status            DepositStatus @default(pending)
 
+  // What the user ASKED to deposit, in USD cents, at the moment the address was issued. Kept so the
+  // amount the webhook later claims can be reconciled against what was actually requested; without
+  // it a wrong credit has nothing to be wrong against. Nullable for rows written before it existed.
+  amountCents Int?
+
   // What the user actually sent.
   chain        String // "BSC", "TRON", "POLYGON", …
   asset        String // "USDT", "USDC", …
@@ -466,6 +497,12 @@ model Deposit {
   // What it became, in USD cents, after the processor's conversion and fees. Null until confirmed.
   creditedCents Int?
   creditedAt    DateTime?
+
+  /// When the credit was taken back, after the processor refunded or charged back a payment it had
+  /// already settled. Nullable-timestamp for the same reason as `creditedAt`: it is the exactly-once
+  /// guard as well as the record — the reversal claims the row by matching `reversedAt IS NULL`, so
+  /// a redelivered refund callback cannot debit the wallet twice.
+  reversedAt DateTime?
 
   // Raw provider payload of the last webhook, kept for dispute resolution. Non-secret: it holds
   // amounts, hashes and statuses, never API keys.

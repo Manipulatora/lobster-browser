@@ -1,4 +1,10 @@
-import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  type OnModuleDestroy,
+  type OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { planByTier, type PaidPlanTier } from '@lobster/shared-types';
 
@@ -89,7 +95,8 @@ export class RenewalService implements OnModuleInit, OnModuleDestroy {
       // Charge what the team actually agreed to, not today's list price. `priceCents` was
       // snapshotted at purchase precisely so a catalog change cannot silently re-price an existing
       // subscriber; falling back to the catalog covers rows written before that field existed.
-      const price = sub.priceCents > 0 ? sub.priceCents : planByTier(sub.tier as PaidPlanTier).priceCents;
+      const price =
+        sub.priceCents > 0 ? sub.priceCents : planByTier(sub.tier as PaidPlanTier).priceCents;
       const plan = planByTier(sub.tier as PaidPlanTier);
 
       const outcome = await this.repo.renewSubscription({
@@ -105,7 +112,9 @@ export class RenewalService implements OnModuleInit, OnModuleDestroy {
       } else if (outcome === 'insufficient_credit') {
         await this.repo.markPastDue(sub.teamId, 'insufficient_credit');
         result.lapsed += 1;
-        this.logger.log(`team ${sub.teamId} lapsed to past_due — not enough Credit for ${sub.tier}`);
+        this.logger.log(
+          `team ${sub.teamId} lapsed to past_due — not enough Credit for ${sub.tier}`,
+        );
       } else {
         // Another instance renewed this period between the query and the attempt. Expected.
         result.skipped += 1;

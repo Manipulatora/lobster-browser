@@ -29,6 +29,22 @@ async function register(email: string): Promise<string> {
   return (await signUpOverHttp(app, mailCapture, email)).token;
 }
 
+/**
+ * A session plus one profile of its own.
+ *
+ * The lease routes are scoped to a profile the caller can actually see, so these tests need a REAL
+ * profile id rather than an invented string — an invented one is now (correctly) a 404.
+ */
+async function userWithProfile(email: string): Promise<{ token: string; profileId: string }> {
+  const token = await register(email);
+  const created = await request(app.getHttpServer())
+    .post('/profiles')
+    .set('Authorization', `Bearer ${token}`)
+    .send({ name: 'Leased profile', engine: 'lobium', os: 'windows' });
+  assert.ok([200, 201].includes(created.status), `profile create status ${created.status}`);
+  return { token, profileId: created.body.data.id };
+}
+
 before(async () => {
   process.env.DATABASE_URL = ''; // force in-memory repos — see the note in audit.e2e.spec.ts
   process.env.BLOB_STORE_PATH = '';
@@ -62,15 +78,15 @@ after(async () => {
 });
 
 test('a free profile reads as free, and claiming it names the holder', async () => {
-  const token = await register('lease-free@gmail.com');
+  const { token, profileId } = await userWithProfile('lease-free@gmail.com');
 
   const before = await request(app.getHttpServer())
-    .get('/profiles/prf-free/lease')
+    .get(`/profiles/${profileId}/lease`)
     .set('Authorization', `Bearer ${token}`);
   assert.equal(before.body.data, null, 'a profile nobody holds is free');
 
   const claimed = await request(app.getHttpServer())
-    .post('/profiles/prf-free/lease')
+    .post(`/profiles/${profileId}/lease`)
     .set('Authorization', `Bearer ${token}`)
     .send({ deviceId: 'dev-1', deviceLabel: "Ivy's laptop" });
   assert.equal(claimed.status, 200);
@@ -78,21 +94,21 @@ test('a free profile reads as free, and claiming it names the holder', async () 
   assert.ok(claimed.body.data.leaseId, 'a claim id is issued');
 
   const after = await request(app.getHttpServer())
-    .get('/profiles/prf-free/lease')
+    .get(`/profiles/${profileId}/lease`)
     .set('Authorization', `Bearer ${token}`);
   assert.equal(after.body.data.deviceId, 'dev-1');
 });
 
 test('a second machine is refused and told where the profile is open', async () => {
-  const token = await register('lease-second@gmail.com');
+  const { token, profileId } = await userWithProfile('lease-second@gmail.com');
   await request(app.getHttpServer())
-    .post('/profiles/prf-busy/lease')
+    .post(`/profiles/${profileId}/lease`)
     .set('Authorization', `Bearer ${token}`)
     .send({ deviceId: 'dev-a', deviceLabel: 'Desktop' })
     .expect(200);
 
   const second = await request(app.getHttpServer())
-    .post('/profiles/prf-busy/lease')
+    .post(`/profiles/${profileId}/lease`)
     .set('Authorization', `Bearer ${token}`)
     .send({ deviceId: 'dev-b', deviceLabel: 'Laptop' });
   assert.equal(second.status, 409);
@@ -105,15 +121,15 @@ test('a second machine is refused and told where the profile is open', async () 
 });
 
 test('two machines racing for the same profile: exactly one wins', async () => {
-  const token = await register('lease-race@gmail.com');
+  const { token, profileId } = await userWithProfile('lease-race@gmail.com');
 
   const [a, b] = await Promise.all([
     request(app.getHttpServer())
-      .post('/profiles/prf-race/lease')
+      .post(`/profiles/${profileId}/lease`)
       .set('Authorization', `Bearer ${token}`)
       .send({ deviceId: 'dev-a', deviceLabel: 'A' }),
     request(app.getHttpServer())
-      .post('/profiles/prf-race/lease')
+      .post(`/profiles/${profileId}/lease`)
       .set('Authorization', `Bearer ${token}`)
       .send({ deviceId: 'dev-b', deviceLabel: 'B' }),
   ]);
@@ -198,24 +214,68 @@ test('a taken-over machine cannot extend or release the claim it lost', async ()
 });
 
 test('releasing frees the profile for the next machine', async () => {
-  const token = await register('lease-release@gmail.com');
+  const { token, profileId } = await userWithProfile('lease-release@gmail.com');
   const claimed = await request(app.getHttpServer())
-    .post('/profiles/prf-release/lease')
+    .post(`/profiles/${profileId}/lease`)
     .set('Authorization', `Bearer ${token}`)
     .send({ deviceId: 'dev-a', deviceLabel: 'A' })
     .expect(200);
 
   await request(app.getHttpServer())
-    .delete('/profiles/prf-release/lease')
+    .delete(`/profiles/${profileId}/lease`)
     .set('Authorization', `Bearer ${token}`)
     .send({ leaseId: claimed.body.data.leaseId })
     .expect(200);
 
   await request(app.getHttpServer())
-    .post('/profiles/prf-release/lease')
+    .post(`/profiles/${profileId}/lease`)
     .set('Authorization', `Bearer ${token}`)
     .send({ deviceId: 'dev-b', deviceLabel: 'B' })
     .expect(200);
+});
+
+test("another team's profile is invisible, not merely unwritable", async () => {
+  const owner = await userWithProfile('lease-owner@gmail.com');
+  const stranger = await register('lease-stranger@gmail.com');
+  const strangerAuth = { Authorization: `Bearer ${stranger}` };
+
+  await request(app.getHttpServer())
+    .post(`/profiles/${owner.profileId}/lease`)
+    .set('Authorization', `Bearer ${owner.token}`)
+    .send({ deviceId: 'dev-owner', deviceLabel: "Owner's laptop" })
+    .expect(200);
+
+  // Reading it would disclose which user and device is running that identity right now, and
+  // claiming it would take the profile away from its owner for as long as the thief refreshes.
+  // A 404 rather than a 403, so the id cannot be probed for existence either.
+  const read = await request(app.getHttpServer())
+    .get(`/profiles/${owner.profileId}/lease`)
+    .set(strangerAuth);
+  assert.equal(read.status, 404);
+  assert.ok(!JSON.stringify(read.body).includes('dev-owner'), 'no holder is disclosed');
+
+  const steal = await request(app.getHttpServer())
+    .post(`/profiles/${owner.profileId}/lease`)
+    .set(strangerAuth)
+    .send({ deviceId: 'dev-thief', deviceLabel: 'Thief' });
+  assert.equal(steal.status, 404);
+
+  const held = await request(app.getHttpServer())
+    .get(`/profiles/${owner.profileId}/lease`)
+    .set('Authorization', `Bearer ${owner.token}`);
+  assert.equal(held.body.data.deviceId, 'dev-owner', "the owner's claim is untouched");
+});
+
+test('a profile that does not exist has no lease to read or take', async () => {
+  const token = await register('lease-missing@gmail.com');
+  const auth = { Authorization: `Bearer ${token}` };
+
+  await request(app.getHttpServer()).get('/profiles/no-such-profile/lease').set(auth).expect(404);
+  await request(app.getHttpServer())
+    .post('/profiles/no-such-profile/lease')
+    .set(auth)
+    .send({ deviceId: 'dev-a' })
+    .expect(404);
 });
 
 test('every lease route requires a token', async () => {

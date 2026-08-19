@@ -186,6 +186,18 @@ test('nested objects are sorted recursively', () => {
   assert.ok(event, 'recursively sorted payloads must verify');
 });
 
+test('a payload nested past the depth cap is refused instead of sorted', () => {
+  // The sort runs BEFORE the signature can be checked, so its cost is work an unauthenticated
+  // caller gets to ask for. A real IPN is one object deep; anything approaching this is a probe.
+  let deep: Record<string, unknown> = { end: true };
+  for (let i = 0; i < 64; i += 1) deep = { nest: deep };
+
+  assert.equal(
+    provider().verifyWebhook(Buffer.from(JSON.stringify(deep)), { 'x-nowpayments-sig': 'x' }),
+    null,
+  );
+});
+
 // --- The payment request -------------------------------------------------------------------
 //
 // These exist because the request body was NOT covered before, and a wrong field name in it is

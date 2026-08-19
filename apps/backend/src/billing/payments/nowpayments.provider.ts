@@ -241,9 +241,18 @@ export class NowPaymentsProvider implements PaymentProvider, OnModuleInit {
       return null;
     }
 
-    const expected = createHmac('sha512', this.ipnSecret)
-      .update(JSON.stringify(sortDeep(payload)))
-      .digest('hex');
+    let canonical: string;
+    try {
+      canonical = JSON.stringify(sortDeep(payload));
+    } catch (err) {
+      if (err instanceof PayloadTooDeepError) {
+        this.logger.warn('IPN payload nested past the depth cap — rejecting unread');
+        return null;
+      }
+      throw err;
+    }
+
+    const expected = createHmac('sha512', this.ipnSecret).update(canonical).digest('hex');
 
     // Constant-time compare. A plain `===` leaks, through timing, how many leading characters of
     // a guess were right, which is enough to forge a signature byte by byte over many attempts.
@@ -260,10 +269,58 @@ export class NowPaymentsProvider implements PaymentProvider, OnModuleInit {
       return null;
     }
 
+    return this.toEvent(payload, 'IPN');
+  }
+
+  /**
+   * `GET /v1/payment/{id}` — the same payment, told to us instead of shouted at us.
+   *
+   * The response carries the same fields the IPN does, so it goes through the same normalisation
+   * and reaches the same crediting path. There is no signature to check because there is nothing
+   * to authenticate: we made the request, over TLS, with our own API key.
+   *
+   * Errors are swallowed into null on purpose. The caller is a periodic sweep over payments that
+   * are already unsettled — an unreachable API means it stays unsettled and the next pass tries
+   * again, which is exactly what should happen.
+   */
+  async fetchPayment(providerPaymentId: string): Promise<ParsedWebhook | null> {
+    if (!this.isConfigured() || !providerPaymentId) return null;
+
+    try {
+      const res = await fetch(`${API_BASE}/payment/${encodeURIComponent(providerPaymentId)}`, {
+        headers: { 'x-api-key': this.apiKey },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) {
+        // A 404 is a payment they have no record of; anything else is theirs to recover from.
+        if (res.status !== 404) {
+          this.logger.warn(`payment lookup for ${providerPaymentId} failed: HTTP ${res.status}`);
+        }
+        return null;
+      }
+      const payload = (await res.json()) as Record<string, unknown>;
+      // Their lookup response omits `payment_id` on some plans; the id we asked for is authoritative.
+      return this.toEvent({ ...payload, payment_id: providerPaymentId }, 'payment lookup');
+    } catch (err) {
+      this.logger.warn(
+        `payment lookup for ${providerPaymentId} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Normalise a NOWPayments payment payload, whichever direction it arrived from.
+   *
+   * Shared so a pushed callback and a pulled lookup can never disagree about what a payment means
+   * — the reconciliation sweep exists precisely to be a substitute for the webhook, and would be
+   * worthless if it credited a different amount.
+   */
+  private toEvent(payload: Record<string, unknown>, source: string): ParsedWebhook | null {
     const rawStatus = String(payload.payment_status ?? '');
     const status = STATUS_MAP[rawStatus];
     if (!status) {
-      this.logger.warn(`IPN with unknown payment_status "${rawStatus}" — ignoring`);
+      this.logger.warn(`${source} with unknown payment_status "${rawStatus}" — ignoring`);
       return null;
     }
 
@@ -325,14 +382,27 @@ function creditableCents(payload: Record<string, unknown>): number {
 }
 
 /**
+ * How deep a payload may nest before it is refused unread.
+ *
+ * An IPN is one flat object; nothing legitimate comes close. The cap exists because the sort below
+ * runs BEFORE the signature can be checked — it is work an unauthenticated caller gets to ask for,
+ * and unbounded recursion over a body they chose is the cheapest way to ask for a lot of it.
+ */
+const MAX_PAYLOAD_DEPTH = 8;
+
+/** Signals a payload nested past {@link MAX_PAYLOAD_DEPTH}. */
+class PayloadTooDeepError extends Error {}
+
+/**
  * Recursively sort object keys. Arrays keep their order — order is meaningful in an array, and
  * NOWPayments does not reorder them either.
  */
-function sortDeep(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortDeep);
+function sortDeep(value: unknown, depth = 0): unknown {
+  if (depth > MAX_PAYLOAD_DEPTH) throw new PayloadTooDeepError();
+  if (Array.isArray(value)) return value.map((item) => sortDeep(item, depth + 1));
   if (value === null || typeof value !== 'object') return value;
   const src = value as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(src).sort()) out[key] = sortDeep(src[key]);
+  for (const key of Object.keys(src).sort()) out[key] = sortDeep(src[key], depth + 1);
   return out;
 }

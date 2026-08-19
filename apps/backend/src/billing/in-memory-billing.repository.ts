@@ -9,7 +9,7 @@ import type {
   Subscription,
 } from '@lobster/shared-types';
 
-import type { BillingRepository } from './billing.repository';
+import type { BillingRepository, DepositReversal, StoredDeposit } from './billing.repository';
 
 /**
  * In-memory Credit store. Active whenever `DATABASE_URL` is unset, so the app and its tests boot
@@ -26,7 +26,7 @@ import type { BillingRepository } from './billing.repository';
 export class InMemoryBillingRepository implements BillingRepository {
   private readonly balances = new Map<string, number>();
   private readonly ledger: CreditTransaction[] = [];
-  private readonly deposits = new Map<string, Deposit & { creditedAt?: string }>();
+  private readonly deposits = new Map<string, StoredDeposit>();
   private readonly subscriptions = new Map<string, Subscription>();
 
   // --- Wallet ---------------------------------------------------------------
@@ -75,16 +75,19 @@ export class InMemoryBillingRepository implements BillingRepository {
     teamId: string;
     provider: string;
     providerPaymentId: string;
+    amountCents: number;
     chain: string;
     asset: string;
     address?: string;
     amountCrypto?: string;
   }): Promise<Deposit> {
-    const row: Deposit = {
+    const row: StoredDeposit = {
       id: randomUUID(),
       teamId: deposit.teamId,
       provider: deposit.provider,
+      providerPaymentId: deposit.providerPaymentId,
       status: 'pending',
+      amountCents: deposit.amountCents,
       chain: deposit.chain,
       asset: deposit.asset,
       address: deposit.address,
@@ -92,10 +95,10 @@ export class InMemoryBillingRepository implements BillingRepository {
       createdAt: new Date().toISOString(),
     };
     this.deposits.set(deposit.providerPaymentId, row);
-    return row;
+    return toWireDeposit(row);
   }
 
-  async findDepositByProviderId(providerPaymentId: string): Promise<Deposit | null> {
+  async findDepositByProviderId(providerPaymentId: string): Promise<StoredDeposit | null> {
     return this.deposits.get(providerPaymentId) ?? null;
   }
 
@@ -103,7 +106,22 @@ export class InMemoryBillingRepository implements BillingRepository {
     return [...this.deposits.values()]
       .filter((d) => d.teamId === teamId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, limit);
+      .slice(0, limit)
+      .map(toWireDeposit);
+  }
+
+  async findUnsettledDeposits(args: {
+    createdBefore: Date;
+    createdAfter: Date;
+    limit: number;
+  }): Promise<StoredDeposit[]> {
+    const before = args.createdBefore.toISOString();
+    const after = args.createdAfter.toISOString();
+    return [...this.deposits.values()]
+      .filter((d) => d.status === 'pending' || d.status === 'confirming')
+      .filter((d) => d.createdAt < before && d.createdAt > after)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(0, args.limit);
   }
 
   async updateDepositStatus(
@@ -140,6 +158,49 @@ export class InMemoryBillingRepository implements BillingRepository {
       metadata: { depositId: row.id, providerPaymentId, txHash: args.txHash ?? null },
     });
     return true;
+  }
+
+  async reverseDeposit(
+    providerPaymentId: string,
+    status: DepositStatus,
+    patch: { txHash?: string; amountCrypto?: string },
+  ): Promise<DepositReversal> {
+    const row = this.deposits.get(providerPaymentId);
+    if (!row) return { reversed: false, clawedBackCents: 0, unrecoveredCents: 0 };
+
+    row.status = status;
+    if (patch.txHash) row.txHash = patch.txHash;
+    if (patch.amountCrypto) row.amountCrypto = patch.amountCrypto;
+
+    // Same guard as the Prisma implementation: nothing was minted, or it has already been given
+    // back, so there is nothing to take.
+    if (!row.creditedAt || row.reversedAt) {
+      return { reversed: false, clawedBackCents: 0, unrecoveredCents: 0 };
+    }
+    row.reversedAt = new Date().toISOString();
+
+    const owed = row.creditedCents ?? 0;
+    if (owed <= 0) return { reversed: true, clawedBackCents: 0, unrecoveredCents: 0 };
+
+    const balance = this.balances.get(row.teamId) ?? 0;
+    const clawedBackCents = Math.min(owed, Math.max(balance, 0));
+    const unrecoveredCents = owed - clawedBackCents;
+    if (clawedBackCents === 0) return { reversed: true, clawedBackCents: 0, unrecoveredCents };
+
+    await this.move({
+      teamId: row.teamId,
+      kind: 'adjustment',
+      amountCents: -clawedBackCents,
+      description: `Deposit reversed — ${row.asset} on ${row.chain}`,
+      metadata: {
+        reason: 'deposit_reversed',
+        depositId: row.id,
+        providerPaymentId,
+        creditedCents: owed,
+        unrecoveredCents,
+      },
+    });
+    return { reversed: true, clawedBackCents, unrecoveredCents };
   }
 
   // --- Subscription ---------------------------------------------------------
@@ -224,4 +285,21 @@ export class InMemoryBillingRepository implements BillingRepository {
       .sort((a, b) => (a.currentPeriodEnd ?? '').localeCompare(b.currentPeriodEnd ?? ''))
       .slice(0, limit);
   }
+}
+
+/**
+ * Drop the settlement bookkeeping a client has no business seeing.
+ *
+ * The Prisma repository gets this for free — it maps rows to the wire type explicitly — while this
+ * one hands back the object it stores, so the projection has to be deliberate.
+ */
+function toWireDeposit(row: StoredDeposit): Deposit {
+  const {
+    providerPaymentId: _providerPaymentId,
+    amountCents: _amountCents,
+    creditedAt: _creditedAt,
+    reversedAt: _reversedAt,
+    ...deposit
+  } = row;
+  return deposit;
 }
