@@ -2,6 +2,7 @@ import { useState } from 'react';
 
 import { authClient, type CloudUser } from '../../api/auth';
 import siteLogo from '../../assets/brand/site-logo.png';
+import { Button } from '../../ui';
 
 interface AuthScreenProps {
   onAuthenticated: (user: CloudUser) => void;
@@ -70,31 +71,26 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps): JSX.Element {
             </div>
             {/* Cancelling only stops this window waiting; the Rust side drops its loopback
                 listener when the attempt is abandoned. */}
-            <button
-              type="button"
-              className="btn auth-screen__button auth-screen__cancel"
+            <Button
+              className="auth-screen__button auth-screen__cancel"
               onClick={() => setWaiting(null)}
             >
               Cancel
-            </button>
+            </Button>
           </>
         ) : (
           <>
             <div className="auth-screen__actions">
-              <button
-                type="button"
-                className="btn btn--primary auth-screen__button"
+              <Button
+                variant="primary"
+                className="auth-screen__button"
                 onClick={() => void start('signup')}
               >
                 Sign up
-              </button>
-              <button
-                type="button"
-                className="btn auth-screen__button"
-                onClick={() => void start('login')}
-              >
+              </Button>
+              <Button className="auth-screen__button" onClick={() => void start('login')}>
                 Log in
-              </button>
+              </Button>
             </div>
 
             {error ? (

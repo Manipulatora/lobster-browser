@@ -486,9 +486,7 @@ export function ProfileList({
                           only exists once a check has run, so show host:port until then. */}
                       <span
                         className="proxy-cell__ip cell-ellipsis"
-                        title={
-                          check?.state === 'ok' && check.ip ? check.ip : proxy.address
-                        }
+                        title={check?.state === 'ok' && check.ip ? check.ip : proxy.address}
                       >
                         {check?.state === 'ok' && check.ip ? check.ip : proxy.address}
                       </span>

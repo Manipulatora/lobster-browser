@@ -72,11 +72,11 @@ export function ActionDialog({
           {description}
         </p>
         {input ? (
-          <label className="field" htmlFor={inputId}>
-            <span className="field__label">{input.label}</span>
+          <label className="lb-field" htmlFor={inputId}>
+            <span className="lb-field__label">{input.label}</span>
             <input
               id={inputId}
-              className="input"
+              className="lb-input"
               type={input.type ?? 'text'}
               value={input.value}
               placeholder={input.placeholder}

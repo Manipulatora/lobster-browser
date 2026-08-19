@@ -6,6 +6,7 @@ import { OS_OPTIONS } from '../src/features/profiles/options';
 import {
   androidModelsForSelection,
   fontPresetsForTarget,
+  rendererPresetById,
   rendererPresetsForTarget,
 } from '../src/features/profiles/fingerprintCatalog';
 import {
@@ -159,8 +160,13 @@ test('changing OS rebuilds target-specific screen, fonts, renderer, and navigato
   expect(input.os).toBe('linux');
   expect(input.fingerprintOverrides?.navigator?.platform).toBeUndefined();
   expect(input.fingerprintOverrides?.fonts).not.toContain('Segoe UI');
-  expect(input.fingerprintOverrides?.renderer).toEqual({ mode: 'host' });
-  expect(input.fingerprintOverrides?.webgl).toBeUndefined();
+  const renderer = input.fingerprintOverrides?.renderer;
+  expect(renderer?.mode).toBe('validated_preset');
+  const presetId = renderer?.mode === 'validated_preset' ? renderer.presetId : '';
+  const preset = rendererPresetById('linux', presetId);
+  expect(preset).toBeTruthy();
+  expect(rendererPresetById('windows', presetId)).toBeUndefined();
+  expect(input.fingerprintOverrides?.webgl).toEqual(preset?.webgl);
 });
 
 test('Android is selectable and its device identity round-trips', () => {

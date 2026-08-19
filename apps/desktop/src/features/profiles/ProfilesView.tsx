@@ -1,6 +1,4 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
-
 
 import type {
   CreateProfileInput,
@@ -20,12 +18,11 @@ import {
   type ProfilePatch,
 } from '../../api/tauri';
 import { LaunchPanel } from '../automation/LaunchPanel';
-import { t } from '../../i18n';
-import { ActionDialog, Button, EmptyState, Skeleton, useToast } from '../../ui';
+import { ActionDialog, Button, EmptyState, Modal, Skeleton, useToast } from '../../ui';
 import { EditProfileForm } from './EditProfileForm';
 import { ExportProfileDialog } from './ExportProfileDialog';
 import { ImportProfileDialog } from './ImportProfileDialog';
-import { ENGINE_OPTIONS, OS_OPTIONS, STATUS_META } from './options';
+import { ENGINE_OPTIONS, OS_OPTIONS, STATUS_META, profileCount } from './options';
 import { ProfileList, type ProfileSortKey, type SortDir } from './ProfileList';
 import { TrashModal } from './TrashModal';
 import { useProfiles } from './useProfiles';
@@ -88,77 +85,6 @@ function pendingActionCopy(action: PendingProfileAction | null): {
     description: `${action.label} will be removed from the active workspace and can be restored later.`,
     confirmLabel: 'Move to trash',
   };
-}
-
-function AccessibleModalOverlay({
-  children,
-  onClose,
-  locked = false,
-}: {
-  children: ReactNode;
-  onClose: () => void;
-  locked?: boolean;
-}): JSX.Element {
-  const overlayRef = useRef<HTMLDivElement | null>(null);
-  const closeRef = useRef(onClose);
-  const lockedRef = useRef(locked);
-  closeRef.current = onClose;
-  lockedRef.current = locked;
-
-  useEffect(() => {
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    const root = overlayRef.current;
-    const first =
-      root?.querySelector<HTMLElement>('[autofocus]') ??
-      root?.querySelector<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      );
-    first?.focus();
-
-    function onKeyDown(event: KeyboardEvent): void {
-      if (event.key === 'Escape' && !lockedRef.current) {
-        event.preventDefault();
-        event.stopPropagation();
-        closeRef.current();
-        return;
-      }
-      if (event.key !== 'Tab' || !root) return;
-      const focusable = Array.from(
-        root.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter((element) => element.offsetParent !== null);
-      if (focusable.length === 0) return;
-      const firstElement = focusable[0];
-      const lastElement = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === firstElement) {
-        event.preventDefault();
-        lastElement?.focus();
-      } else if (!event.shiftKey && document.activeElement === lastElement) {
-        event.preventDefault();
-        firstElement?.focus();
-      }
-    }
-
-    document.addEventListener('keydown', onKeyDown, true);
-    return () => {
-      document.removeEventListener('keydown', onKeyDown, true);
-      previouslyFocused?.focus();
-    };
-  }, []);
-
-  return (
-    <div
-      ref={overlayRef}
-      className="modal-overlay"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !locked) onClose();
-      }}
-    >
-      {children}
-    </div>
-  );
 }
 
 /**
@@ -330,7 +256,12 @@ export function ProfilesView({
     return created;
   }
 
-  async function launchProfile(id: string, password?: string): Promise<void> {
+  /**
+   * `quiet` is for the bulk paths: twenty launches used to mean twenty notifications, one per
+   * profile, stacked over the list the user was trying to watch. The caller reports the whole
+   * operation once instead. The boolean is what lets it count.
+   */
+  async function launchProfile(id: string, password?: string, quiet = false): Promise<boolean> {
     const target = profiles.find((profile) => profile.id === id);
     setBusy(id, true);
     try {
@@ -338,9 +269,11 @@ export function ProfilesView({
       setLaunchInfo((prev) => new Map(prev).set(id, info));
       // Go straight to Lobium; connection details remain an explicit advanced action.
       // Connection details remain available via the profile ⋮ menu while running.
-      toast.success(`Launched ${target?.name ?? 'profile'}.`);
+      if (!quiet) toast.success(`Launched ${target?.name ?? 'profile'}.`);
+      return true;
     } catch (e: unknown) {
-      toast.error(`Launch failed: ${errMessage(e)}`);
+      if (!quiet) toast.error(`Launch failed: ${errMessage(e)}`);
+      return false;
     } finally {
       setBusy(id, false);
     }
@@ -382,7 +315,7 @@ export function ProfilesView({
     }
   }
 
-  async function handleStop(id: string): Promise<void> {
+  async function handleStop(id: string, quiet = false): Promise<boolean> {
     setBusy(id, true);
     try {
       await stop(id);
@@ -394,9 +327,11 @@ export function ProfilesView({
       if (launchPanel && profiles.find((p) => p.id === id)?.name === launchPanel.profileName) {
         setLaunchPanel(null);
       }
-      toast.success('Profile stopped.');
+      if (!quiet) toast.success('Profile stopped.');
+      return true;
     } catch (e: unknown) {
-      toast.error(`Stop failed: ${errMessage(e)}`);
+      if (!quiet) toast.error(`Stop failed: ${errMessage(e)}`);
+      return false;
     } finally {
       setBusy(id, false);
     }
@@ -508,16 +443,31 @@ export function ProfilesView({
   }
 
   async function handleBulkLaunch(): Promise<void> {
-    const ids = [...selectedIds].filter((id) => {
-      const p = profiles.find((x) => x.id === id);
-      return p && !isLive(p.status);
-    });
-    if (ids.length === 0) {
+    const targets = [...selectedIds]
+      .map((id) => profiles.find((profile) => profile.id === id))
+      .filter((profile): profile is Profile => Boolean(profile) && !isLive(profile!.status));
+    if (targets.length === 0) {
       toast.error('No selected desktop Lobium profiles can be launched.');
       return;
     }
-    for (const id of ids) {
-      await handleLaunch(id);
+
+    // PASSWORD-PROTECTED PROFILES ARE NAMED, NOT LAUNCHED. Unlocking is a single-slot dialog, so
+    // looping over a selection that contains several of them opened one prompt for the last profile
+    // and silently dropped the rest — the user pressed Launch on ten and got one. They are counted
+    // out loud here and launched one at a time from their own row.
+    const locked = targets.filter((profile) => profile.passwordProtected);
+    const unlocked = targets.filter((profile) => !profile.passwordProtected);
+
+    let launched = 0;
+    for (const profile of unlocked) {
+      if (await launchProfile(profile.id, undefined, true)) launched += 1;
+    }
+
+    if (launched > 0) toast.success(`Launched ${profileCount(launched)}.`);
+    const failed = unlocked.length - launched;
+    if (failed > 0) toast.error(`${profileCount(failed)} failed to launch.`);
+    if (locked.length > 0) {
+      toast.info(`${profileCount(locked.length)} need a password. Launch those from the row.`);
     }
   }
 
@@ -526,9 +476,13 @@ export function ProfilesView({
       const p = profiles.find((x) => x.id === id);
       return p && isLive(p.status);
     });
+    let stopped = 0;
     for (const id of ids) {
-      await handleStop(id);
+      if (await handleStop(id, true)) stopped += 1;
     }
+    if (stopped > 0) toast.success(`Stopped ${profileCount(stopped)}.`);
+    const failed = ids.length - stopped;
+    if (failed > 0) toast.error(`${profileCount(failed)} failed to stop.`);
   }
 
   async function handleBulkTrash(): Promise<void> {
@@ -543,7 +497,7 @@ export function ProfilesView({
     setPendingAction({
       kind: 'trash',
       ids,
-      label: `${ids.length} selected profiles`,
+      label: profileCount(ids.length),
     });
   }
 
@@ -704,44 +658,43 @@ export function ProfilesView({
           </label>
         </div>
         <div className="toolbar-actions">
-          <button type="button" className="btn btn--primary" onClick={() => setShowForm(true)}>
-            <Icon name="PlusIcon" aria-hidden />
+          <Button
+            variant="primary"
+            leadingIcon={<Icon name="PlusIcon" aria-hidden />}
+            onClick={() => setShowForm(true)}
+          >
             Create Profile
-          </button>
+          </Button>
           {/* Import sits beside Create because a `.lobprofile` is the other way a profile comes
               into existence, and a fresh install is the main moment for it. */}
-          <button
-            type="button"
-            className="btn"
+          <Button
+            leadingIcon={<Icon name="ArrowUpTrayIcon" aria-hidden />}
             onClick={() => setShowImport(true)}
             title="Import a profile from a .lobprofile file"
           >
-            <Icon name="ArrowUpTrayIcon" aria-hidden />
             Import
-          </button>
+          </Button>
           {/* Trash, directly. This was a second primary-coloured square button opening a menu whose
               only item was Trash — two clicks and an extra control to reach one action, and a
               second accent-filled button competing with Create Profile beside it. A menu is worth
               its own button at three items, not one. */}
-          <button
-            type="button"
-            className="btn"
+          <Button
+            leadingIcon={<Icon name="TrashIcon" aria-hidden />}
             onClick={() => {
               void handleOpenTrash();
             }}
           >
-            <Icon name="TrashIcon" aria-hidden />
             Trash
-          </button>
+          </Button>
         </div>
       </header>
 
       {showFilters ? (
         <div className="filter-bar" aria-label="Profile filters">
-          <label className="field">
-            <span className="field__label">Engine</span>
+          <label className="lb-field">
+            <span className="lb-field__label">Engine</span>
             <select
-              className="input"
+              className="lb-select"
               value={engineFilter}
               onChange={(e) => setEngineFilter(e.target.value as 'all' | EngineKind)}
             >
@@ -753,10 +706,10 @@ export function ProfilesView({
               ))}
             </select>
           </label>
-          <label className="field">
-            <span className="field__label">OS</span>
+          <label className="lb-field">
+            <span className="lb-field__label">OS</span>
             <select
-              className="input"
+              className="lb-select"
               value={osFilter}
               onChange={(e) => setOsFilter(e.target.value as 'all' | ProfileOsTarget)}
             >
@@ -768,10 +721,10 @@ export function ProfilesView({
               ))}
             </select>
           </label>
-          <label className="field">
-            <span className="field__label">Status</span>
+          <label className="lb-field">
+            <span className="lb-field__label">Status</span>
             <select
-              className="input"
+              className="lb-select"
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value as 'all' | ProfileStatus)}
             >
@@ -783,10 +736,10 @@ export function ProfilesView({
               ))}
             </select>
           </label>
-          <label className="field">
-            <span className="field__label">Proxy</span>
+          <label className="lb-field">
+            <span className="lb-field__label">Proxy</span>
             <select
-              className="input"
+              className="lb-select"
               value={proxyFilter}
               onChange={(e) => setProxyFilter(e.target.value as typeof proxyFilter)}
             >
@@ -795,19 +748,19 @@ export function ProfilesView({
               <option value="without">Without proxy</option>
             </select>
           </label>
-          <label className="field">
-            <span className="field__label">Tag</span>
+          <label className="lb-field">
+            <span className="lb-field__label">Tag</span>
             <input
-              className="input"
+              className="lb-input"
               type="text"
               value={tagFilter}
               placeholder="Filter tags"
               onChange={(e) => setTagFilter(e.target.value)}
             />
           </label>
-          <button
-            type="button"
-            className="btn btn--ghost filter-reset"
+          <Button
+            variant="ghost"
+            className="filter-reset"
             onClick={() => {
               setEngineFilter('all');
               setOsFilter('all');
@@ -818,7 +771,7 @@ export function ProfilesView({
             disabled={!filtersActive}
           >
             Reset
-          </button>
+          </Button>
         </div>
       ) : null}
 
@@ -876,12 +829,15 @@ export function ProfilesView({
         ) : isEmpty ? (
           <EmptyState
             icon={<Icon name="UserGroupIcon" aria-hidden />}
-            title={t('profiles.empty.title')}
+            title="No profiles yet"
             action={
-              <button type="button" className="btn btn--primary" onClick={() => setShowForm(true)}>
-                <Icon name="PlusIcon" aria-hidden />
+              <Button
+                variant="primary"
+                leadingIcon={<Icon name="PlusIcon" aria-hidden />}
+                onClick={() => setShowForm(true)}
+              >
                 Create Profile
-              </button>
+              </Button>
             }
           />
         ) : (
@@ -939,62 +895,61 @@ export function ProfilesView({
       </div>
 
       {showForm ? (
-        <AccessibleModalOverlay onClose={() => setShowForm(false)}>
-          <Suspense
-            fallback={
-              <div className="modal modal-loading" role="dialog" aria-label="Loading profile form">
-                <p>Loading profile settings…</p>
-              </div>
-            }
-          >
-            <NewProfileForm
-              proxies={availableProxies}
-              templates={availableTemplates}
-              onCreate={handleCreate}
-              onCreateProxy={handleCreateProxyFromProfile}
-              onTestProxy={(config) => proxiesClient.test_proxy(null, config)}
-              loadFontFamilies={loadFontFamilies}
-              onCancel={() => setShowForm(false)}
-            />
-          </Suspense>
-        </AccessibleModalOverlay>
-      ) : null}
-
-      {showTrash ? (
-        <AccessibleModalOverlay onClose={() => setShowTrash(false)}>
-          <TrashModal
-            profiles={trashProfiles}
-            loading={trashLoading}
-            busyIds={trashBusyIds}
-            error={trashError}
-            onRefresh={() => {
-              void refreshTrash();
-            }}
-            onRestore={(id) => {
-              void handleRestore(id);
-            }}
-            onPermanentlyDelete={(id) => {
-              void handlePermanentDelete(id);
-            }}
-            onClose={() => setShowTrash(false)}
-          />
-        </AccessibleModalOverlay>
-      ) : null}
-
-      {editingProfile ? (
-        <AccessibleModalOverlay onClose={() => setEditingProfile(null)} locked={saving}>
-          <EditProfileForm
-            profile={editingProfile}
-            saving={saving}
-            onSave={handleSaveProfile}
-            onCancel={() => setEditingProfile(null)}
+        <Suspense
+          fallback={
+            <Modal
+              open
+              onClose={() => setShowForm(false)}
+              ariaLabel="Loading profile form"
+              size="lg"
+            >
+              <p className="muted">Loading profile settings…</p>
+            </Modal>
+          }
+        >
+          <NewProfileForm
             proxies={availableProxies}
             templates={availableTemplates}
+            onCreate={handleCreate}
             onCreateProxy={handleCreateProxyFromProfile}
             onTestProxy={(config) => proxiesClient.test_proxy(null, config)}
             loadFontFamilies={loadFontFamilies}
+            onCancel={() => setShowForm(false)}
           />
-        </AccessibleModalOverlay>
+        </Suspense>
+      ) : null}
+
+      {showTrash ? (
+        <TrashModal
+          profiles={trashProfiles}
+          loading={trashLoading}
+          busyIds={trashBusyIds}
+          error={trashError}
+          onRefresh={() => {
+            void refreshTrash();
+          }}
+          onRestore={(id) => {
+            void handleRestore(id);
+          }}
+          onPermanentlyDelete={(id) => {
+            void handlePermanentDelete(id);
+          }}
+          onClose={() => setShowTrash(false)}
+        />
+      ) : null}
+
+      {editingProfile ? (
+        <EditProfileForm
+          profile={editingProfile}
+          saving={saving}
+          onSave={handleSaveProfile}
+          onCancel={() => setEditingProfile(null)}
+          proxies={availableProxies}
+          templates={availableTemplates}
+          onCreateProxy={handleCreateProxyFromProfile}
+          onTestProxy={(config) => proxiesClient.test_proxy(null, config)}
+          loadFontFamilies={loadFontFamilies}
+        />
       ) : null}
 
       {exportingProfile ? (

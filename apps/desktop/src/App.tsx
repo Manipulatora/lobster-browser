@@ -1,7 +1,6 @@
-
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { accountClient, formatCredit, type AccountState } from './api/account';
+import { accountClient, type AccountState } from './api/account';
 import { authClient, type CloudUser } from './api/auth';
 import { profilesClient } from './api/tauri';
 import { AuthScreen } from './features/auth/AuthScreen';
@@ -23,6 +22,13 @@ const NAV_ITEMS = [
 ] as const satisfies ReadonlyArray<{ key: string; label: string; icon: IconName }>;
 
 export type NavKey = (typeof NAV_ITEMS)[number]['key'];
+
+/**
+ * The palette's own shortcut, spelled the way the platform spells it. Windows is the primary target,
+ * so anything that is not recognisably a Mac gets Ctrl — a hint that names the wrong key is worse
+ * than none.
+ */
+const PALETTE_SHORTCUT = /mac/i.test(navigator.userAgent) ? '⌘K' : 'Ctrl K';
 
 function ActiveView({
   active,
@@ -353,25 +359,24 @@ function Dashboard({
         </div>
         <div className="topbar__spacer" />
         <div className="topbar__actions">
-          {/* Credit, mirrored from the sidebar account panel because it is the number that decides
-              whether the user can do the thing they came to do. Rendered only when it is actually
-              known: a balance that flickers 0.00 -> 12.00 on every start reads as money briefly
-              missing, and an unknown balance shown as zero is worse than no balance at all.
-              Every OTHER account state is reported in the sidebar panel, which never renders
-              nothing. */}
-          {account.kind === 'ready' ? (
-            <button
-              type="button"
-              className="wallet-chip"
-              onClick={() => void accountClient.openBilling()}
-              title="Credit balance - open billing"
-            >
-              <Icon name="WalletIcon" className="wallet-chip__icon" aria-hidden />
-              <span className="wallet-chip__value">
-                {formatCredit(account.summary.balanceCents)}
-              </span>
-            </button>
-          ) : null}
+          {/* THE PALETTE NEEDS A DOOR. Ctrl/Cmd-K is the fast way in, not the discoverable one: a
+              shortcut nobody is told about is a feature nobody has. Credit is deliberately NOT
+              mirrored here — the balance, the plan it pays for and the allowance it buys are one
+              subject, and they are read together in the sidebar account panel. */}
+          <button
+            type="button"
+            className="palette-trigger"
+            onClick={() => setPaletteOpen(true)}
+            aria-haspopup="dialog"
+            // Named here rather than by its own text: below 900px the label and the shortcut hint
+            // are display:none and the icon is aria-hidden, which would leave the button with no
+            // accessible name at all — an unlabelled button to a screen reader.
+            aria-label="Search"
+          >
+            <Icon name="MagnifyingGlassIcon" className="palette-trigger__icon" aria-hidden />
+            <span className="palette-trigger__label">Search</span>
+            <kbd className="palette-trigger__key">{PALETTE_SHORTCUT}</kbd>
+          </button>
         </div>
       </header>
 
@@ -408,7 +413,8 @@ function Dashboard({
             onOpenBilling={() => void accountClient.openBilling()}
             onRetry={() => setAccountAttempt((n) => n + 1)}
             menuRef={accountMenuRef}
-          />        </aside>
+          />{' '}
+        </aside>
 
         <main className="main">
           <ActiveView
@@ -427,7 +433,7 @@ function Dashboard({
       <ActionDialog
         open={quickLaunchProfile !== null}
         title="Unlock profile"
-        description={`Enter the password for â€œ${quickLaunchProfile?.name ?? 'this profile'}â€ to launch it in Lobium.`}
+        description={`Enter the password for “${quickLaunchProfile?.name ?? 'this profile'}” to launch it in Lobium.`}
         confirmLabel="Launch profile"
         busy={quickLaunchBusy}
         input={{

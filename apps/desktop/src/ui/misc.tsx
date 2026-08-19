@@ -4,11 +4,6 @@ import type { ReactNode } from 'react';
 import { Button } from './Button';
 import { Icon } from './Icon';
 
-/** Loading spinner. */
-export function Spinner({ size = 16 }: { size?: number }): JSX.Element {
-  return <span className="lb-spinner" style={{ width: size, height: size }} aria-hidden />;
-}
-
 /** Rectangular shimmer placeholder for loading content. */
 export function Skeleton({
   width = '100%',
@@ -61,18 +56,6 @@ export function EmptyState({
   );
 }
 
-/** Simple hover/focus tooltip. */
-export function Tooltip({ label, children }: { label: string; children: ReactNode }): JSX.Element {
-  return (
-    <span className="lb-tooltip">
-      {children}
-      <span className="lb-tooltip__bubble" role="tooltip">
-        {label}
-      </span>
-    </span>
-  );
-}
-
 /** A code block with a copy-to-clipboard button (used by the automation panel). */
 export function CodeBlock({ code, label }: { code: string; label?: string }): JSX.Element {
   const [copied, setCopied] = useState(false);
@@ -92,7 +75,9 @@ export function CodeBlock({ code, label }: { code: string; label?: string }): JS
         variant="secondary"
         size="sm"
         onClick={copy}
-        leadingIcon={copied ? <Icon name="CheckIcon" aria-hidden /> : <Icon name="ClipboardIcon" aria-hidden />}
+        leadingIcon={
+          copied ? <Icon name="CheckIcon" aria-hidden /> : <Icon name="ClipboardIcon" aria-hidden />
+        }
       >
         {copied ? 'Copied' : 'Copy'}
       </Button>

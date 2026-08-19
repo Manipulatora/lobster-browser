@@ -114,7 +114,6 @@ input[type='checkbox'] {
  */
 .topbar__actions,
 .nav-item,
-.btn,
 .icon-button,
 .profile-button,
 .search-field,
@@ -124,7 +123,6 @@ input[type='checkbox'] {
 .table-toolbar,
 .toolbar-total,
 .toolbar-actions,
-.modal-footer-actions,
 .check-row {
   display: inline-flex;
   align-items: center;
@@ -350,10 +348,10 @@ input[type='checkbox'] {
 }
 
 /* ONE BAND. The toolbar sets its own control height so the search field (40px) and the buttons
-   beside it line up exactly; `--primary` no longer carries a height of its own, which is what used
-   to make a modal's Save button 8px taller than the Cancel next to it. */
-.table-toolbar .btn {
-  min-height: 40px;
+   beside it line up exactly. `height`, not `min-height`: `.lb-btn` sets its own height and a
+   minimum can never raise it. */
+.table-toolbar .lb-btn {
+  height: 40px;
 }
 
 .table-toolbar--simple {
@@ -432,9 +430,7 @@ input[type='checkbox'] {
   font-size: var(--fs-md);
 }
 
-.search-field input::placeholder,
-.input::placeholder,
-.textarea::placeholder {
+.search-field input::placeholder {
   color: var(--text-soft);
 }
 
@@ -466,37 +462,15 @@ input[type='checkbox'] {
   background: var(--surface);
 }
 
+/* Last cell of the filter grid, which aligns its children to the bottom edge — the button lines up
+   with the inputs beside it because both are 34px. */
 .filter-reset {
-  min-height: 32px;
-  white-space: nowrap;
+  align-self: end;
 }
 
-.input {
-  width: 100%;
-  min-height: 32px;
-  padding: 5px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--text);
-  outline: 0;
-}
-
-.input:focus,
-.search-field:focus-within,
-textarea:focus {
+.search-field:focus-within {
   border-color: var(--accent);
   box-shadow: var(--shadow-focus);
-}
-
-.input[aria-invalid='true'] {
-  border-color: var(--danger);
-  box-shadow: 0 0 0 1px var(--danger);
-}
-
-.input[readonly] {
-  background: var(--surface-muted);
-  color: var(--text-muted);
 }
 
 /* THE APP DRAWS ITS OWN ARROW.
@@ -511,7 +485,6 @@ textarea:focus {
  * chevron, at the same stroke weight, in the same muted grey as the rest of the icon set. The right
  * padding reserves the space so a long option label can never run underneath it.
  */
-select.input,
 select.lb-select {
   appearance: none;
   -webkit-appearance: none;
@@ -524,133 +497,16 @@ select.lb-select {
 }
 
 /* Legacy Edge draws a second arrow of its own next to ours. */
-select.input::-ms-expand,
 select.lb-select::-ms-expand {
   display: none;
 }
 
 /* The chevron is decoration on a control that is doing nothing, so it fades with the rest of it. */
-select.input:disabled,
 select.lb-select:disabled {
   background-color: var(--surface-muted);
   color: var(--text-muted);
   cursor: not-allowed;
   opacity: 1;
-}
-
-.textarea {
-  min-height: 72px;
-  resize: vertical;
-}
-
-.textarea--profile {
-  min-height: 124px;
-}
-
-.textarea--tall {
-  min-height: 170px;
-}
-
-.btn {
-  justify-content: center;
-  gap: var(--space-2);
-  min-height: 32px;
-  padding: 0 var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--text);
-  /* Explicit, so a button never inherits a container's size. Control weight rather than the Light
-     body weight: a label you click has to stay crisp at 12px on a 1080p Windows panel. */
-  font-size: var(--fs-md);
-  font-weight: var(--fw-control);
-  cursor: pointer;
-}
-
-.btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.btn:disabled,
-.icon-button:disabled {
-  opacity: 0.42;
-  cursor: not-allowed;
-}
-
-.btn--primary {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--on-brand);
-  font-size: var(--fs-md);
-  box-shadow: 0 2px 4px rgba(124, 58, 237, 0.18);
-}
-
-.btn--primary svg {
-  color: var(--on-brand);
-}
-
-.btn--primary:hover {
-  border-color: var(--accent-hover);
-  background: var(--accent-hover);
-  color: var(--on-brand);
-}
-
-.btn--secondary {
-  border-color: transparent;
-  background: var(--active-muted);
-}
-
-.btn--outline {
-  border-color: var(--accent);
-  background: var(--surface);
-  color: var(--accent);
-}
-
-.btn--compact {
-  min-height: 30px;
-  padding: 0 var(--space-3);
-  font-size: var(--fs-md);
-  white-space: nowrap;
-}
-
-.btn--compact svg {
-  width: 15px;
-  height: 15px;
-}
-
-.btn--danger {
-  border-color: var(--danger);
-  background: var(--surface);
-  color: var(--danger);
-}
-
-.btn--danger:hover {
-  border-color: var(--danger);
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-.btn--ghost {
-  border-color: transparent;
-  background: transparent;
-  color: var(--text-muted);
-}
-
-/* `--text-soft` is the placeholder colour: Edit and Delete sat in it and read as greyed-out. */
-.btn--ghost:hover {
-  background: var(--surface-muted);
-  color: var(--text);
-}
-
-/* Destructive rows announce themselves on approach rather than looking like every other action. */
-.btn--ghost.btn--danger-hover:hover {
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-.btn--disabled {
-  color: var(--text-soft);
 }
 
 .icon-button,
@@ -660,6 +516,11 @@ select.lb-select:disabled {
   border-radius: var(--radius);
   background: transparent;
   cursor: pointer;
+}
+
+.icon-button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
 }
 
 .icon-button {
@@ -1188,6 +1049,12 @@ select.lb-select:disabled {
   color: var(--amber);
 }
 
+/* Nothing has been asked of it yet. Deliberately the same muted grey as the pill's own ground: an
+   unchecked proxy is not a state worth colouring. */
+.status--idle {
+  color: var(--text-muted);
+}
+
 .status--error {
   color: var(--danger);
 }
@@ -1253,16 +1120,6 @@ select.lb-select:disabled {
   color: var(--text);
 }
 
-/* Sub-label under a field: the constraint, or what the value means. Muted so it reads as guidance
-   and not as a validation failure — errors get `.notice--error`. */
-.field__hint {
-  display: block;
-  margin-top: 4px;
-  color: var(--text-muted);
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-regular);
-}
-
 /* --- Profile import: file picker + what the chosen file contains ------------------------------- */
 .import-picker {
   display: flex;
@@ -1316,108 +1173,6 @@ select.lb-select:disabled {
   padding: 22px;
 }
 
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: var(--z-modal);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 7vh 20px 20px;
-  overflow: auto;
-  background: var(--overlay);
-  backdrop-filter: blur(2px);
-  animation: modal-fade var(--dur) var(--ease-out);
-}
-
-.modal {
-  display: flex;
-  flex-direction: column;
-  width: min(680px, calc(100vw - 40px));
-  max-height: calc(100dvh - 40px);
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-lg);
-  animation: modal-pop var(--dur-slow) var(--ease-out);
-}
-
-@keyframes modal-fade {
-  from {
-    opacity: 0;
-  }
-}
-
-@keyframes modal-pop {
-  from {
-    opacity: 0;
-    transform: translateY(6px) scale(0.99);
-  }
-}
-
-.modal--proxy {
-  width: min(520px, calc(100vw - 48px));
-}
-
-.modal--trash {
-  width: min(760px, calc(100vw - 48px));
-}
-
-.modal--template {
-  width: min(560px, calc(100vw - 48px));
-}
-
-.modal-loading {
-  min-height: 180px;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
-}
-
-.modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  min-height: 54px;
-  padding: 0 var(--space-6);
-  border-bottom: 1px solid var(--border);
-}
-
-.modal-header h2 {
-  margin: 0;
-  font-size: var(--fs-lg);
-  font-weight: var(--fw-medium);
-}
-
-.modal-title-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.modal-subtitle {
-  margin: 2px 0 0;
-  color: var(--text-muted);
-  font-size: var(--fs-base);
-}
-
-.modal-header-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.modal-body {
-  max-height: min(680px, calc(100dvh - 260px));
-  overflow: auto;
-  /* Matches `.modal-header` and `.subtabs`: the title, the tab strip and the first field all start
-     on the same vertical line. They used to sit at 22px, 24px and 28px respectively. */
-  padding: var(--space-6);
-}
-
 .trash-list {
   display: grid;
   gap: 0;
@@ -1450,29 +1205,6 @@ select.lb-select:disabled {
   justify-content: flex-end;
   gap: 8px;
   white-space: nowrap;
-}
-
-.modal-footer {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--space-2);
-  min-height: 60px;
-  padding: var(--space-3) var(--space-6);
-  border-top: 1px solid var(--border);
-  background: var(--surface-muted);
-}
-
-.modal-footer--split {
-  justify-content: space-between;
-}
-
-.modal--proxy .modal-footer {
-  justify-content: space-between;
-}
-
-.modal-footer-actions {
-  gap: 8px;
 }
 
 .action-dialog {
@@ -1540,8 +1272,7 @@ select.lb-select:disabled {
 
 .wizard-body {
   /* A floor, not a fixed height. Short tabs no longer collapse the dialog to a sliver, tall ones
-     grow it downward only (see the note on `.modal-overlay`), and anything past `.modal-body`'s cap
-     scrolls. */
+     grow it downward only, and anything past `.lb-modal`'s own cap scrolls in the body. */
   min-height: 300px;
 }
 
@@ -1552,46 +1283,13 @@ select.lb-select:disabled {
   gap: 18px;
 }
 
-.field-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 16px;
-}
-
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.field--wide {
-  grid-column: 1 / -1;
-}
-
-/* A row of form actions, sized to their labels and pushed to the trailing edge. Without this a lone
-   `.btn` in a `.field` stretches to the full grid width, which makes a secondary action the widest
-   element on the panel. */
-.field--actions {
-  flex-direction: row;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-}
-
-/* Three parts of one decision — engine, OS, OS version — on one line. Split across a two-column
-   grid they left a half-width hole that reads as a field that failed to render. */
-.field-triple {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px 16px;
-}
-
 .os-version-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px 16px;
 }
 
-.os-version-row > .field {
+.os-version-row > .lb-field {
   min-width: 0;
 }
 
@@ -1611,7 +1309,7 @@ select.lb-select:disabled {
   align-items: flex-start;
 }
 
-.fp-row > .field {
+.fp-row > .lb-field {
   flex: 1 1 0;
   min-width: 0;
 }
@@ -1831,7 +1529,7 @@ select.lb-select:disabled {
   gap: 8px;
 }
 
-.font-multiselect__toolbar .input {
+.font-multiselect__toolbar .lb-input {
   flex: 1 1 180px;
   min-width: 140px;
 }
@@ -1914,17 +1612,6 @@ select.lb-select:disabled {
   margin: 0;
 }
 
-.btn--compact {
-  min-height: 28px;
-  padding: 0 10px;
-  font-size: var(--fs-sm);
-}
-
-.field-hint {
-  color: var(--text-muted);
-  font-size: var(--fs-sm);
-}
-
 .status-action--closing {
   pointer-events: none;
 }
@@ -1962,20 +1649,6 @@ select.lb-select:disabled {
     opacity: 1;
     transform: translateY(-1px);
   }
-}
-
-.field__label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  color: var(--text);
-  font-size: var(--fs-base);
-  font-weight: 400;
-}
-
-.required {
-  color: var(--danger);
 }
 
 
@@ -2112,11 +1785,12 @@ select.lb-select:disabled {
   grid-template-columns: 96px minmax(0, 1fr) 84px 40px;
 }
 
-.proxy-input-row .input {
+.proxy-input-row .lb-input,
+.proxy-input-row .lb-select {
   border-radius: 0;
 }
 
-.proxy-input-row .input:first-child {
+.proxy-input-row .lb-select:first-child {
   border-top-left-radius: var(--radius);
   border-bottom-left-radius: var(--radius);
 }
@@ -2165,7 +1839,7 @@ select.lb-select:disabled {
 }
 
 .fp-inline-group .support-grid,
-.fp-inline-group .field-grid {
+.fp-inline-group .lb-field-grid {
   margin-top: 4px;
 }
 
@@ -2189,7 +1863,7 @@ select.lb-select:disabled {
   border-radius: var(--radius);
 }
 
-.fp-group .field-grid,
+.fp-group .lb-field-grid,
 .fp-group .support-grid {
   margin-top: 10px;
 }
@@ -2549,25 +2223,13 @@ code {
 }
 
 @media (max-width: 760px) {
-  .modal-overlay {
-    padding: 10px;
-  }
-
-  .modal {
-    width: min(100%, calc(100vw - 20px));
-    max-height: calc(100dvh - 20px);
-  }
-
-  .modal-body {
-    padding: 18px;
-  }
-
   .wizard-steps {
     gap: 20px;
     padding-inline: 18px;
   }
 
-  .field-grid,
+  .lb-field-grid,
+  .lb-field-triple,
   .os-version-row,
   .support-grid {
     grid-template-columns: 1fr;
@@ -2578,7 +2240,6 @@ code {
     gap: 12px;
   }
 
-  .modal-footer--split,
   .profile-identity-summary > div {
     align-items: stretch;
     flex-direction: column;
@@ -2649,6 +2310,65 @@ code {
   width: 100%;
 }
 
+/* Render-time crash fallback (ui/ErrorBoundary). Deliberately the same centred card as the engine
+   gate above: both are the only thing on screen, both replace the app rather than sit inside it, and
+   a crash screen that looks like a different product would read as a second failure. It cannot rely
+   on anything the app renders — the tree that would have drawn it is the tree that just threw — so
+   every value here is a token or a literal, and nothing is inherited from a shell that no longer
+   exists. */
+.crash-screen {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-palette);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.crash-screen__card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  max-width: 520px;
+  width: 100%;
+  padding: 32px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.crash-screen__title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-medium);
+  color: var(--text);
+}
+
+/* The error's own words, in mono and selectable: this is the line a user copies into a support
+   request, and `break-word` is what stops an unbroken stack-ish string from widening the card past
+   the window. `pre-wrap` keeps a multi-line message readable instead of collapsing it to one run. */
+.crash-screen__message {
+  margin: 0;
+  align-self: stretch;
+  max-height: 40vh;
+  overflow: auto;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  user-select: text;
+}
+
 /* ── Authentication gate ──────────────────────────────────────────────────────
    The first screen on a fresh install: two centred buttons that hand off to the
    browser. Deliberately plain — it is on screen once, and anything elaborate here
@@ -2694,16 +2414,16 @@ code {
   gap: 10px;
 }
 
+/* `height`, not `min-height`: `.lb-btn` sets an explicit height, and a minimum can never raise it. */
 .auth-screen__button {
   width: 100%;
-  min-height: 40px;
-  font-weight: var(--fw-control);
+  height: 40px;
 }
 
 /* The only control on the waiting screen, so it is sized to be unmissable rather than tucked away
    as a text link — a user who wants out of a stalled sign-in should not have to hunt for it. */
 .auth-screen__cancel {
-  min-height: 44px;
+  height: 44px;
   margin-top: 4px;
 }
 

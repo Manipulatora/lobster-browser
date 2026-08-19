@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { parseJson, parseNetscape } from '@lobster/cookies';
 import { normalizeDeviceMemory } from '@lobster/fingerprint';
@@ -58,6 +57,7 @@ import {
   type ProfileDraft,
 } from './profileDraft';
 import { Icon } from '../../ui/Icon';
+import { Button, Modal } from '../../ui';
 
 interface NewProfileFormProps {
   profile?: Profile;
@@ -99,6 +99,8 @@ const STEPS: ReadonlyArray<{ key: WizardStep; label: string }> = [
 
 const CUSTOM_PROXY_VALUE = '__custom__';
 const MAX_COOKIE_FILE_BYTES = 5 * 1024 * 1024;
+/** Ties the footer's submit button to the form in the dialog body, which is not its ancestor. */
+const FORM_ID = 'profile-editor-form';
 
 function isValidLanguageTag(value: string): boolean {
   try {
@@ -340,7 +342,7 @@ function FontMultiSelect({
       <div className="font-multiselect__content">
         <div className="font-multiselect__toolbar">
           <input
-            className="input"
+            className="lb-input"
             type="search"
             value={query}
             aria-label="Search available fonts"
@@ -348,20 +350,12 @@ function FontMultiSelect({
             onChange={(e) => setQuery(e.target.value)}
           />
           <span className="font-multiselect__tag">{selected.length} selected</span>
-          <button
-            type="button"
-            className="btn btn--secondary btn--compact"
-            onClick={() => onChange([...options])}
-          >
+          <Button size="sm" onClick={() => onChange([...options])}>
             Select all
-          </button>
-          <button
-            type="button"
-            className="btn btn--secondary btn--compact"
-            onClick={() => onChange([])}
-          >
+          </Button>
+          <Button size="sm" onClick={() => onChange([])}>
             Clear
-          </button>
+          </Button>
         </div>
         <div className="font-multiselect__list" role="listbox" aria-multiselectable="true">
           {filtered.slice(0, 800).map((font) => {
@@ -442,7 +436,7 @@ function SearchableSelect({
   return (
     <div className="combobox">
       <input
-        className="input"
+        className="lb-input"
         value={query}
         aria-label={ariaLabel}
         aria-invalid={invalid}
@@ -544,7 +538,7 @@ function OsSelect({
     <div className="os-select" ref={rootRef}>
       <button
         type="button"
-        className="input os-select__trigger"
+        className="lb-input os-select__trigger"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="Operating system"
@@ -1035,52 +1029,61 @@ export function NewProfileForm({
   }
 
   return (
-    <form
-      // `wizard` was a marker with no rule anywhere — `.modal` does the styling and the children
-      // carry their own `wizard-*` classes. A class that styles nothing is a class the next person
-      // has to check before they can change anything.
-      className="modal"
-      onSubmit={handleSubmit}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="new-profile-title"
-      noValidate
+    <Modal
+      open
+      // A save in flight must not be interrupted by Escape or a stray click on the overlay: the
+      // profile is half-written at that point and the window would close over it.
+      onClose={submitting ? () => undefined : onCancel}
+      title={editing ? 'Edit profile' : 'New profile'}
+      size="lg"
+      subheader={
+        <div className="wizard-steps" role="tablist" aria-label="Profile setup sections">
+          {STEPS.map((item) => {
+            const issueCount = showValidation
+              ? issues.filter((issue) => issue.step === item.key).length
+              : 0;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                role="tab"
+                id={`new-profile-tab-${item.key}`}
+                aria-selected={item.key === step}
+                aria-controls={`new-profile-panel-${item.key}`}
+                className={item.key === step ? 'wizard-step wizard-step--active' : 'wizard-step'}
+                onClick={() => setStep(item.key)}
+              >
+                <span>{item.label}</span>
+                {issueCount > 0 ? (
+                  <span className="wizard-step__issues" aria-label={`${issueCount} issues`}>
+                    {issueCount}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      }
+      footer={
+        <>
+          <Button onClick={onCancel} disabled={submitting}>
+            Cancel
+          </Button>
+          {/* Submits the form in the body by id: the footer is a sibling of the dialog body, not a
+              descendant of the form, so it cannot rely on being inside it. */}
+          <Button type="submit" form={FORM_ID} variant="primary" disabled={!canSubmit}>
+            {submitting
+              ? editing
+                ? 'Saving…'
+                : 'Creating…'
+              : editing
+                ? 'Save profile'
+                : 'Create profile'}
+          </Button>
+        </>
+      }
     >
-      <header className="modal-header">
-        <h2 id="new-profile-title">{editing ? 'Edit profile' : 'New profile'}</h2>
-        <button type="button" className="icon-button" onClick={onCancel} aria-label="Close">
-          <Icon name="XMarkIcon" aria-hidden />
-        </button>
-      </header>
-
-      <div className="wizard-steps" role="tablist" aria-label="Profile setup sections">
-        {STEPS.map((item) => {
-          const issueCount = showValidation
-            ? issues.filter((issue) => issue.step === item.key).length
-            : 0;
-          return (
-            <button
-              key={item.key}
-              type="button"
-              role="tab"
-              id={`new-profile-tab-${item.key}`}
-              aria-selected={item.key === step}
-              aria-controls={`new-profile-panel-${item.key}`}
-              className={item.key === step ? 'wizard-step wizard-step--active' : 'wizard-step'}
-              onClick={() => setStep(item.key)}
-            >
-              <span>{item.label}</span>
-              {issueCount > 0 ? (
-                <span className="wizard-step__issues" aria-label={`${issueCount} issues`}>
-                  {issueCount}
-                </span>
-              ) : null}
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="modal-body wizard-body">
+      <form id={FORM_ID} className="wizard-body" onSubmit={handleSubmit} noValidate>
         {step === 'general' ? (
           <section
             className="wizard-section"
@@ -1089,14 +1092,14 @@ export function NewProfileForm({
             aria-labelledby="new-profile-tab-general"
           >
             <fieldset
-              className="field-grid"
+              className="lb-field-grid"
               disabled={legacyAndroid}
               style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}
             >
-              <label className="field field--wide">
-                <span className="field__label">Template</span>
+              <label className="lb-field lb-field--wide">
+                <span className="lb-field__label">Template</span>
                 <select
-                  className="input"
+                  className="lb-select"
                   value={form.templateId}
                   onChange={(e) => applyTemplate(e.target.value)}
                 >
@@ -1109,12 +1112,12 @@ export function NewProfileForm({
                 </select>
               </label>
 
-              <label className="field field--wide">
-                <span className="field__label">
-                  Profile name<span className="required">*</span>
+              <label className="lb-field lb-field--wide">
+                <span className="lb-field__label">
+                  Profile name<span className="lb-field__required">*</span>
                 </span>
                 <input
-                  className="input"
+                  className="lb-input"
                   type="text"
                   value={form.name}
                   maxLength={120}
@@ -1128,10 +1131,10 @@ export function NewProfileForm({
                 />
               </label>
 
-              <label className="field field--wide">
-                <span className="field__label">Description</span>
+              <label className="lb-field lb-field--wide">
+                <span className="lb-field__label">Description</span>
                 <textarea
-                  className="input textarea textarea--profile"
+                  className="lb-textarea lb-textarea--profile"
                   value={form.description}
                   maxLength={2000}
                   placeholder="Enter description"
@@ -1139,10 +1142,10 @@ export function NewProfileForm({
                 />
               </label>
 
-              <label className="field field--wide">
-                <span className="field__label">Folder</span>
+              <label className="lb-field lb-field--wide">
+                <span className="lb-field__label">Folder</span>
                 <input
-                  className="input"
+                  className="lb-input"
                   type="text"
                   value={form.folder}
                   maxLength={240}
@@ -1151,10 +1154,10 @@ export function NewProfileForm({
                 />
               </label>
 
-              <label className="field field--wide">
-                <span className="field__label">Proxy</span>
+              <label className="lb-field lb-field--wide">
+                <span className="lb-field__label">Proxy</span>
                 <select
-                  className="input"
+                  className="lb-select"
                   value={form.proxyId}
                   onChange={(e) => {
                     set('proxyId', e.target.value);
@@ -1172,23 +1175,23 @@ export function NewProfileForm({
               </label>
 
               {isCustomProxy ? (
-                <div className="field-grid field--wide custom-proxy-grid">
-                  <label className="field field--wide">
-                    <span className="field__label">
-                      Proxy title<span className="required">*</span>
+                <div className="lb-field-grid lb-field--wide custom-proxy-grid">
+                  <label className="lb-field lb-field--wide">
+                    <span className="lb-field__label">
+                      Proxy title<span className="lb-field__required">*</span>
                     </span>
                     <input
-                      className="input"
+                      className="lb-input"
                       type="text"
                       value={customProxy.title}
                       autoComplete="off"
                       onChange={(e) => setCustom('title', e.target.value)}
                     />
                   </label>
-                  <label className="field">
-                    <span className="field__label">Type</span>
+                  <label className="lb-field">
+                    <span className="lb-field__label">Type</span>
                     <select
-                      className="input"
+                      className="lb-select"
                       value={customProxy.type}
                       onChange={(e) => setCustom('type', e.target.value as ProxyType)}
                     >
@@ -1197,12 +1200,12 @@ export function NewProfileForm({
                       <option value="https">HTTPS</option>
                     </select>
                   </label>
-                  <label className="field">
-                    <span className="field__label">
-                      Host<span className="required">*</span>
+                  <label className="lb-field">
+                    <span className="lb-field__label">
+                      Host<span className="lb-field__required">*</span>
                     </span>
                     <input
-                      className="input"
+                      className="lb-input"
                       type="text"
                       value={customProxy.host}
                       placeholder="proxy.example.com"
@@ -1212,12 +1215,12 @@ export function NewProfileForm({
                       onChange={(e) => setCustom('host', e.target.value)}
                     />
                   </label>
-                  <label className="field">
-                    <span className="field__label">
-                      Port<span className="required">*</span>
+                  <label className="lb-field">
+                    <span className="lb-field__label">
+                      Port<span className="lb-field__required">*</span>
                     </span>
                     <input
-                      className="input"
+                      className="lb-input"
                       type="number"
                       min={1}
                       max={65535}
@@ -1225,30 +1228,29 @@ export function NewProfileForm({
                       onChange={(e) => setCustom('port', e.target.value)}
                     />
                   </label>
-                  <label className="field">
-                    <span className="field__label">Login</span>
+                  <label className="lb-field">
+                    <span className="lb-field__label">Login</span>
                     <input
-                      className="input"
+                      className="lb-input"
                       type="text"
                       value={customProxy.login}
                       autoComplete="username"
                       onChange={(e) => setCustom('login', e.target.value)}
                     />
                   </label>
-                  <label className="field">
-                    <span className="field__label">Password</span>
+                  <label className="lb-field">
+                    <span className="lb-field__label">Password</span>
                     <input
-                      className="input"
+                      className="lb-input"
                       type="password"
                       value={customProxy.password}
                       autoComplete="new-password"
                       onChange={(e) => setCustom('password', e.target.value)}
                     />
                   </label>
-                  <div className="custom-proxy-actions field--wide">
-                    <button
-                      type="button"
-                      className="btn btn--outline btn--compact"
+                  <div className="custom-proxy-actions lb-field--wide">
+                    <Button
+                      size="sm"
                       disabled={
                         proxyChecking ||
                         !onTestProxy ||
@@ -1259,7 +1261,7 @@ export function NewProfileForm({
                       }}
                     >
                       {proxyChecking ? 'Testing…' : 'Test connection'}
-                    </button>
+                    </Button>
                     {proxyTest ? (
                       <p
                         className={
@@ -1278,10 +1280,10 @@ export function NewProfileForm({
                 </div>
               ) : null}
 
-              <label className="field field--wide">
-                <span className="field__label">Tags</span>
+              <label className="lb-field lb-field--wide">
+                <span className="lb-field__label">Tags</span>
                 <input
-                  className="input"
+                  className="lb-input"
                   type="text"
                   value={form.tags}
                   placeholder="Separate tags with commas"
@@ -1303,15 +1305,15 @@ export function NewProfileForm({
               className="fp-stack"
               style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}
             >
-              <div className="field os-version-row">
-                <label className="field">
-                  <span className="field__label">Operating system</span>
+              <div className="lb-field os-version-row">
+                <label className="lb-field">
+                  <span className="lb-field__label">Operating system</span>
                   <OsSelect value={form.os} options={OS_OPTIONS} onChange={setOs} />
                 </label>
-                <label className="field">
-                  <span className="field__label">OS version</span>
+                <label className="lb-field">
+                  <span className="lb-field__label">OS version</span>
                   <select
-                    className="input"
+                    className="lb-select"
                     value={form.osVersion}
                     onChange={(e) => setOsVersion(e.target.value)}
                   >
@@ -1324,10 +1326,10 @@ export function NewProfileForm({
                 </label>
               </div>
 
-              <label className="field field--wide">
-                <span className="field__label">User-Agent</span>
+              <label className="lb-field lb-field--wide">
+                <span className="lb-field__label">User-Agent</span>
                 <input
-                  className="input"
+                  className="lb-input"
                   type="text"
                   aria-label="User Agent"
                   value={userAgent}
@@ -1338,10 +1340,10 @@ export function NewProfileForm({
 
               {isAndroid ? (
                 <>
-                  <label className="field">
-                    <span className="field__label">Device type</span>
+                  <label className="lb-field">
+                    <span className="lb-field__label">Device type</span>
                     <select
-                      className="input"
+                      className="lb-select"
                       value={form.androidDeviceType}
                       onChange={(e) => setAndroidDeviceType(e.target.value as AndroidDeviceType)}
                     >
@@ -1352,8 +1354,8 @@ export function NewProfileForm({
                       ))}
                     </select>
                   </label>
-                  <label className="field field--wide">
-                    <span className="field__label">Device model</span>
+                  <label className="lb-field lb-field--wide">
+                    <span className="lb-field__label">Device model</span>
                     <SearchableSelect
                       options={androidModels}
                       value={form.androidDeviceModel}
@@ -1365,12 +1367,12 @@ export function NewProfileForm({
                       }
                       placeholder="Search Google Play device models"
                     />
-                    <span className="field-hint">
+                    <span className="lb-field__hint">
                       {androidModels.length.toLocaleString()} models from Google Play’s official
                       device list · {form.osVersion} · {form.androidDeviceType}
                     </span>
                   </label>
-                  <p className="field-hint field--wide">
+                  <p className="lb-field__hint lb-field--wide">
                     The selected model sets the device name reported in the User-Agent. Screen, GPU
                     and RAM use a coherent hardware profile matched to the device — exact for
                     popular flagships, otherwise a real same-brand device. The profile opens in a
@@ -1380,10 +1382,10 @@ export function NewProfileForm({
                 </>
               ) : (
                 <>
-                  <label className="field">
-                    <span className="field__label">Screen resolution</span>
+                  <label className="lb-field">
+                    <span className="lb-field__label">Screen resolution</span>
                     <select
-                      className="input"
+                      className="lb-select"
                       value={form.screenResolution}
                       onChange={(e) => set('screenResolution', e.target.value)}
                     >
@@ -1395,10 +1397,10 @@ export function NewProfileForm({
                     </select>
                   </label>
 
-                  <div className="field field--wide">
-                    <span className="field__label">Fonts</span>
+                  <div className="lb-field lb-field--wide">
+                    <span className="lb-field__label">Fonts</span>
                     {fontCatalogLoading ? (
-                      <p className="field-hint" role="status">
+                      <p className="lb-field__hint" role="status">
                         Reading the installed font pack…
                       </p>
                     ) : fontCatalogError ? (
@@ -1408,7 +1410,7 @@ export function NewProfileForm({
                     ) : (
                       <>
                         {fontPackAbsent ? (
-                          <p className="field-hint" role="status">
+                          <p className="lb-field__hint" role="status">
                             No font pack installed — the profile still reports only the fonts listed
                             here, but families this machine does not have will not render.
                           </p>
@@ -1427,10 +1429,10 @@ export function NewProfileForm({
               )}
 
               <div className="fp-row">
-                <label className="field">
-                  <span className="field__label">Language</span>
+                <label className="lb-field">
+                  <span className="lb-field__label">Language</span>
                   <select
-                    className="input"
+                    className="lb-select"
                     value={form.languageMode}
                     onChange={(e) => set('languageMode', e.target.value as PersonaMode)}
                   >
@@ -1442,8 +1444,8 @@ export function NewProfileForm({
                   </select>
                 </label>
                 {form.languageMode === 'manual' ? (
-                  <label className="field fp-row__grow">
-                    <span className="field__label">Locale</span>
+                  <label className="lb-field fp-row__grow">
+                    <span className="lb-field__label">Locale</span>
                     <SearchableSelect
                       options={LOCALE_OPTIONS}
                       value={primaryLocaleOf(form.languages)}
@@ -1451,7 +1453,7 @@ export function NewProfileForm({
                       ariaLabel="Language"
                       placeholder="Select a language / locale"
                     />
-                    <span className="field-hint">
+                    <span className="lb-field__hint">
                       navigator.languages = {form.languages || '—'}
                     </span>
                   </label>
@@ -1459,10 +1461,10 @@ export function NewProfileForm({
               </div>
 
               <div className="fp-row">
-                <label className="field">
-                  <span className="field__label">Timezone</span>
+                <label className="lb-field">
+                  <span className="lb-field__label">Timezone</span>
                   <select
-                    className="input"
+                    className="lb-select"
                     value={form.timezoneMode}
                     onChange={(e) => set('timezoneMode', e.target.value as PersonaMode)}
                   >
@@ -1474,8 +1476,8 @@ export function NewProfileForm({
                   </select>
                 </label>
                 {form.timezoneMode === 'manual' ? (
-                  <label className="field fp-row__grow">
-                    <span className="field__label">Timezone value</span>
+                  <label className="lb-field fp-row__grow">
+                    <span className="lb-field__label">Timezone value</span>
                     <SearchableSelect
                       options={TIMEZONE_OPTIONS}
                       value={form.timezone}
@@ -1488,10 +1490,10 @@ export function NewProfileForm({
               </div>
 
               <div className="fp-row">
-                <label className="field">
-                  <span className="field__label">Geolocation</span>
+                <label className="lb-field">
+                  <span className="lb-field__label">Geolocation</span>
                   <select
-                    className="input"
+                    className="lb-select"
                     value={form.geolocationMode}
                     onChange={(e) => set('geolocationMode', e.target.value as PersonaMode)}
                   >
@@ -1504,8 +1506,8 @@ export function NewProfileForm({
                 </label>
                 {form.geolocationMode === 'manual' ? (
                   <>
-                    <label className="field fp-row__grow">
-                      <span className="field__label">Location</span>
+                    <label className="lb-field fp-row__grow">
+                      <span className="lb-field__label">Location</span>
                       <SearchableSelect
                         options={LOCATION_OPTIONS.map((l) => l.label)}
                         value={
@@ -1528,16 +1530,16 @@ export function NewProfileForm({
                         ariaLabel="Location"
                         placeholder="Select a city / location"
                       />
-                      <span className="field-hint">
+                      <span className="lb-field__hint">
                         {form.geolocationLat && form.geolocationLng
                           ? `lat ${form.geolocationLat}, lng ${form.geolocationLng}`
                           : 'Pick a location to set coordinates'}
                       </span>
                     </label>
-                    <label className="field">
-                      <span className="field__label">Accuracy (m)</span>
+                    <label className="lb-field">
+                      <span className="lb-field__label">Accuracy (m)</span>
                       <input
-                        className="input"
+                        className="lb-input"
                         type="number"
                         min={1}
                         value={form.geolocationAccuracy}
@@ -1548,10 +1550,10 @@ export function NewProfileForm({
                 ) : null}
               </div>
 
-              <label className="field">
-                <span className="field__label">WebRTC</span>
+              <label className="lb-field">
+                <span className="lb-field__label">WebRTC</span>
                 <select
-                  className="input"
+                  className="lb-select"
                   value={form.webrtcMode}
                   onChange={(e) => set('webrtcMode', e.target.value as WebRtcUiMode)}
                 >
@@ -1566,10 +1568,10 @@ export function NewProfileForm({
               {!isAndroid ? (
                 <>
                   <div className="fp-row">
-                    <label className="field">
-                      <span className="field__label">CPU cores</span>
+                    <label className="lb-field">
+                      <span className="lb-field__label">CPU cores</span>
                       <select
-                        className="input"
+                        className="lb-select"
                         value={form.cpuCores}
                         onChange={(e) => set('cpuCores', e.target.value)}
                       >
@@ -1581,10 +1583,10 @@ export function NewProfileForm({
                       </select>
                     </label>
 
-                    <label className="field">
-                      <span className="field__label">Reported memory</span>
+                    <label className="lb-field">
+                      <span className="lb-field__label">Reported memory</span>
                       <select
-                        className="input"
+                        className="lb-select"
                         value={form.ramSize}
                         onChange={(e) => set('ramSize', e.target.value)}
                       >
@@ -1594,14 +1596,14 @@ export function NewProfileForm({
                           </option>
                         ))}
                       </select>
-                      <span className="field-hint">navigator.deviceMemory (Lobium values)</span>
+                      <span className="lb-field__hint">navigator.deviceMemory (Lobium values)</span>
                     </label>
                   </div>
 
-                  <label className="field">
-                    <span className="field__label">WebGL renderer</span>
+                  <label className="lb-field">
+                    <span className="lb-field__label">WebGL renderer</span>
                     <select
-                      className="input"
+                      className="lb-select"
                       value={form.rendererPresetId}
                       onChange={(e) => set('rendererPresetId', e.target.value)}
                     >
@@ -1613,7 +1615,7 @@ export function NewProfileForm({
                         </option>
                       ))}
                     </select>
-                    <span className="field-hint">
+                    <span className="lb-field__hint">
                       Host calibration is recommended. {rendererOptions.length.toLocaleString()}{' '}
                       sourced {form.os} GPU presets available.
                     </span>
@@ -1647,11 +1649,11 @@ export function NewProfileForm({
 
             <fieldset className="fp-inline-group" disabled={legacyAndroid}>
               <legend>Media devices</legend>
-              <div className="field-grid">
-                <label className="field">
-                  <span className="field__label">Cameras</span>
+              <div className="lb-field-grid">
+                <label className="lb-field">
+                  <span className="lb-field__label">Cameras</span>
                   <input
-                    className="input"
+                    className="lb-input"
                     type="number"
                     min={0}
                     step={1}
@@ -1659,10 +1661,10 @@ export function NewProfileForm({
                     onChange={(e) => set('mediaCameras', e.target.value)}
                   />
                 </label>
-                <label className="field">
-                  <span className="field__label">Microphones</span>
+                <label className="lb-field">
+                  <span className="lb-field__label">Microphones</span>
                   <input
-                    className="input"
+                    className="lb-input"
                     type="number"
                     min={0}
                     step={1}
@@ -1670,10 +1672,10 @@ export function NewProfileForm({
                     onChange={(e) => set('mediaMicrophones', e.target.value)}
                   />
                 </label>
-                <label className="field">
-                  <span className="field__label">Speakers</span>
+                <label className="lb-field">
+                  <span className="lb-field__label">Speakers</span>
                   <input
-                    className="input"
+                    className="lb-input"
                     type="number"
                     min={0}
                     step={1}
@@ -1701,10 +1703,10 @@ export function NewProfileForm({
             id="new-profile-panel-cookies"
             aria-labelledby="new-profile-tab-cookies"
           >
-            <label className="field field--wide">
-              <span className="field__label">Import mode</span>
+            <label className="lb-field lb-field--wide">
+              <span className="lb-field__label">Import mode</span>
               <select
-                className="input"
+                className="lb-select"
                 value={form.cookiesMode}
                 onChange={(e) => set('cookiesMode', e.target.value as CookieImportMode)}
               >
@@ -1747,19 +1749,15 @@ export function NewProfileForm({
                         ? 'Import needs attention'
                         : `${form.cookiesParsedCount ?? 0} valid cookies ready`}
                     </span>
-                    <button
-                      type="button"
-                      className="btn btn--ghost btn--compact"
-                      onClick={() => setCookieText('', '')}
-                    >
+                    <Button variant="ghost" size="sm" onClick={() => setCookieText('', '')}>
                       Clear import
-                    </button>
+                    </Button>
                   </div>
                 ) : null}
-                <label className="field field--wide">
-                  <span className="field__label">Plain text cookies</span>
+                <label className="lb-field lb-field--wide">
+                  <span className="lb-field__label">Plain text cookies</span>
                   <textarea
-                    className="input textarea textarea--tall"
+                    className="lb-textarea lb-textarea--tall"
                     value={form.cookiesText}
                     aria-invalid={Boolean(form.cookiesErrors?.length)}
                     spellCheck={false}
@@ -1769,7 +1767,7 @@ export function NewProfileForm({
                 </label>
               </>
             ) : (
-              <p className="field-hint">No cookies will be imported for this profile.</p>
+              <p className="lb-field__hint">No cookies will be imported for this profile.</p>
             )}
             {form.cookiesErrors?.length ? (
               <div className="review-warnings">
@@ -1788,11 +1786,11 @@ export function NewProfileForm({
             id="new-profile-panel-security"
             aria-labelledby="new-profile-tab-security"
           >
-            <div className="field-grid">
-              <label className="field">
-                <span className="field__label">Password</span>
+            <div className="lb-field-grid">
+              <label className="lb-field">
+                <span className="lb-field__label">Password</span>
                 <input
-                  className="input"
+                  className="lb-input"
                   type="password"
                   value={form.password}
                   placeholder="Optional"
@@ -1800,10 +1798,10 @@ export function NewProfileForm({
                   autoComplete="new-password"
                 />
               </label>
-              <label className="field">
-                <span className="field__label">Confirm password</span>
+              <label className="lb-field">
+                <span className="lb-field__label">Confirm password</span>
                 <input
-                  className="input"
+                  className="lb-input"
                   type="password"
                   value={form.passwordConfirm}
                   aria-invalid={showValidation && form.password !== form.passwordConfirm}
@@ -1813,7 +1811,7 @@ export function NewProfileForm({
                 />
               </label>
             </div>
-            <p className="field-hint">
+            <p className="lb-field__hint">
               {editing && profile?.passwordProtected
                 ? 'Leave blank to keep the current password, or enter a replacement.'
                 : 'When set, launching this profile requires the password.'}
@@ -1843,11 +1841,11 @@ export function NewProfileForm({
             id="new-profile-panel-extensions"
             aria-labelledby="new-profile-tab-extensions"
           >
-            <div className="field-grid">
-              <label className="field">
-                <span className="field__label">Source</span>
+            <div className="lb-field-grid">
+              <label className="lb-field">
+                <span className="lb-field__label">Source</span>
                 <select
-                  className="input"
+                  className="lb-select"
                   value={extensionSource}
                   onChange={(event) => {
                     setExtensionSource(event.target.value as BrowserExtensionRef['source']);
@@ -1858,14 +1856,14 @@ export function NewProfileForm({
                   <option value="unpacked">Local unpacked directory</option>
                 </select>
               </label>
-              <label className="field field--wide">
-                <span className="field__label">
+              <label className="lb-field lb-field--wide">
+                <span className="lb-field__label">
                   {extensionSource === 'chrome_web_store'
                     ? 'Extension ID or official detail URL'
                     : 'Absolute directory path'}
                 </span>
                 <input
-                  className="input"
+                  className="lb-input"
                   value={extensionValue}
                   aria-invalid={Boolean(extensionInputError)}
                   autoCapitalize="none"
@@ -1882,10 +1880,8 @@ export function NewProfileForm({
                   }}
                 />
               </label>
-              <div className="field field--wide field--actions">
-                <button type="button" className="btn btn--secondary" onClick={addExtension}>
-                  Add extension
-                </button>
+              <div className="lb-field lb-field--wide lb-field--actions">
+                <Button onClick={addExtension}>Add extension</Button>
                 {extensionInputError ? (
                   <p className="notice notice--error" role="alert">
                     {extensionInputError}
@@ -1895,7 +1891,7 @@ export function NewProfileForm({
             </div>
             <div className="extension-list">
               {form.extensions.length === 0 ? (
-                <p className="field-hint">No extensions configured.</p>
+                <p className="lb-field__hint">No extensions configured.</p>
               ) : (
                 form.extensions.map((extension, index) => {
                   const label =
@@ -1945,9 +1941,9 @@ export function NewProfileForm({
                       {extension.installError ? (
                         <p className="notice notice--error">{extension.installError}</p>
                       ) : null}
-                      <button
-                        type="button"
-                        className="btn btn--ghost btn--compact"
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() =>
                           setForm((previous) => ({
                             ...previous,
@@ -1958,13 +1954,13 @@ export function NewProfileForm({
                         }
                       >
                         Remove
-                      </button>
+                      </Button>
                     </div>
                   );
                 })
               )}
             </div>
-            <p className="field-hint">
+            <p className="lb-field__hint">
               Store packages are fetched only for explicitly configured IDs from Google’s update
               service, then CRX3 identity/signature-verified and safely unpacked. Availability and
               use remain subject to Chrome Web Store terms.
@@ -1986,27 +1982,7 @@ export function NewProfileForm({
             {error}
           </p>
         ) : null}
-      </div>
-
-      <footer className="modal-footer">
-        <button
-          type="button"
-          className="btn btn--secondary"
-          onClick={onCancel}
-          disabled={submitting}
-        >
-          Cancel
-        </button>
-        <button type="submit" className="btn btn--primary" disabled={!canSubmit}>
-          {submitting
-            ? editing
-              ? 'Saving…'
-              : 'Creating…'
-            : editing
-              ? 'Save profile'
-              : 'Create profile'}
-        </button>
-      </footer>
-    </form>
+      </form>
+    </Modal>
   );
 }

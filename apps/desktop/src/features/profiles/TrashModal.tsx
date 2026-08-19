@@ -1,9 +1,8 @@
 import type { Profile } from '@lobster/shared-types';
 
-
 import appIcon from '../../assets/brand/icon.png';
-import { osLabel } from './options';
-import { EmptyState } from '../../ui';
+import { osLabel, profileCount } from './options';
+import { Button, EmptyState, Modal } from '../../ui';
 import { Icon } from '../../ui/Icon';
 
 interface TrashModalProps {
@@ -40,96 +39,86 @@ export function TrashModal({
   onClose,
 }: TrashModalProps): JSX.Element {
   return (
-    <div
-      className="modal modal--trash"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="trash-title"
+    <Modal
+      open
+      onClose={onClose}
+      size="lg"
+      title={
+        <>
+          Trash
+          <span className="lb-modal__count">{profileCount(profiles.length)}</span>
+        </>
+      }
+      headerActions={
+        <Button
+          variant="ghost"
+          size="sm"
+          iconOnly
+          onClick={onRefresh}
+          disabled={loading}
+          aria-label="Refresh trash"
+          title="Refresh"
+        >
+          <Icon name="ArrowPathIcon" aria-hidden />
+        </Button>
+      }
     >
-      <header className="modal-header">
-        <div>
-          <h2 id="trash-title">Trash</h2>
-          <p className="modal-subtitle">{profiles.length} profiles</p>
-        </div>
-        <div className="modal-header-actions">
-          <button
-            type="button"
-            className="icon-button"
-            onClick={onRefresh}
-            disabled={loading}
-            aria-label="Refresh trash"
-            title="Refresh"
-          >
-            <Icon name="ArrowPathIcon" aria-hidden />
-          </button>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
-            <Icon name="XMarkIcon" aria-hidden />
-          </button>
-        </div>
-      </header>
+      {error ? <p className="notice notice--error">{error}</p> : null}
+      {loading ? <p className="notice">Loading trash...</p> : null}
+      {!loading && profiles.length === 0 ? (
+        <EmptyState icon={<Icon name="TrashIcon" aria-hidden />} title="Trash is empty" />
+      ) : null}
 
-      <div className="modal-body">
-        {error ? <p className="notice notice--error">{error}</p> : null}
-        {loading ? <p className="notice">Loading trash...</p> : null}
-        {!loading && profiles.length === 0 ? (
-          <EmptyState
-            icon={<Icon name="TrashIcon" aria-hidden />}
-            title="Trash is empty"
-          />
-        ) : null}
-
-        {!loading && profiles.length > 0 ? (
-          <div className="trash-list">
-            {profiles.map((profile) => {
-              const busy = busyIds.has(profile.id);
-              return (
-                <article className="trash-row" key={profile.id}>
-                  <div className="profile-title-cell profile-title-cell--compact">
-                    <img className="row-mark" src={appIcon} alt="" aria-hidden />
-                    <div className="profile-title-text">
-                      <div className="table-title">{profile.name}</div>
-                      <div className="table-subtitle">
-                        {osLabel(profile.os)} | Trashed {formatDate(profile.trashedAt)}
-                      </div>
+      {!loading && profiles.length > 0 ? (
+        <div className="trash-list">
+          {profiles.map((profile) => {
+            const busy = busyIds.has(profile.id);
+            return (
+              <article className="trash-row" key={profile.id}>
+                <div className="profile-title-cell profile-title-cell--compact">
+                  <img className="row-mark" src={appIcon} alt="" aria-hidden />
+                  <div className="profile-title-text">
+                    <div className="table-title">{profile.name}</div>
+                    <div className="table-subtitle">
+                      {osLabel(profile.os)} · Trashed {formatDate(profile.trashedAt)}
                     </div>
                   </div>
-                  <div className="tag-row tag-row--compact trash-row__tags">
-                    {profile.tags.length > 0 ? (
-                      profile.tags.map((tag) => (
-                        <span key={tag} className="tag">
-                          {tag}
-                        </span>
-                      ))
-                    ) : (
-                      <span className="muted">No tags</span>
-                    )}
-                  </div>
-                  <div className="trash-row__actions">
-                    <button
-                      type="button"
-                      className="btn btn--outline"
-                      disabled={busy}
-                      onClick={() => onRestore(profile.id)}
-                    >
-                      <Icon name="ArrowUturnLeftIcon" aria-hidden />
-                      Restore
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn--danger"
-                      disabled={busy}
-                      onClick={() => onPermanentlyDelete(profile.id)}
-                    >
-                      <Icon name="TrashIcon" aria-hidden />
-                      Delete
-                    </button>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        ) : null}
-      </div>
-    </div>
+                </div>
+                <div className="tag-row tag-row--compact trash-row__tags">
+                  {profile.tags.length > 0 ? (
+                    profile.tags.map((tag) => (
+                      <span key={tag} className="tag">
+                        {tag}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="muted">No tags</span>
+                  )}
+                </div>
+                <div className="trash-row__actions">
+                  <Button
+                    size="sm"
+                    leadingIcon={<Icon name="ArrowUturnLeftIcon" aria-hidden />}
+                    disabled={busy}
+                    onClick={() => onRestore(profile.id)}
+                  >
+                    Restore
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    leadingIcon={<Icon name="TrashIcon" aria-hidden />}
+                    disabled={busy}
+                    onClick={() => onPermanentlyDelete(profile.id)}
+                  >
+                    Delete
+                  </Button>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : null}
+    </Modal>
   );
 }

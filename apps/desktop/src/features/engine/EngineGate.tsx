@@ -4,6 +4,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 import siteLogo from '../../assets/brand/site-logo.png';
+import { Button } from '../../ui';
 
 interface EngineStatus {
   present: boolean;
@@ -109,13 +110,9 @@ export function EngineGate({ children }: { children: ReactNode }): JSX.Element {
                 </p>
               </>
             ) : (
-              <button
-                type="button"
-                className="btn btn--primary"
-                onClick={() => void startDownload()}
-              >
+              <Button variant="primary" onClick={() => void startDownload()}>
                 Download engine
-              </button>
+              </Button>
             )}
             {error ? (
               <p className="notice notice--error engine-gate__error" role="alert">

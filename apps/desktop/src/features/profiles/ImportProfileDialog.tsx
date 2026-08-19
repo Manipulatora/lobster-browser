@@ -87,9 +87,7 @@ export function ImportProfileDialog({
       // The Rust side tags the overwhelmingly common failure so the dialog can say the useful
       // thing rather than surfacing an AEAD error.
       setError(
-        message.includes('WRONG_PASSPHRASE')
-          ? 'That password does not open this file.'
-          : message,
+        message.includes('WRONG_PASSPHRASE') ? 'That password does not open this file.' : message,
       );
     } finally {
       setBusy(false);
@@ -137,7 +135,11 @@ export function ImportProfileDialog({
           <Button variant="secondary" onClick={() => void pickFile()} disabled={busy}>
             {path ? 'Choose a different file' : 'Choose file…'}
           </Button>
-          {path ? <span className="import-picker__path cell-ellipsis" title={path}>{path}</span> : null}
+          {path ? (
+            <span className="import-picker__path cell-ellipsis" title={path}>
+              {path}
+            </span>
+          ) : null}
         </div>
 
         {preview ? (
@@ -176,11 +178,11 @@ export function ImportProfileDialog({
         ) : null}
 
         {preview ? (
-          <label className="field" htmlFor={passId}>
-            <span className="field__label">File password</span>
+          <label className="lb-field" htmlFor={passId}>
+            <span className="lb-field__label">File password</span>
             <input
               id={passId}
-              className="input"
+              className="lb-input"
               type="password"
               value={passphrase}
               autoComplete="current-password"

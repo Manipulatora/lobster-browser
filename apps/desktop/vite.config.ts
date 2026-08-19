@@ -28,6 +28,11 @@ export default defineConfig({
     port: 5173,
     // Fail loudly instead of silently hopping to a random port the webview can't find.
     strictPort: true,
+    watch: {
+      // `src-tauri/target` holds gigabytes of Rust build artifacts. Watching them exhausts the
+      // inotify budget and kills the dev server with ENOSPC before it finishes optimizing deps.
+      ignored: ['**/src-tauri/**'],
+    },
   },
 
   // Emit assets the Tauri packager can load with relative paths (frontendDist = ../dist).

@@ -83,6 +83,16 @@ export function CommandPalette({
     setActive((a) => Math.min(a, Math.max(0, filtered.length - 1)));
   }, [filtered.length]);
 
+  // The list caps at 46vh and every profile is a command, so arrowing past the fold moved the
+  // highlight somewhere the user could not see it. `nearest` scrolls only when it has to, which
+  // keeps the list still while the highlight travels within the visible rows.
+  useEffect(() => {
+    if (!open) return;
+    listRef.current
+      ?.querySelectorAll<HTMLElement>('.lb-palette__item')
+      [active]?.scrollIntoView({ block: 'nearest' });
+  }, [active, open, filtered]);
+
   if (!open) return null;
 
   const grouped = new Map<string, Command[]>();

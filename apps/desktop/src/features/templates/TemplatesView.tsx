@@ -6,11 +6,12 @@ import type {
   EngineKind,
   ProfileOsTarget,
   ProfileTemplate,
+  StoredProxy,
 } from '@lobster/shared-types';
 
-import { profilesClient, templatesClient } from '../../api/tauri';
+import { profilesClient, proxiesClient, templatesClient } from '../../api/tauri';
 import appIcon from '../../assets/brand/icon.png';
-import { EmptyState, Modal, Skeleton, useToast } from '../../ui';
+import { Button, EmptyState, Modal, Skeleton, useToast } from '../../ui';
 import { ENGINE_OPTIONS, OS_OPTIONS, OS_VERSION_OPTIONS } from '../profiles/options';
 import { Icon } from '../../ui/Icon';
 
@@ -19,8 +20,8 @@ interface TemplateFormState {
   engine: EngineKind;
   os: ProfileOsTarget;
   osVersion: string;
-  preset: string;
-  proxy: string;
+  /** Id of a stored proxy, or '' for none. */
+  proxyId: string;
   tags: string;
 }
 
@@ -29,8 +30,7 @@ const initialForm: TemplateFormState = {
   engine: 'lobium',
   os: 'windows',
   osVersion: OS_VERSION_OPTIONS.windows[0],
-  preset: 'User Agent, Extensions',
-  proxy: '',
+  proxyId: '',
   tags: '',
 };
 
@@ -41,11 +41,9 @@ function parseTags(raw: string): string[] {
     .filter(Boolean);
 }
 
-function parsePreset(raw: string): string[] {
-  return raw
-    .split(/[,\n]/)
-    .map((item) => item.trim())
-    .filter(Boolean);
+function proxyEndpoint(proxy: StoredProxy): string {
+  if (proxy.source === 'hive') return 'Managed endpoint';
+  return `${proxy.config.host}:${proxy.config.port}`;
 }
 
 function osName(value: ProfileOsTarget): string {
@@ -67,9 +65,11 @@ function proxyDetail(template: ProfileTemplate): string {
 }
 
 function CreateTemplateModal({
+  proxies,
   onCreate,
   onClose,
 }: {
+  proxies: readonly StoredProxy[];
   onCreate: (input: CreateProfileTemplateInput) => Promise<void>;
   onClose: () => void;
 }): JSX.Element {
@@ -90,13 +90,17 @@ function CreateTemplateModal({
       engine: form.engine,
       os: form.os,
       osVersion: form.osVersion,
-      presetParameters: parsePreset(form.preset),
       tags: parseTags(form.tags),
     };
-    const proxy = form.proxy.trim();
+    // A REAL PROXY, NOT A LABEL. This field used to be free text that became `proxyLabel` and
+    // nothing else, so a profile created from the template carried no proxy at all while the
+    // template row cheerfully displayed one. Only an id the profile creator can act on is stored;
+    // the label and endpoint beside it are display copy derived from that same proxy.
+    const proxy = proxies.find((item) => item.id === form.proxyId);
     if (proxy) {
-      input.proxyLabel = proxy;
-      input.proxyDetail = proxy;
+      input.proxyId = proxy.id;
+      input.proxyLabel = proxy.label;
+      input.proxyDetail = proxyEndpoint(proxy);
     }
 
     setSubmitting(true);
@@ -115,29 +119,22 @@ function CreateTemplateModal({
       open
       onClose={submitting ? () => undefined : onClose}
       title="Create template"
-      size="sm"
+      size="md"
       footer={
         <>
-          <button type="button" className="btn btn--secondary" onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            type="submit"
-            form="create-template-form"
-            className="btn btn--primary"
-            disabled={!canSubmit}
-          >
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="create-template-form" variant="primary" disabled={!canSubmit}>
             {submitting ? 'Creating…' : 'Create template'}
-          </button>
+          </Button>
         </>
       }
     >
       <form id="create-template-form" onSubmit={handleSubmit} aria-label="Template details">
-        <div className="field-grid">
-          <label className="field field--wide">
-            <span className="field__label">Title</span>
+        <div className="lb-field-grid">
+          <label className="lb-field lb-field--wide">
+            <span className="lb-field__label">Title</span>
             <input
-              className="input"
+              className="lb-input"
               type="text"
               value={form.name}
               placeholder="Enter template name"
@@ -145,11 +142,11 @@ function CreateTemplateModal({
               autoFocus
             />
           </label>
-          <div className="field-triple field--wide">
-            <label className="field">
-              <span className="field__label">Engine</span>
+          <div className="lb-field-triple lb-field--wide">
+            <label className="lb-field">
+              <span className="lb-field__label">Engine</span>
               <select
-                className="input"
+                className="lb-select"
                 value={form.engine}
                 onChange={(e) => set('engine', e.target.value as EngineKind)}
               >
@@ -160,10 +157,10 @@ function CreateTemplateModal({
                 ))}
               </select>
             </label>
-            <label className="field">
-              <span className="field__label">OS</span>
+            <label className="lb-field">
+              <span className="lb-field__label">OS</span>
               <select
-                className="input"
+                className="lb-select"
                 value={form.os}
                 onChange={(e) => {
                   const os = e.target.value as ProfileOsTarget;
@@ -177,10 +174,10 @@ function CreateTemplateModal({
                 ))}
               </select>
             </label>
-            <label className="field">
-              <span className="field__label">OS version</span>
+            <label className="lb-field">
+              <span className="lb-field__label">OS version</span>
               <select
-                className="input"
+                className="lb-select"
                 value={form.osVersion}
                 onChange={(e) => set('osVersion', e.target.value)}
               >
@@ -192,29 +189,30 @@ function CreateTemplateModal({
               </select>
             </label>
           </div>
-          <label className="field field--wide">
-            <span className="field__label">Preset parameters</span>
-            <input
-              className="input"
-              type="text"
-              value={form.preset}
-              onChange={(e) => set('preset', e.target.value)}
-            />
+          <label className="lb-field lb-field--wide">
+            <span className="lb-field__label">Proxy</span>
+            <select
+              className="lb-select"
+              value={form.proxyId}
+              onChange={(e) => set('proxyId', e.target.value)}
+            >
+              <option value="">No proxy</option>
+              {proxies.map((proxy) => (
+                <option key={proxy.id} value={proxy.id}>
+                  {proxy.label} · {proxyEndpoint(proxy)}
+                </option>
+              ))}
+            </select>
+            {proxies.length === 0 ? (
+              <span className="lb-field__hint">
+                Add a proxy on the Proxies page to attach one to this template.
+              </span>
+            ) : null}
           </label>
-          <label className="field field--wide">
-            <span className="field__label">Proxy</span>
+          <label className="lb-field lb-field--wide">
+            <span className="lb-field__label">Tags</span>
             <input
-              className="input"
-              type="text"
-              value={form.proxy}
-              placeholder="Proxy label or endpoint"
-              onChange={(e) => set('proxy', e.target.value)}
-            />
-          </label>
-          <label className="field field--wide">
-            <span className="field__label">Tags</span>
-            <input
-              className="input"
+              className="lb-input"
               type="text"
               value={form.tags}
               placeholder="Separate tags with commas"
@@ -236,6 +234,7 @@ export function TemplatesView(): JSX.Element {
   const toast = useToast();
   const [query, setQuery] = useState('');
   const [templates, setTemplates] = useState<ProfileTemplate[]>([]);
+  const [proxies, setProxies] = useState<StoredProxy[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -262,10 +261,25 @@ export function TemplatesView(): JSX.Element {
     void refresh();
   }, []);
 
+  // The proxy picker in the create dialog needs real stored proxies to choose from. A failure here
+  // is not worth reporting: the dialog degrades to "No proxy" and says where proxies come from.
+  useEffect(() => {
+    let cancelled = false;
+    void proxiesClient
+      .list_proxies()
+      .then((list) => {
+        if (!cancelled) setProxies(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   async function handleCreate(input: CreateProfileTemplateInput): Promise<void> {
     const created = await templatesClient.create_template(input);
     setTemplates((prev) => [created, ...prev]);
-    toast.success(`Created template "${created.name}".`);
+    toast.success(`Created template “${created.name}”.`);
   }
 
   async function handleCreateProfile(template: ProfileTemplate): Promise<void> {
@@ -282,7 +296,7 @@ export function TemplatesView(): JSX.Element {
     if (template.cookiesImport) input.cookiesImport = template.cookiesImport;
     if (template.extensions) input.extensions = template.extensions;
     await profilesClient.create_profile(input);
-    toast.success(`Created profile from "${template.name}".`);
+    toast.success(`Created profile from “${template.name}”.`);
   }
 
   return (
@@ -301,10 +315,13 @@ export function TemplatesView(): JSX.Element {
             onChange={(e) => setQuery(e.target.value)}
           />
         </label>
-        <button type="button" className="btn btn--primary" onClick={() => setShowCreate(true)}>
-          <Icon name="PlusIcon" aria-hidden />
+        <Button
+          variant="primary"
+          leadingIcon={<Icon name="PlusIcon" aria-hidden />}
+          onClick={() => setShowCreate(true)}
+        >
           Create Template
-        </button>
+        </Button>
       </header>
 
       {error ? <p className="notice notice--error">Could not load templates: {error}</p> : null}
@@ -322,14 +339,13 @@ export function TemplatesView(): JSX.Element {
           title={query.trim() ? 'No matching templates' : 'No templates yet'}
           action={
             query.trim() ? undefined : (
-              <button
-                type="button"
-                className="btn btn--primary"
+              <Button
+                variant="primary"
+                leadingIcon={<Icon name="SparklesIcon" aria-hidden />}
                 onClick={() => setShowCreate(true)}
               >
-                <Icon name="SparklesIcon" aria-hidden />
                 Create Template
-              </button>
+              </Button>
             )
           }
         />
@@ -377,16 +393,15 @@ export function TemplatesView(): JSX.Element {
                     </div>
                   </td>
                   <td>
-                    <button
-                      type="button"
-                      className="btn btn--outline btn--compact"
+                    <Button
+                      size="sm"
+                      leadingIcon={<Icon name="PlayIcon" aria-hidden />}
                       onClick={() => {
                         void handleCreateProfile(template);
                       }}
                     >
-                      <Icon name="PlayIcon" aria-hidden />
                       Create Profile
-                    </button>
+                    </Button>
                   </td>
                 </tr>
               ))}
@@ -396,7 +411,11 @@ export function TemplatesView(): JSX.Element {
       ) : null}
 
       {showCreate ? (
-        <CreateTemplateModal onCreate={handleCreate} onClose={() => setShowCreate(false)} />
+        <CreateTemplateModal
+          proxies={proxies}
+          onCreate={handleCreate}
+          onClose={() => setShowCreate(false)}
+        />
       ) : null}
     </section>
   );

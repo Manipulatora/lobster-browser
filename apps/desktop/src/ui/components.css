@@ -111,6 +111,14 @@
   color: var(--danger);
 }
 
+/* Destructive row actions announce themselves on approach rather than looking like every other
+   action in the row. Quiet until the pointer is on them, which is what keeps a table of twenty rows
+   from being a wall of red. */
+.lb-btn--ghost.lb-btn--danger-hover:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .lb-btn__spinner {
   width: 15px;
   height: 15px;
@@ -126,33 +134,31 @@
   }
 }
 
-/* --- Spinner ------------------------------------------------------------------------------------ */
-.lb-spinner {
-  display: inline-block;
-  border: 2px solid var(--border-strong);
-  border-right-color: var(--accent);
-  border-radius: 50%;
-  animation: lb-spin 0.6s linear infinite;
-}
-
 /* --- Field / Input / Select / Textarea ---------------------------------------------------------- */
 .lb-field {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
 }
+/* Inline-flex because a label carries more than words: the required marker sits beside it, and on a
+   narrow column the pair has to wrap rather than push the field wider. */
 .lb-field__label {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
   font-size: var(--fs-base);
   font-weight: var(--fw-medium);
   color: var(--text);
 }
+
+/* The asterisk on a required label. */
+.lb-field__required {
+  color: var(--danger);
+}
 .lb-field__hint {
   font-size: var(--fs-sm);
   color: var(--text-muted);
-}
-.lb-field__error {
-  font-size: var(--fs-sm);
-  color: var(--danger);
 }
 .lb-input,
 .lb-select,
@@ -186,9 +192,56 @@
   border-color: var(--brand-400);
   box-shadow: var(--shadow-focus);
 }
-.lb-input--invalid,
-.lb-select--invalid {
+.lb-input[aria-invalid='true'],
+.lb-select[aria-invalid='true'],
+.lb-textarea[aria-invalid='true'] {
   border-color: var(--danger);
+}
+
+/* Readable, not editable — and it must not look like an empty field waiting for input. */
+.lb-input[readonly] {
+  background: var(--surface-muted);
+  color: var(--text-muted);
+}
+
+/* Two heights the forms actually ask for: a profile description, and the cookie paste box that is
+   expected to hold a whole file. */
+.lb-textarea--profile {
+  min-height: 124px;
+}
+.lb-textarea--tall {
+  min-height: 170px;
+}
+
+/* --- Field layout ------------------------------------------------------------------------------- */
+
+/* The form grid every dialog lays its fields on. Two columns, because almost every pair of fields in
+   this product is one decision (host + port, OS + version). */
+.lb-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4) var(--space-4);
+}
+
+/* Three parts of one decision — engine, OS, OS version — on one line. Split across the two-column
+   grid they left a half-width hole that reads as a field that failed to render. */
+.lb-field-triple {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4) var(--space-4);
+}
+
+.lb-field--wide {
+  grid-column: 1 / -1;
+}
+
+/* A row of form actions, sized to their labels and pushed to the trailing edge. Without this a lone
+   button in a field stretches to the full grid width, which makes a secondary action the widest
+   element on the panel. */
+.lb-field--actions {
+  flex-direction: row;
+  justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 /* --- Badge -------------------------------------------------------------------------------------- */
@@ -278,11 +331,36 @@
   border-bottom: 1px solid var(--border);
 }
 .lb-modal__title {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
   margin: 0;
+  min-width: 0;
   font-size: var(--fs-lg);
   font-weight: var(--fw-medium);
 }
+
+/* The count beside a dialog title (Trash). Part of the heading, so it reads with the title, but set
+   back so the title is still the thing you land on. */
+.lb-modal__count {
+  color: var(--text-muted);
+  font-size: var(--fs-base);
+  font-weight: var(--fw-control);
+}
+
+/* Dialog-level controls, Close last. */
+.lb-modal__header-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--space-1);
+}
+/* `min-height: 0` is what lets the body shrink inside the flex column and scroll: without it a tall
+   body (the profile wizard sets a 300px floor of its own) pushes the footer past the bottom of the
+   dialog instead of scrolling. */
 .lb-modal__body {
+  flex: 0 1 auto;
+  min-height: 0;
   padding: var(--space-6);
   overflow-y: auto;
 }
@@ -299,8 +377,27 @@
 
 /* A footer that carries a secondary action (Check proxy) as well as confirm/cancel splits them to
    opposite ends: the thing that only inspects belongs away from the thing that commits. */
-.lb-modal__footer:has(.modal-footer-actions) {
+.lb-modal__footer:has(.lb-modal__footer-actions) {
   justify-content: space-between;
+}
+.lb-modal__footer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* On a small window the dialog takes what it can get: the 7vh drop and the 20px gutters are a
+   comfort on a desktop and a waste of the screen here. */
+@media (max-width: 760px) {
+  .lb-overlay {
+    padding: var(--space-3);
+  }
+  .lb-modal {
+    max-height: calc(100vh - var(--space-6));
+  }
+  .lb-modal__body {
+    padding: var(--space-4);
+  }
 }
 
 @keyframes lb-fade {
@@ -354,6 +451,13 @@
 .lb-toast__title {
   font-weight: var(--fw-medium);
   font-size: var(--fs-md);
+}
+/* The repeat tally on a coalesced notification. Muted and tabular so a card counting up in place
+   does not reflow its own title while the user is reading it. */
+.lb-toast__count {
+  color: var(--text-soft);
+  font-weight: var(--fw-control);
+  font-variant-numeric: tabular-nums;
 }
 .lb-toast__msg {
   font-size: var(--fs-base);
@@ -522,45 +626,6 @@
   background: var(--accent);
 }
 
-/* --- Menu (dropdown) ---------------------------------------------------------------------------- */
-.lb-menu {
-  position: absolute;
-  z-index: var(--z-dropdown);
-  min-width: 180px;
-  padding: var(--space-1);
-  background: var(--surface-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-md);
-  animation: lb-pop var(--dur) var(--ease-out);
-}
-.lb-menu__item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  padding: var(--space-2) var(--space-3);
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text);
-  font-size: var(--fs-md);
-  text-align: left;
-  cursor: pointer;
-}
-.lb-menu__item:hover,
-.lb-menu__item--active {
-  background: var(--active-muted);
-}
-.lb-menu__item--danger {
-  color: var(--danger);
-}
-.lb-menu__sep {
-  height: 1px;
-  margin: var(--space-1) 0;
-  background: var(--border);
-}
-
 /* --- EmptyState --------------------------------------------------------------------------------- */
 .lb-empty {
   display: flex;
@@ -718,73 +783,83 @@
   right: var(--space-2);
 }
 
-/* --- Segmented control -------------------------------------------------------------------------- */
-.lb-segmented {
-  display: inline-flex;
-  padding: 2px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-  gap: 2px;
-}
-.lb-segmented__btn {
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  padding: var(--space-1) var(--space-3);
-  border-radius: var(--radius-sm);
-  font-size: var(--fs-base);
-  font-weight: var(--fw-medium);
-  cursor: pointer;
-}
-.lb-segmented__btn--active {
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: var(--shadow-xs);
-}
+/* --- Command palette trigger, topbar ------------------------------------------------------------ */
 
-/* --- Credit balance, topbar ------------------------------------------------------------------- */
-
-/* A QUIET BUTTON, NOT A LABEL. This opens billing, but with no border and no icon it read as static
-   text in the corner and nothing suggested it could be clicked. It now carries the same 32px pill as
-   the search and account controls beside it, so the topbar is three of one thing rather than three
-   different things. */
-.wallet-chip {
+/* THE PALETTE'S ONLY VISIBLE DOOR. It searches profiles, navigates and quick-launches, and the sole
+   way in used to be a shortcut printed nowhere in the product. Shaped like the search field in the
+   toolbar below rather than like a button, because that is what it opens; the shortcut rides inside
+   the control so using the mouse once teaches the keyboard for every time after. */
+.palette-trigger {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
   height: 32px;
-  padding: 0 var(--space-3);
+  min-width: 208px;
+  padding: 0 var(--space-2) 0 var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
-  color: var(--text);
+  color: var(--text-muted);
   font-family: inherit;
   font-size: var(--fs-md);
   font-weight: var(--fw-control);
-  font-variant-numeric: tabular-nums;
   cursor: pointer;
   transition:
     background var(--dur-fast) var(--ease),
-    border-color var(--dur-fast) var(--ease);
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
 }
 
-.wallet-chip:hover {
+.palette-trigger:hover {
   background: var(--surface-muted);
   border-color: var(--border-strong);
+  color: var(--text);
 }
 
-.wallet-chip:focus-visible {
+.palette-trigger:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
 
-/* Muted, not accent-coloured. The number is the content; the icon is only there to say what the
-   number is, and a violet glyph beside it competes with the one primary action on screen. */
-.wallet-chip__icon {
+.palette-trigger__icon {
   width: 16px;
   height: 16px;
+  flex: 0 0 auto;
   color: var(--text-soft);
+}
+
+/* Takes the slack so the key hint is pinned to the right edge at every window width. */
+.palette-trigger__label {
+  flex: 1;
+  text-align: left;
+}
+
+/* A key cap, not a badge: monospaced and boxed so it reads as something to press. `--fw-control` and
+   the neutral surface keep it quieter than the label it sits beside. */
+.palette-trigger__key {
+  flex: 0 0 auto;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+/* Below the sidebar's own breakpoint the topbar has no room for a 208px control, so it collapses to
+   the icon — still a door, still in the same place. */
+@media (max-width: 900px) {
+  .palette-trigger {
+    min-width: 0;
+    padding: 0 var(--space-2);
+  }
+  .palette-trigger__label,
+  .palette-trigger__key {
+    display: none;
+  }
 }
 
 
@@ -1043,7 +1118,7 @@
 .proxies-table th:nth-child(4) { width: 172px; }  /* Location + tz */
 .proxies-table th:nth-child(5) { width: 76px;  }  /* Latency       */
 .proxies-table th:nth-child(6) { width: 96px;  }  /* Status        */
-.proxies-table th:nth-child(7) { width: 154px; }  /* Actions       */
+.proxies-table th:nth-child(7) { width: 208px; }  /* Actions       */
 
 /* Truncate rather than wrap: a wrapped cell changes the row height and knocks the table out of
    alignment. The Location cell is exempt because it deliberately stacks two lines. */
@@ -1065,10 +1140,4 @@
   overflow: visible;
 }
 
-/* TABULAR FIGURES. Without them the balance is set in proportional digits, so it changes width as
-   the amount changes and the chip jitters — most visible when a deposit lands while the app is
-   open, which is exactly the moment the user is looking at it. */
-.wallet-chip__value {
-  font-variant-numeric: tabular-nums;
-}
 

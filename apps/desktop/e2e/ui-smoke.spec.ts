@@ -1,6 +1,24 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Locator } from '@playwright/test';
+
+import type { ProfileOsTarget } from '@lobster/shared-types';
+
+import { rendererPresetById } from '../src/features/profiles/fingerprintCatalog';
+import { OS_OPTIONS } from '../src/features/profiles/options';
 
 const baseUrl = process.env.LOBSTER_E2E_URL ?? 'http://127.0.0.1:5181/';
+
+/** The OS picker is a custom listbox (it draws a platform glyph per option), so drive it by hand. */
+async function selectOs(dialog: Locator, label: string): Promise<void> {
+  await dialog.getByRole('button', { name: 'Operating system' }).click();
+  await dialog.getByRole('option', { name: label, exact: true }).click();
+}
+
+async function selectedOs(dialog: Locator): Promise<ProfileOsTarget> {
+  const label = (await dialog.getByRole('button', { name: 'Operating system' }).innerText()).trim();
+  const option = OS_OPTIONS.find((entry) => entry.label === label);
+  if (!option) throw new Error(`Unknown operating system label: ${label}`);
+  return option.value;
+}
 
 test('desktop UI smoke: profiles, filters, trash, proxies, and templates', async ({ page }) => {
   await page.goto(baseUrl);
@@ -14,17 +32,19 @@ test('desktop UI smoke: profiles, filters, trash, proxies, and templates', async
 
   const profileName = `E2E Policy ${Date.now()}`;
   await page.getByRole('button', { name: 'Create Profile' }).click();
+  const dialog = page.getByRole('dialog', { name: 'New profile' });
   await page.getByPlaceholder('Enter profile name').fill(profileName);
   await page.getByPlaceholder('Enter description').fill('Policy smoke profile');
   await page.getByPlaceholder('Tags').fill('e2e, policy');
 
   await page.getByRole('tab', { name: 'Fingerprint' }).click();
-  await page.getByLabel('Operating system').selectOption('windows');
+  await selectOs(dialog, 'Windows');
   await page.getByLabel('OS version').selectOption('Windows 11');
   await expect(page.getByLabel('User Agent')).toHaveValue(/Chrome\//);
   await page.getByLabel('Geolocation').selectOption('manual');
-  await page.getByLabel('Latitude').fill('40.7128');
-  await page.getByLabel('Longitude').fill('-74.0060');
+  await dialog.getByRole('textbox', { name: 'Location', exact: true }).fill('New York');
+  await dialog.getByRole('option', { name: 'New York, United States' }).click();
+  await expect(dialog.getByText('lat 40.7128, lng -74.006')).toBeVisible();
   await page.getByLabel(/Client rects/i).check();
   await page.getByLabel('Cameras').fill('2');
   await page.getByLabel('Speakers').fill('3');
@@ -43,10 +63,7 @@ test('desktop UI smoke: profiles, filters, trash, proxies, and templates', async
     .getByPlaceholder('abcdefghijklmnopabcdefghijklmnop')
     .fill('abcdefghijklmnopabcdefghijklmnop');
   await page.getByRole('button', { name: 'Add extension' }).click();
-  await page
-    .getByRole('dialog', { name: 'New profile' })
-    .getByRole('button', { name: 'Create profile' })
-    .click();
+  await dialog.getByRole('button', { name: 'Create profile' }).click();
   await expect(page.getByText(profileName, { exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: 'Filters' }).click();
@@ -56,11 +73,11 @@ test('desktop UI smoke: profiles, filters, trash, proxies, and templates', async
   await page.getByRole('button', { name: 'Reset' }).click();
 
   await page.getByLabel(`More actions for ${profileName}`).click();
-  await page.getByRole('menuitem', { name: 'Set/remove pwd' }).click();
+  await page.getByRole('menuitem', { name: 'Set a password' }).click();
   await page.getByLabel('New password').fill('secret-pass');
   await page.getByRole('button', { name: 'Save password' }).click();
   await expect(page.getByText('Password protection enabled.')).toBeVisible();
-  await expect(page.getByText('Password protected')).toBeVisible();
+  await expect(page.getByRole('row').filter({ hasText: profileName })).toContainText('Locked');
 
   await page.getByLabel(`More actions for ${profileName}`).click();
   await page.getByRole('menuitem', { name: 'Move to trash' }).click();
@@ -68,13 +85,13 @@ test('desktop UI smoke: profiles, filters, trash, proxies, and templates', async
   await expect(page.getByText('Profile moved to trash.')).toBeVisible();
   await expect(page.getByText(profileName, { exact: true })).not.toBeVisible();
 
-  await page.getByRole('button', { name: 'More actions', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Trash' }).click();
-  await expect(page.getByRole('dialog', { name: 'Trash' })).toBeVisible();
-  await expect(page.getByText(profileName, { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: 'Restore' }).click();
+  await page.getByRole('button', { name: 'Trash', exact: true }).click();
+  const trash = page.getByRole('dialog', { name: /^Trash/ });
+  await expect(trash).toBeVisible();
+  await expect(trash.getByText(profileName, { exact: true })).toBeVisible();
+  await trash.getByRole('button', { name: 'Restore' }).click();
   await expect(page.getByText('Profile restored.')).toBeVisible();
-  await page.getByRole('button', { name: 'Close' }).click();
+  await trash.getByRole('button', { name: 'Close' }).click();
   await expect(page.getByText(profileName, { exact: true })).toBeVisible();
 
   await page.getByRole('button', { name: 'Proxies' }).click();
@@ -111,10 +128,10 @@ test('profile wizard validates hidden sections, tests proxy, and restores focus'
   await expect(dialog.getByRole('alert')).toContainText('Enter a profile name');
 
   await page.getByPlaceholder('Enter profile name').fill('Validation profile');
-  await page.getByLabel('Proxy').selectOption('__custom__');
-  await page.getByLabel('Proxy title').fill('Validated proxy');
-  await page.getByLabel('Host').fill('proxy.example.test');
-  await page.getByLabel('Port').fill('1080');
+  await dialog.getByRole('combobox', { name: 'Proxy', exact: true }).selectOption('__custom__');
+  await dialog.getByLabel('Proxy title').fill('Validated proxy');
+  await dialog.getByLabel('Host').fill('proxy.example.test');
+  await dialog.getByLabel('Port').fill('1080');
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.getByRole('status')).toContainText('Connected');
 
@@ -137,7 +154,7 @@ test('profile wizard creates an editable Android device profile', async ({ page 
   const dialog = page.getByRole('dialog', { name: 'New profile' });
   await page.getByPlaceholder('Enter profile name').fill(name);
   await page.getByRole('tab', { name: 'Fingerprint' }).click();
-  await page.getByLabel('Operating system').selectOption('android');
+  await selectOs(dialog, 'Android');
   await expect(page.getByLabel('Device type')).toBeEnabled();
   await page.getByLabel('Device type').selectOption('tablet');
   await expect(page.getByLabel('Device model')).toBeEnabled();
@@ -155,7 +172,7 @@ test('narrow shell keeps keyboard navigation and modal focus accessible', async 
   await page.setViewportSize({ width: 560, height: 720 });
   await page.goto(baseUrl);
 
-  const paletteButton = page.getByRole('button', { name: 'Open command palette' });
+  const paletteButton = page.getByRole('banner').getByRole('button');
   await expect(paletteButton).toBeVisible();
   await paletteButton.click();
 
@@ -174,7 +191,7 @@ test('narrow shell keeps keyboard navigation and modal focus accessible', async 
   );
 });
 
-test('fingerprint edit preserves the calibrated host renderer and other profile overrides', async ({
+test('fingerprint edit preserves the validated per-OS renderer and other profile overrides', async ({
   page,
 }) => {
   await page.goto(baseUrl);
@@ -198,7 +215,7 @@ test('fingerprint edit preserves the calibrated host renderer and other profile 
   const dialog = page.getByRole('dialog', { name: 'Edit profile' });
   const renderer = dialog.getByLabel('WebGL renderer');
   const rendererPreset = await renderer.inputValue();
-  expect(rendererPreset).toBe('host');
+  expect(rendererPresetById(await selectedOs(dialog), rendererPreset)).toBeTruthy();
   await dialog.getByLabel('Speakers').fill('4');
   await dialog.getByRole('button', { name: 'Save profile' }).click();
   await expect(page.getByText('Profile saved.')).toBeVisible();
@@ -206,4 +223,23 @@ test('fingerprint edit preserves the calibrated host renderer and other profile 
   await openProfileEditor();
   await expect(dialog.getByLabel('Speakers')).toHaveValue('4');
   await expect(dialog.getByLabel('WebGL renderer')).toHaveValue(rendererPreset);
+});
+
+// Fixed-width columns are sized to the controls they hold, so a change to button padding silently
+// pushes the last column past the table box and clips its actions. That has regressed twice; this
+// measures it instead of trusting the numbers.
+test('data tables fit their container at every supported width', async ({ page }) => {
+  for (const width of [1280, 1440, 1920]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const screen of ['Profiles', 'Proxies', 'Templates']) {
+      await page.goto(baseUrl);
+      await page.getByRole('button', { name: screen, exact: true }).click();
+      const overflow = await page.evaluate(() => {
+        const table = document.querySelector('table');
+        const panel = table?.parentElement;
+        return panel ? panel.scrollWidth - panel.clientWidth : 0;
+      });
+      expect(overflow, `${screen} at ${width}px overflows its panel by ${overflow}px`).toBe(0);
+    }
+  }
 });

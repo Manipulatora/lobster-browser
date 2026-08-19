@@ -14,7 +14,10 @@ interface ExportProfileDialogProps {
 
 /** A filename the user can find again, without characters Windows refuses. */
 function suggestFilename(name: string): string {
-  const safe = name.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim();
+  const safe = name
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
   return `${safe || 'profile'}.lobprofile`;
 }
 
@@ -123,46 +126,46 @@ export function ExportProfileDialog({
           with the file and its password can sign in as this profile.
         </p>
 
-        <label className="field" htmlFor={passId}>
-          <span className="field__label">Password</span>
+        <label className="lb-field" htmlFor={passId}>
+          <span className="lb-field__label">Password</span>
           <input
             id={passId}
-            className="input"
+            className="lb-input"
             type="password"
             value={passphrase}
             autoComplete="new-password"
             autoFocus
             onChange={(event) => setPassphrase(event.target.value)}
           />
-          {tooShort ? <span className="field__hint">Use at least 8 characters.</span> : null}
+          {tooShort ? <span className="lb-field__hint">Use at least 8 characters.</span> : null}
         </label>
 
-        <label className="field" htmlFor={confirmId}>
-          <span className="field__label">Confirm password</span>
+        <label className="lb-field" htmlFor={confirmId}>
+          <span className="lb-field__label">Confirm password</span>
           <input
             id={confirmId}
-            className="input"
+            className="lb-input"
             type="password"
             value={confirm}
             autoComplete="new-password"
             onChange={(event) => setConfirm(event.target.value)}
           />
-          {mismatch ? <span className="field__hint">These do not match.</span> : null}
+          {mismatch ? <span className="lb-field__hint">These do not match.</span> : null}
         </label>
 
         {/* Exporting must not be a way around the profile's own lock. */}
         {profile.passwordProtected ? (
-          <label className="field" htmlFor={profilePassId}>
-            <span className="field__label">This profile&apos;s password</span>
+          <label className="lb-field" htmlFor={profilePassId}>
+            <span className="lb-field__label">This profile&apos;s password</span>
             <input
               id={profilePassId}
-              className="input"
+              className="lb-input"
               type="password"
               value={profilePassword}
               autoComplete="current-password"
               onChange={(event) => setProfilePassword(event.target.value)}
             />
-            <span className="field__hint">
+            <span className="lb-field__hint">
               Required because this profile is locked. The copy stays locked with the same password.
             </span>
           </label>
@@ -177,7 +180,10 @@ export function ExportProfileDialog({
             />
             <span>
               Include the proxy username and password
-              <span className="field__hint"> — leave this off if you are sending the file to someone else</span>
+              <span className="lb-field__hint">
+                {' '}
+                — leave this off if you are sending the file to someone else
+              </span>
             </span>
           </label>
         ) : null}

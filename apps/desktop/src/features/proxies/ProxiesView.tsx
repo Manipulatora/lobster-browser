@@ -1,4 +1,3 @@
-
 import { useEffect, useState } from 'react';
 
 import type {
@@ -10,7 +9,7 @@ import type {
 } from '@lobster/shared-types';
 
 import { proxiesClient } from '../../api/tauri';
-import { ActionDialog, EmptyState, Modal, Skeleton, useToast } from '../../ui';
+import { ActionDialog, Button, EmptyState, Modal, Skeleton, useToast } from '../../ui';
 import { Icon } from '../../ui/Icon';
 
 interface ProxyFormState {
@@ -59,12 +58,18 @@ function latencyLabel(proxy: StoredProxy): string {
   return proxy.latencyMs === undefined ? 'Not tested' : `${proxy.latencyMs} ms`;
 }
 
-function statusLabel(proxy: StoredProxy, checking: boolean): string {
-  if (checking) return 'Testing';
-  if (proxy.status === 'ready') return 'Ready';
-  if (proxy.status === 'error') return 'Error';
-  if (proxy.status === 'testing') return 'Testing';
-  return 'Warning';
+/**
+ * NOT TESTED IS NOT A WARNING. Anything that was not `ready`, `error` or `testing` used to fall
+ * through to an amber "Warning", so a proxy added thirty seconds ago and never checked announced
+ * itself as degraded while every other cell in its own row read "Not tested". Amber is reserved for
+ * a proxy that answered badly; a proxy nobody has asked yet gets the neutral pill.
+ */
+function statusLabel(proxy: StoredProxy, checking: boolean): { label: string; tone: string } {
+  if (checking || proxy.status === 'testing') return { label: 'Testing', tone: 'testing' };
+  if (proxy.status === 'ready') return { label: 'Ready', tone: 'ready' };
+  if (proxy.status === 'error') return { label: 'Error', tone: 'error' };
+  if (!proxy.lastCheckedAt) return { label: 'Not tested', tone: 'idle' };
+  return { label: 'Warning', tone: 'warning' };
 }
 
 function portNumber(raw: string): number | null {
@@ -201,32 +206,28 @@ function AddProxyModal({
       open
       onClose={submitting ? () => undefined : onClose}
       title="Add proxy"
-      size="sm"
+      size="md"
       footer={
         <>
-          <button
-            type="button"
-            className="btn btn--outline"
+          <Button
+            leadingIcon={<Icon name="ArrowPathIcon" aria-hidden />}
             onClick={() => {
               void handleCheck();
             }}
             disabled={checking || !canSubmit}
           >
-            <Icon name="ArrowPathIcon" aria-hidden />
             {checking ? 'Checking…' : 'Check proxy'}
-          </button>
-          <div className="modal-footer-actions">
-            <button type="button" className="btn btn--secondary" onClick={onClose}>
-              Cancel
-            </button>
-            <button
+          </Button>
+          <div className="lb-modal__footer-actions">
+            <Button onClick={onClose}>Cancel</Button>
+            <Button
               type="submit"
               form="add-proxy-form"
-              className="btn btn--primary"
+              variant="primary"
               disabled={!canSubmit || submitting}
             >
               {submitting ? 'Adding…' : 'Add proxy'}
-            </button>
+            </Button>
           </div>
         </>
       }
@@ -237,12 +238,12 @@ function AddProxyModal({
         onSubmit={handleSubmit}
         aria-label="Proxy details"
       >
-        <label className="field field--wide">
-          <span className="field__label">
-            Title<span className="required">*</span>
+        <label className="lb-field lb-field--wide">
+          <span className="lb-field__label">
+            Title<span className="lb-field__required">*</span>
           </span>
           <input
-            className="input"
+            className="lb-input"
             type="text"
             value={form.title}
             onChange={(e) => set('title', e.target.value)}
@@ -250,13 +251,13 @@ function AddProxyModal({
           />
         </label>
 
-        <div className="field field--wide">
-          <span className="field__label">
-            Proxy<span className="required">*</span>
+        <div className="lb-field lb-field--wide">
+          <span className="lb-field__label">
+            Proxy<span className="lb-field__required">*</span>
           </span>
           <div className="proxy-input-row">
             <select
-              className="input"
+              className="lb-select"
               value={form.type}
               onChange={(e) => set('type', e.target.value as ProxyType)}
             >
@@ -265,14 +266,14 @@ function AddProxyModal({
               <option value="https">HTTPS</option>
             </select>
             <input
-              className="input"
+              className="lb-input"
               type="text"
               value={form.host}
               placeholder="Enter IP or domain"
               onChange={(e) => set('host', e.target.value)}
             />
             <input
-              className="input"
+              className="lb-input"
               type="text"
               value={form.port}
               aria-label="Port"
@@ -293,20 +294,20 @@ function AddProxyModal({
           </div>
         </div>
 
-        <div className="field-grid">
-          <label className="field">
-            <span className="field__label">Login</span>
+        <div className="lb-field-grid">
+          <label className="lb-field">
+            <span className="lb-field__label">Login</span>
             <input
-              className="input"
+              className="lb-input"
               type="text"
               value={form.login}
               onChange={(e) => set('login', e.target.value)}
             />
           </label>
-          <label className="field">
-            <span className="field__label">Password</span>
+          <label className="lb-field">
+            <span className="lb-field__label">Password</span>
             <input
-              className="input"
+              className="lb-input"
               type="password"
               value={form.password}
               onChange={(e) => set('password', e.target.value)}
@@ -314,18 +315,16 @@ function AddProxyModal({
           </label>
         </div>
 
-        <label className="field field--wide">
-          <span className="field__label">URL for IP Change</span>
+        <label className="lb-field lb-field--wide">
+          <span className="lb-field__label">URL for IP Change</span>
           <input
-            className="input"
+            className="lb-input"
             type="url"
             value={form.rotateUrl}
             placeholder="https://provider.example/rotate"
             onChange={(e) => set('rotateUrl', e.target.value)}
           />
         </label>
-
-
 
         {message ? (
           <p className="notice" role="status">
@@ -489,10 +488,13 @@ export function ProxiesView(): JSX.Element {
           <strong>{rows.length}</strong>
           <span>{rows.length === 1 ? 'proxy' : 'proxies'}</span>
         </div>
-        <button type="button" className="btn btn--primary" onClick={() => setShowAddProxy(true)}>
-          <Icon name="PlusIcon" aria-hidden />
+        <Button
+          variant="primary"
+          leadingIcon={<Icon name="PlusIcon" aria-hidden />}
+          onClick={() => setShowAddProxy(true)}
+        >
           Add Proxy
-        </button>
+        </Button>
       </header>
 
       {error ? <p className="notice notice--error">Could not load proxies: {error}</p> : null}
@@ -509,14 +511,13 @@ export function ProxiesView(): JSX.Element {
           icon={<Icon name="ServerStackIcon" aria-hidden />}
           title="No proxies yet"
           action={
-            <button
-              type="button"
-              className="btn btn--primary"
+            <Button
+              variant="primary"
+              leadingIcon={<Icon name="PlusIcon" aria-hidden />}
               onClick={() => setShowAddProxy(true)}
             >
-              <Icon name="PlusIcon" aria-hidden />
               Add Proxy
-            </button>
+            </Button>
           }
         />
       ) : null}
@@ -567,46 +568,45 @@ export function ProxiesView(): JSX.Element {
                     </td>
                     <td>{checking ? 'Checking...' : latencyLabel(proxy)}</td>
                     <td>
-                      <span className={`status status--${status.toLowerCase()}`}>
+                      <span className={`status status--${status.tone}`}>
                         <span className="status__dot" aria-hidden />
-                        {status}
+                        {status.label}
                       </span>
                     </td>
                     <td>
                       <div className="proxy-row-actions">
-                        <button
-                          type="button"
-                          className="btn btn--outline btn--compact"
+                        <Button
+                          size="sm"
                           onClick={() => void handleCheckProxy(proxy)}
                           disabled={checking}
                         >
                           Check
-                        </button>
+                        </Button>
                         {proxy.rotateUrl ? (
-                          <button
-                            type="button"
-                            className="btn btn--outline btn--compact"
+                          <Button
+                            size="sm"
+                            leadingIcon={<Icon name="ArrowPathIcon" aria-hidden />}
                             onClick={() => void handleRotateProxy(proxy)}
                             disabled={checking}
                           >
-                            <Icon name="ArrowPathIcon" aria-hidden />
                             Rotate
-                          </button>
+                          </Button>
                         ) : null}
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--compact"
+                        <Button
+                          variant="ghost"
+                          size="sm"
                           onClick={() => void handleRenameProxy(proxy)}
                         >
                           Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn--ghost btn--compact btn--danger-hover"
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="lb-btn--danger-hover"
                           onClick={() => void handleDeleteProxy(proxy)}
                         >
                           Delete
-                        </button>
+                        </Button>
                       </div>
                     </td>
                   </tr>

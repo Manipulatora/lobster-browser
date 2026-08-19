@@ -57,6 +57,11 @@ export function osLabel(os: ProfileOsTarget): string {
   return OS_OPTIONS.find((o) => o.value === os)?.label ?? os;
 }
 
+/** "1 profile" / "12 profiles". One place, so no view ever reports "1 profiles". */
+export function profileCount(count: number): string {
+  return `${count} ${count === 1 ? 'profile' : 'profiles'}`;
+}
+
 /** Presentation metadata for each profile lifecycle status. */
 export const STATUS_META: Readonly<Record<ProfileStatus, { label: string; tone: string }>> = {
   idle: { label: 'Idle', tone: 'idle' },

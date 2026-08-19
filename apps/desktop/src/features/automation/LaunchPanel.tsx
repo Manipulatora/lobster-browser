@@ -31,7 +31,11 @@ export function LaunchPanel({
       size="lg"
       title={
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-          <Icon name="CheckCircleIcon" style={{ width: 20, height: 20, color: 'var(--green)' }} aria-hidden />
+          <Icon
+            name="CheckCircleIcon"
+            style={{ width: 20, height: 20, color: 'var(--green)' }}
+            aria-hidden
+          />
           {profileName} is running
         </span>
       }
