@@ -3,7 +3,6 @@ import { useEffect, useState } from 'react';
 import type {
   CreateProfileInput,
   CreateProfileTemplateInput,
-  EngineKind,
   ProfileOsTarget,
   ProfileTemplate,
   StoredProxy,
@@ -11,40 +10,11 @@ import type {
 
 import { profilesClient, proxiesClient, templatesClient } from '../../api/tauri';
 import appIcon from '../../assets/brand/icon.png';
-import { Button, EmptyState, Modal, Skeleton, useToast } from '../../ui';
-import { ENGINE_OPTIONS, OS_OPTIONS, OS_VERSION_OPTIONS } from '../profiles/options';
+import { ActionDialog, Button, EmptyState, Skeleton, useToast } from '../../ui';
+import { OS_OPTIONS } from '../profiles/options';
 import { Icon } from '../../ui/Icon';
-
-interface TemplateFormState {
-  name: string;
-  engine: EngineKind;
-  os: ProfileOsTarget;
-  osVersion: string;
-  /** Id of a stored proxy, or '' for none. */
-  proxyId: string;
-  tags: string;
-}
-
-const initialForm: TemplateFormState = {
-  name: '',
-  engine: 'lobium',
-  os: 'windows',
-  osVersion: OS_VERSION_OPTIONS.windows[0],
-  proxyId: '',
-  tags: '',
-};
-
-function parseTags(raw: string): string[] {
-  return raw
-    .split(/[,\n]/)
-    .map((tag) => tag.trim())
-    .filter(Boolean);
-}
-
-function proxyEndpoint(proxy: StoredProxy): string {
-  if (proxy.source === 'hive') return 'Managed endpoint';
-  return `${proxy.config.host}:${proxy.config.port}`;
-}
+import { RowMenu } from '../../ui/RowMenu';
+import { TemplateDialog } from './TemplateDialog';
 
 function osName(value: ProfileOsTarget): string {
   return OS_OPTIONS.find((option) => option.value === value)?.label ?? value;
@@ -64,178 +34,15 @@ function proxyDetail(template: ProfileTemplate): string {
   return template.proxyDetail ?? 'Template default';
 }
 
-function CreateTemplateModal({
-  proxies,
-  onCreate,
-  onClose,
-}: {
-  proxies: readonly StoredProxy[];
-  onCreate: (input: CreateProfileTemplateInput) => Promise<void>;
-  onClose: () => void;
-}): JSX.Element {
-  const [form, setForm] = useState<TemplateFormState>(initialForm);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const canSubmit = form.name.trim().length > 0 && !submitting;
-
-  function set<K extends keyof TemplateFormState>(key: K, value: TemplateFormState[K]): void {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  }
-
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    if (!canSubmit) return;
-    const input: CreateProfileTemplateInput = {
-      name: form.name.trim(),
-      engine: form.engine,
-      os: form.os,
-      osVersion: form.osVersion,
-      tags: parseTags(form.tags),
-    };
-    // A REAL PROXY, NOT A LABEL. This field used to be free text that became `proxyLabel` and
-    // nothing else, so a profile created from the template carried no proxy at all while the
-    // template row cheerfully displayed one. Only an id the profile creator can act on is stored;
-    // the label and endpoint beside it are display copy derived from that same proxy.
-    const proxy = proxies.find((item) => item.id === form.proxyId);
-    if (proxy) {
-      input.proxyId = proxy.id;
-      input.proxyLabel = proxy.label;
-      input.proxyDetail = proxyEndpoint(proxy);
-    }
-
-    setSubmitting(true);
-    setError(null);
-    try {
-      await onCreate(input);
-      onClose();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Modal
-      open
-      onClose={submitting ? () => undefined : onClose}
-      title="Create template"
-      size="md"
-      footer={
-        <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button type="submit" form="create-template-form" variant="primary" disabled={!canSubmit}>
-            {submitting ? 'Creating…' : 'Create template'}
-          </Button>
-        </>
-      }
-    >
-      <form id="create-template-form" onSubmit={handleSubmit} aria-label="Template details">
-        <div className="lb-field-grid">
-          <label className="lb-field lb-field--wide">
-            <span className="lb-field__label">Title</span>
-            <input
-              className="lb-input"
-              type="text"
-              value={form.name}
-              placeholder="Enter template name"
-              onChange={(e) => set('name', e.target.value)}
-              autoFocus
-            />
-          </label>
-          <div className="lb-field-triple lb-field--wide">
-            <label className="lb-field">
-              <span className="lb-field__label">Engine</span>
-              <select
-                className="lb-select"
-                value={form.engine}
-                onChange={(e) => set('engine', e.target.value as EngineKind)}
-              >
-                {ENGINE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="lb-field">
-              <span className="lb-field__label">OS</span>
-              <select
-                className="lb-select"
-                value={form.os}
-                onChange={(e) => {
-                  const os = e.target.value as ProfileOsTarget;
-                  setForm((prev) => ({ ...prev, os, osVersion: OS_VERSION_OPTIONS[os][0] }));
-                }}
-              >
-                {OS_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="lb-field">
-              <span className="lb-field__label">OS version</span>
-              <select
-                className="lb-select"
-                value={form.osVersion}
-                onChange={(e) => set('osVersion', e.target.value)}
-              >
-                {OS_VERSION_OPTIONS[form.os].map((version) => (
-                  <option key={version} value={version}>
-                    {version}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <label className="lb-field lb-field--wide">
-            <span className="lb-field__label">Proxy</span>
-            <select
-              className="lb-select"
-              value={form.proxyId}
-              onChange={(e) => set('proxyId', e.target.value)}
-            >
-              <option value="">No proxy</option>
-              {proxies.map((proxy) => (
-                <option key={proxy.id} value={proxy.id}>
-                  {proxy.label} · {proxyEndpoint(proxy)}
-                </option>
-              ))}
-            </select>
-            {proxies.length === 0 ? (
-              <span className="lb-field__hint">
-                Add a proxy on the Proxies page to attach one to this template.
-              </span>
-            ) : null}
-          </label>
-          <label className="lb-field lb-field--wide">
-            <span className="lb-field__label">Tags</span>
-            <input
-              className="lb-input"
-              type="text"
-              value={form.tags}
-              placeholder="Separate tags with commas"
-              onChange={(e) => set('tags', e.target.value)}
-            />
-          </label>
-        </div>
-        {error ? (
-          <p className="notice notice--error" role="alert">
-            {error}
-          </p>
-        ) : null}
-      </form>
-    </Modal>
-  );
-}
-
 export function TemplatesView(): JSX.Element {
   const toast = useToast();
   const [query, setQuery] = useState('');
   const [templates, setTemplates] = useState<ProfileTemplate[]>([]);
   const [proxies, setProxies] = useState<StoredProxy[]>([]);
   const [showCreate, setShowCreate] = useState(false);
+  const [editing, setEditing] = useState<ProfileTemplate | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<ProfileTemplate | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const rows = templates.filter((template) =>
@@ -261,7 +68,7 @@ export function TemplatesView(): JSX.Element {
     void refresh();
   }, []);
 
-  // The proxy picker in the create dialog needs real stored proxies to choose from. A failure here
+  // The proxy picker in the template dialog needs real stored proxies to choose from. A failure here
   // is not worth reporting: the dialog degrades to "No proxy" and says where proxies come from.
   useEffect(() => {
     let cancelled = false;
@@ -282,6 +89,44 @@ export function TemplatesView(): JSX.Element {
     toast.success(`Created template “${created.name}”.`);
   }
 
+  async function handleSave(
+    template: ProfileTemplate,
+    input: CreateProfileTemplateInput,
+  ): Promise<void> {
+    const saved = await templatesClient.update_template(template.id, input);
+    setTemplates((prev) => prev.map((item) => (item.id === template.id ? saved : item)));
+    toast.success(`Saved template “${saved.name}”.`);
+  }
+
+  async function handleDuplicate(template: ProfileTemplate): Promise<void> {
+    try {
+      const copy = await templatesClient.duplicate_template(template.id);
+      setTemplates((prev) => [copy, ...prev]);
+      toast.success(`Created “${copy.name}”.`);
+    } catch (e: unknown) {
+      toast.error(`Could not duplicate template: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async function handleDelete(template: ProfileTemplate): Promise<void> {
+    setDeleting(true);
+    try {
+      await templatesClient.delete_template(template.id);
+      setTemplates((prev) => prev.filter((item) => item.id !== template.id));
+      setPendingDelete(null);
+      toast.success('Template deleted.');
+    } catch (e: unknown) {
+      toast.error(`Could not delete template: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  /**
+   * A proxy that no longer exists, an OS the desktop path refuses, a name collision, a locked
+   * profile: every one of these came back from `create_profile` and was dropped on the floor, so the
+   * button did nothing and said nothing. Whatever the store refuses, the user is told.
+   */
   async function handleCreateProfile(template: ProfileTemplate): Promise<void> {
     const input: CreateProfileInput = {
       name: `${template.name} profile`,
@@ -293,10 +138,18 @@ export function TemplatesView(): JSX.Element {
     if (template.osVersion) input.osVersion = template.osVersion;
     if (template.proxyId) input.proxyId = template.proxyId;
     if (template.fingerprintOverrides) input.fingerprintOverrides = template.fingerprintOverrides;
+    // The template dialog collects no cookies, deliberately: a template may not carry cookie text at
+    // all — `template_store` refuses `rawText` so a template can never hand someone else a live
+    // session — which leaves the import mode, and a new profile already starts with an empty jar.
+    // What arrives here comes from templates created through the local automation API.
     if (template.cookiesImport) input.cookiesImport = template.cookiesImport;
     if (template.extensions) input.extensions = template.extensions;
-    await profilesClient.create_profile(input);
-    toast.success(`Created profile from “${template.name}”.`);
+    try {
+      await profilesClient.create_profile(input);
+      toast.success(`Created profile from “${template.name}”.`);
+    } catch (e: unknown) {
+      toast.error(`Could not create profile: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   return (
@@ -393,15 +246,34 @@ export function TemplatesView(): JSX.Element {
                     </div>
                   </td>
                   <td>
-                    <Button
-                      size="sm"
-                      leadingIcon={<Icon name="PlayIcon" aria-hidden />}
-                      onClick={() => {
-                        void handleCreateProfile(template);
-                      }}
-                    >
-                      Create Profile
-                    </Button>
+                    <div className="table-actions">
+                      <Button
+                        size="sm"
+                        leadingIcon={<Icon name="PlayIcon" aria-hidden />}
+                        onClick={() => {
+                          void handleCreateProfile(template);
+                        }}
+                      >
+                        Create Profile
+                      </Button>
+                      <RowMenu
+                        label={`More actions for ${template.name}`}
+                        items={[
+                          { label: 'Edit template', onSelect: () => setEditing(template) },
+                          {
+                            label: 'Duplicate',
+                            onSelect: () => {
+                              void handleDuplicate(template);
+                            },
+                          },
+                          {
+                            label: 'Delete template',
+                            danger: true,
+                            onSelect: () => setPendingDelete(template),
+                          },
+                        ]}
+                      />
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -411,12 +283,32 @@ export function TemplatesView(): JSX.Element {
       ) : null}
 
       {showCreate ? (
-        <CreateTemplateModal
+        <TemplateDialog
           proxies={proxies}
-          onCreate={handleCreate}
+          onSubmit={handleCreate}
           onClose={() => setShowCreate(false)}
         />
       ) : null}
+      {editing ? (
+        <TemplateDialog
+          template={editing}
+          proxies={proxies}
+          onSubmit={(input) => handleSave(editing, input)}
+          onClose={() => setEditing(null)}
+        />
+      ) : null}
+      <ActionDialog
+        open={pendingDelete !== null}
+        title="Delete template?"
+        description={`Remove “${pendingDelete?.name ?? 'this template'}”. Profiles already created from it are not affected.`}
+        confirmLabel="Delete template"
+        busy={deleting}
+        destructive
+        onConfirm={() => {
+          if (pendingDelete) void handleDelete(pendingDelete);
+        }}
+        onClose={() => setPendingDelete(null)}
+      />
     </section>
   );
 }

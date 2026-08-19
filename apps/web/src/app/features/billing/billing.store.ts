@@ -3,6 +3,7 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 import { ApiClient } from '../../core/api/api.client';
 import type {
   BillingOverview,
+  BillingPeriod,
   CreditTransaction,
   Deposit,
   DepositInstruction,
@@ -37,6 +38,8 @@ export class BillingStore {
   // Absent until the overview lands; assume unavailable rather than offering a button that 503s.
   readonly depositsAvailable = computed(() => this._overview()?.depositsAvailable === true);
   readonly subscription = computed(() => this._overview()?.subscription ?? null);
+  /** When the next renewal charges, straight from the server. Null when nothing is due. */
+  readonly nextBillingAt = computed(() => this._overview()?.nextBillingAt ?? null);
   /**
    * Whether the overview has actually arrived.
    *
@@ -82,8 +85,9 @@ export class BillingStore {
     return instruction;
   }
 
-  async purchase(tier: PaidPlanTier): Promise<void> {
-    await this.api.post('/billing/purchase', { tier });
+  /** Buy a package. `period` picks the monthly price or twelve months at the yearly discount. */
+  async purchase(tier: PaidPlanTier, period: BillingPeriod = 'monthly'): Promise<void> {
+    await this.api.post('/billing/purchase', { tier, period });
     // Reload rather than patch: a purchase changes the balance, the subscription AND the ledger,
     // and reconstructing all three client-side is how they drift apart.
     await this.load();

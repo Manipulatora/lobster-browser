@@ -1,4 +1,5 @@
 import type {
+  BillingPeriod,
   CreditTransaction,
   CreditTxKind,
   Deposit,
@@ -231,12 +232,22 @@ export interface BillingRepository {
 
   getSubscription(teamId: string): Promise<Subscription | null>;
 
-  /** Activate or replace a team's package. Called after the purchase debit has succeeded. */
+  /**
+   * Activate or replace a team's package. Called after the purchase debit has succeeded.
+   *
+   * The whole period is written together — start, end, anchor and cadence — because they only mean
+   * anything as a set: an end without the anchor it was clamped from is a billing day that walks,
+   * and an end without a start is a period nothing can be prorated against.
+   */
   activateSubscription(args: {
     teamId: string;
     tier: PaidPlanTier;
     profileLimit: number;
     priceCents: number;
+    billingPeriod: BillingPeriod;
+    /** Day of the month every period after this one ends on, 1-31. */
+    billingAnchorDay: number;
+    currentPeriodStart: Date;
     currentPeriodEnd: Date;
   }): Promise<Subscription>;
 
@@ -266,6 +277,7 @@ export interface BillingRepository {
     teamId: string;
     expectedPeriodEnd: string;
     priceCents: number;
+    newPeriodStart: Date;
     newPeriodEnd: Date;
     description: string;
   }): Promise<'renewed' | 'insufficient_credit' | 'not_due'>;

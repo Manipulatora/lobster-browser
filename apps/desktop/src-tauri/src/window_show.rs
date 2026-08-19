@@ -143,7 +143,10 @@ mod tests {
     };
 
     fn wide(s: &str) -> Vec<u16> {
-        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     /// A real top-level window of the class the browser uses, created and left HIDDEN — the exact
@@ -179,12 +182,23 @@ mod tests {
         let pid = std::process::id();
         let hwnd = hidden_browser_window("Chrome_WidgetWin_1");
         assert!(!hwnd.is_null(), "could not create the test window");
-        assert_eq!(unsafe { IsWindowVisible(hwnd) }, 0, "fixture must start hidden");
+        assert_eq!(
+            unsafe { IsWindowVisible(hwnd) },
+            0,
+            "fixture must start hidden"
+        );
         assert!(!imp::has_visible_window(pid));
 
         let shown = imp::show_hidden_windows_of(pid);
-        assert!(shown >= 1, "expected the hidden window to be shown, showed {shown}");
-        assert_ne!(unsafe { IsWindowVisible(hwnd) }, 0, "window should now be visible");
+        assert!(
+            shown >= 1,
+            "expected the hidden window to be shown, showed {shown}"
+        );
+        assert_ne!(
+            unsafe { IsWindowVisible(hwnd) },
+            0,
+            "window should now be visible"
+        );
         assert!(imp::has_visible_window(pid));
 
         // Idempotent: a second pass must not touch an already-visible window, or every launch would

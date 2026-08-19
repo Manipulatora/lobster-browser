@@ -138,6 +138,19 @@ export class BillingPage {
   protected readonly currentTier = computed(() => this.subscription()?.tier ?? 'free');
   protected readonly isPastDue = computed(() => this.subscription()?.status === 'past_due');
 
+  // --- Package -------------------------------------------------------------
+
+  /** The date the renewal job will charge on, as the server computed it. */
+  protected readonly nextBillingAt = this.billing.nextBillingAt;
+
+  /** The package worth rendering a panel for. The free tier has nothing to renew or cancel. */
+  protected readonly paidPackage = computed(() => {
+    const current = this.subscription();
+    return current && current.tier !== 'free' ? current : null;
+  });
+
+  protected readonly togglingAutoRenew = signal(false);
+
   /**
    * EXACTLY WHAT THE USER TYPED, held as text.
    *
@@ -348,13 +361,27 @@ export class BillingPage {
     }
   }
 
+  /** Plan names come from the catalog the server sent, so they cannot drift from what it charges. */
+  protected planName(tier: string): string {
+    return this.plans().find((p) => p.tier === tier)?.name ?? tier;
+  }
+
+  /** What each renewal costs and how often — the two halves of "what am I signed up for". */
+  protected renewalTerms(priceCents: number, period?: string): string {
+    return `${this.formatCredit(priceCents)} ${period === 'yearly' ? 'a year' : 'a month'}`;
+  }
+
   protected async toggleAutoRenew(): Promise<void> {
     const current = this.subscription();
-    if (!current) return;
+    if (!current || this.togglingAutoRenew()) return;
+    this.purchaseError.set(null);
+    this.togglingAutoRenew.set(true);
     try {
       await this.billing.setAutoRenew(!current.autoRenew);
     } catch (err) {
       this.purchaseError.set(err instanceof Error ? err.message : 'could not change auto-renew');
+    } finally {
+      this.togglingAutoRenew.set(false);
     }
   }
 

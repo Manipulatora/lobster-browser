@@ -8,9 +8,12 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
+  entitledProfileLimit,
   FREE_PLAN_PROFILE_LIMIT,
+  periodPriceCents,
   PLAN_CATALOG,
   planByTier,
+  type BillingPeriod,
   type CreditTransaction,
   type Deposit,
   type PaidPlanTier,
@@ -20,6 +23,7 @@ import {
 import { USERS_REPOSITORY, type UsersRepository } from '../auth/users.repository';
 import { MailService } from '../mail/mail.service';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
+import { addPeriod, subtractPeriod } from './billing-period';
 import {
   BILLING_REPOSITORY,
   type BillingRepository,
@@ -41,6 +45,23 @@ export interface BillingOverview {
   chains: typeof DEPOSIT_CHAINS;
   freePlanProfileLimit: number;
   /**
+   * When Credit will next be debited for the package, or null when nothing is due — the free tier,
+   * auto-renew off, a cancelled package.
+   *
+   * THE SAME INSTANT THE CHARGE USES, forwarded rather than recomputed. A client that works the
+   * date out for itself from a period length is a client that eventually shows a day the sweep
+   * does not charge on, and the user only finds out which of the two was right afterwards.
+   */
+  nextBillingAt: string | null;
+  /**
+   * The profile allowance actually in force right now.
+   *
+   * `subscription.profileLimit` is what was BOUGHT and stays put through a lapse; this is what the
+   * API will enforce on the next create. Sent as its own field so no client has to re-derive the
+   * "is this entitlement still live" rule and quietly disagree with the server about it.
+   */
+  entitledProfileLimit: number;
+  /**
    * Whether the processor is actually usable right now. Sent so the page can say so BEFORE the
    * user picks an amount, rather than letting them commit to Pay and meet a 503 — the credentials
    * being absent is a fact we already know at render time.
@@ -59,19 +80,17 @@ export interface DepositInstruction {
   hostedUrl?: string;
 }
 
-/** How long a purchased package lasts before auto-renew charges again. */
-const PERIOD_DAYS = 30;
-
 /**
  * Credit and package logic.
  *
  * THE BILLING MODEL, in one paragraph. Users hold a USD Credit balance, topped up by crypto
  * deposits of any size at any time. A package is bought by DEBITING that balance — there is no
  * card, no external subscription object, and no third party holding a mandate against the user.
- * Every 30 days the renewal job debits the same balance again; if the balance is short the
- * subscription lapses to `past_due` and recovers by itself the next time a deposit lands. Credit
- * therefore behaves like a prepaid account, and the only way money enters the system is a
- * confirmed on-chain payment.
+ * On the same calendar day of each month (or of each year, for a package paid twelve months up
+ * front) the renewal job debits the same balance again; if the balance is short the subscription
+ * lapses to `past_due` and recovers by itself the next time a deposit lands. Credit therefore
+ * behaves like a prepaid account, and the only way money enters the system is a confirmed on-chain
+ * payment.
  */
 @Injectable()
 export class BillingService {
@@ -119,6 +138,8 @@ export class BillingService {
       chains: DEPOSIT_CHAINS.filter((c) => this.payments.supportsCurrency(c.code)),
       depositsAvailable: this.payments.isConfigured(),
       freePlanProfileLimit: FREE_PLAN_PROFILE_LIMIT,
+      nextBillingAt: nextBillingAt(subscription),
+      entitledProfileLimit: entitledProfileLimit(subscription),
     };
   }
 
@@ -375,26 +396,51 @@ export class BillingService {
    * pay for it, leaving an active subscription with no charge behind it. `move` returns null
    * rather than throwing on insufficient funds, so "you cannot afford this" is an ordinary
    * outcome handled here, not an exception escaping from the data layer.
+   *
+   * THE PERIOD IS ANCHORED TO TODAY. A purchase starts a fresh period whichever way it arrives —
+   * first package, upgrade, downgrade — so the billing day becomes the day of the month the team
+   * last paid on, and the unused remainder of any previous period is credited back rather than
+   * carried. Anything else would have to answer "which of the two billing days survives an
+   * upgrade", and every answer to that is a surprise to somebody.
    */
-  async purchasePlan(userId: string, tier: PaidPlanTier, teamId?: string): Promise<Subscription> {
+  async purchasePlan(
+    userId: string,
+    tier: PaidPlanTier,
+    period: BillingPeriod = 'monthly',
+    teamId?: string,
+  ): Promise<Subscription> {
     const team = await this.resolveTeamId(userId, teamId);
     const plan = planByTier(tier);
+    const priceCents = periodPriceCents(plan, period);
 
     const existing = await this.repo.getSubscription(team);
-    if (existing && existing.tier === tier && existing.status === 'active') {
+    if (
+      existing &&
+      existing.tier === tier &&
+      existing.status === 'active' &&
+      (existing.billingPeriod ?? 'monthly') === period
+    ) {
       throw new ConflictException(`already subscribed to ${plan.name}`);
     }
 
     // Credit back whatever the team already paid for and has not used, so switching packages
     // mid-period does not quietly confiscate the remainder. See {@link unusedCents}.
     const unused = unusedCents(existing);
-    const netCents = plan.priceCents - unused;
+    const netCents = priceCents - unused;
 
+    const term = period === 'yearly' ? ', 12 months' : '';
     const description =
       unused > 0
-        ? `${plan.name} package — ${plan.profileLimit} profiles ` +
+        ? `${plan.name} package${term} — ${plan.profileLimit} profiles ` +
           `(less ${usd(unused)} credit for unused time)`
-        : `${plan.name} package — ${plan.profileLimit} profiles`;
+        : `${plan.name} package${term} — ${plan.profileLimit} profiles`;
+
+    const metadata = {
+      tier,
+      billingPeriod: period,
+      profileLimit: plan.profileLimit,
+      unusedCreditCents: unused,
+    };
 
     // ONE movement, not a refund followed by a charge. Two movements can half-apply: refund first
     // and the charge fails, and the team keeps its old package plus a windfall; charge first and
@@ -411,14 +457,14 @@ export class BillingService {
             kind: 'purchase',
             amountCents: -netCents,
             description,
-            metadata: { tier, profileLimit: plan.profileLimit, unusedCreditCents: unused },
+            metadata,
           })
         : await this.repo.move({
             teamId: team,
             kind: 'refund',
             amountCents: -netCents,
             description,
-            metadata: { tier, profileLimit: plan.profileLimit, unusedCreditCents: unused },
+            metadata,
           });
 
     if (!charge) {
@@ -427,21 +473,27 @@ export class BillingService {
       const cost =
         unused > 0
           ? `${plan.name} costs ${usd(netCents)} after credit for your unused time`
-          : `${plan.name} costs ${usd(plan.priceCents)}`;
+          : `${plan.name} costs ${usd(priceCents)}`;
       throw new BadRequestException(
         `not enough Credit — ${cost}, you have ${usd(balance)}. Deposit ${usd(shortBy)} more.`,
       );
     }
 
+    const start = new Date();
     const subscription = await this.repo.activateSubscription({
       teamId: team,
       tier,
       profileLimit: plan.profileLimit,
-      priceCents: plan.priceCents,
-      currentPeriodEnd: addDays(new Date(), PERIOD_DAYS),
+      priceCents,
+      billingPeriod: period,
+      // The day of the month they paid on, read in UTC so the anchor is the same calendar day the
+      // charge landed on wherever the server happens to be.
+      billingAnchorDay: start.getUTCDate(),
+      currentPeriodStart: start,
+      currentPeriodEnd: addPeriod(start, period),
     });
 
-    this.logger.log(`team ${team} purchased ${tier} for ${plan.priceCents} cents`);
+    this.logger.log(`team ${team} purchased ${tier} (${period}) for ${priceCents} cents`);
     return subscription;
   }
 
@@ -459,10 +511,19 @@ export class BillingService {
   }
 }
 
-export function addDays(from: Date, days: number): Date {
-  const out = new Date(from);
-  out.setUTCDate(out.getUTCDate() + days);
-  return out;
+/**
+ * When the renewal job will next debit this subscription, or null when it never will.
+ *
+ * Mirrors `findDueForRenewal`'s predicate exactly — same statuses, same auto-renew flag, same
+ * instant — so the date a user is shown is the date they are charged on. A `past_due` package
+ * returns its period end even though that is in the past, which is the truth: the charge is due
+ * now and lands the moment Credit arrives.
+ */
+function nextBillingAt(subscription: Subscription | null): string | null {
+  if (!subscription || subscription.tier === 'free') return null;
+  if (!subscription.autoRenew || !subscription.currentPeriodEnd) return null;
+  if (subscription.status !== 'active' && subscription.status !== 'past_due') return null;
+  return subscription.currentPeriodEnd;
 }
 
 /** Format USD cents for a user-facing message. */
@@ -478,8 +539,12 @@ function usd(cents: number): string {
  * two has just thrown away 28 days they paid for. That is an ordinary action, not an edge case, and
  * losing the customer's money on it is a defect rather than simplicity.
  *
- * Prorated by elapsed time against a 30-day period, floored to the cent so rounding can never
- * credit MORE than was actually unused. Returns 0 for:
+ * PRORATED AGAINST THE REAL PERIOD, `currentPeriodStart` to `currentPeriodEnd`. Measuring against
+ * an assumed 30 days instead gets February wrong in one direction and July in the other, and gets a
+ * yearly package wrong by a factor of twelve — it would refund a whole year's price for the last
+ * fortnight of one. Floored to the cent, so rounding can never credit MORE than was unused.
+ *
+ * Returns 0 for:
  *   - no subscription, or the free tier — nothing was paid
  *   - a period that has already ended — it was consumed, and the next one was never charged
  *   - `past_due` — the last renewal failed, so there is no paid period to refund
@@ -489,12 +554,23 @@ function unusedCents(subscription: Subscription | null): number {
   if (subscription.status !== 'active') return 0;
   if (!subscription.currentPeriodEnd || subscription.priceCents <= 0) return 0;
 
-  const remainingMs = new Date(subscription.currentPeriodEnd).getTime() - Date.now();
+  const end = new Date(subscription.currentPeriodEnd);
+  const remainingMs = end.getTime() - Date.now();
   if (remainingMs <= 0) return 0;
 
-  const periodMs = PERIOD_DAYS * 24 * 60 * 60 * 1000;
-  // Clamp: a period end further out than one full period (a support grant, a clock skew) must not
-  // refund more than the team ever paid.
-  const fraction = Math.min(remainingMs / periodMs, 1);
-  return Math.floor(subscription.priceCents * fraction);
+  // Rows written before period starts were recorded fall back to one period back from the end,
+  // which is where the period they are in began.
+  const start = subscription.currentPeriodStart
+    ? new Date(subscription.currentPeriodStart)
+    : subtractPeriod(end, subscription.billingPeriod ?? 'monthly', subscription.billingAnchorDay);
+  const periodMs = end.getTime() - start.getTime();
+  if (periodMs <= 0) return 0;
+
+  // Only bites when `now` precedes the period start — a support grant dated into the future, or a
+  // clock that moved. Refunding more than was ever paid is not a rounding question.
+  if (remainingMs >= periodMs) return subscription.priceCents;
+
+  // Integer cents throughout: a cents × ms product stays far inside the exact-integer range, so
+  // there is no float fraction to accumulate error in.
+  return Math.floor((subscription.priceCents * remainingMs) / periodMs);
 }

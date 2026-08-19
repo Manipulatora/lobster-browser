@@ -20,6 +20,7 @@ import type {
   ProxySource,
   ProxyTestResult,
   StoredProxy,
+  UpdateProfileTemplateInput,
   UpdateStoredProxyInput,
   ProxyRotationResult,
 } from '@lobster/shared-types';
@@ -151,6 +152,11 @@ export interface ProxiesClient {
 export interface TemplatesClient {
   list_templates(): Promise<ProfileTemplate[]>;
   create_template(input: CreateProfileTemplateInput): Promise<ProfileTemplate>;
+  /** Replaces the fields a user owns — an omitted optional field is cleared, not kept. */
+  update_template(id: string, input: UpdateProfileTemplateInput): Promise<ProfileTemplate>;
+  /** Copied in the store, so a field added to templates later is carried without a change here. */
+  duplicate_template(id: string): Promise<ProfileTemplate>;
+  delete_template(id: string): Promise<void>;
 }
 
 /**
@@ -237,6 +243,9 @@ const tauriProxiesClient: ProxiesClient = {
 const tauriTemplatesClient: TemplatesClient = {
   list_templates: () => invoke<ProfileTemplate[]>('list_templates'),
   create_template: (input) => invoke<ProfileTemplate>('create_template', { input }),
+  update_template: (id, input) => invoke<ProfileTemplate>('update_template', { id, input }),
+  duplicate_template: (id) => invoke<ProfileTemplate>('duplicate_template', { id }),
+  delete_template: (id) => invoke<void>('delete_template', { id }),
 };
 
 /* --------------------------------------------------------------------------------------------
@@ -297,13 +306,20 @@ function buildStoredProxy(input: CreateStoredProxyInput): StoredProxy {
     source: input.source,
     label: input.label,
     config: { ...input.config, id, label: input.label },
-    status: 'warning',
+    status: 'untested',
     createdAt: ts,
     updatedAt: ts,
     ...(input.location ? { location: input.location } : {}),
     ...(input.timezone ? { timezone: input.timezone } : {}),
     ...(input.rotateUrl ? { rotateUrl: input.rotateUrl } : {}),
   };
+}
+
+/** Mirrors `proxy_store::ENDPOINT_FIELDS` — the values a stored check result is about. */
+const PROXY_ENDPOINT_FIELDS = ['type', 'host', 'port', 'username', 'password'] as const;
+
+function endpointMoved(before: ProxyConfig, after: ProxyConfig): boolean {
+  return PROXY_ENDPOINT_FIELDS.some((field) => before[field] !== after[field]);
 }
 
 function buildTemplate(input: CreateProfileTemplateInput): ProfileTemplate {
@@ -376,6 +392,9 @@ function seedMockStore(): void {
       location: 'US · New York · New York',
       timezone: 'America/New_York',
     },
+    // ROTATING ON PURPOSE. A rotate URL puts an extra control in the row, and the widest row is the
+    // one that decides whether the actions column fits — a fixture without one measures the easy case
+    // (see the table-fit spec in e2e/ui-smoke.spec.ts).
     {
       source: 'mine',
       label: 'DE Datacenter Backup',
@@ -388,6 +407,7 @@ function seedMockStore(): void {
       },
       location: 'DE · Hesse · Frankfurt',
       timezone: 'Europe/Berlin',
+      rotateUrl: 'https://provider.example/rotate?token=demo',
     },
     {
       source: 'hive',
@@ -405,11 +425,20 @@ function seedMockStore(): void {
   ];
   for (const sample of proxySamples) {
     const proxy = buildStoredProxy(sample);
+    // One of each state the screen can show: a checked residential exit, a checked exit that turned
+    // out to be a datacenter (amber), and one nobody has checked yet.
+    const datacenter = proxy.id === 'px-de-1';
+    const checked = sample.source !== 'hive';
     const seeded: StoredProxy = {
       ...proxy,
-      status: sample.source === 'hive' ? 'testing' : proxy.id === 'px-de-1' ? 'warning' : 'ready',
+      status: checked ? (datacenter ? 'warning' : 'ready') : 'untested',
     };
-    if (sample.source !== 'hive') seeded.latencyMs = proxy.id === 'px-de-1' ? 132 : 84;
+    if (checked) {
+      seeded.latencyMs = datacenter ? 132 : 84;
+      seeded.lastCheckedAt = nowIso();
+      seeded.isDatacenter = datacenter;
+      seeded.asn = datacenter ? 'AS24940 Hetzner Online' : 'AS7922 Comcast Cable';
+    }
     mockProxyStore.set(proxy.id, seeded);
   }
 
@@ -418,7 +447,9 @@ function seedMockStore(): void {
     engine: 'lobium',
     os: 'windows',
     osVersion: 'Windows 11',
-    presetParameters: ['User Agent', 'Extensions'],
+    // What the dialog derives for a template with no extensions — the column reports what the row
+    // actually carries, so a fixture that claims more than it holds is a fixture that lies.
+    presetParameters: ['Fingerprint'],
     proxyId: 'px-us-1',
     proxyLabel: 'US Residential Gateway',
     proxyDetail: 'us-east.proxy.local:9443',
@@ -549,17 +580,35 @@ const mockProxiesClient: ProxiesClient = {
   update_proxy: async (id, patch) => {
     const existing = mockProxyStore.get(id);
     if (!existing) throw new Error(`Proxy ${id} not found`);
-    const updated: StoredProxy = {
-      ...existing,
-      ...patch,
-      config: patch.config ?? existing.config,
-      updatedAt: nowIso(),
-      status: 'warning',
-    };
+    const config = patch.config ?? existing.config;
+    const updated: StoredProxy = { ...existing, ...patch, config, updatedAt: nowIso() };
+    // An empty rotation URL means "remove it", the same way `validate_rotate_url` reads it in Rust.
+    if (patch.rotateUrl !== undefined) {
+      if (patch.rotateUrl.trim()) updated.rotateUrl = patch.rotateUrl.trim();
+      else delete updated.rotateUrl;
+    }
+    // Same rule as `proxy_store::update`: a rename leaves the last check alone, a move of the
+    // endpoint drops all of it, because the result described the endpoint that is gone.
+    if (endpointMoved(existing.config, config)) {
+      updated.status = 'untested';
+      delete updated.lastCheckedAt;
+      delete updated.latencyMs;
+      delete updated.lastError;
+      delete updated.location;
+      delete updated.timezone;
+      delete updated.asn;
+      delete updated.isDatacenter;
+    }
     mockProxyStore.set(id, updated);
     return structuredClone(updated);
   },
+  // Both references the store refuses, so a dev browser cannot delete a proxy the desktop app would
+  // have kept — see `proxy_store::delete`.
   delete_proxy: async (id) => {
+    const profiles = Array.from(mockStore.values()).filter((item) => item.proxyId === id).length;
+    if (profiles > 0) throw new Error(`proxy ${id} is assigned to ${profiles} active profile(s)`);
+    const template = Array.from(mockTemplateStore.values()).find((item) => item.proxyId === id);
+    if (template) throw new Error(`proxy ${id} is used by template “${template.name}”`);
     if (!mockProxyStore.delete(id)) throw new Error(`Proxy ${id} not found`);
   },
   rotate_proxy: async (id) => {
@@ -578,23 +627,29 @@ const mockProxiesClient: ProxiesClient = {
         region: 'NY',
         city: 'New York',
         timezone: 'America/New_York',
+        asn: 'AS7922 Comcast Cable',
         isDatacenter: false,
       },
     };
     if (id !== null) {
       const existing = mockProxyStore.get(id);
       if (existing) {
+        const datacenter = result.geo?.isDatacenter === true;
         const checked: StoredProxy = {
           ...existing,
           config,
-          status: 'ready',
+          // Amber means the proxy answered and its exit is a hosting range — see
+          // `proxy_store::update_test_result`.
+          status: datacenter ? 'warning' : 'ready',
           location: 'US · NY · New York',
+          isDatacenter: datacenter,
           lastCheckedAt: nowIso(),
           updatedAt: nowIso(),
         };
         const timezone = result.geo?.timezone ?? existing.timezone;
         if (timezone) checked.timezone = timezone;
         if (result.latencyMs !== undefined) checked.latencyMs = result.latencyMs;
+        if (result.geo?.asn) checked.asn = result.geo.asn;
         mockProxyStore.set(id, checked);
       }
     }
@@ -610,6 +665,44 @@ const mockTemplatesClient: TemplatesClient = {
     const template = buildTemplate(input);
     mockTemplateStore.set(template.id, template);
     return structuredClone(template);
+  },
+
+  update_template: async (id, input) => {
+    const existing = mockTemplateStore.get(id);
+    if (!existing) throw new Error(`Template ${id} not found`);
+    if (!input.name.trim()) throw new Error('template name is required');
+    // A save replaces the fields a user owns, so the rebuild starts from the input, not the row —
+    // that is what lets the editor unbind a proxy or clear the extension list.
+    const updated: ProfileTemplate = {
+      ...buildTemplate(input),
+      id: existing.id,
+      createdAt: existing.createdAt,
+      updatedAt: nowIso(),
+    };
+    mockTemplateStore.set(id, updated);
+    return structuredClone(updated);
+  },
+
+  duplicate_template: async (id) => {
+    const existing = mockTemplateStore.get(id);
+    if (!existing) throw new Error(`Template ${id} not found`);
+    const taken = new Set(Array.from(mockTemplateStore.values()).map((item) => item.name));
+    let name = `${existing.name} (copy)`;
+    for (let suffix = 2; taken.has(name); suffix += 1) name = `${existing.name} (copy ${suffix})`;
+    const ts = nowIso();
+    const copy: ProfileTemplate = {
+      ...structuredClone(existing),
+      id: `tpl_${crypto.randomUUID().replaceAll('-', '')}`,
+      name,
+      createdAt: ts,
+      updatedAt: ts,
+    };
+    mockTemplateStore.set(copy.id, copy);
+    return structuredClone(copy);
+  },
+
+  delete_template: async (id) => {
+    if (!mockTemplateStore.delete(id)) throw new Error(`Template ${id} not found`);
   },
 };
 

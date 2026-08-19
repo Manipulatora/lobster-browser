@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 
-import { formatCredit, planLabel, type AccountState } from '../api/account';
+import { formatCredit, planLabel, type AccountState, type AccountSummary } from '../api/account';
 import { Icon } from './Icon';
 
 /** Below this fraction of the cap the bar is neutral; above it, it starts warning. */
@@ -72,6 +72,25 @@ export function AccountPanel({
   );
 }
 
+/**
+ * The day the package is charged again, short and in the reader's own locale.
+ *
+ * TAKEN FROM THE SERVER, never worked out here. The renewal job bills on a calendar anchor clamped
+ * to the length of each month — a 31st-of-the-month plan is charged on the 28th in February — so
+ * any date this panel derived from a period length would eventually name a day nothing happens on.
+ *
+ * NO DATE IS AN ORDINARY ANSWER, not a failure. The free tier, a cancelled package and one with
+ * auto-renew turned off all have no next payment; so does a core that predates the field. The line
+ * is simply absent for all of them, which is why this reads the summary structurally rather than
+ * insisting the date is there.
+ */
+function renewalDate(summary: AccountSummary): string | null {
+  if (!('nextBillingAt' in summary) || typeof summary.nextBillingAt !== 'string') return null;
+  const at = new Date(summary.nextBillingAt);
+  if (Number.isNaN(at.getTime())) return null;
+  return at.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
+
 function renderBody(
   state: AccountState,
   used: number,
@@ -109,6 +128,7 @@ function renderBody(
   }
 
   const { summary } = state;
+  const renews = renewalDate(summary);
   const cap = summary.profileLimit;
   // A zero or unknown cap must not render a full bar — that would tell an unlimited or
   // not-yet-known account it is out of room.
@@ -145,6 +165,8 @@ function renderBody(
           <span className="account-panel__cap">/{cap > 0 ? cap : '—'}</span>
           <span className="account-panel__unit"> profiles</span>
         </span>
+        {/* The day the plan is paid for again, which is otherwise only visible on the website. */}
+        {renews ? <span className="account-panel__unit">Renews {renews}</span> : null}
       </div>
 
       {/* Credit, clickable straight through to where it is topped up. */}

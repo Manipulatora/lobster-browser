@@ -227,7 +227,9 @@ fn parse_mode(mode: &str) -> Result<CaptureMode, String> {
 /// makes the same passphrase produce a different key for every exported file.
 fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; LB_V1_KEY_LEN]> {
     if passphrase.is_empty() {
-        bail!("a passphrase is required — an unencrypted profile file is a credential in the clear");
+        bail!(
+            "a passphrase is required — an unencrypted profile file is a credential in the clear"
+        );
     }
     let params = Params::new(KDF_MEMORY_KIB, KDF_PASSES, KDF_LANES, Some(LB_V1_KEY_LEN))
         .map_err(|e| anyhow!("invalid Argon2 parameters: {e}"))?;
@@ -283,8 +285,15 @@ pub fn export_profile_file(
     profile_password: Option<String>,
     options: Option<ExportOptions>,
 ) -> Result<ExportReport, String> {
-    export_inner(&state, &id, &dest_path, &passphrase, profile_password.as_deref(), options.unwrap_or_default())
-        .map_err(|e| format!("{e:#}"))
+    export_inner(
+        &state,
+        &id,
+        &dest_path,
+        &passphrase,
+        profile_password.as_deref(),
+        options.unwrap_or_default(),
+    )
+    .map_err(|e| format!("{e:#}"))
 }
 
 fn export_inner(
@@ -455,16 +464,15 @@ fn export_inner(
 
     let dest = Path::new(dest_path);
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
 
     // Never write the destination directly: a half-written file with the real extension looks
     // importable. Write a sibling `.part`, flush it, then rename — the vault's own pattern.
     let part = dest.with_extension("part");
     {
-        let mut file = fs::File::create(&part)
-            .with_context(|| format!("creating {}", part.display()))?;
+        let mut file =
+            fs::File::create(&part).with_context(|| format!("creating {}", part.display()))?;
         file.write_all(MAGIC)?;
         file.write_all(&(header_json.len() as u32).to_le_bytes())?;
         file.write_all(&header_json)?;
@@ -581,8 +589,7 @@ pub fn import_profile_file(
     passphrase: String,
     name_override: Option<String>,
 ) -> Result<ImportReport, String> {
-    import_inner(&state, Path::new(&path), &passphrase, name_override)
-        .map_err(|e| format!("{e:#}"))
+    import_inner(&state, Path::new(&path), &passphrase, name_override).map_err(|e| format!("{e:#}"))
 }
 
 fn import_inner(
@@ -724,7 +731,10 @@ fn finish_import(
             warnings.push(format!(
                 "{}: {}",
                 artifact.id,
-                artifact.detail.clone().unwrap_or_else(|| format!("{:?}", artifact.status))
+                artifact
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| format!("{:?}", artifact.status))
             ));
         }
     }
@@ -795,11 +805,17 @@ mod tests {
         let redacted = redacted.unwrap();
         assert!(redacted.get("username").is_none());
         assert!(redacted.get("password").is_none());
-        assert_eq!(redacted.get("host").and_then(|v| v.as_str()), Some("gw.example.com"));
+        assert_eq!(
+            redacted.get("host").and_then(|v| v.as_str()),
+            Some("gw.example.com")
+        );
         assert!(!included);
 
         let (kept, included) = redact_proxy(Some(proxy), true);
-        assert_eq!(kept.unwrap().get("username").and_then(|v| v.as_str()), Some("u"));
+        assert_eq!(
+            kept.unwrap().get("username").and_then(|v| v.as_str()),
+            Some("u")
+        );
         assert!(included);
     }
 

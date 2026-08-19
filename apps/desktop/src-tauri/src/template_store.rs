@@ -77,6 +77,13 @@ pub struct CreateProfileTemplateInput {
     pub tags: Option<Vec<String>>,
 }
 
+/// A save REPLACES the fields a user owns, rather than patching the ones it mentions.
+///
+/// That is what makes "No proxy" expressible at all: a patch whose absent fields mean "leave alone"
+/// can set a proxy but can never unbind one, and the same goes for clearing an OS version or the
+/// extension list. The editor always holds the template's full state, so it always sends it.
+pub type UpdateProfileTemplateInput = CreateProfileTemplateInput;
+
 fn row_to_template(row: &Row) -> rusqlite::Result<ProfileTemplate> {
     let preset_json: String = row.get("preset_parameters")?;
     let overrides_json: Option<String> = row.get("fingerprint_overrides")?;
@@ -156,7 +163,16 @@ pub fn list(conn: &Connection) -> Result<Vec<ProfileTemplate>> {
     Ok(templates)
 }
 
-pub fn create(conn: &Connection, input: CreateProfileTemplateInput) -> Result<ProfileTemplate> {
+pub fn get(conn: &Connection, id: &str) -> Result<Option<ProfileTemplate>> {
+    let mut stmt = conn.prepare("SELECT * FROM profile_templates WHERE id = ?1")?;
+    let mut rows = stmt.query_map([id], row_to_template)?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
+fn validate(input: &CreateProfileTemplateInput) -> Result<()> {
     const PROFILE_OS_TARGETS: &[&str] = &[
         "windows",
         "macos",
@@ -165,6 +181,9 @@ pub fn create(conn: &Connection, input: CreateProfileTemplateInput) -> Result<Pr
         "linux",
         "android",
     ];
+    if input.name.trim().is_empty() {
+        anyhow::bail!("template name is required");
+    }
     if !PROFILE_OS_TARGETS.contains(&input.os.as_str()) {
         anyhow::bail!(
             "desktop templates cannot use OS target `{}`; allowed: {}",
@@ -180,6 +199,11 @@ pub fn create(conn: &Connection, input: CreateProfileTemplateInput) -> Result<Pr
     {
         anyhow::bail!("cookie rawText is forbidden in profile templates");
     }
+    Ok(())
+}
+
+pub fn create(conn: &Connection, input: CreateProfileTemplateInput) -> Result<ProfileTemplate> {
+    validate(&input)?;
     let id = format!("tpl_{}", uuid::Uuid::new_v4().simple());
     let presets = input.preset_parameters.unwrap_or_default();
     let tags = input.tags.unwrap_or_default();
@@ -207,10 +231,106 @@ pub fn create(conn: &Connection, input: CreateProfileTemplateInput) -> Result<Pr
         ],
     )?;
 
-    Ok(list(conn)?
-        .into_iter()
-        .find(|template| template.id == id)
-        .expect("row was just inserted"))
+    Ok(get(conn, &id)?.expect("row was just inserted"))
+}
+
+pub fn update(
+    conn: &Connection,
+    id: &str,
+    input: UpdateProfileTemplateInput,
+) -> Result<Option<ProfileTemplate>> {
+    if get(conn, id)?.is_none() {
+        return Ok(None);
+    }
+    validate(&input)?;
+    let presets = input.preset_parameters.unwrap_or_default();
+    let tags = input.tags.unwrap_or_default();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    conn.execute(
+        "UPDATE profile_templates SET name = ?2, engine = ?3, os = ?4, os_version = ?5, \
+         preset_parameters = ?6, proxy_id = ?7, proxy_label = ?8, proxy_detail = ?9, \
+         fingerprint_overrides = ?10, cookies_import = ?11, extensions = ?12, tags = ?13, \
+         updated_at = ?14 WHERE id = ?1",
+        params![
+            id,
+            input.name,
+            input.engine,
+            input.os,
+            input.os_version,
+            serde_json::to_string(&presets)?,
+            input.proxy_id,
+            input.proxy_label,
+            input.proxy_detail,
+            to_text(&input.fingerprint_overrides),
+            to_text(&input.cookies_import),
+            to_text(&input.extensions),
+            serde_json::to_string(&tags)?,
+            now,
+        ],
+    )?;
+
+    get(conn, id)
+}
+
+/// "US Retail" → "US Retail (copy)", and again → "US Retail (copy 2)".
+///
+/// Two rows with the same name are two rows nobody can tell apart in a list that offers Edit and
+/// Delete on each of them.
+fn copy_name(conn: &Connection, base: &str) -> Result<String> {
+    let mut stmt = conn.prepare("SELECT name FROM profile_templates")?;
+    let mut taken: Vec<String> = Vec::new();
+    for name in stmt.query_map([], |row| row.get::<_, String>(0))? {
+        taken.push(name?);
+    }
+    let first = format!("{base} (copy)");
+    if !taken.contains(&first) {
+        return Ok(first);
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{base} (copy {suffix})");
+        if !taken.contains(&candidate) {
+            return Ok(candidate);
+        }
+        suffix += 1;
+    }
+}
+
+/// Copy a template, in the store rather than in the caller.
+///
+/// A UI-side duplicate has to enumerate the fields it copies, so every field added to a template
+/// afterwards is silently dropped by the copy until someone remembers to extend the list. Here the
+/// copy is made from the stored row.
+pub fn duplicate(conn: &Connection, id: &str) -> Result<Option<ProfileTemplate>> {
+    let Some(source) = get(conn, id)? else {
+        return Ok(None);
+    };
+    let copy = create(
+        conn,
+        CreateProfileTemplateInput {
+            name: copy_name(conn, &source.name)?,
+            engine: source.engine,
+            os: source.os,
+            os_version: source.os_version,
+            preset_parameters: Some(source.preset_parameters),
+            proxy_id: source.proxy_id,
+            proxy_label: source.proxy_label,
+            proxy_detail: source.proxy_detail,
+            fingerprint_overrides: source.fingerprint_overrides,
+            cookies_import: source.cookies_import,
+            extensions: source.extensions,
+            tags: Some(source.tags),
+        },
+    )?;
+    Ok(Some(copy))
+}
+
+/// Profiles made from a template are NOT counted here, unlike the proxy a profile runs through.
+/// A template is a starting point: the profiles it minted are complete on their own and go on
+/// working after it is gone, so refusing the delete would only strand the row.
+pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
+    Ok(conn.execute("DELETE FROM profile_templates WHERE id = ?1", [id])? > 0)
 }
 
 #[cfg(test)]
@@ -248,6 +368,88 @@ mod tests {
         assert_eq!(template.preset_parameters, vec!["User Agent", "Extensions"]);
         assert_eq!(template.proxy_id.as_deref(), Some("px_1"));
         assert_eq!(list(&conn).unwrap().len(), 1);
+    }
+
+    fn sample(name: &str) -> CreateProfileTemplateInput {
+        CreateProfileTemplateInput {
+            name: name.to_string(),
+            engine: "lobium".to_string(),
+            os: "windows".to_string(),
+            os_version: Some("Windows 11 23H2".to_string()),
+            preset_parameters: Some(vec!["Proxy".to_string()]),
+            proxy_id: Some("px_1".to_string()),
+            proxy_label: Some("US proxy".to_string()),
+            proxy_detail: Some("example.test:10000".to_string()),
+            fingerprint_overrides: None,
+            cookies_import: None,
+            extensions: Some(serde_json::json!([{ "id": "abcdefghijklmnopabcdefghijklmnop" }])),
+            tags: Some(vec!["retail".to_string()]),
+        }
+    }
+
+    #[test]
+    fn a_saved_template_replaces_the_fields_a_user_owns() {
+        let conn = mem();
+        let created = create(&conn, sample("US Retail")).unwrap();
+
+        let updated = update(
+            &conn,
+            &created.id,
+            CreateProfileTemplateInput {
+                name: "EU Retail".to_string(),
+                engine: "lobium".to_string(),
+                os: "linux".to_string(),
+                os_version: None,
+                preset_parameters: Some(vec![]),
+                // Unbinding the proxy is the case a merge-style patch cannot express at all.
+                proxy_id: None,
+                proxy_label: None,
+                proxy_detail: None,
+                fingerprint_overrides: None,
+                cookies_import: None,
+                extensions: None,
+                tags: Some(vec!["eu".to_string()]),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(updated.name, "EU Retail");
+        assert_eq!(updated.os, "linux");
+        assert!(updated.os_version.is_none());
+        assert!(updated.proxy_id.is_none());
+        assert!(updated.extensions.is_none());
+        assert_eq!(updated.tags, vec!["eu"]);
+        assert_eq!(updated.created_at, created.created_at);
+
+        let missing = update(&conn, "tpl_missing", sample("Nowhere")).unwrap();
+        assert!(missing.is_none());
+        assert!(update(&conn, &updated.id, sample("")).is_err());
+    }
+
+    #[test]
+    fn a_duplicate_carries_every_field_and_takes_a_name_of_its_own() {
+        let conn = mem();
+        let created = create(&conn, sample("US Retail")).unwrap();
+
+        let copy = duplicate(&conn, &created.id).unwrap().unwrap();
+        assert_eq!(copy.name, "US Retail (copy)");
+        assert_ne!(copy.id, created.id);
+        assert_eq!(copy.engine, created.engine);
+        assert_eq!(copy.os_version, created.os_version);
+        assert_eq!(copy.proxy_id, created.proxy_id);
+        assert_eq!(copy.preset_parameters, created.preset_parameters);
+        assert_eq!(copy.extensions, created.extensions);
+        assert_eq!(copy.tags, created.tags);
+
+        assert_eq!(
+            duplicate(&conn, &created.id).unwrap().unwrap().name,
+            "US Retail (copy 2)"
+        );
+        assert!(duplicate(&conn, "tpl_missing").unwrap().is_none());
+
+        assert!(delete(&conn, &copy.id).unwrap());
+        assert!(!delete(&conn, &copy.id).unwrap());
+        assert_eq!(list(&conn).unwrap().len(), 2);
     }
 
     #[test]

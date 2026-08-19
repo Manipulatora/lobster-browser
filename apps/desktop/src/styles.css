@@ -596,6 +596,9 @@ select.lb-select:disabled {
   font-weight: var(--fw-control);
   letter-spacing: 0.02em;
   text-transform: uppercase;
+  /* A two-line header in a 34px band overflows its own row: "PRESET PARAMETERS" broke in half and
+     sat astride the border while every other header stayed on one line. */
+  white-space: nowrap;
 }
 
 .data-table td {
@@ -854,12 +857,23 @@ select.lb-select:disabled {
   cursor: not-allowed;
 }
 
+/* Preferred widths, not a fixed layout: the table still grows a column that needs more. The Proxy
+   column asked for 35% and took it out of Preset parameters, which was left at 100px — narrower than
+   its own header. */
 .templates-table th:nth-child(2) {
-  width: 14%;
+  width: 12%;
+}
+
+.templates-table th:nth-child(3) {
+  width: 20%;
 }
 
 .templates-table th:nth-child(4) {
-  width: 35%;
+  width: 26%;
+}
+
+.templates-table th:nth-child(5) {
+  width: 12%;
 }
 
 .table-title {
@@ -869,6 +883,13 @@ select.lb-select:disabled {
   font-weight: var(--fw-control);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A source chip beside the row's name ("Hive"), for a proxy this machine does not own the endpoint
+   of. Inline so it cannot change the row height. */
+.table-title .tag {
+  margin-left: 6px;
+  vertical-align: middle;
 }
 
 /* A FLEX ROW, not inline text. The OS icon used to sit inline with a 5px right margin and overlapped
@@ -912,9 +933,19 @@ select.lb-select:disabled {
   flex: 0 0 auto;
 }
 
+/* The one action group for a table row, on all three tables. The proxy table used to have its own,
+   and the two drifted: this one is the pattern the profile list established — a primary control
+   followed by the row's overflow menu.
+
+   NOWRAP is the load-bearing part. The proxy cell had no rule at all for a while and the browser
+   default laid its buttons out inline, wrapping mid-group into "Check  Edit" with a stranded
+   "Delete" underneath, which changes the row height and misaligns the whole table. */
 .table-actions {
   display: inline-flex;
+  align-items: center;
   gap: var(--space-1);
+  flex-wrap: nowrap;
+  white-space: nowrap;
 }
 
 /* Dedicated trailing actions column (launch + row menu), split out of the title cell so the profile
@@ -1086,6 +1117,12 @@ select.lb-select:disabled {
 
 .muted {
   color: var(--text-muted);
+}
+
+/* For a row subtitle that reports a problem with the row itself — a proxy whose credentials this
+   machine cannot decrypt reads as ordinary grey metadata otherwise. */
+.text-danger {
+  color: var(--danger);
 }
 
 /* RESTORED. This was `.notice, .info-strip { … }`, and a cleanup pass that removed the dead
@@ -1815,6 +1852,80 @@ select.lb-select:disabled {
 .proxy-mini-button:hover {
   background: var(--surface-muted);
   color: var(--accent);
+}
+
+/* The shared `button:focus-visible` ring is drawn OUTSIDE the box, and this button is the last cell
+   of a segmented row whose neighbour sits flush against it — so the ring landed underneath the port
+   input and the only keyboard-reachable control in the row looked unfocused. Lifting it paints the
+   ring over its neighbours instead of under them. */
+.proxy-mini-button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Bulk import: a paste box and the lines it could not read. */
+.proxy-import-box {
+  min-height: 132px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.proxy-import-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 148px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  color: var(--danger);
+  font-size: var(--fs-sm);
+}
+
+.proxy-import-errors strong {
+  margin-right: 6px;
+  font-weight: var(--fw-control);
+}
+
+/* Template extensions: an input the Add button sits beside, then the list of what was added. */
+.template-extension-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.template-extension-row .lb-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.template-extension-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.template-extension-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: space-between;
+}
+
+.template-extension-id {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 

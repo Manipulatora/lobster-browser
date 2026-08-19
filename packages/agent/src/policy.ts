@@ -194,13 +194,14 @@ export function actionCommitIntent(
   if (
     action.kind === 'browser_config' &&
     (action.op === 'set_downloads' ||
+      action.op === 'set_pref' ||
       action.op === 'set_theme' ||
       action.op === 'set_privacy' ||
       action.op === 'set_content_default')
   ) {
     return {
       kind: 'semantic-commit',
-      reason: `persist browser setting: ${action.op.replaceAll('_', ' ')}`,
+      reason: `persist browser setting: ${action.pref ?? action.op.replaceAll('_', ' ')}`,
     };
   }
   if (action.kind === 'remember' || action.kind === 'learn') {

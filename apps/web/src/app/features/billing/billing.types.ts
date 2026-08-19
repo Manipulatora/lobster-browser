@@ -19,13 +19,20 @@ export interface PlanDefinition {
   profileLimit: number;
 }
 
+/** How a package is paid for: every month, or twelve months up front at a discount. */
+export type BillingPeriod = 'monthly' | 'yearly';
+
 export interface Subscription {
   teamId: string;
   tier: PlanTier;
   profileLimit: number;
   priceCents: number;
   status: 'active' | 'past_due' | 'canceled' | 'trialing';
+  currentPeriodStart?: string;
   currentPeriodEnd?: string;
+  /** Day of the month the package bills on, 1-31. */
+  billingAnchorDay?: number;
+  billingPeriod?: BillingPeriod;
   autoRenew: boolean;
   lastFailureCode?: string;
 }
@@ -56,6 +63,16 @@ export interface BillingOverview {
   freePlanProfileLimit: number;
   /** Whether the processor is usable right now; false means deposits cannot be started. */
   depositsAvailable: boolean;
+  /**
+   * When Credit is next debited for the package, or null when nothing is due.
+   *
+   * The server's own figure, never recomputed here: a date this page worked out from a period
+   * length is a date that can disagree with the charge, and the user finds out which was right
+   * only afterwards.
+   */
+  nextBillingAt: string | null;
+  /** The profile allowance actually in force — a lapsed or elapsed package entitles the free one. */
+  entitledProfileLimit: number;
 }
 
 export type CreditTxKind =

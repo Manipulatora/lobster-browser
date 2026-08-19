@@ -118,6 +118,26 @@ test('cookie CDP calls reject broad public/private suffix scopes before reading 
   assert.equal(browserCalls, 0);
 });
 
+test('an empty preference batch never opens the privileged settings page', async () => {
+  // The WebUI page is the one context where the browser's own settings API exists, so it is only ever
+  // worth creating for work that exists. A batch with nothing in it is a caller bug, and answering it
+  // with a target creation would put a privileged page on screen for no change at all.
+  let calls = 0;
+  const instance = driver(
+    session(async () => {
+      calls += 1;
+      return {};
+    }),
+  );
+
+  await assert.rejects(
+    instance.browserConfig({ op: 'set_prefs', prefs: [] }),
+    /at least one preference/,
+  );
+  await assert.rejects(instance.browserConfig({ op: 'get_prefs', keys: [] }), /at least one key/);
+  assert.equal(calls, 0);
+});
+
 test('modifier chords dispatch as shortcuts, not as typed characters', async () => {
   const events: Array<Record<string, unknown>> = [];
   const instance = driver(

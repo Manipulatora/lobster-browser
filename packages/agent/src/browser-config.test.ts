@@ -10,6 +10,8 @@ import {
   normalizeBrowserPermissionOrigin,
   normalizeCookieDomain,
 } from './browser-config-guard.js';
+import type { BrowserConfigCommand, BrowserDriver } from './driver.js';
+import { executeAction } from './executor.js';
 import { actionRisk } from './policy.js';
 import { describeSafeAction } from './security.js';
 import type { AgentAction } from '@lobster/shared-types';
@@ -17,11 +19,24 @@ import type { RawPerception } from './types.js';
 
 type BrowserConfigAction = Extract<AgentAction, { kind: 'browser_config' }>;
 
+const page = { elements: [] } as unknown as RawPerception;
+
 function cfg(over: Record<string, unknown>): BrowserConfigAction {
   const result = parseAction({ kind: 'browser_config', ...over });
   if (!result.ok) throw new Error(`parse failed for ${JSON.stringify(over)}: ${result.error}`);
   if (result.action.kind !== 'browser_config') throw new Error('unexpected action kind');
   return result.action;
+}
+
+/** A driver that records what the config path actually handed the browser. */
+function recordingDriver(commands: BrowserConfigCommand[], reply: string): BrowserDriver {
+  return {
+    browserConfig: async (command: BrowserConfigCommand) => {
+      commands.push(command);
+      return reply;
+    },
+    waitForSettle: async () => {},
+  } as unknown as BrowserDriver;
 }
 
 test('browser_config parser enforces per-op required fields', () => {
@@ -321,7 +336,6 @@ test('UI-fallback ops resolve to vetted chrome://settings URLs; identity pages a
 });
 
 test('destructive config ops are annotated high-risk for confirm-mode prompts', () => {
-  const page = { elements: [] } as unknown as RawPerception;
   assert.equal(
     actionRisk(cfg({ op: 'clear_site_data', origin: 'https://a.com' }), page).high,
     true,
@@ -359,6 +373,215 @@ test('a privileged internal page reached by accident is off limits, not a settin
   // The vetted settings pages the agent legitimately drives remain usable.
   assert.equal(isVettedBrowserConfigUrl('chrome://settings/appearance'), true);
   assert.equal(isPrivilegedInternalUrl('chrome://settings/appearance'), true);
+});
+
+test('an allow-listed preference reaches the driver as a typed write', async () => {
+  const commands: BrowserConfigCommand[] = [];
+  const result = await executeAction(
+    cfg({ op: 'set_pref', pref: 'Download.Prompt_For_Download', value: 'TRUE' }),
+    page,
+    recordingDriver(commands, 'applied and verified download.prompt_for_download'),
+    {},
+  );
+  // The key is canonicalized once, at parse time, and the value arrives as the type Chromium wants —
+  // the driver applies what it is given, so anything still ambiguous here would be ambiguous there.
+  assert.deepEqual(commands, [
+    { op: 'set_prefs', prefs: [{ key: 'download.prompt_for_download', value: true }] },
+  ]);
+  assert.match(result.outcome, /applied and verified/);
+  assert.match(
+    describeSafeAction(cfg({ op: 'set_pref', pref: 'safebrowsing.enabled', value: 'false' })),
+    /set pref safebrowsing\.enabled → false/,
+  );
+  assert.equal(
+    actionRisk(cfg({ op: 'set_pref', pref: 'safebrowsing.enabled', value: 'false' }), page)
+      .consequential,
+    true,
+  );
+});
+
+test('get_pref reads back through the same allow-list, and reading is not a change', async () => {
+  const commands: BrowserConfigCommand[] = [];
+  const result = await executeAction(
+    cfg({ op: 'get_pref', pref: 'safebrowsing.enabled' }),
+    page,
+    recordingDriver(commands, 'safebrowsing.enabled = true'),
+    {},
+  );
+  assert.deepEqual(commands, [{ op: 'get_prefs', keys: ['safebrowsing.enabled'] }]);
+  assert.match(result.outcome, /safebrowsing\.enabled = true/);
+  assert.equal(
+    actionRisk(cfg({ op: 'get_pref', pref: 'safebrowsing.enabled' }), page).consequential,
+    false,
+  );
+});
+
+test('a fingerprint or network preference is refused with no override, however it is spelled', () => {
+  // A pref key writes its words with dots and underscores, so the denylist only sees them if the key is
+  // read as the phrase it is. Every one of these is reachable through the settings API.
+  for (const pref of [
+    'intl.accept_languages',
+    'intl.app_locale',
+    'proxy',
+    'dns_over_https.mode',
+    'webrtc.ip_handling_policy',
+    'profile.default_zoom_level',
+    'webkit.webprefs.default_font_size',
+    'webkit.webprefs.fonts.standard.Zyyy',
+    'hardware_acceleration_mode.enabled',
+    'webkit.webprefs.encrypted_media_enabled',
+  ]) {
+    const written = assessBrowserConfig(cfg({ op: 'set_pref', pref, value: 'true' }));
+    assert.equal(written.verdict, 'block', pref);
+    assert.match(written.reason ?? '', /anti-detect|hard limit|no override/i);
+    assert.equal(written.prefs, undefined, pref);
+    // Reading one is refused for the same reason: the answer leaves the machine in the model's context.
+    const read = assessBrowserConfig(cfg({ op: 'get_pref', pref }));
+    assert.equal(read.verdict, 'block', pref);
+    assert.match(read.reason ?? '', /anti-detect|hard limit|no override/i);
+  }
+});
+
+test('an unlisted preference is refused, with the settable keys and the way out', () => {
+  // A filesystem destination is not a browser setting the agent may choose; the refusal still has to
+  // leave the model somewhere useful, so it names the list and the settings-UI path.
+  const verdict = assessBrowserConfig(
+    cfg({ op: 'set_pref', pref: 'download.default_directory', value: '/tmp/anywhere' }),
+  );
+  assert.equal(verdict.verdict, 'block');
+  assert.match(verdict.reason ?? '', /not a preference the agent may touch/);
+  assert.match(verdict.reason ?? '', /download\.prompt_for_download/);
+  assert.match(verdict.reason ?? '', /open_settings/);
+  assert.equal(assessBrowserConfig(cfg({ op: 'get_pref', pref: 'kiosk.enable' })).verdict, 'block');
+});
+
+test('a preference value is closed: coerced to its own domain, or refused with that domain', () => {
+  assert.deepEqual(
+    assessBrowserConfig(cfg({ op: 'set_pref', pref: 'safebrowsing.enabled', value: 'off' })).prefs,
+    [{ key: 'safebrowsing.enabled', value: false }],
+  );
+  const notBoolean = assessBrowserConfig(
+    cfg({ op: 'set_pref', pref: 'safebrowsing.enabled', value: 'sometimes' }),
+  );
+  assert.equal(notBoolean.verdict, 'block');
+  assert.match(notBoolean.reason ?? '', /accepts true or false/);
+
+  assert.deepEqual(
+    assessBrowserConfig(cfg({ op: 'set_pref', pref: 'profile.cookie_controls_mode', value: '1' }))
+      .prefs,
+    [{ key: 'profile.cookie_controls_mode', value: 1 }],
+  );
+  const notAChoice = assessBrowserConfig(
+    cfg({ op: 'set_pref', pref: 'profile.cookie_controls_mode', value: '9' }),
+  );
+  assert.equal(notAChoice.verdict, 'block');
+  assert.match(notAChoice.reason ?? '', /block third-party cookies/);
+
+  // A URL-valued preference is a destination the browser opens unattended, so only http(s) survives:
+  // chrome://policy as the home page would put a privileged WebUI one keystroke from every launch.
+  assert.deepEqual(
+    assessBrowserConfig(cfg({ op: 'set_pref', pref: 'homepage', value: 'Example.COM/start' }))
+      .prefs,
+    [{ key: 'homepage', value: 'https://example.com/start' }],
+  );
+  for (const value of [
+    'chrome://policy',
+    'javascript:alert(1)',
+    'file:///etc/passwd',
+    'data:text/html,x',
+    'https://user:pass@example.com/',
+  ]) {
+    assert.equal(
+      assessBrowserConfig(cfg({ op: 'set_pref', pref: 'homepage', value })).verdict,
+      'block',
+      value,
+    );
+  }
+  assert.deepEqual(
+    assessBrowserConfig(
+      cfg({
+        op: 'set_pref',
+        pref: 'session.startup_urls',
+        values: ['example.com', 'https://b.test/x'],
+      }),
+    ).prefs,
+    [{ key: 'session.startup_urls', value: ['https://example.com/', 'https://b.test/x'] }],
+  );
+  assert.equal(
+    assessBrowserConfig(
+      cfg({ op: 'set_pref', pref: 'session.startup_urls', values: ['chrome://policy'] }),
+    ).verdict,
+    'block',
+  );
+  // The op still needs its arguments: neither half is optional.
+  assert.equal(parseAction({ kind: 'browser_config', op: 'set_pref' }).ok, false);
+  assert.equal(parseAction({ kind: 'browser_config', op: 'set_pref', pref: 'homepage' }).ok, false);
+  assert.equal(parseAction({ kind: 'browser_config', op: 'get_pref' }).ok, false);
+});
+
+test('every listed preference and settings area is actually reachable', () => {
+  // Both lists sit BEHIND the fingerprint screen, and both are quoted to the model as what it may use.
+  // An entry that the screen rejects, or an area whose page the loop then refuses to act on, would be
+  // dead weight the model spends steps discovering — so the promise and the reality are checked here.
+  const prefRefusal = assessBrowserConfig(cfg({ op: 'get_pref', pref: 'not.a.real.pref' }));
+  const keys = (prefRefusal.reason ?? '')
+    .replace(/^.*Available: /, '')
+    .replace(/\. For anything else.*$/, '')
+    .split(', ');
+  assert.ok(keys.length > 30, `expected the whole preference list, saw ${keys.length}`);
+  for (const key of keys) {
+    assert.equal(assessBrowserConfig(cfg({ op: 'get_pref', pref: key })).verdict, 'allow', key);
+  }
+
+  const areaRefusal = assessBrowserConfig(cfg({ op: 'open_settings', value: '???' }));
+  assert.equal(areaRefusal.verdict, 'block');
+  const areas = (areaRefusal.reason ?? '')
+    .replace(/^.*Openable areas: /, '')
+    .replace(/\.$/, '')
+    .split(', ');
+  assert.ok(areas.length > 30, `expected the whole area list, saw ${areas.length}`);
+  for (const area of areas) {
+    const url = assessBrowserConfig(cfg({ op: 'open_settings', value: area })).settingsUrl;
+    assert.ok(url, `${area} must resolve to a page`);
+    assert.equal(isVettedBrowserConfigUrl(url ?? ''), true, `${area} → ${url} must be actionable`);
+  }
+});
+
+test('the settings surface reaches more real areas, and an unnamed one searches instead of dead-ending', () => {
+  for (const [area, path] of [
+    ['password manager', 'passwords'],
+    ['clear browsing data', 'clearBrowserData'],
+    ['ad privacy', 'adPrivacy'],
+    ['safety check', 'safetyCheck'],
+    ['automatic downloads', 'content/automaticDownloads'],
+    ['default search engine', 'search'],
+    ['startup pages', 'onStartup'],
+  ] as const) {
+    assert.equal(
+      assessBrowserConfig(cfg({ op: 'open_settings', value: area })).settingsUrl,
+      `chrome://settings/${path}`,
+      area,
+    );
+  }
+
+  // An area nobody wrote a synonym for lands on the settings search, which is a page the agent may
+  // legitimately act on — it is the same place a person would start from.
+  const searched = assessBrowserConfig(cfg({ op: 'open_settings', value: 'autoplay' }));
+  assert.equal(searched.settingsUrl, 'chrome://settings/?search=autoplay');
+  assert.equal(isVettedBrowserConfigUrl(searched.settingsUrl ?? ''), true);
+
+  // The search is not a second way to name a destination, and it never survives a fingerprint tell.
+  assert.equal(
+    assessBrowserConfig(cfg({ op: 'open_settings', value: 'chrome://net-internals' })).verdict,
+    'block',
+  );
+  assert.equal(
+    assessBrowserConfig(cfg({ op: 'open_settings', value: 'font size' })).verdict,
+    'block',
+  );
+  // Identity subsections of an allowed base are not covered by the base.
+  assert.equal(isVettedBrowserConfigUrl('chrome://settings/content/zoomLevels'), false);
+  assert.equal(isVettedBrowserConfigUrl('chrome://settings/content/localFonts'), false);
 });
 
 test('page zoom is treated as a display-metric change, not an appearance preference', () => {

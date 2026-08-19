@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import type {
+  BillingPeriod,
   CreditTransaction,
   CreditTxKind,
   Deposit,
@@ -255,6 +256,9 @@ export class InMemoryBillingRepository implements BillingRepository {
     tier: PaidPlanTier;
     profileLimit: number;
     priceCents: number;
+    billingPeriod: BillingPeriod;
+    billingAnchorDay: number;
+    currentPeriodStart: Date;
     currentPeriodEnd: Date;
   }): Promise<Subscription> {
     const row: Subscription = {
@@ -263,7 +267,10 @@ export class InMemoryBillingRepository implements BillingRepository {
       profileLimit: args.profileLimit,
       priceCents: args.priceCents,
       status: 'active',
+      currentPeriodStart: args.currentPeriodStart.toISOString(),
       currentPeriodEnd: args.currentPeriodEnd.toISOString(),
+      billingAnchorDay: args.billingAnchorDay,
+      billingPeriod: args.billingPeriod,
       autoRenew: true,
     };
     this.subscriptions.set(args.teamId, row);
@@ -281,6 +288,7 @@ export class InMemoryBillingRepository implements BillingRepository {
     teamId: string;
     expectedPeriodEnd: string;
     priceCents: number;
+    newPeriodStart: Date;
     newPeriodEnd: Date;
     description: string;
   }): Promise<'renewed' | 'insufficient_credit' | 'not_due'> {
@@ -292,6 +300,7 @@ export class InMemoryBillingRepository implements BillingRepository {
     const balance = this.balances.get(args.teamId) ?? 0;
     if (balance < args.priceCents) return 'insufficient_credit';
 
+    row.currentPeriodStart = args.newPeriodStart.toISOString();
     row.currentPeriodEnd = args.newPeriodEnd.toISOString();
     row.status = 'active';
     row.lastFailureCode = undefined;

@@ -209,8 +209,10 @@ export function describeSafeAction(action: AgentAction, perception?: RawPercepti
         : `${safe.operation} tab${safe.tabId ? ` ${safe.tabId}` : safe.index === undefined ? '' : ` ${safe.index}`}`;
     case 'browser_config': {
       const where = safe.origin ?? safe.domain;
-      const detail =
-        safe.op === 'set_permission'
+      const newValue = safe.values?.join(', ') ?? safe.value;
+      const detail = safe.pref
+        ? ` ${safe.pref}${safe.op === 'set_pref' && newValue ? ` → ${clip(newValue, 120)}` : ''}`
+        : safe.op === 'set_permission'
           ? ` ${safe.permission ?? ''} → ${safe.setting ?? 'prompt'}${where ? ` for ${where}` : ''}`
           : safe.op === 'set_downloads'
             ? ` → ${safe.behavior ?? 'default'}`

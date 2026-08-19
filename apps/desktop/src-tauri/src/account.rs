@@ -27,6 +27,10 @@ pub struct AccountSummary {
     pub tier: String,
     /// Profiles this plan allows. The cap the server actually enforces on create.
     pub profile_limit: i64,
+    /// When the next renewal is charged, ISO-8601. Absent on `free` and once auto-renew is off:
+    /// naming the period end as a payment date would promise a charge that will not happen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_billing_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +47,11 @@ struct Overview {
     balance_cents: Option<i64>,
     subscription: Option<Subscription>,
     free_plan_profile_limit: Option<i64>,
+    /// What the server will actually enforce, already accounting for status AND an elapsed period.
+    /// Preferred over re-deriving it here, because the two answers drifting apart is what let a
+    /// lapsed account keep seeing its paid cap.
+    entitled_profile_limit: Option<i64>,
+    next_billing_at: Option<String>,
 }
 
 /// Fetch the summary for the signed-in account.
@@ -100,13 +109,15 @@ fn summarize(overview: Overview) -> AccountSummary {
         tier: active
             .and_then(|s| s.tier.clone())
             .unwrap_or_else(|| "free".to_string()),
-        profile_limit: active
-            .and_then(|s| s.profile_limit)
+        profile_limit: overview
+            .entitled_profile_limit
+            .or_else(|| active.and_then(|s| s.profile_limit))
             // Falls back to the server's own free allowance rather than a constant here: duplicating
             // the number is how the sign-up screen ended up promising five profiles when the server
             // had already moved to three.
             .or(overview.free_plan_profile_limit)
             .unwrap_or(0),
+        next_billing_at: overview.next_billing_at.clone(),
     }
 }
 
@@ -123,6 +134,8 @@ mod tests {
                 profile_limit: Some(limit),
             }),
             free_plan_profile_limit: Some(3),
+            entitled_profile_limit: None,
+            next_billing_at: None,
         }
     }
 
@@ -160,12 +173,43 @@ mod tests {
             balance_cents: None,
             subscription: None,
             free_plan_profile_limit: Some(3),
+            entitled_profile_limit: None,
+            next_billing_at: None,
         });
         assert_eq!(s.tier, "free");
         assert_eq!(s.profile_limit, 3);
         assert_eq!(
             s.balance_cents, 0,
             "a missing balance is zero, not an error"
+        );
+    }
+
+    #[test]
+    fn the_servers_entitled_limit_wins_over_the_rows_own_number() {
+        // An `active` row whose period has elapsed still carries its paid profileLimit. The server
+        // resolves that to the free allowance; re-deriving it here from status alone is what let a
+        // lapsed account keep being shown a cap the server would refuse.
+        let s = summarize(Overview {
+            balance_cents: Some(0),
+            subscription: Some(Subscription {
+                tier: Some("pro".to_string()),
+                status: Some("active".to_string()),
+                profile_limit: Some(200),
+            }),
+            free_plan_profile_limit: Some(3),
+            entitled_profile_limit: Some(3),
+            next_billing_at: None,
+        });
+        assert_eq!(s.profile_limit, 3);
+    }
+
+    #[test]
+    fn the_renewal_date_is_carried_through_for_the_panel() {
+        let mut o = overview("pro", "active", 200);
+        o.next_billing_at = Some("2026-04-15T08:00:00.000Z".to_string());
+        assert_eq!(
+            summarize(o).next_billing_at.as_deref(),
+            Some("2026-04-15T08:00:00.000Z")
         );
     }
 }

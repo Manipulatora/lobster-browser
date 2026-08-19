@@ -1,11 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import type {
-  BrowserExtensionRef,
-  EngineKind,
-  FingerprintOverrides,
-  Profile,
-  ProfileOsTarget,
+import {
+  entitledProfileLimit,
+  type BrowserExtensionRef,
+  type EngineKind,
+  type FingerprintOverrides,
+  type Profile,
+  type ProfileOsTarget,
 } from '@lobster/shared-types';
 
 import { PrismaService } from '../prisma/prisma.service';
@@ -162,9 +163,23 @@ export class PrismaProfilesRepository implements ProfilesRepository {
     return true;
   }
 
+  /**
+   * The allowance the team is ENTITLED to, not the one on the row.
+   *
+   * `profileLimit` records what was bought and stays put when the package lapses or its period
+   * simply runs out with auto-renew off. Returning it unconditionally would let a team turn
+   * auto-renew off and keep a Max allowance indefinitely, for free — and would disagree with the
+   * desktop, which shows the free cap for a lapsed package. `entitledProfileLimit` is the single
+   * rule both answer to.
+   */
   async getProfileLimit(teamId: string): Promise<number | null> {
     const subscription = await this.prisma.subscription.findUnique({ where: { teamId } });
-    return subscription ? subscription.profileLimit : null;
+    if (!subscription) return null;
+    return entitledProfileLimit({
+      status: subscription.status,
+      profileLimit: subscription.profileLimit,
+      currentPeriodEnd: subscription.currentPeriodEnd?.toISOString(),
+    });
   }
 
   /**

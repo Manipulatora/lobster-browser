@@ -156,6 +156,16 @@ export function yearlyPerMonthCents(plan: PlanDefinition): number {
   return Math.round(yearlyPriceCents(plan) / 12);
 }
 
+/**
+ * What ONE billing period of a package costs, in USD cents — the figure actually debited.
+ *
+ * The purchase path and the renewal job both resolve the price through here, so a yearly
+ * subscriber cannot be charged a monthly amount (or charged the yearly amount every month).
+ */
+export function periodPriceCents(plan: PlanDefinition, period: BillingPeriod): number {
+  return period === 'yearly' ? yearlyPriceCents(plan) : plan.priceCents;
+}
+
 export function planByTier(tier: PaidPlanTier): PlanDefinition {
   const plan = PLAN_CATALOG.find((p) => p.tier === tier);
   // Unreachable while `tier` is typed, but this is also the runtime guard for values that arrive
@@ -174,11 +184,57 @@ export interface Subscription {
   /** What the next renewal will cost, in USD cents; snapshotted at purchase. */
   priceCents: number;
   status: SubscriptionStatus;
+  /**
+   * ISO instant the current period began; absent on `free`.
+   *
+   * The other end of the window `currentPeriodEnd` closes, and the only thing proration can be
+   * measured against: without it, "how much of this period is left" has to be guessed from an
+   * assumed period length, which is wrong for every month that is not exactly that long.
+   */
+  currentPeriodStart?: string;
   /** ISO instant the current period ends and auto-renew becomes eligible; absent on `free`. */
   currentPeriodEnd?: string;
+  /**
+   * Day of the month the package bills on, 1-31; absent on `free`.
+   *
+   * Stored rather than read off `currentPeriodEnd`, because the end is CLAMPED to the length of the
+   * month it lands in. A subscription anchored to the 31st bills on the 28th in February, and
+   * re-deriving the anchor from that date would move it there permanently — the billing day walking
+   * backwards a few days a year, which is exactly what a calendar anchor exists to prevent.
+   */
+  billingAnchorDay?: number;
+  /** Whether the package is billed every month or twelve months up front. */
+  billingPeriod?: BillingPeriod;
   autoRenew: boolean;
   /** Why the last renewal attempt failed, e.g. `insufficient_credit`. */
   lastFailureCode?: string;
+}
+
+/**
+ * The profile allowance a team is ACTUALLY entitled to right now.
+ *
+ * `profileLimit` records what was BOUGHT, and it stays on the row when a renewal fails and when a
+ * period simply runs out with auto-renew off. Reading it directly is how a team that stopped paying
+ * keeps a Max allowance forever, for free — the row still says 1,000.
+ *
+ * THE single definition of "is this entitlement live", so the cap the API enforces, the meter the
+ * desktop draws and the plan the dashboard names cannot disagree. `trialing` counts as live: a
+ * trial is a granted period, and collapsing it would refuse profiles the server would accept.
+ */
+export function entitledProfileLimit(
+  subscription: Pick<Subscription, 'status' | 'profileLimit' | 'currentPeriodEnd'> | null,
+  now: Date = new Date(),
+): number {
+  if (!subscription) return FREE_PLAN_PROFILE_LIMIT;
+  if (subscription.status !== 'active' && subscription.status !== 'trialing') {
+    return FREE_PLAN_PROFILE_LIMIT;
+  }
+  // An elapsed period is a lapse the renewal sweep has not reached yet — or one it never will,
+  // because auto-renew is off. Either way the paid window is over and the allowance with it.
+  if (subscription.currentPeriodEnd && new Date(subscription.currentPeriodEnd) <= now) {
+    return FREE_PLAN_PROFILE_LIMIT;
+  }
+  return subscription.profileLimit;
 }
 
 // --- Credit / wallet -------------------------------------------------------

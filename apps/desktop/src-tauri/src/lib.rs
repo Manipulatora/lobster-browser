@@ -40,7 +40,7 @@ use proxy_check::{run_proxy_check, ProxyCheckResult};
 use proxy_store::{CreateStoredProxyInput, StoredProxy, UpdateStoredProxyInput};
 use secrets::SecretCipher;
 use sidecar::SidecarClient;
-use template_store::{CreateProfileTemplateInput, ProfileTemplate};
+use template_store::{CreateProfileTemplateInput, ProfileTemplate, UpdateProfileTemplateInput};
 
 /// Port the local automation API binds to on 127.0.0.1. Loopback-only by design.
 const LOCAL_API_PORT: u16 = 53211;
@@ -794,6 +794,36 @@ fn create_template(
 }
 
 #[tauri::command]
+fn update_template(
+    state: State<'_, AppState>,
+    id: String,
+    input: UpdateProfileTemplateInput,
+) -> Result<ProfileTemplate, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    template_store::update(&conn, &id, input)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("template {id} not found"))
+}
+
+#[tauri::command]
+fn duplicate_template(state: State<'_, AppState>, id: String) -> Result<ProfileTemplate, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    template_store::duplicate(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("template {id} not found"))
+}
+
+#[tauri::command]
+fn delete_template(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    if template_store::delete(&conn, &id).map_err(|e| e.to_string())? {
+        Ok(())
+    } else {
+        Err(format!("template {id} not found"))
+    }
+}
+
+#[tauri::command]
 async fn test_proxy(
     state: State<'_, AppState>,
     id: Option<String>,
@@ -810,29 +840,8 @@ async fn test_proxy(
     };
     let result = run_proxy_check(checked_config).await;
     if let Some(id) = id.as_deref() {
-        let location = result.geo.as_ref().map(|geo| {
-            [
-                geo.country_code.as_str(),
-                geo.region.as_deref().unwrap_or_default(),
-                geo.city.as_deref().unwrap_or_default(),
-            ]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" · ")
-        });
-        let timezone = result.geo.as_ref().map(|geo| geo.timezone.clone());
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        proxy_store::update_test_result(
-            &conn,
-            id,
-            result.ok,
-            result.latency_ms,
-            location,
-            timezone,
-            result.error.clone(),
-        )
-        .map_err(|e| e.to_string())?;
+        proxy_store::update_test_result(&conn, id, &result).map_err(|e| e.to_string())?;
     }
     Ok(result)
 }
@@ -1704,6 +1713,9 @@ pub fn run() {
             test_proxy,
             list_templates,
             create_template,
+            update_template,
+            duplicate_template,
+            delete_template,
             launch_profile,
             stop_profile,
             export_profile_cookies,

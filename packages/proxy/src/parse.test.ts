@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   formatProxyUrl,
   parseProxy,
+  parseProxyList,
   toEnginePlaywrightProxy,
   validateProxyConfig,
   validateProxyRotationUrl,
@@ -88,6 +89,47 @@ test('colon form preserves colons in passwords and supports bracketed IPv6', () 
   const ipv6 = parseProxy('[2001:db8::1]:1080', 'id-ipv6');
   assert.equal(ipv6.host, '[2001:db8::1]');
   assert.equal(formatProxyUrl(ipv6), 'http://[2001:db8::1]:1080');
+});
+
+test('parseProxy mints an id when the caller does not supply one', () => {
+  const p = parseProxy('1.2.3.4:8080');
+  assert.match(p.id, /^[0-9a-f-]{36}$/);
+  assert.notEqual(parseProxy('1.2.3.4:8080').id, p.id);
+});
+
+test('a pasted list imports the good lines and names the bad ones', () => {
+  const results = parseProxyList(
+    [
+      '# vendor export',
+      '1.2.3.4:8080:bob:secret',
+      '',
+      'socks5://user:pass@host.example:1080',
+      'not-a-proxy',
+      '  5.6.7.8:3128  ',
+    ].join('\n'),
+  );
+  assert.equal(results.length, 4);
+  assert.deepEqual(
+    results.map((r) => [r.line, r.ok]),
+    [
+      [2, true],
+      [4, true],
+      [5, false],
+      [6, true],
+    ],
+  );
+  const [first] = results;
+  assert.ok(first?.ok && first.config.username === 'bob');
+  const failed = results.find((r) => !r.ok);
+  assert.ok(failed && !failed.ok && !failed.error.startsWith('parseProxy:'));
+  const trimmed = results[3];
+  assert.ok(trimmed?.ok && trimmed.config.host === '5.6.7.8');
+});
+
+test('every line of a list gets its own proxy id', () => {
+  const results = parseProxyList('1.2.3.4:8080\n1.2.3.4:8080');
+  const ids = results.filter((r) => r.ok).map((r) => (r.ok ? r.config.id : ''));
+  assert.equal(new Set(ids).size, 2);
 });
 
 test('runtime validation catches malformed IPC/database ProxyConfig values', () => {

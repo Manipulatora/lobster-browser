@@ -1073,19 +1073,6 @@
 
 /* --- Row actions ------------------------------------------------------------------------------ */
 
-/* The proxy table's action cell had NO rule at all, so its three buttons were laid out by the
-   browser default: inline, wrapping mid-group, which rendered as "Check  Edit" on one line and a
-   stranded "Delete" underneath. Found by screenshotting the app rather than by reading it — nothing
-   in the build could have told us, which is what ci/validation/desktop-css-contract.mjs now does. */
-.proxy-row-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  /* One line, always. A wrapped action group changes the row height and misaligns the whole table. */
-  flex-wrap: nowrap;
-  white-space: nowrap;
-}
-
 /* A disabled, spinner-style status button in the profile list: it reports state rather than
    offering an action, so it must not look pressable. */
 .status-action {
@@ -1106,19 +1093,22 @@
 }
 
 /* Seven columns. Widths sized to the LONGEST REAL VALUE each holds, not split evenly: "SOCKS5",
-   "132 ms" and "Warning" need a fixed small amount and no more, Actions needs room for three
-   controls, and whatever is left goes to the proxy name. Guessed percentages are how the first
-   attempt clipped "SOCKS5" to "SOC..." and cut Delete off the right edge. */
-/* Sized to the longest real value plus padding, and no more — the six fixed columns come to 754px
-   of roughly 976, leaving the name ~220px, which fits "US Residential Gateway" whole. An earlier
-   pass spent 832px here and truncated the one column a user actually reads. */
+   "132 ms" and "Datacenter" need a fixed small amount and no more, and whatever is left goes to the
+   proxy name. Guessed percentages are how the first attempt clipped "SOCKS5" to "SOC..." and cut
+   Delete off the right edge.
+
+   Every one of these was measured in the browser rather than reasoned about, because the last two
+   times they were not: Status was 96px around a "Not tested" pill that needs 115, and Latency was
+   76px around a "Not tested" that renders at 86 — both silently clipped by the truncation rule
+   below. Actions is a single button plus the row menu now, so it costs 108px instead of the 284px
+   five text buttons wanted, and the difference paid for the two columns that were short. */
 .proxies-table th:nth-child(1) { width: auto;  }  /* Proxy — takes the remainder */
-.proxies-table th:nth-child(2) { width: 76px;  }  /* Type: SOCKS5  */
-.proxies-table th:nth-child(3) { width: 180px; }  /* Endpoint      */
-.proxies-table th:nth-child(4) { width: 172px; }  /* Location + tz */
-.proxies-table th:nth-child(5) { width: 76px;  }  /* Latency       */
-.proxies-table th:nth-child(6) { width: 96px;  }  /* Status        */
-.proxies-table th:nth-child(7) { width: 208px; }  /* Actions       */
+.proxies-table th:nth-child(2) { width: 76px;  }  /* Type: SOCKS5      */
+.proxies-table th:nth-child(3) { width: 180px; }  /* Endpoint          */
+.proxies-table th:nth-child(4) { width: 172px; }  /* Location + tz     */
+.proxies-table th:nth-child(5) { width: 92px;  }  /* Latency           */
+.proxies-table th:nth-child(6) { width: 124px; }  /* Status: Datacenter */
+.proxies-table th:nth-child(7) { width: 116px; }  /* Actions           */
 
 /* Truncate rather than wrap: a wrapped cell changes the row height and knocks the table out of
    alignment. The Location cell is exempt because it deliberately stacks two lines. */

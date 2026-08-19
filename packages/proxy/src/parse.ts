@@ -1,7 +1,16 @@
-import { randomUUID } from 'node:crypto';
 import type { ProxyConfig, ProxyType } from '@lobster/shared-types';
 
 const MAX_PROXY_PORT = 65_535;
+
+/**
+ * NOT `node:crypto`. The desktop proxy dialog imports this module straight into the browser bundle
+ * (`@lobster/proxy/parse`) so the formats users paste are parsed by the same tested code the engine
+ * uses; a Node builtin here is unresolvable there. The Web Crypto global exists in every runtime
+ * that loads this file — Node 19+, and the webview, which is a secure context.
+ */
+function randomProxyId(): string {
+  return crypto.randomUUID();
+}
 
 function schemeToType(scheme: string): ProxyType {
   const s = scheme.toLowerCase();
@@ -88,7 +97,7 @@ export function assertValidProxyConfig(proxy: ProxyConfig): void {
  *   - URL form:   `socks5://user:pass@host:port`, `http://host:port`
  *   - colon form: `host:port:user:pass`, `host:port`
  */
-export function parseProxy(input: string, id: string = randomUUID()): ProxyConfig {
+export function parseProxy(input: string, id: string = randomProxyId()): ProxyConfig {
   const raw = input.trim();
   if (raw === '') throw new Error('parseProxy: empty proxy string');
 
@@ -136,6 +145,40 @@ export function parseProxy(input: string, id: string = randomUUID()): ProxyConfi
   if (match[4] !== undefined) config.password = match[4];
   assertValidProxyConfig(config);
   return config;
+}
+
+/** One line of a pasted proxy list, kept next to the text it came from. */
+export type ProxyLineResult =
+  | { line: number; raw: string; ok: true; config: ProxyConfig }
+  | { line: number; raw: string; ok: false; error: string };
+
+/**
+ * Parse a pasted block of proxies, one per line.
+ *
+ * PARTIAL SUCCESS IS THE POINT. A list of forty lines from a vendor panel routinely holds one
+ * truncated row, and refusing the whole paste over it means the user re-does the other thirty-nine
+ * by hand. Every line is reported with its own number so the failures can be named and fixed while
+ * the rest are imported. Blank lines and `#` comments are skipped rather than reported as errors —
+ * vendors ship both.
+ */
+export function parseProxyList(input: string): ProxyLineResult[] {
+  const results: ProxyLineResult[] = [];
+  input.split(/\r?\n/).forEach((rawLine, index) => {
+    const raw = rawLine.trim();
+    if (raw === '' || raw.startsWith('#')) return;
+    const line = index + 1;
+    try {
+      results.push({ line, raw, ok: true, config: parseProxy(raw) });
+    } catch (error) {
+      results.push({
+        line,
+        raw,
+        ok: false,
+        error: error instanceof Error ? error.message.replace(/^parseProxy: /, '') : String(error),
+      });
+    }
+  });
+  return results;
 }
 
 /** Format a config back into a URL (credentials percent-encoded). */

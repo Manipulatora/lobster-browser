@@ -34,7 +34,13 @@ export interface ProxyTestResult {
 }
 
 export type ProxySource = 'mine' | 'hive';
-export type StoredProxyStatus = 'ready' | 'warning' | 'testing' | 'error';
+/**
+ * `untested` is the state a proxy is created in and returns to whenever its endpoint changes: no
+ * check has described THIS endpoint yet. It exists because the alternative was storing `warning` on
+ * a proxy nobody had asked anything of, which reads as "degraded" everywhere status is coloured.
+ * `warning` means the opposite — a check that succeeded and found something worth knowing.
+ */
+export type StoredProxyStatus = 'untested' | 'ready' | 'warning' | 'testing' | 'error';
 
 export interface StoredProxy {
   id: string;
@@ -48,8 +54,18 @@ export interface StoredProxy {
   rotateUrl?: string;
   lastCheckedAt?: string;
   lastError?: string;
+  /** Autonomous System of the last checked exit IP, e.g. "AS15169 Google LLC". */
+  asn?: string;
+  /** The last check placed the exit IP in a hosting range. */
+  isDatacenter?: boolean;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Fields this machine could not decrypt (`config`, `rotate_url`). A proxy carrying any is missing
+   * its credentials in memory, so saving it would overwrite them — the store refuses the write and
+   * the UI has to say so rather than presenting an editable, silently-emptied password.
+   */
+  unreadableSecrets?: string[];
 }
 
 export interface CreateStoredProxyInput {

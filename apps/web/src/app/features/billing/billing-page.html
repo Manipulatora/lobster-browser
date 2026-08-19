@@ -218,6 +218,64 @@
       }
     </section>
 
+    <!-- ── Package ───────────────────────────────────────────────────────────
+         What is being paid for, and WHEN it is paid for next. The date is the server's own
+         `nextBillingAt` — the same instant the renewal job charges on — rather than one worked out
+         here from a period length, which is how a page ends up naming a day nothing happens on.
+         The renewal switch lives here too: it used to exist only in the component, with no control
+         anywhere in the page that could reach it. -->
+    @if (paidPackage(); as pkg) {
+      <section class="mt-14">
+        <h2 class="text-[0.9375rem] text-muted">Package</h2>
+        <dl class="mt-3 divide-y-[0.5px] divide-hairline border-y-[0.5px] border-hairline">
+          <div class="flex items-baseline justify-between gap-4 py-3">
+            <dt class="text-[0.9375rem] text-ink">{{ planName(pkg.tier) }}</dt>
+            <dd class="text-[0.9375rem] text-muted">
+              {{ renewalTerms(pkg.priceCents, pkg.billingPeriod) }}
+            </dd>
+          </div>
+
+          @if (nextBillingAt(); as due) {
+            <div class="flex items-baseline justify-between gap-4 py-3">
+              <dt class="text-[0.9375rem] text-muted">{{ isPastDue() ? 'Payment due' : 'Next payment' }}</dt>
+              <dd class="text-[0.9375rem] text-ink">{{ due | date: 'mediumDate' }}</dd>
+            </div>
+          } @else if (pkg.currentPeriodEnd; as ends) {
+            <!-- Auto-renew off: there is no next payment, but the paid time already bought does not
+                 disappear — and the date it runs out is the one thing the user needs from here. -->
+            <div class="flex items-baseline justify-between gap-4 py-3">
+              <dt class="text-[0.9375rem] text-muted">Access until</dt>
+              <dd class="text-[0.9375rem] text-ink">{{ ends | date: 'mediumDate' }}</dd>
+            </div>
+          }
+        </dl>
+
+        <div class="mt-3 flex items-baseline justify-between gap-4">
+          <p class="text-[0.8125rem] leading-relaxed text-muted">
+            @if (isPastDue()) {
+              Your last renewal could not be paid. Add Credit and it will resume by itself.
+            } @else if (pkg.autoRenew) {
+              Renews from your Credit balance on this date.
+            } @else {
+              Auto-renew is off — the package ends on this date.
+            }
+          </p>
+          <button
+            type="button"
+            class="btn btn-sm btn-secondary shrink-0"
+            [disabled]="togglingAutoRenew()"
+            (click)="toggleAutoRenew()"
+          >
+            {{ pkg.autoRenew ? 'Turn off' : 'Turn on' }}
+          </button>
+        </div>
+
+        @if (purchaseError()) {
+          <p class="field-error mt-3">{{ purchaseError() }}</p>
+        }
+      </section>
+    }
+
     <!-- ── History ───────────────────────────────────────────────────────── -->
     @if (transactions().length) {
       <section class="mt-14">

@@ -233,18 +233,48 @@ test('fingerprint edit preserves the validated per-OS renderer and other profile
 // Fixed-width columns are sized to the controls they hold, so a change to button padding silently
 // pushes the last column past the table box and clips its actions. That has regressed twice; this
 // measures it instead of trusting the numbers.
+//
+// A table only fits if its WIDEST row fits, so the row that decides the answer has to be on screen
+// while this measures. For proxies that is a row carrying every optional part at once — a rotation
+// action, an amber exit-network pill, and a row that has never been checked, whose "Not tested"
+// pills are the longest strings the Status and Latency columns ever hold. The seed in
+// src/api/tauri.ts is what puts them there, and the assertions below fail if it stops.
 test('data tables fit their container at every supported width', async ({ page }) => {
   for (const width of [1280, 1440, 1920]) {
     await page.setViewportSize({ width, height: 900 });
     for (const screen of ['Profiles', 'Proxies', 'Templates']) {
       await page.goto(baseUrl);
       await page.getByRole('button', { name: screen, exact: true }).click();
+      if (screen === 'Proxies') {
+        await expect(page.getByRole('row').filter({ hasText: 'Datacenter' })).toBeVisible();
+        await expect(page.getByRole('row').filter({ hasText: 'Not tested' })).toBeVisible();
+        await page.getByLabel('More actions for DE Datacenter Backup').click();
+        await expect(page.getByRole('menuitem', { name: 'Rotate IP' })).toBeVisible();
+        await page.keyboard.press('Escape');
+      }
       const overflow = await page.evaluate(() => {
         const table = document.querySelector('table');
         const panel = table?.parentElement;
         return panel ? panel.scrollWidth - panel.clientWidth : 0;
       });
       expect(overflow, `${screen} at ${width}px overflows its panel by ${overflow}px`).toBe(0);
+      if (screen === 'Proxies') {
+        // A panel can also fit because the columns inside it clipped their own contents. Latency,
+        // Status and Actions hold short values and controls — unlike Endpoint, which truncates a long
+        // hostname on purpose and keeps the whole of it in a tooltip, there is nothing to recover a
+        // half-drawn pill or a cut-off button from, so those three may never overflow their cell.
+        const clipped = await page.evaluate(() =>
+          [...document.querySelectorAll('tbody tr')].flatMap((row) =>
+            [5, 6, 7]
+              .map((column) => row.querySelector(`td:nth-child(${column})`))
+              .filter((cell): cell is HTMLTableCellElement =>
+                Boolean(cell && cell.scrollWidth > cell.clientWidth + 1),
+              )
+              .map((cell) => cell.textContent?.trim() ?? ''),
+          ),
+        );
+        expect(clipped, `${screen} at ${width}px clips ${clipped.join(', ')}`).toEqual([]);
+      }
     }
   }
 });

@@ -602,18 +602,6 @@ async fn proxy_test(
 
     let result = proxy_check::run_proxy_check(body.config).await;
     if let Some(id) = body.id.as_deref() {
-        let location = result.geo.as_ref().map(|geo| {
-            [
-                geo.country_code.as_str(),
-                geo.region.as_deref().unwrap_or_default(),
-                geo.city.as_deref().unwrap_or_default(),
-            ]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" · ")
-        });
-        let timezone = result.geo.as_ref().map(|geo| geo.timezone.clone());
         let conn = match state.db.lock() {
             Ok(conn) => conn,
             Err(_) => {
@@ -623,15 +611,7 @@ async fn proxy_test(
                 )
             }
         };
-        if let Err(err) = proxy_store::update_test_result(
-            &conn,
-            id,
-            result.ok,
-            result.latency_ms,
-            location,
-            timezone,
-            result.error.clone(),
-        ) {
+        if let Err(err) = proxy_store::update_test_result(&conn, id, &result) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 ApiResponse::err(err.to_string()),

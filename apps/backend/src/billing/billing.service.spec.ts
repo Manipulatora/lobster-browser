@@ -3,11 +3,18 @@ import { test } from 'node:test';
 
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
-import { PLAN_CATALOG, planByTier } from '@lobster/shared-types';
+import {
+  entitledProfileLimit,
+  FREE_PLAN_PROFILE_LIMIT,
+  PLAN_CATALOG,
+  planByTier,
+  yearlyPriceCents,
+} from '@lobster/shared-types';
 
 import type { UsersRepository } from '../auth/users.repository';
 import type { MailService } from '../mail/mail.service';
 import type { TeamsRepository } from '../teams/teams.repository';
+import { subtractPeriod } from './billing-period';
 import { BillingService } from './billing.service';
 import { InMemoryBillingRepository } from './in-memory-billing.repository';
 import type { CreatedDeposit, PaymentProvider } from './payments/payment-provider';
@@ -101,6 +108,20 @@ test('plan catalog matches the agreed pricing', () => {
   );
 });
 
+test('a year costs twelve months less the advertised twenty per cent', () => {
+  // The pricing page prints these figures from its own copy of the numbers, so they are a contract
+  // rather than an implementation detail: a rounding change here is a wrong price on the storefront.
+  assert.deepEqual(
+    PLAN_CATALOG.map((p) => [p.tier, yearlyPriceCents(p)]),
+    [
+      ['light', 9_600],
+      ['plus', 57_600],
+      ['pro', 96_000],
+      ['max', 192_000],
+    ],
+  );
+});
+
 // --- Credit arithmetic -------------------------------------------------------
 
 test('a debit larger than the balance is refused and changes nothing', async () => {
@@ -184,14 +205,17 @@ test('buying the same active plan twice is rejected', async () => {
 test('switching packages credits back the unused part of the current period', async () => {
   const { svc, repo } = makeService();
   await fund(repo, 30_000);
-  await svc.purchasePlan(USER, 'light'); // -1_000 → 29_000, 30 days ahead
+  await svc.purchasePlan(USER, 'light'); // -1_000 → 29_000, one month ahead
 
-  // Halfway through the period: half of Light's $10 is unused.
+  // Exactly halfway through a 30-day period: half of Light's $10 is unused.
   await repo.activateSubscription({
     teamId: TEAM,
     tier: 'light',
     profileLimit: 10,
     priceCents: 1_000,
+    billingPeriod: 'monthly',
+    billingAnchorDay: 1,
+    currentPeriodStart: new Date(Date.now() - 15 * 24 * 3600 * 1000),
     currentPeriodEnd: new Date(Date.now() + 15 * 24 * 3600 * 1000),
   });
 
@@ -217,6 +241,9 @@ test('a downgrade worth more than the new plan lands as a refund, not a negative
     tier: 'max',
     profileLimit: 1_000,
     priceCents: 20_000,
+    billingPeriod: 'monthly',
+    billingAnchorDay: 1,
+    currentPeriodStart: new Date(),
     currentPeriodEnd: new Date(Date.now() + 30 * 24 * 3600 * 1000),
   });
 
@@ -251,7 +278,7 @@ test('a caller cannot spend a team they do not belong to', async () => {
   await fund(repo, 30_000);
 
   await assert.rejects(
-    () => svc.purchasePlan(USER, 'pro', 'someone-elses-team'),
+    () => svc.purchasePlan(USER, 'pro', 'monthly', 'someone-elses-team'),
     ForbiddenException,
   );
 });
@@ -396,11 +423,16 @@ async function expire(repo: InMemoryBillingRepository, daysAgo: number): Promise
   const sub = await repo.getSubscription(TEAM);
   assert.ok(sub);
   const past = new Date(Date.now() - daysAgo * 24 * 3600 * 1000);
+  const period = sub.billingPeriod ?? 'monthly';
   await repo.activateSubscription({
     teamId: TEAM,
     tier: sub.tier as 'pro',
     profileLimit: sub.profileLimit,
     priceCents: sub.priceCents,
+    billingPeriod: period,
+    // The team's billing day is unchanged by being moved into the past — only the period is.
+    billingAnchorDay: sub.billingAnchorDay ?? past.getUTCDate(),
+    currentPeriodStart: subtractPeriod(past, period),
     currentPeriodEnd: past,
   });
 }
@@ -491,15 +523,199 @@ test('renewal charges the snapshotted price, not the current catalog price', asy
   const { repo } = makeService();
   await fund(repo, 30_000);
   // A team on a grandfathered price: Pro is $100 today, they pay $70.
+  const ended = new Date(Date.now() - 1000);
   await repo.activateSubscription({
     teamId: TEAM,
     tier: 'pro',
     profileLimit: planByTier('pro').profileLimit,
     priceCents: 7_000,
-    currentPeriodEnd: new Date(Date.now() - 1000),
+    billingPeriod: 'monthly',
+    billingAnchorDay: ended.getUTCDate(),
+    currentPeriodStart: subtractPeriod(ended, 'monthly'),
+    currentPeriodEnd: ended,
   });
 
   await renewal(repo).sweep();
 
   assert.equal(await repo.getBalanceCents(TEAM), 23_000, 'charged 7_000, not the catalog 10_000');
+});
+
+// --- Calendar billing --------------------------------------------------------
+//
+// The clock is frozen for these, and every date is written out in full. A billing day that walks is
+// invisible in a test that computes its expectation the same way the code does.
+
+test('a purchase at 23:00 UTC bills on the calendar day it charged, not the next one', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-03-15T23:00:00.000Z') });
+  const { svc, repo } = makeService();
+  await fund(repo, 10_000);
+
+  const sub = await svc.purchasePlan(USER, 'pro');
+
+  assert.equal(sub.billingAnchorDay, 15, 'the day the charge landed, read in UTC');
+  assert.equal(sub.currentPeriodStart, '2026-03-15T23:00:00.000Z');
+  assert.equal(sub.currentPeriodEnd, '2026-04-15T23:00:00.000Z');
+});
+
+test('a January 31st package bills on February 28th and is back on the 31st in March', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-01-31T12:00:00.000Z') });
+  const { svc, repo } = makeService();
+  await fund(repo, 30_000); // exactly three months of Pro
+
+  const bought = await svc.purchasePlan(USER, 'pro');
+  assert.equal(bought.currentPeriodEnd, '2026-02-28T12:00:00.000Z', 'February has no 31st');
+
+  const sweeps = renewal(repo);
+  assert.equal((await sweeps.sweep(new Date('2026-02-28T12:00:00.000Z'))).renewed, 1);
+  assert.equal(
+    (await repo.getSubscription(TEAM))?.currentPeriodEnd,
+    '2026-03-31T12:00:00.000Z',
+    'the anchor is kept, so the billing day comes back',
+  );
+
+  assert.equal((await sweeps.sweep(new Date('2026-03-31T12:00:00.000Z'))).renewed, 1);
+  assert.equal((await repo.getSubscription(TEAM))?.currentPeriodEnd, '2026-04-30T12:00:00.000Z');
+  assert.equal(await repo.getBalanceCents(TEAM), 0, 'three charges in three months, not four');
+});
+
+test('an upgrade re-anchors to the day it was paid for, crediting the unused time', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-01-31T12:00:00.000Z') });
+  const { svc, repo } = makeService();
+  await fund(repo, 30_000);
+  await svc.purchasePlan(USER, 'light'); // -1_000; runs to 2026-02-28
+
+  t.mock.timers.tick(10 * 24 * 3600 * 1000); // 2026-02-10T12:00Z
+
+  const pro = await svc.purchasePlan(USER, 'pro');
+
+  assert.equal(pro.billingAnchorDay, 10, 'the billing day follows the payment');
+  assert.equal(pro.currentPeriodStart, '2026-02-10T12:00:00.000Z');
+  assert.equal(pro.currentPeriodEnd, '2026-03-10T12:00:00.000Z');
+  // Light ran 28 days from January 31st and 18 were unused: floor(1000 × 18/28) = 642. Prorating
+  // against an assumed 30 days would have credited 600 for the same fortnight and a half.
+  assert.equal(await repo.getBalanceCents(TEAM), 30_000 - 1_000 - (10_000 - 642));
+});
+
+test('a lapse recovered on day 29 is charged once, not twice inside 48 hours', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2025-12-01T00:00:00.000Z') });
+  const { svc, repo } = makeService();
+  await fund(repo, 10_000);
+  await svc.purchasePlan(USER, 'pro'); // balance 0, runs to 2026-01-01
+
+  const sweeps = renewal(repo);
+  assert.equal((await sweeps.sweep(new Date('2026-01-01T00:00:00.000Z'))).lapsed, 1);
+
+  await fund(repo, 10_000); // the deposit lands on the 29th
+  assert.equal((await sweeps.sweep(new Date('2026-01-29T09:00:00.000Z'))).renewed, 1);
+
+  const sub = await repo.getSubscription(TEAM);
+  assert.equal(
+    sub?.currentPeriodStart,
+    '2026-01-29T09:00:00.000Z',
+    'the 28 days they were locked out of are not invoiced',
+  );
+  assert.equal(
+    sub?.currentPeriodEnd,
+    '2026-03-01T09:00:00.000Z',
+    'a whole month, still on the 1st',
+  );
+
+  // Under the 30-day clock this sweep charged a second full month, two days after the first.
+  const twoDaysLater = await sweeps.sweep(new Date('2026-01-31T12:00:00.000Z'));
+  assert.equal(twoDaysLater.examined, 0, 'nothing is due yet');
+  assert.equal(await repo.getBalanceCents(TEAM), 0, 'exactly one renewal was charged');
+});
+
+test('a yearly package charges the discounted year and bills twelve months later', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-03-15T23:00:00.000Z') });
+  const { svc, repo } = makeService();
+  const year = yearlyPriceCents(planByTier('pro'));
+  await fund(repo, year * 2);
+
+  const sub = await svc.purchasePlan(USER, 'pro', 'yearly');
+
+  assert.equal(sub.priceCents, year, 'the yearly price is snapshotted, not the monthly one');
+  assert.equal(sub.billingPeriod, 'yearly');
+  assert.equal(sub.currentPeriodEnd, '2027-03-15T23:00:00.000Z');
+  assert.equal(await repo.getBalanceCents(TEAM), year);
+
+  assert.equal((await renewal(repo).sweep(new Date('2027-03-15T23:00:00.000Z'))).renewed, 1);
+  assert.equal(await repo.getBalanceCents(TEAM), 0, 'a year renews for a year, not for a month');
+  assert.equal((await repo.getSubscription(TEAM))?.currentPeriodEnd, '2028-03-15T23:00:00.000Z');
+});
+
+test('switching an active package to yearly is a purchase, not a duplicate', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-01-15T00:00:00.000Z') });
+  const { svc, repo } = makeService();
+  await fund(repo, 200_000);
+  await svc.purchasePlan(USER, 'pro');
+
+  await assert.rejects(() => svc.purchasePlan(USER, 'pro'), ConflictException);
+
+  const yearly = await svc.purchasePlan(USER, 'pro', 'yearly');
+  assert.equal(yearly.billingPeriod, 'yearly');
+  assert.equal(yearly.priceCents, yearlyPriceCents(planByTier('pro')));
+  assert.equal(yearly.currentPeriodEnd, '2027-01-15T00:00:00.000Z');
+});
+
+test('the overview shows the instant the sweep will charge on, and nothing when it will not', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-05-31T08:00:00.000Z') });
+  const { svc, repo } = makeService();
+  await fund(repo, 10_000);
+  await svc.purchasePlan(USER, 'pro');
+
+  const overview = await svc.getOverview(USER);
+  assert.equal(overview.nextBillingAt, '2026-06-30T08:00:00.000Z', 'June has no 31st');
+  assert.equal(
+    overview.nextBillingAt,
+    overview.subscription?.currentPeriodEnd,
+    'the date shown is the one the renewal job charges on',
+  );
+
+  await svc.setAutoRenew(USER, false);
+  assert.equal((await svc.getOverview(USER)).nextBillingAt, null, 'nothing more will be charged');
+});
+
+test('the overview reports the allowance in force, not the one that was bought', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-05-01T00:00:00.000Z') });
+  const { svc, repo } = makeService();
+  await fund(repo, 10_000);
+  await svc.purchasePlan(USER, 'pro');
+  assert.equal((await svc.getOverview(USER)).entitledProfileLimit, 200);
+
+  // Auto-renew off and the period gone. The row still says Pro/200 — nothing renewed it, and
+  // nothing marked it past_due either, because a subscription with auto-renew off is never swept.
+  await svc.setAutoRenew(USER, false);
+  t.mock.timers.tick(40 * 24 * 3600 * 1000);
+
+  const overview = await svc.getOverview(USER);
+  assert.equal(overview.subscription?.profileLimit, 200, 'the purchase is still on the row');
+  assert.equal(overview.entitledProfileLimit, FREE_PLAN_PROFILE_LIMIT, 'and is no longer honoured');
+});
+
+test('an elapsed period stops entitling the profile limit it paid for', () => {
+  const now = new Date('2026-06-01T00:00:00.000Z');
+  const live = {
+    status: 'active' as const,
+    profileLimit: 1_000,
+    currentPeriodEnd: '2026-07-01T00:00:00.000Z',
+  };
+
+  assert.equal(entitledProfileLimit(live, now), 1_000);
+  assert.equal(
+    entitledProfileLimit({ ...live, currentPeriodEnd: '2026-05-01T00:00:00.000Z' }, now),
+    FREE_PLAN_PROFILE_LIMIT,
+    'a period that ended a month ago entitles nothing',
+  );
+  assert.equal(
+    entitledProfileLimit({ ...live, status: 'past_due' }, now),
+    FREE_PLAN_PROFILE_LIMIT,
+    'a failed renewal withdraws the allowance the desktop already stopped showing',
+  );
+  assert.equal(
+    entitledProfileLimit({ ...live, status: 'trialing' }, now),
+    1_000,
+    'a trial is a live period, not a lapse',
+  );
+  assert.equal(entitledProfileLimit(null, now), FREE_PLAN_PROFILE_LIMIT);
 });

@@ -74,8 +74,11 @@ export interface ProfilesRepository {
    */
   remove(teamId: string, id: string): Promise<boolean>;
   /**
-   * The team's plan profile limit from its Subscription, or null when no subscription exists
-   * (the service then applies the default free-tier limit).
+   * The profile limit the team's Subscription currently entitles it to, or null when no
+   * subscription exists (the service then applies the default free-tier limit).
+   *
+   * ENTITLED, not purchased: a package whose period has ended, or whose last renewal failed, is
+   * worth the free allowance however large a limit is stored on the row.
    */
   getProfileLimit(teamId: string): Promise<number | null>;
 }

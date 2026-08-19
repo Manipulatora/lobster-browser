@@ -566,14 +566,23 @@ export async function executeAction(
         if (!browserConfig) {
           return { outcome: 'error: browser configuration is unavailable in this driver' };
         }
-        const command: BrowserConfigCommand = {
-          op: action.op as BrowserConfigCommand['op'],
-          ...(action.domain ? { domain: action.domain } : {}),
-          ...(action.origin ? { origin: action.origin } : {}),
-          ...(action.permission ? { permission: action.permission } : {}),
-          ...(action.setting ? { setting: action.setting } : {}),
-          ...(action.behavior ? { behavior: action.behavior } : {}),
-        };
+        // Preference ops carry what the GUARD resolved, never what the model wrote: the key is one it
+        // allow-listed and the value is already the type Chromium expects. The driver applies prefs
+        // verbatim and does no filtering of its own, so passing the raw action through here would move
+        // the boundary out of the one file that owns it. One action names one preference; the driver's
+        // command takes a batch, so it arrives as a batch of one.
+        const command: BrowserConfigCommand = assessment.prefs
+          ? { op: 'set_prefs', prefs: assessment.prefs }
+          : assessment.keys
+            ? { op: 'get_prefs', keys: assessment.keys }
+            : {
+                op: action.op as BrowserConfigCommand['op'],
+                ...(action.domain ? { domain: action.domain } : {}),
+                ...(action.origin ? { origin: action.origin } : {}),
+                ...(action.permission ? { permission: action.permission } : {}),
+                ...(action.setting ? { setting: action.setting } : {}),
+                ...(action.behavior ? { behavior: action.behavior } : {}),
+              };
         await beforeEffect();
         const result = await dispatchInput(() => browserConfig.call(driver, command));
         return { outcome: result };

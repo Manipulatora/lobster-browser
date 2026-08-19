@@ -43,6 +43,28 @@ function check(label, condition, detail = '') {
   }
 }
 
+/**
+ * Rows that must already exist when a given migration runs.
+ *
+ * A migration that BACKFILLS is only half-tested by applying it to an empty database: the DDL runs,
+ * the UPDATE matches nothing, and a backfill that converts the wrong column looks identical to one
+ * that works. Seeding a row that predates the migration is the only way to see what it does to real
+ * data — which is the data a deployment actually has.
+ */
+const SEED_BEFORE = {
+  // A subscription as the 30-day clock left it: an end date, a renewal stamp, and no calendar
+  // anchor anywhere.
+  '0015_calendar_billing': `
+    INSERT INTO users (id, email, "createdAt") VALUES ('u0', 'legacy@b.c', CURRENT_TIMESTAMP);
+    INSERT INTO teams (id, name, "ownerUserId", "createdAt")
+      VALUES ('t0', 'Legacy', 'u0', CURRENT_TIMESTAMP);
+    INSERT INTO subscriptions ("teamId", tier, "profileLimit", status, "priceCents",
+                               "currentPeriodEnd", "lastRenewalAt", "createdAt", "updatedAt")
+      VALUES ('t0', 'pro', 200, 'active', 10000, TIMESTAMP '2026-03-17 09:00:00',
+              TIMESTAMP '2026-02-15 09:00:00', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+  `,
+};
+
 // --- Apply every migration in order -----------------------------------------
 const dirs = readdirSync(MIGRATIONS, { withFileTypes: true })
   .filter((e) => e.isDirectory())
@@ -53,6 +75,7 @@ console.log('Applying migrations:');
 for (const dir of dirs) {
   const sql = readFileSync(join(MIGRATIONS, dir, 'migration.sql'), 'utf8');
   try {
+    if (SEED_BEFORE[dir]) await db.exec(SEED_BEFORE[dir]);
     await db.exec(sql);
     console.log(`  OK    ${dir}`);
   } catch (err) {
@@ -85,12 +108,26 @@ check(
 for (const col of [
   'priceCents',
   'currentPeriodEnd',
+  'currentPeriodStart',
+  'billingAnchorDay',
+  'billingPeriod',
   'autoRenew',
   'lastRenewalAt',
   'lastFailureCode',
 ]) {
   check(`subscriptions.${col} added`, await columnExists('subscriptions', col));
 }
+
+const periods = await db.query(`
+  SELECT e.enumlabel FROM pg_enum e
+  JOIN pg_type t ON t.oid = e.enumtypid
+  WHERE t.typname = 'BillingPeriod' ORDER BY e.enumsortorder
+`);
+check(
+  'BillingPeriod = monthly,yearly',
+  JSON.stringify(periods.rows.map((r) => r.enumlabel)) === JSON.stringify(['monthly', 'yearly']),
+  `got ${JSON.stringify(periods.rows.map((r) => r.enumlabel))}`,
+);
 
 // --- New tables ---------------------------------------------------------------
 for (const table of [
@@ -125,6 +162,29 @@ check('deposits.providerPaymentId is UNIQUE', uniq.rows.length === 1);
 
 // --- Behavioural checks: the invariants the code depends on -------------------
 console.log('\nBehavioural assertions:');
+
+// The 0015 backfill, against the row seeded before it ran. A subscription that predates calendar
+// billing has to come out of the migration with a billing day and a period start, or the first
+// sweep after deploy has nothing to anchor to and re-derives both from whatever it finds.
+const legacy = await db.query(`
+  SELECT "billingAnchorDay" AS anchor,
+         "currentPeriodStart"::text AS start,
+         "billingPeriod"::text AS period
+  FROM subscriptions WHERE "teamId" = 't0'
+`);
+check(
+  'backfill anchors a legacy row to the day it is next charged on',
+  legacy.rows[0]?.anchor === 17,
+  `got ${legacy.rows[0]?.anchor}`,
+);
+check(
+  'backfill takes the period start from the last renewal',
+  legacy.rows[0]?.start.startsWith('2026-02-15 09:00:00'),
+  `got ${legacy.rows[0]?.start}`,
+);
+check('a legacy row bills monthly', legacy.rows[0]?.period === 'monthly');
+// Removed before the cascade check below counts what a team deletion leaves behind.
+await db.exec(`DELETE FROM teams WHERE id = 't0'`);
 
 await db.exec(`
   INSERT INTO users (id, email, "createdAt") VALUES ('u1', 'a@b.c', CURRENT_TIMESTAMP);

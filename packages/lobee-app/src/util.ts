@@ -43,6 +43,10 @@ function describeBrowserConfig(a: AgentAction): string {
       return 'Opened privacy settings';
     case 'set_content_default':
       return 'Opened site-content settings';
+    case 'set_pref':
+      return `Set ${a.pref ?? 'a browser setting'} → ${a.value ?? 'default'}`;
+    case 'get_pref':
+      return `Read ${a.pref ?? 'a browser setting'}`;
     default:
       return 'Changed a browser setting';
   }

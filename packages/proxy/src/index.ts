@@ -9,10 +9,12 @@ export {
   assertValidProxyConfig,
   formatProxyUrl,
   parseProxy,
+  parseProxyList,
   toEnginePlaywrightProxy,
   validateProxyConfig,
   validateProxyRotationUrl,
 } from './parse.js';
+export type { ProxyLineResult } from './parse.js';
 export { proxyDispatcher, proxyDispatcherForUrl } from './dispatcher.js';
 export type { GeoProvider, DeriveGeoOptions } from './geo.js';
 export {

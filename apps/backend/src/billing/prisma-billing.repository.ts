@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type {
+  BillingPeriod,
   CreditTransaction,
   CreditTxKind,
   Deposit,
@@ -372,12 +373,18 @@ export class PrismaBillingRepository implements BillingRepository {
     tier: PaidPlanTier;
     profileLimit: number;
     priceCents: number;
+    billingPeriod: BillingPeriod;
+    billingAnchorDay: number;
+    currentPeriodStart: Date;
     currentPeriodEnd: Date;
   }): Promise<Subscription> {
     const data = {
       tier: args.tier,
       profileLimit: args.profileLimit,
       priceCents: args.priceCents,
+      billingPeriod: args.billingPeriod,
+      billingAnchorDay: args.billingAnchorDay,
+      currentPeriodStart: args.currentPeriodStart,
       currentPeriodEnd: args.currentPeriodEnd,
       status: 'active' as const,
       autoRenew: true,
@@ -406,6 +413,7 @@ export class PrismaBillingRepository implements BillingRepository {
     teamId: string;
     expectedPeriodEnd: string;
     priceCents: number;
+    newPeriodStart: Date;
     newPeriodEnd: Date;
     description: string;
   }): Promise<'renewed' | 'insufficient_credit' | 'not_due'> {
@@ -416,6 +424,7 @@ export class PrismaBillingRepository implements BillingRepository {
         const claimed = await tx.subscription.updateMany({
           where: { teamId: args.teamId, currentPeriodEnd: new Date(args.expectedPeriodEnd) },
           data: {
+            currentPeriodStart: args.newPeriodStart,
             currentPeriodEnd: args.newPeriodEnd,
             status: 'active',
             lastRenewalAt: new Date(),
@@ -553,7 +562,10 @@ function toSubscription(row: any): Subscription {
     profileLimit: row.profileLimit,
     priceCents: row.priceCents,
     status: row.status,
+    currentPeriodStart: row.currentPeriodStart ? row.currentPeriodStart.toISOString() : undefined,
     currentPeriodEnd: row.currentPeriodEnd ? row.currentPeriodEnd.toISOString() : undefined,
+    billingAnchorDay: row.billingAnchorDay ?? undefined,
+    billingPeriod: row.billingPeriod,
     autoRenew: row.autoRenew,
     lastFailureCode: row.lastFailureCode ?? undefined,
   };

@@ -58,6 +58,13 @@ enum SubscriptionStatus {
   trialing
 }
 
+// Mirrors shared-types `BillingPeriod`. How long one paid period lasts, and therefore which price
+// from `PLAN_CATALOG` applies — the monthly one, or twelve months at the yearly discount.
+enum BillingPeriod {
+  monthly
+  yearly
+}
+
 // What moved Credit, for the append-only ledger. Every balance change carries exactly one of
 // these, so the ledger reads as a history rather than a set of opaque deltas.
 enum CreditTxKind {
@@ -399,11 +406,26 @@ model Subscription {
 
   // Renewal clock. `currentPeriodEnd` is the instant the renewal job becomes eligible to charge;
   // null while the team is on `free`. The job selects on it, hence the index.
-  currentPeriodEnd DateTime?
-  autoRenew        Boolean   @default(true)
-  lastRenewalAt    DateTime?
+  //
+  // A CALENDAR CLOCK, NOT A 30-DAY ONE. The period advances by whole months from
+  // `billingAnchorDay`, clamped to the length of the month it lands in, so a team that bought on
+  // the 31st bills on the 28th in February and returns to the 31st in March. A fixed 30-day period
+  // does neither: it walks the billing day backwards about five days a year, and it fits 12.17 of
+  // them into a year on a package sold "per month".
+  //
+  // `currentPeriodStart` is the other end of that window, and what proration measures against —
+  // an assumed period length cannot, because no two months are the same length.
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  // Day of the month the package bills on, 1-31; null while the team is on `free`. Stored rather
+  // than re-derived from `currentPeriodEnd`, because that date is CLAMPED: reading the anchor back
+  // off a February 28th would move a 31st-of-the-month subscription there permanently.
+  billingAnchorDay   Int?
+  billingPeriod      BillingPeriod @default(monthly)
+  autoRenew          Boolean       @default(true)
+  lastRenewalAt      DateTime?
   // Why the last renewal attempt failed (e.g. "insufficient_credit"), for the dashboard banner.
-  lastFailureCode  String?
+  lastFailureCode    String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

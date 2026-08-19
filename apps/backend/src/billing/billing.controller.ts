@@ -11,15 +11,23 @@ import {
 } from '@nestjs/common';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString } from 'class-validator';
 import { Type } from 'class-transformer';
-import type { CreditTransaction, Deposit, PaidPlanTier, Subscription } from '@lobster/shared-types';
+import type {
+  BillingPeriod,
+  CreditTransaction,
+  Deposit,
+  PaidPlanTier,
+  Subscription,
+} from '@lobster/shared-types';
 
 import { CurrentUser } from '../auth/current-user.decorator';
 import { EmailVerifiedGuard } from '../auth/email-verified.guard';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ok, type ApiResponse } from '../common/api-response';
+import { AdminTokenGuard } from './admin-token.guard';
 import { BillingService, type BillingOverview, type DepositInstruction } from './billing.service';
 import { DEPOSIT_CHAINS } from './deposit-chains';
 import { PAYMENT_PROVIDER, type PaymentProvider } from './payments/payment-provider';
+import { RenewalService, type RenewalSweepResult } from './renewal.service';
 
 /**
  * Minimal shape of the incoming request this controller touches. Avoids a hard dependency on
@@ -31,6 +39,7 @@ interface WebhookRequest {
 }
 
 const PAID_TIERS: PaidPlanTier[] = ['light', 'plus', 'pro', 'max'];
+const BILLING_PERIODS: BillingPeriod[] = ['monthly', 'yearly'];
 const CHAIN_CODES = DEPOSIT_CHAINS.map((c) => c.code);
 
 class CreateDepositDto {
@@ -50,6 +59,15 @@ class CreateDepositDto {
 class PurchaseDto {
   @IsIn(PAID_TIERS)
   tier!: PaidPlanTier;
+
+  /**
+   * Monthly, or twelve months up front at the yearly discount. Optional, defaulting to monthly:
+   * the price of a package is a decision the buyer makes, and omitting it means the cheaper
+   * commitment rather than the larger charge.
+   */
+  @IsOptional()
+  @IsIn(BILLING_PERIODS)
+  period?: BillingPeriod;
 
   // Honoured only after the caller's membership is verified server-side — never trusted as an
   // ambient identity.
@@ -79,6 +97,7 @@ class AutoRenewDto {
 export class BillingController {
   constructor(
     private readonly billing: BillingService,
+    private readonly renewals: RenewalService,
     @Inject(PAYMENT_PROVIDER) private readonly payments: PaymentProvider,
   ) {}
 
@@ -137,7 +156,9 @@ export class BillingController {
     @CurrentUser() user: { id: string },
     @Body() dto: PurchaseDto,
   ): Promise<ApiResponse<Subscription>> {
-    return ok(await this.billing.purchasePlan(user.id, dto.tier, dto.teamId));
+    return ok(
+      await this.billing.purchasePlan(user.id, dto.tier, dto.period ?? 'monthly', dto.teamId),
+    );
   }
 
   @Post('auto-renew')
@@ -147,6 +168,25 @@ export class BillingController {
     @Body() dto: AutoRenewDto,
   ): Promise<ApiResponse<Subscription>> {
     return ok(await this.billing.setAutoRenew(user.id, dto.autoRenew, dto.teamId));
+  }
+
+  /**
+   * Run one renewal sweep now, for a deployment that drives billing from its own scheduler.
+   *
+   * THE ONLY WAY TO CHARGE ANYTHING when `RENEWAL_SWEEP_INTERVAL_MS=0`. That setting turns the
+   * in-process timer off, which without this route means renewals simply stop happening — silently,
+   * because nothing errors when a job that was never scheduled does not run.
+   *
+   * Guarded by a shared secret rather than a session (see {@link AdminTokenGuard}), and safe to
+   * call as often as a cron likes: the sweep is the same idempotent pass the timer runs, so two
+   * overlapping invocations cannot double-charge a subscription. The counts come back so the caller
+   * has something to log and alert on.
+   */
+  @Post('admin/renewal-sweep')
+  @UseGuards(AdminTokenGuard)
+  @HttpCode(200)
+  async renewalSweep(): Promise<ApiResponse<RenewalSweepResult>> {
+    return ok(await this.renewals.sweep());
   }
 
   /**

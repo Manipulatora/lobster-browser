@@ -46,9 +46,12 @@ export interface AgentLlmConfig {
 }
 
 /**
- * Deep browser-config operations, in two families:
+ * Deep browser-config operations, in three families:
  *   - LIVE (over leak-free CDP, applied instantly, no relaunch): clear one site's cookies, clear all
  *     cookies, site-data / cache, per-site permissions, and download behavior.
+ *   - PREF (`set_pref` / `get_pref`): read or write one Chromium preference through the browser's own
+ *     settings API, semantically and instantly. This is the precise path — no page is shown, no control
+ *     is clicked — and it is restricted to a curated allow-list of keys with closed value domains.
  *   - UI (the chrome://settings fallback): open a vetted settings page so the agent can operate the
  *     real control with humanized input; Chromium applies the change live. `open_settings` is the
  *     general long-tail entry; `set_theme` / `set_privacy` / `set_content_default` are shortcuts to the
@@ -61,6 +64,8 @@ export type BrowserConfigOp =
   | 'clear_cache'
   | 'set_permission'
   | 'set_downloads'
+  | 'set_pref'
+  | 'get_pref'
   | 'open_settings'
   | 'set_theme'
   | 'set_privacy'
@@ -243,8 +248,12 @@ export type AgentAction =
       setting?: 'granted' | 'denied' | 'prompt';
       /** Download handling for set_downloads. */
       behavior?: 'allow' | 'deny' | 'default';
-      /** Generic value for pref-backed ops (theme, privacy toggles, content defaults). */
+      /** Chromium preference key for set_pref / get_pref, e.g. `download.prompt_for_download`. */
+      pref?: string;
+      /** Generic value for pref-backed ops (theme, privacy toggles, content defaults, set_pref). */
       value?: string;
+      /** The new value for a list-valued preference, e.g. the startup pages. */
+      values?: string[];
       note?: string;
     }
   /** Ask the human without disclosing the reply to the model when `sensitive` + `targetId` are set. */

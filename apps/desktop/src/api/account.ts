@@ -10,6 +10,12 @@ export interface AccountSummary {
   tier: string;
   /** Profiles this plan allows — the cap the server actually enforces on create. */
   profileLimit: number;
+  /**
+   * When the next renewal is charged, ISO-8601. Absent on `free`, and absent once auto-renew is off
+   * — there is no next payment to name, and showing the period end as one would promise a charge
+   * that will not happen.
+   */
+  nextBillingAt?: string;
 }
 
 /**

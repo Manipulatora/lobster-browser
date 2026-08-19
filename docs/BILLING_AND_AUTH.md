@@ -8,8 +8,11 @@ decisions behind the parts that are not obvious.
 ## 1. The billing model in one paragraph
 
 Users hold a **Credit** balance denominated in USD. They top it up with cryptocurrency, in any
-amount, at any time. Buying a package **debits Credit**. Every 30 days the renewal sweep debits it
-again for the same package. If the balance is short, the subscription lapses to `past_due` and
+amount, at any time. Buying a package **debits Credit**. On the same calendar day each month — or
+each year on a yearly package — the renewal sweep debits it again for the same package. The billing
+day is anchored at purchase and clamped to the length of the target month, so a subscription bought
+on the 31st bills on the 28th in February and returns to the 31st in March rather than drifting
+earlier every month. If the balance is short, the subscription lapses to `past_due` and
 recovers by itself the next time a deposit lands. There is no card, no external subscription
 object, and no recurring mandate against anything outside the account — Credit behaves like a
 prepaid balance, and the only way money enters the system is a confirmed on-chain payment.
@@ -18,7 +21,7 @@ prepaid balance, and the only way money enters the system is a confirmed on-chai
 
 | Tier  | Price  | Profiles |
 | ----- | ------ | -------- |
-| Free  | $0     | 5        |
+| Free  | $0     | 3        |
 | Light | $10/mo | 10       |
 | Plus  | $60/mo | 100      |
 | Pro   | $100/mo| 200      |

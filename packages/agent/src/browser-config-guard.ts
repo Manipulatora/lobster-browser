@@ -18,11 +18,12 @@ import { parse as parseDomain } from 'tldts';
  *      that unblocks it. Changing these would either contradict the persona (a tell) or leak the real
  *      machine — the exact thing the product prevents.
  *
- *   2. CONFIG NEVER RUNS ON A PAGE TARGET. Phase-1 ops execute over the browser-target CDP session and
- *      pref ops rewrite the on-disk profile — neither enables a page-observable domain, so config adds
- *      no automation tell. (Enforced by the driver; this guard screens intent.)
+ *   2. CONFIG NEVER RUNS ON A PAGE TARGET. Live ops execute over the browser-target CDP session and
+ *      pref ops run in a throwaway browser-internal page that is never shown — neither enables a
+ *      page-observable domain, so config adds no automation tell. (Enforced by the driver; this guard
+ *      screens intent.)
  *
- * The screen is intentionally conservative: for the free-form surfaces (a pref value, or a
+ * The screen is intentionally conservative: for the free-form surfaces (a preference key, or a
  * chrome://settings/flags field the UI-fallback drives) it DENIES BY DEFAULT on any fingerprint token,
  * because a missed tell is a de-anonymization and a false block is a harmless "can't do that".
  */
@@ -36,7 +37,14 @@ export interface ConfigAssessment {
    * operates the real control with humanized input; Chromium applies the change live (no relaunch).
    */
   settingsUrl?: string;
+  /** For `set_pref`: the screened, typed preference writes the driver may apply verbatim. */
+  prefs?: Array<{ key: string; value: PrefValue }>;
+  /** For `get_pref`: the screened preference keys the driver may read. */
+  keys?: string[];
 }
+
+/** The value shapes Chromium's settings API accepts for the preferences in {@link SAFE_PREFS}. */
+export type PrefValue = boolean | number | string | string[];
 
 /** Live, page-invisible ops that run over leak-free CDP (applied instantly). */
 const LIVE_OPS: ReadonlySet<BrowserConfigOp> = new Set([
@@ -47,6 +55,9 @@ const LIVE_OPS: ReadonlySet<BrowserConfigOp> = new Set([
   'set_permission',
   'set_downloads',
 ]);
+
+/** Preference ops: one key read or written through the browser's own settings API. */
+const PREF_OPS: ReadonlySet<BrowserConfigOp> = new Set(['set_pref', 'get_pref']);
 
 /** UI-fallback ops: open a vetted chrome://settings page and let the agent operate the control. */
 const UI_OPS: ReadonlySet<BrowserConfigOp> = new Set([
@@ -68,7 +79,6 @@ const SAFE_SETTINGS: ReadonlyMap<string, string> = new Map([
   ['dark mode', 'appearance'],
   ['dark', 'appearance'],
   ['light', 'appearance'],
-  ['font', 'appearance'],
   ['privacy', 'privacy'],
   ['privacy and security', 'privacy'],
   ['security', 'security'],
@@ -86,25 +96,207 @@ const SAFE_SETTINGS: ReadonlyMap<string, string> = new Map([
   ['camera', 'content/camera'],
   ['microphone', 'content/microphone'],
   ['sound', 'content/sound'],
+  ['ads', 'content/ads'],
+  ['automatic downloads', 'content/automaticDownloads'],
+  ['clipboard', 'content/clipboard'],
+  ['sensors', 'content/sensors'],
+  ['motion sensors', 'content/sensors'],
+  ['pdf', 'content/pdfDocuments'],
+  ['pdfs', 'content/pdfDocuments'],
+  ['permissions', 'content'],
+  ['site permissions', 'content'],
+  ['all sites', 'content/all'],
+  ['site data', 'content/siteData'],
   ['downloads', 'downloads'],
+  ['download', 'downloads'],
   ['autofill', 'autofill'],
   ['passwords', 'passwords'],
+  ['password manager', 'passwords'],
+  ['saved passwords', 'passwords'],
   ['payment methods', 'payments'],
+  ['payments', 'payments'],
+  ['credit cards', 'payments'],
   ['addresses', 'addresses'],
+  ['address', 'addresses'],
   ['search', 'search'],
   ['search engine', 'search'],
+  ['search engines', 'search'],
+  ['default search engine', 'search'],
   ['on startup', 'onStartup'],
   ['startup', 'onStartup'],
+  ['startup pages', 'onStartup'],
   ['home', 'appearance'],
+  ['home page', 'appearance'],
+  ['homepage', 'appearance'],
+  ['home button', 'appearance'],
+  ['bookmarks bar', 'appearance'],
+  // Only the unambiguous deletion wordings: "history" on its own is as likely to mean reading it, and
+  // this destination is a dialog whose primary button erases data.
+  ['clear browsing data', 'clearBrowserData'],
+  ['clear browsing history', 'clearBrowserData'],
+  ['clear history', 'clearBrowserData'],
+  ['safety check', 'safetyCheck'],
+  ['ad privacy', 'adPrivacy'],
+  ['privacy sandbox', 'adPrivacy'],
   ['accessibility', 'accessibility'],
   ['performance', 'performance'],
   ['memory', 'performance'],
+  ['memory saver', 'performance'],
   // Backgrounds and other New Tab customisation live on the New Tab page, not in Appearance.
   ['new tab', '@new-tab'],
   ['new tab page', '@new-tab'],
   ['background', '@new-tab'],
   ['background image', '@new-tab'],
   ['wallpaper', '@new-tab'],
+]);
+
+interface SafePref {
+  /** How the model's text becomes the typed value the settings API expects. */
+  kind: 'boolean' | 'number' | 'string' | 'url' | 'url-list';
+  /** For `number`/`string` keys: every accepted value, with what it means (quoted on a bad value). */
+  choices?: ReadonlyArray<readonly [value: number | string, meaning: string]>;
+}
+
+const BOOLEAN: SafePref = { kind: 'boolean' };
+const WEB_URL: SafePref = { kind: 'url' };
+const WEB_URL_LIST: SafePref = { kind: 'url-list' };
+const oneOf = (
+  kind: 'number' | 'string',
+  ...choices: Array<readonly [number | string, string]>
+): SafePref => ({ kind, choices });
+
+/**
+ * The preferences the agent may read or write, and the complete set of values each one accepts.
+ *
+ * Chromium's settings API reaches hundreds of keys — `proxy`, `intl.accept_languages` and the font
+ * families among them — so "whichever key the model names" is not a boundary, it is the absence of one.
+ * This is therefore an ALLOW-LIST, built from keys that (a) the real settings UI writes, so the effect is
+ * one a human could have produced from the same browser, and (b) have a CLOSED value domain: a boolean,
+ * an enumeration, or an http(s) URL. That second property is what makes a value screen unnecessary on
+ * this path — nothing free-form reaches the browser, so a page cannot talk the model into writing
+ * arbitrary text into the profile the way it could into a settings text field.
+ *
+ * The identity and network layer is absent BY CONSTRUCTION and screened again by FINGERPRINT_TELLS:
+ * languages/locale, timezone, proxy/PAC/DNS, WebRTC, user-agent, zoom, fonts and font sizes, screen
+ * metrics. Three omissions are worth naming because they look like ordinary settings:
+ *   - `hardware_acceleration_mode.enabled` swaps the GPU for SwiftShader, rewriting the WebGL
+ *     vendor/renderer strings the persona declares.
+ *   - `webkit.webprefs.encrypted_media_enabled` and the protected-media content default change what a
+ *     DRM capability probe reports, and that probe carries a device identity.
+ *   - `download.default_directory` names a filesystem path, which is outside the agent's file fence.
+ *
+ * Reads go through the same list as writes: a run's outcomes travel to a third-party model, so
+ * `get_pref` on the proxy or the accept-languages string would be an exfiltration of the identity it
+ * exists to protect.
+ */
+const SAFE_PREFS: ReadonlyMap<string, SafePref> = new Map<string, SafePref>([
+  // Downloads.
+  ['download.prompt_for_download', BOOLEAN],
+  ['download_bubble.partial_view_enabled', BOOLEAN],
+
+  // Autofill and payments.
+  ['autofill.profile_enabled', BOOLEAN],
+  ['autofill.credit_card_enabled', BOOLEAN],
+  ['autofill.payment_cvc_storage', BOOLEAN],
+  ['payments.can_make_payment_enabled', BOOLEAN],
+
+  // Password manager.
+  ['credentials_enable_service', BOOLEAN],
+  ['credentials_enable_autosignin', BOOLEAN],
+  ['profile.password_manager_leak_detection', BOOLEAN],
+
+  // Safe Browsing and connection security.
+  ['safebrowsing.enabled', BOOLEAN],
+  ['safebrowsing.enhanced', BOOLEAN],
+  ['safebrowsing.scout_reporting_enabled', BOOLEAN],
+  ['https_only_mode_enabled', BOOLEAN],
+
+  // Privacy.
+  [
+    'profile.cookie_controls_mode',
+    oneOf(
+      'number',
+      [0, 'allow third-party cookies'],
+      [1, 'block third-party cookies'],
+      [2, 'block third-party cookies in Incognito only'],
+    ),
+  ],
+  [
+    'generated.cookie_default_content_setting',
+    oneOf(
+      'string',
+      ['allow', 'sites may store cookies'],
+      ['session_only', 'cookies are cleared when the browser closes'],
+      ['block', 'no site may store cookies'],
+    ),
+  ],
+  ['search.suggest_enabled', BOOLEAN],
+  ['alternate_error_pages.enabled', BOOLEAN],
+  ['url_keyed_anonymized_data_collection.enabled', BOOLEAN],
+  ['privacy_sandbox.m1.topics_enabled', BOOLEAN],
+  ['privacy_sandbox.m1.fledge_enabled', BOOLEAN],
+  ['privacy_sandbox.m1.ad_measurement_enabled', BOOLEAN],
+  ['safety_hub.unused_site_permissions_revocation.enabled', BOOLEAN],
+
+  // Site settings. The allow/block DEFAULT for a content type is not a preference — the settings UI
+  // writes it through its own site-settings handler — so these two reach the prompting style only, and
+  // "block notifications for every site" stays a job for the content pages in SAFE_SETTINGS.
+  [
+    'generated.notification',
+    oneOf(
+      'number',
+      [0, 'sites may ask, with the normal prompt'],
+      [1, 'sites may ask, with a quieter prompt'],
+      [2, 'quieter prompts on sites where they are usually dismissed'],
+    ),
+  ],
+  [
+    'generated.geolocation',
+    oneOf(
+      'number',
+      [0, 'sites may ask, with the normal prompt'],
+      [1, 'sites may ask, with a quieter prompt'],
+      [2, 'quieter prompts on sites where they are usually dismissed'],
+    ),
+  ],
+  ['plugins.always_open_pdf_externally', BOOLEAN],
+
+  // Startup, home, and appearance.
+  [
+    'session.restore_on_startup',
+    oneOf(
+      'number',
+      [1, 'continue where you left off'],
+      [4, 'open the pages in session.startup_urls'],
+      [5, 'open the New Tab page'],
+    ),
+  ],
+  ['session.startup_urls', WEB_URL_LIST],
+  ['homepage', WEB_URL],
+  ['homepage_is_newtabpage', BOOLEAN],
+  ['browser.show_home_button', BOOLEAN],
+  ['bookmark_bar.show_on_all_tabs', BOOLEAN],
+  ['browser.ctrl_tab_mru', BOOLEAN],
+
+  // Text services. The language LIST is identity and stays out; whether the browser offers to translate
+  // or checks spelling at all is not, and neither is observable to a page.
+  ['translate.enabled', BOOLEAN],
+  ['browser.enable_spellchecking', BOOLEAN],
+  ['spellcheck.use_spelling_service', BOOLEAN],
+
+  // Accessibility.
+  ['settings.a11y.caretbrowsing.enabled', BOOLEAN],
+  ['settings.a11y.focus_highlight', BOOLEAN],
+  ['settings.a11y.enable_accessibility_image_labels', BOOLEAN],
+  ['settings.a11y.overscroll_history_navigation', BOOLEAN],
+  ['accessibility.captions.live_caption_enabled', BOOLEAN],
+
+  // Performance and system.
+  [
+    'performance_tuning.high_efficiency_mode.state',
+    oneOf('number', [0, 'memory saver off'], [2, 'memory saver on']),
+  ],
+  ['background_mode.enabled', BOOLEAN],
 ]);
 
 /** Fixed page for the pref-shortcut ops. */
@@ -131,6 +323,9 @@ const FINGERPRINT_TELLS: readonly RegExp[] = [
   /\bdns\b/,
   /\bdoh\b/,
   /\bip[\s-]?(leak|address|handling)\b/,
+  // "System" is where Chromium keeps the proxy and the graphics stack, and on Linux the window frame
+  // too — three different ways into the identity layer behind one innocuous word.
+  /\bsystem\b/,
   // Identity strings
   /user[\s-]?agent/,
   /\bua[\s-]?(string|data|hints?|ch)\b/,
@@ -162,10 +357,16 @@ const FINGERPRINT_TELLS: readonly RegExp[] = [
   /\bgpu\b/,
   /\brenderer\b/,
   /\bunmasked\b/,
+  // Turning hardware acceleration off is not a performance preference: Chromium falls back to
+  // SwiftShader, and the WebGL vendor/renderer strings the persona declares change with it.
+  /hardware[\s-]?acceleration/,
   // Audio / media fingerprint
   /audio[\s-]?(context|fingerprint)/,
   /media[\s-]?devices?/,
   /enumerate[\s-]?devices/,
+  // A CDM capability probe carries a device identity, and its availability is directly observable.
+  /(protected|encrypted)[\s-]?media/,
+  /\bwidevine\b/,
   // Hardware
   /hardware[\s-]?concurrency/,
   /\bcpu[\s-]?cores?\b/,
@@ -300,6 +501,55 @@ export function normalizeCookieDomain(raw?: string): string {
   return host;
 }
 
+/**
+ * Canonicalize a preference key at the parse boundary, so the allow-list lookup, the approval prompt and
+ * the journal entry all name the same setting. Chromium's keys are lower-case throughout.
+ */
+export function normalizePrefKey(raw?: string): string {
+  return (raw ?? '').trim().toLowerCase();
+}
+
+/**
+ * Read a key as the phrase it is. A tell written with dots and underscores — `intl.accept_languages`,
+ * `webkit.webprefs.fonts.standard` — walks straight past patterns that expect words, so the separators
+ * become spaces before the denylist sees it.
+ */
+function prefKeyPhrase(key: string): string {
+  return key.replace(/[._-]+/g, ' ');
+}
+
+/**
+ * Canonicalize a URL a preference will point the browser at (home page, startup pages).
+ *
+ * Only http(s) survives, and a bare host is promoted rather than rejected. A preference is not an
+ * ordinary navigation: `chrome://policy` as the startup page would open a privileged WebUI on every
+ * launch — the one page that can set enterprise policy, proxy included — and `javascript:` / `data:` /
+ * `file:` would run supplied content with the browser's own first-party feel, all without the
+ * navigation policy ever seeing a destination.
+ */
+function normalizePrefUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 2_048) return '';
+  const candidate = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return '';
+  }
+  if (
+    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+    url.username !== '' ||
+    url.password !== ''
+  ) {
+    return '';
+  }
+  const host = canonicalBrowserHostname(url.hostname);
+  if (!host) return '';
+  const port = url.port ? `:${url.port}` : '';
+  return `${url.protocol}//${originHost(host)}${port}${url.pathname}${url.search}${url.hash}`;
+}
+
 /** Return lower-case ASCII/IDNA hostname form, or an empty result for non-host input. */
 function canonicalBrowserHostname(raw: string): string {
   const trimmed = raw.trim();
@@ -359,6 +609,26 @@ export function assessBrowserConfig(
 ): ConfigAssessment {
   const { op } = action;
 
+  // Preference surface. The key is screened for tells FIRST, so a request for the proxy or the language
+  // list is refused as the hard limit it is rather than as an unknown key, and only then looked up in
+  // the allow-list. Nothing unlisted reaches the browser, in either direction.
+  if (PREF_OPS.has(op)) {
+    const key = normalizePrefKey(action.pref);
+    if (!key) return block(`${op} needs a "pref" naming the browser setting`);
+    const tell = hasFingerprintTell(prefKeyPhrase(key));
+    if (tell) return block(fingerprintRefusal(tell));
+    const spec = SAFE_PREFS.get(key);
+    if (!spec) {
+      return block(
+        `${JSON.stringify(key)} is not a preference the agent may touch. Available: ${[...SAFE_PREFS.keys()].join(', ')}. For anything else, open the area with open_settings and use the control.`,
+      );
+    }
+    if (op === 'get_pref') return { verdict: 'allow', keys: [key] };
+    const coerced = coercePrefValue(spec, action.value, action.values);
+    if ('error' in coerced) return block(`${key} ${coerced.error}`);
+    return { verdict: 'allow', prefs: [{ key, value: coerced.value }] };
+  }
+
   // Live, inherently-safe surfaces (cookies / cache / permissions / downloads). These never touch the
   // fingerprint, so domains are NOT screened for tell-tokens (a site literally named "fonts.google.com"
   // must remain clearable). Only set_permission is constrained, to the real Permissions-API grants.
@@ -399,6 +669,49 @@ export function assessBrowserConfig(
   return block(`unsupported browser-config op ${JSON.stringify(op)}`);
 }
 
+type CoercedPref = { value: PrefValue } | { error: string };
+
+/**
+ * Turn the model's text into the typed value the settings API expects, or explain what the preference
+ * accepts. The rejection is deterministic and happens BEFORE the durable write barrier, so a mistyped
+ * value costs a step and never a half-applied setting: the driver verifies by read-back, and a value the
+ * browser silently coerced would read back as "applied" while meaning something else.
+ */
+function coercePrefValue(
+  spec: SafePref,
+  raw: string | undefined,
+  list: string[] | undefined,
+): CoercedPref {
+  if (spec.kind === 'url-list') {
+    const entries = list ?? (raw ? [raw] : []);
+    const urls = entries.map((entry) => normalizePrefUrl(entry));
+    if (urls.length === 0 || urls.some((url) => !url)) {
+      return { error: 'takes http(s) page URLs in "values"' };
+    }
+    return { value: urls };
+  }
+  const text = (raw ?? '').trim();
+  if (!text) return { error: 'needs a "value"' };
+  if (spec.kind === 'url') {
+    const url = normalizePrefUrl(text);
+    return url ? { value: url } : { error: 'takes one http(s) page URL' };
+  }
+  if (spec.kind === 'boolean') {
+    const lower = text.toLowerCase();
+    if (['true', 'on', 'yes', 'enable', 'enabled', '1'].includes(lower)) return { value: true };
+    if (['false', 'off', 'no', 'disable', 'disabled', '0'].includes(lower)) return { value: false };
+    return { error: 'accepts true or false' };
+  }
+  const choices = spec.choices ?? [];
+  const wanted = spec.kind === 'number' ? Number(text) : text.toLowerCase();
+  const chosen = choices.find(([value]) => value === wanted);
+  return chosen
+    ? { value: chosen[0] }
+    : {
+        error: `accepts ${choices.map(([value, meaning]) => `${JSON.stringify(value)} (${meaning})`).join(', ')}`,
+      };
+}
+
 /**
  * Resolve a UI op to a vetted `chrome://settings/...` URL, or null if the area is unknown/blocked.
  * Pref-shortcut ops map to a fixed page; `open_settings` looks its `value` up in the safe allow-list.
@@ -414,7 +727,30 @@ export function resolveSettingsTarget(op: BrowserConfigOp, value?: string): stri
   const path =
     SAFE_SETTINGS.get(key) ?? SAFE_SETTINGS.get(key.replace(/\bsettings?\b/g, '').trim());
   if (path === '@new-tab') return 'chrome://new-tab-page/';
-  return path ? `chrome://settings/${path}` : null;
+  if (path) return `chrome://settings/${path}`;
+  // A named area is a destination; anything with URL punctuation is an attempt to pick the destination
+  // directly, and that is what the allow-list exists to prevent. Refuse it rather than searching for it.
+  if (/[:/\\?#]/.test(key)) return null;
+  return settingsSearchTarget(key);
+}
+
+/**
+ * The last resort for a control whose area simply has no synonym above.
+ *
+ * The allow-list enumerates DESTINATIONS, not settings, so a perfectly safe control could dead-end just
+ * because nobody had thought of the word for it. Searching lands on `chrome://settings/` — a page that
+ * changes nothing by itself — and lets the agent find the control the way a person would. It does not
+ * widen the boundary: the words have already cleared the denylist, only plain words survive (so a query
+ * can never smuggle a path or a second URL), and the moment a result navigates into a non-vetted
+ * subsection the loop refuses to act there.
+ */
+function settingsSearchTarget(value: string): string | null {
+  const terms = value
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .slice(0, 60)
+    .trim();
+  return terms ? `chrome://settings/?search=${encodeURIComponent(terms)}` : null;
 }
 
 /**
@@ -433,7 +769,13 @@ export function isVettedBrowserConfigUrl(raw: string): boolean {
   if (url.hostname === 'new-tab-page' || url.hostname === 'newtab') return true;
   if (url.hostname !== 'settings') return false;
   const path = url.pathname.replace(/^\/+|\/+$/g, '');
-  if (/(^|\/)(languages?|fonts?|system|proxy)(\/|$)/i.test(path)) return false;
+  // Matched on any part of a segment, not the whole word: `content/localFonts` and `content/zoomLevels`
+  // are subsections of an allowed base, so a whole-segment test would have let the fingerprint layer in
+  // through the front door of the page it guards.
+  if (/(^|\/)\p{L}*(languages?|fonts?|zoom|system|proxy)/iu.test(path)) return false;
+  // The settings root — with or without a `?search=` query — is the landing page of the search fallback.
+  // It carries no control of its own, and every subsection it links to is judged on its own URL.
+  if (path === '') return true;
   const allowed = new Set([...SAFE_SETTINGS.values()].filter((value) => value !== '@new-tab'));
   return [...allowed].some((base) => path === base || path.startsWith(`${base}/`));
 }

@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 
 import { AuthModule } from '../auth/auth.module';
 import { PrismaService } from '../prisma/prisma.service';
+import { AdminTokenGuard } from './admin-token.guard';
 import { AgentSpendService } from './agent-spend.service';
 import { BILLING_REPOSITORY } from './billing.repository';
 import { BillingController } from './billing.controller';
@@ -34,6 +35,7 @@ import { RenewalService } from './renewal.service';
     RenewalService,
     DepositReconciliationService,
     AgentSpendService,
+    AdminTokenGuard,
     {
       provide: BILLING_REPOSITORY,
       inject: [ConfigService, PrismaService],

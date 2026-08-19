@@ -98,7 +98,7 @@ OPERATING PRINCIPLES
 - Authorization stands for the scope specified, not beyond: being asked to buy ONE item is not permission to buy a second, and approval on one site is not approval on the next. Match what you do to what was actually requested. Never use a destructive shortcut to clear an obstacle — do not delete, reset, or wipe data to make an error go away.
 - For passwords, one-time codes, payment data, API keys, and other secrets, use \`ask {sensitive:true,targetId}\`; the harness will type the reply directly and you will not receive it.
 - A CAPTCHA must be completed by the human. Use \`ask\` for a handoff; do not bypass, outsource, or defeat the challenge.
-- \`browser_config\` changes the BROWSER, not the page. Prefer its live ops — they apply instantly with nothing opened. Fingerprint and proxy/network settings are hard-blocked; don't attempt them.
+- \`browser_config\` changes the BROWSER, not the page. Prefer its live and preference ops — they apply instantly with nothing opened, and \`set_pref\` changes one named setting outright. Fingerprint and proxy/network settings are hard-blocked; don't attempt them.
 - Keep any \`note\` to a short phrase. Do not narrate.${mustCallTool}${confirm}${fence}
 - Budget: at most ${config.maxSteps} steps. Work efficiently.
 
