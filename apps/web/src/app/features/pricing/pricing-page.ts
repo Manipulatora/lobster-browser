@@ -11,7 +11,8 @@ import { Router } from '@angular/router';
 
 import { AuthStore } from '../../core/auth/auth.store';
 import { BillingStore } from '../billing/billing.store';
-import { AuthModalService } from '../auth/auth-modal.service';
+import { PlanConfirmDialog } from '../billing/plan-confirm-dialog';
+import type { BillingPeriod, PaidPlanTier } from '../billing/billing.types';
 
 /** `free` is the state every account starts in; the other four are sellable. */
 type Tier = 'free' | 'light' | 'plus' | 'pro' | 'max';
@@ -107,12 +108,12 @@ const PLANS: readonly Plan[] = [
 /** Pricing page — five tiers, no marketing copy around them. */
 @Component({
   selector: 'app-pricing-page',
+  imports: [PlanConfirmDialog],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './pricing-page.html',
   styleUrl: './pricing-page.css',
 })
 export class PricingPage {
-  private readonly authModal = inject(AuthModalService);
   private readonly auth = inject(AuthStore);
   private readonly billing = inject(BillingStore);
   private readonly router = inject(Router);
@@ -120,6 +121,15 @@ export class PricingPage {
 
   protected readonly plans = PLANS;
   protected readonly period = signal<Period>('monthly');
+
+  /**
+   * The package the confirmation dialog is open on, or null when it is closed.
+   *
+   * Frozen at the moment the CTA was pressed — the term especially. Reading the live toggle from
+   * inside the dialog would let a stray click on Monthly re-price an open confirmation, and the
+   * user would be confirming one thing and paying for another.
+   */
+  protected readonly pending = signal<{ tier: PaidPlanTier; period: BillingPeriod } | null>(null);
 
   /** Percentage off, for the toggle's own label. */
   protected readonly discountPercent = Math.round(YEARLY_DISCOUNT * 100);
@@ -184,9 +194,24 @@ export class PricingPage {
     return this.period() === 'yearly' ? '/yr' : '/mo';
   }
 
+  /**
+   * Whether this card is a step UP from the package the account is on.
+   *
+   * Ranked off the order of {@link PLANS}, which is ascending — the same order the API's own
+   * catalog is in, so "bigger" means the same thing on both sides of the wire.
+   */
+  protected isUpgrade(plan: Plan): boolean {
+    const current = this.currentTier();
+    if (!current || current === 'free' || plan.tier === 'free') return false;
+    return rank(plan.tier) > rank(current);
+  }
+
   protected cta(plan: Plan): string {
     if (this.isCurrent(plan)) return 'Current plan';
-    return plan.tier === 'free' ? 'Start free' : `Get ${plan.name}`;
+    if (plan.tier === 'free') return 'Start free';
+    // "Upgrade" rather than "Get" when that is what it is: the card is offering to replace a
+    // package the visitor is paying for, and the button is the only place that says so.
+    return this.isUpgrade(plan) ? `Upgrade to ${plan.name}` : `Get ${plan.name}`;
   }
 
   protected setPeriod(period: Period): void {
@@ -194,20 +219,47 @@ export class PricingPage {
   }
 
   /**
-   * Every CTA leads to the same place — the billing page, where Credit is topped up and a package
-   * is actually bought. A signed-out visitor signs up first, in a modal, so the price table stays
-   * on screen behind it rather than being replaced by a form.
+   * Act on a CTA, carrying the chosen package with it.
    *
-   * The plan is not carried through. Purchasing costs Credit the account does not have yet, so a
-   * brand-new user cannot complete the chosen package regardless; pre-selecting it would promise
-   * something the next screen has to withdraw.
+   * SIGNED IN — the confirmation dialog opens here, over the table. Sending the user to the
+   * account page to press a second button is a step that exists only because the purchase used to
+   * live there; the decision was made on this card, and what follows it is a confirmation.
+   *
+   * SIGNED OUT — to `/signup`, a real URL, with the package in `next`. Authentication is still a
+   * dialog, but at a URL rather than over the table, because the round trip has to survive an
+   * email verification code that arrives in another tab. `next` is the same query the auth guard
+   * already uses, and the auth dialog follows it once the account exists, so the visitor lands
+   * back on the package they picked instead of on a page that has forgotten it.
    */
   protected choose(plan: Plan): void {
     if (this.isCurrent(plan)) return;
-    if (this.auth.isAuthenticated()) {
+    const tier: Tier = plan.tier;
+
+    if (!this.auth.isAuthenticated()) {
+      const next =
+        tier === 'free'
+          ? '/account/billing'
+          : `/account/billing?plan=${tier}&period=${this.period()}`;
+      void this.router.navigate(['/signup'], { queryParams: { next } });
+      return;
+    }
+
+    // The free tier is not sold, so there is nothing to confirm. It is reached by letting a package
+    // lapse, which is what the account page's auto-renew switch does.
+    if (tier === 'free') {
       void this.router.navigate(['/account/billing']);
       return;
     }
-    this.authModal.open('sign-up');
+
+    this.pending.set({ tier, period: this.period() });
   }
+
+  protected closeConfirm(): void {
+    this.pending.set(null);
+  }
+}
+
+/** Position in the ascending price list; -1 for the free tier, which is below all four. */
+function rank(tier: Tier): number {
+  return tier === 'free' ? -1 : PLANS.findIndex((p) => p.tier === tier);
 }

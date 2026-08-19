@@ -332,7 +332,7 @@ function openEntry(zip: ZipFile, entry: Entry): Promise<NodeJS.ReadableStream> {
   });
 }
 
-async function validateExtensionManifest(root: string): Promise<void> {
+async function validateExtensionManifest(root: string): Promise<ExtensionManifestFacts> {
   const manifestPath = join(root, 'manifest.json');
   const manifestStat = await lstat(manifestPath).catch(() => undefined);
   if (!manifestStat?.isFile() || manifestStat.isSymbolicLink()) {
@@ -347,12 +347,106 @@ async function validateExtensionManifest(root: string): Promise<void> {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
     throw new Error('extension manifest.json is not an object');
   }
-  const version = (manifest as Record<string, unknown>).manifest_version;
+  const fields = manifest as Record<string, unknown>;
+  const version = fields.manifest_version;
   if (version !== 2 && version !== 3) throw new Error('extension manifest_version must be 2 or 3');
+  return {
+    manifestVersion: version,
+    ...(typeof fields.version === 'string' ? { version: fields.version } : {}),
+    ...(typeof fields.name === 'string' ? { name: fields.name } : {}),
+  };
+}
+
+interface ExtensionManifestFacts {
+  manifestVersion: 2 | 3;
+  version?: string;
+  name?: string;
+}
+
+/**
+ * The stamp written inside every unpacked extension directory, and the reason a launch no longer
+ * re-extracts one it already has.
+ *
+ * `digest` identifies the SOURCE the directory was produced from — the CRX bytes for a web-store
+ * extension, a walk of the tree for a local one. A launch that finds a matching stamp keeps the
+ * directory. That is worth hundreds of milliseconds on every launch of a profile with a large
+ * extension (the unpack is bounded at 256 MB), and it is also the difference between a developer's
+ * in-place edit surviving a relaunch and being silently overwritten.
+ *
+ * `version` is here because nothing else records it. The web-store download URL asks for `uc` — the
+ * latest published build — so the version a profile runs is whatever Google served that day, and
+ * without a stamp there is no way to answer "which version was this session established under" after
+ * the fact.
+ */
+const INSTALL_STAMP = '.lobster-extension.json';
+
+interface InstallStamp {
+  digest: string;
+  source: BrowserExtensionRef['source'];
+  id?: string;
+  /**
+   * The directory this extension occupies, which is what identifies it ACROSS versions.
+   *
+   * An unpacked extension has no store id, and its digest changes the moment a file does — so
+   * merging the ledger on the digest recorded an edited extension as a second install beside its own
+   * previous version instead of replacing it. The slot is derived from the source path, so it
+   * survives the edit that the digest exists to detect.
+   */
+  slot?: string;
+  name?: string;
+  version?: string;
+  installedAt: string;
+}
+
+async function readStamp(destination: string): Promise<InstallStamp | undefined> {
+  const raw = await readFile(join(destination, INSTALL_STAMP), 'utf8').catch(() => undefined);
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof (parsed as InstallStamp).digest === 'string'
+    ) {
+      return parsed as InstallStamp;
+    }
+  } catch {
+    // A stamp we cannot read is a stamp we do not trust: fall through and reinstall.
+  }
+  return undefined;
+}
+
+/**
+ * A digest of a local directory as a build tool would take it: every file's relative path, size and
+ * modification time, in a stable order. Deliberately not a content hash — the tree is bounded at
+ * 256 MB and reading all of it to decide whether to copy all of it would cost what it saves.
+ */
+async function directoryFingerprint(root: string): Promise<string> {
+  const { readdir } = await import('node:fs/promises');
+  const hash = createHash('sha256');
+  const walk = async (dir: string, prefix: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name, 'en'));
+    for (const entry of entries) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const info = await lstat(join(dir, entry.name));
+      if (info.isDirectory()) {
+        hash.update(`d:${rel}\n`);
+        await walk(join(dir, entry.name), rel);
+      } else if (info.isFile()) {
+        hash.update(`f:${rel}:${info.size}:${Math.trunc(info.mtimeMs)}\n`);
+      }
+    }
+  };
+  await walk(root, '');
+  return hash.digest('hex');
 }
 
 /** Extract a verified ZIP with traversal, symlink, special-file, count and expansion limits. */
-export async function extractExtensionZip(zipBytes: Buffer, destination: string): Promise<void> {
+export async function extractExtensionZip(
+  zipBytes: Buffer,
+  destination: string,
+): Promise<ExtensionManifestFacts> {
   const parent = dirname(destination);
   await mkdir(parent, { recursive: true });
   const staging = await mkdtemp(join(parent, '.extension-'));
@@ -405,16 +499,20 @@ export async function extractExtensionZip(zipBytes: Buffer, destination: string)
       });
       zip.readEntry();
     });
-    await validateExtensionManifest(staging);
+    const facts = await validateExtensionManifest(staging);
     await rm(destination, { recursive: true, force: true });
     await rename(staging, destination);
+    return facts;
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     throw error;
   }
 }
 
-async function snapshotUnpackedDirectory(source: string, destination: string): Promise<void> {
+async function snapshotUnpackedDirectory(
+  source: string,
+  destination: string,
+): Promise<ExtensionManifestFacts> {
   if (!isAbsolute(source)) throw new Error('local unpacked extension path must be absolute');
   const sourceStat = await lstat(source).catch(() => {
     throw new Error(`local unpacked extension path does not exist: ${source}`);
@@ -461,9 +559,10 @@ async function snapshotUnpackedDirectory(source: string, destination: string): P
   };
   try {
     await copyTree(root, staging);
-    await validateExtensionManifest(staging);
+    const facts = await validateExtensionManifest(staging);
     await rm(destination, { recursive: true, force: true });
     await rename(staging, destination);
+    return facts;
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     throw error;
@@ -511,6 +610,7 @@ export async function prepareProfileExtensions(
   const root = join(userDataDir, 'lobium-extensions');
   await mkdir(root, { recursive: true, mode: 0o700 });
   const loaded: string[] = [];
+  const installed: InstallStamp[] = [];
   for (const [index, extension] of extensions.entries()) {
     if (!extension.enabled) continue;
     try {
@@ -519,20 +619,28 @@ export async function prepareProfileExtensions(
         if (!id) throw new Error('invalid Chrome Web Store id or detail URL');
         const crx = await cachedCrx(id, options);
         const destination = join(root, `webstore-${id}`);
-        await extractExtensionZip(crx.zip, destination);
+        const digest = createHash('sha256').update(crx.zip).digest('hex');
+        installed.push(
+          await install(destination, digest, 'chrome_web_store', id, () =>
+            extractExtensionZip(crx.zip, destination),
+          ),
+        );
         loaded.push(destination);
       } else if (extension.source === 'unpacked') {
         const path = extension.path?.trim();
         if (!path) throw new Error('local unpacked extension has no path');
-        const key = createHash('sha256')
-          .update(await realpath(path))
-          .digest('hex')
-          .slice(0, 24);
+        const source = await realpath(path);
+        const key = createHash('sha256').update(source).digest('hex').slice(0, 24);
         const destination = join(
           root,
           `local-${key}-${basename(path).replace(/[^A-Za-z0-9._-]/g, '_')}`,
         );
-        await snapshotUnpackedDirectory(path, destination);
+        const digest = await directoryFingerprint(source);
+        installed.push(
+          await install(destination, digest, 'unpacked', undefined, () =>
+            snapshotUnpackedDirectory(path, destination),
+          ),
+        );
         loaded.push(destination);
       } else {
         throw new Error(`unsupported extension source "${String(extension.source)}"`);
@@ -547,7 +655,71 @@ export async function prepareProfileExtensions(
       );
     }
   }
+  await recordInstalled(root, installed);
   return loaded;
+}
+
+/**
+ * Unpack into `destination` unless it already holds exactly this source, and stamp the result.
+ *
+ * The stamp is written LAST and inside the finished directory, so a run that dies mid-unpack leaves
+ * no stamp and the next launch redoes the work rather than trusting a partial tree.
+ */
+async function install(
+  destination: string,
+  digest: string,
+  source: BrowserExtensionRef['source'],
+  id: string | undefined,
+  unpack: () => Promise<ExtensionManifestFacts>,
+): Promise<InstallStamp> {
+  const existing = await readStamp(destination);
+  if (existing?.digest === digest) return existing;
+  const facts = await unpack();
+  const stamp: InstallStamp = {
+    digest,
+    source,
+    ...(id ? { id } : {}),
+    slot: basename(destination),
+    ...(facts.name ? { name: facts.name } : {}),
+    ...(facts.version ? { version: facts.version } : {}),
+    installedAt: new Date().toISOString(),
+  };
+  await writeFile(join(destination, INSTALL_STAMP), JSON.stringify(stamp), { mode: 0o600 });
+  return stamp;
+}
+
+/**
+ * The per-profile record of what is installed and at which version, at
+ * `<userDataDir>/lobium-extensions/installed.json`.
+ *
+ * It is a snapshot artifact (`extension-manifest` in the desktop's registry) so it TRAVELS, while the
+ * unpacked trees themselves deliberately do not — they are re-fetchable, and a 256 MB tree per
+ * profile per machine is not a backup, it is a mirror of the Web Store. What travels is the answer to
+ * "which extension, at which version, was this session established under", which is exactly what a
+ * restored profile cannot otherwise tell you: the next launch on the new machine fetches whatever the
+ * store publishes that day.
+ *
+ * Merged, not replaced: Lobee installs itself after the user's extensions and must not erase them.
+ */
+async function recordInstalled(root: string, entries: InstallStamp[]): Promise<void> {
+  if (!entries.length) return;
+  const path = join(root, 'installed.json');
+  const previous = await readFile(path, 'utf8')
+    .then((raw): InstallStamp[] => {
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as InstallStamp[]) : [];
+    })
+    .catch(() => [] as InstallStamp[]);
+  const merged = new Map<string, InstallStamp>();
+  for (const entry of [...previous, ...entries]) {
+    if (entry && typeof entry.digest === 'string') {
+      merged.set(entry.id ?? entry.slot ?? entry.digest, entry);
+    }
+  }
+  const ordered = [...merged.values()].sort((a, b) =>
+    (a.id ?? a.name ?? a.digest).localeCompare(b.id ?? b.name ?? b.digest, 'en'),
+  );
+  await writeFile(path, JSON.stringify(ordered, null, 2), { mode: 0o600 });
 }
 
 /**
@@ -586,7 +758,16 @@ export async function prepareDefaultLobeeExtension(
   const root = join(userDataDir, 'lobium-extensions');
   await mkdir(root, { recursive: true, mode: 0o700 });
   const destination = join(root, 'lobee');
-  await snapshotUnpackedDirectory(source, destination);
+  // Lobee is loaded into EVERY profile, so its re-copy is the one that happens most often — and the
+  // one whose cost is paid by users who never asked for an extension at all.
+  const stamp = await install(
+    destination,
+    await directoryFingerprint(source),
+    'unpacked',
+    LOBEE_EXTENSION_ID,
+    () => snapshotUnpackedDirectory(source, destination),
+  );
+  await recordInstalled(root, [stamp]);
 
   // Wire this profile's Lobee panel to the loopback agent bridge: an unguessable per-profile token +
   // the bridge origin, written into THIS snapshot only. `bridge.json` is a normal packaged resource the

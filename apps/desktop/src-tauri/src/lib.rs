@@ -682,13 +682,26 @@ async fn permanently_delete_profile(state: State<'_, AppState>, id: String) -> R
             return Err(format!("profile {id} is live"));
         }
     }
+    // Read the account link BEFORE the row goes: afterwards there is nothing left to say which
+    // remote row this was, and a remote row nothing points at is one the next reconcile restores.
+    let remote_id = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        profile_store::sync_link(&conn, &id)
+            .map_err(|e| e.to_string())?
+            .and_then(|link| link.remote_id)
+    };
     remove_profile_data_dir(&state.profiles_dir, &id)?;
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    if profile_store::purge(&conn, &id).map_err(|e| e.to_string())? {
-        Ok(())
-    } else {
-        Err(format!("trashed profile {id} not found"))
+    let purged = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        profile_store::purge(&conn, &id).map_err(|e| e.to_string())?
+    };
+    if !purged {
+        return Err(format!("trashed profile {id} not found"));
     }
+    if let Some(remote_id) = remote_id {
+        profile_sync::forget_remote_row(&remote_id).await;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1126,14 +1139,23 @@ fn resolve_pck(
 }
 
 #[tauri::command]
-async fn stop_profile(state: State<'_, AppState>, id: String) -> Result<serde_json::Value, String> {
+async fn stop_profile(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<serde_json::Value, String> {
     let sidecar = state
         .sidecar
         .as_ref()
         .ok_or("engine-runner sidecar is not available (failed to start)")?;
-    local_api::stop_profile_via_sidecar(&state.db, sidecar, &id)
+    let result = local_api::stop_profile_via_sidecar(&state.db, sidecar, &id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // A stopped profile is the one moment every store is mutually consistent, which is why the backup
+    // is triggered here and not on a timer. It runs behind the returned result: the Stop button must
+    // not wait on a capture, let alone on an upload.
+    profile_sync::spawn_backup_after_stop(app, id);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1664,6 +1686,11 @@ pub fn run() {
                 account_key: Arc::new(Mutex::new(None)),
             });
 
+            // Bring this machine and the account into agreement, behind first paint. A second machine
+            // has nothing to restore into until this runs: it is what creates the local rows for
+            // profiles the account holds and this install has never seen.
+            profile_sync::spawn_startup_reconcile(app.handle().clone());
+
             // Start the local automation API on the same runtime, sharing the store + sidecar.
             if let Some(sidecar) = sidecar {
                 let state = Arc::new(local_api::LocalApiState {
@@ -1683,8 +1710,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            snapshot::commands::snapshot_push,
-            snapshot::commands::snapshot_pull,
+            profile_sync::sync_push_profile,
+            profile_sync::sync_pull_profile,
+            profile_sync::sync_now,
+            profile_sync::sync_status,
             account_summary,
             open_billing,
             auth_status_cached,
@@ -1728,6 +1757,7 @@ pub fn run() {
             profile_portable::export_profile_file,
             profile_portable::inspect_profile_file,
             profile_portable::import_profile_file,
+            profile_portable::cancel_profile_file_op,
             agent_start,
             agent_set_api_key,
             agent_api_key_status,

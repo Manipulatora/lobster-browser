@@ -83,6 +83,48 @@ test('the sweep refuses a wrong token, and a missing one', async () => {
   assert.equal(none.status, 401, 'a session on the site is not authority over every team at once');
 });
 
+test('the quote route answers over HTTP and refuses a tier nobody sells', async () => {
+  // Over the wire because the confirmation dialog cannot open without it: a quote that exists only
+  // in TypeScript is a modal with no figures in it, and the purchase behind it is unreachable.
+  const { token } = await signUpOverHttp(app, mailCapture, 'billing-quote@gmail.com');
+  const auth = `Bearer ${token}`;
+
+  const res = await request(app.getHttpServer())
+    .get('/billing/quote?tier=pro&period=yearly')
+    .set('Authorization', auth);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.code, 0);
+  assert.deepEqual(
+    {
+      kind: res.body.data.kind,
+      allowed: res.body.data.allowed,
+      priceCents: res.body.data.priceCents,
+      dueCents: res.body.data.dueCents,
+      shortfallCents: res.body.data.shortfallCents,
+      currentTier: res.body.data.currentTier,
+    },
+    // An account with no Credit and no package: allowed to buy, unable to pay for it — two
+    // different facts, and the dialog offers a top-up rather than an error on the second.
+    {
+      kind: 'new',
+      allowed: true,
+      priceCents: 96_000,
+      dueCents: 96_000,
+      shortfallCents: 96_000,
+      currentTier: 'free',
+    },
+  );
+
+  const bogus = await request(app.getHttpServer())
+    .get('/billing/quote?tier=platinum')
+    .set('Authorization', auth);
+  assert.equal(bogus.status, 400, 'the quote validates exactly what the purchase does');
+
+  const anonymous = await request(app.getHttpServer()).get('/billing/quote?tier=pro');
+  assert.equal(anonymous.status, 401, 'a quote names a team’s balance');
+});
+
 test('the overview names the next billing date and the allowance actually in force', async () => {
   // Over the wire, because these two fields are what the dashboard and the desktop render: a
   // payload that carries them only in TypeScript is a panel with a blank date in it.

@@ -9,15 +9,32 @@ import {
   signal,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { Router } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
 
 import { AuthStore } from '../../core/auth/auth.store';
 import { AuthModalService } from '../auth/auth-modal.service';
 import { BillingStore } from './billing.store';
-import type { DepositInstruction, PaidPlanTier, PlanDefinition } from './billing.types';
+import { formatCredit } from './credit';
+import { PlanConfirmDialog } from './plan-confirm-dialog';
+import type {
+  BillingPeriod,
+  DepositInstruction,
+  PaidPlanTier,
+  PlanDefinition,
+} from './billing.types';
 
 /** How often to re-check a pending deposit while the address is on screen. */
 const POLL_MS = 15_000;
+
+/**
+ * Fraction knocked off when twelve months are paid up front.
+ *
+ * MUST equal `YEARLY_DISCOUNT` in @lobster/shared-types, which is what the API actually charges.
+ * The catalog arrives from the server with monthly prices only, so the yearly figure this page
+ * shows is derived — and a wrong constant here is a wrong price on a confirmation, not a cosmetic
+ * defect.
+ */
+const YEARLY_DISCOUNT = 0.2;
 
 /**
  * Account billing: Credit balance, top-ups, and packages.
@@ -29,7 +46,7 @@ const POLL_MS = 15_000;
  */
 @Component({
   selector: 'app-billing-page',
-  imports: [FormsModule, DatePipe],
+  imports: [FormsModule, DatePipe, PlanConfirmDialog],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './billing-page.html',
 })
@@ -37,6 +54,7 @@ export class BillingPage {
   private readonly billing = inject(BillingStore);
   private readonly auth = inject(AuthStore);
   private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
   private readonly document = inject(DOCUMENT);
   private readonly destroyRef = inject(DestroyRef);
   private readonly platformId = inject(PLATFORM_ID);
@@ -114,9 +132,21 @@ export class BillingPage {
     return 1;
   });
 
-  // --- Purchase ------------------------------------------------------------
-  protected readonly purchasing = signal<PaidPlanTier | null>(null);
-  protected readonly purchaseError = signal<string | null>(null);
+  // --- Buying a package ----------------------------------------------------
+
+  /** Which term the package table is priced in. Yearly is the same packages, paid a year up front. */
+  protected readonly planPeriod = signal<BillingPeriod>('monthly');
+
+  /**
+   * The package the confirmation dialog is open on, or null when it is closed.
+   *
+   * The term is frozen into it, not read live from {@link planPeriod}: a click on the toggle behind
+   * an open dialog would otherwise re-price what the user is in the middle of confirming.
+   */
+  protected readonly pending = signal<{ tier: PaidPlanTier; period: BillingPeriod } | null>(null);
+
+  /** Failures from the switch below — the only thing on this page that still charges nothing. */
+  protected readonly packageError = signal<string | null>(null);
 
   protected readonly depositsAvailable = this.billing.depositsAvailable;
 
@@ -188,25 +218,47 @@ export class BillingPage {
     // than firing an unauthenticated request that would clear the token on 401.
     await this.auth.restore();
     if (!this.auth.isAuthenticated()) {
-      void this.router.navigate(['/login']);
+      // Carrying `next` exactly as `authGuard` does. A package chosen on the pricing table arrives
+      // in this URL, and dropping it here would land the visitor on an empty account page after
+      // signing in — the round trip the pricing CTA exists to complete.
+      void this.router.navigate(['/login'], { queryParams: { next: this.router.url } });
       return;
     }
     await this.billing.load();
     // Preselect the first recommended (cheapest) rail.
     const first = this.recommendedChains()[0];
     if (first && !this.chainCode()) this.chainCode.set(first.code);
+
+    this.openPackageFromQuery();
   }
 
   /**
-   * Balances are shown in Credit, never with a currency symbol.
+   * Resume a purchase chosen somewhere else.
    *
-   * Credit is what the account actually holds — a prepaid balance that happens to be denominated
-   * 1:1 in USD. Printing "$12.00" invites the reading that dollars are sitting there withdrawable;
-   * "12.00 Credit" says what it is.
+   * The pricing CTAs put the package in the URL and send a signed-out visitor through sign-up, so
+   * this is where the round trip lands. Read ONCE and then stripped from the URL: the query is a
+   * handoff, not page state, and leaving it there would reopen the dialog on every reload — long
+   * after the purchase it described was made.
    */
-  protected formatCredit(cents: number): string {
-    return `${(cents / 100).toFixed(2)} Credit`;
+  private openPackageFromQuery(): void {
+    const params = this.route.snapshot.queryParamMap;
+    const plan = params.get('plan');
+    const period = params.get('period');
+    if (!plan) return;
+
+    void this.router.navigate([], { relativeTo: this.route, queryParams: {}, replaceUrl: true });
+
+    // Validated against the catalog the server sent, not trusted: the query is whatever was in the
+    // link, and a tier nobody sells would open a dialog that could only fail.
+    const known = this.plans().find((p) => p.tier === plan);
+    if (!known) return;
+    this.pending.set({
+      tier: known.tier,
+      period: period === 'yearly' ? 'yearly' : 'monthly',
+    });
   }
+
+  protected readonly formatCredit = formatCredit;
 
   /** Ledger amounts are signed; the statement renders the sign separately from the magnitude. */
   protected abs(value: number): number {
@@ -234,15 +286,87 @@ export class BillingPage {
   }
 
   protected planIsCurrent(plan: PlanDefinition): boolean {
-    return this.currentTier() === plan.tier && this.subscription()?.status === 'active';
+    return (
+      this.currentTier() === plan.tier &&
+      this.subscription()?.status === 'active' &&
+      (this.subscription()?.billingPeriod ?? 'monthly') === this.planPeriod()
+    );
   }
 
+  /**
+   * What one period of this package costs in the term currently on screen.
+   *
+   * MUST match `periodPriceCents` on the server — twelve months less the advertised discount,
+   * rounded once. Rounding a second time here is how a table quotes a price the charge does not
+   * match.
+   */
+  protected periodPrice(plan: PlanDefinition): number {
+    return this.planPeriod() === 'yearly'
+      ? Math.round(plan.priceCents * 12 * (1 - YEARLY_DISCOUNT))
+      : plan.priceCents;
+  }
+
+  /**
+   * Whether the balance covers the LIST price of this package.
+   *
+   * A first-glance answer for the card, deliberately ignoring any credit an upgrade would reclaim:
+   * that credit depends on the server's clock and is quoted inside the dialog. So this can only
+   * ever understate what the balance can buy, never overstate it — the card never promises a
+   * purchase the next screen has to withdraw.
+   */
   protected canAfford(plan: PlanDefinition): boolean {
-    return this.balanceCents() >= plan.priceCents;
+    return this.balanceCents() >= this.periodPrice(plan);
   }
 
   protected shortfall(plan: PlanDefinition): number {
-    return Math.max(0, plan.priceCents - this.balanceCents());
+    return Math.max(0, this.periodPrice(plan) - this.balanceCents());
+  }
+
+  /**
+   * The tier of a package that is still inside a period it was paid for, or null.
+   *
+   * A lapsed or elapsed package is not something a purchase moves away FROM — it is simply gone,
+   * and the next purchase is a plain one. Mirrors the server's own condition so the button says
+   * the same thing the quote behind it will.
+   */
+  private readonly livePaidTier = computed(() => {
+    const current = this.subscription();
+    if (!current || current.tier === 'free' || current.status !== 'active') return null;
+    if (current.currentPeriodEnd && new Date(current.currentPeriodEnd) <= new Date()) return null;
+    return current.tier;
+  });
+
+  /**
+   * What pressing this row does, in one word.
+   *
+   * "Upgrade" rather than "Buy" when that is what it is — the button is the only place that says
+   * the package is replacing one being paid for. The dialog behind it carries the full story,
+   * including the two moves that have to wait for the current period to end.
+   */
+  protected planCta(plan: PlanDefinition): string {
+    if (this.planIsCurrent(plan)) return 'Current';
+    const live = this.livePaidTier();
+    if (!live) return 'Buy';
+
+    const order = this.plans();
+    const delta =
+      order.findIndex((p) => p.tier === plan.tier) - order.findIndex((p) => p.tier === live);
+    if (delta > 0) return 'Upgrade';
+    return delta < 0 ? 'Buy' : 'Switch';
+  }
+
+  protected setPlanPeriod(period: BillingPeriod): void {
+    this.planPeriod.set(period);
+  }
+
+  /** Open the confirmation, freezing the term it was pressed under. */
+  protected choosePlan(plan: PlanDefinition): void {
+    if (this.planIsCurrent(plan)) return;
+    this.pending.set({ tier: plan.tier, period: this.planPeriod() });
+  }
+
+  protected closeConfirm(): void {
+    this.pending.set(null);
   }
 
   /**
@@ -348,19 +472,6 @@ export class BillingPage {
     }
   }
 
-  protected async purchase(plan: PlanDefinition): Promise<void> {
-    if (this.purchasing()) return;
-    this.purchaseError.set(null);
-    this.purchasing.set(plan.tier);
-    try {
-      await this.billing.purchase(plan.tier);
-    } catch (err) {
-      this.purchaseError.set(err instanceof Error ? err.message : 'purchase failed');
-    } finally {
-      this.purchasing.set(null);
-    }
-  }
-
   /** Plan names come from the catalog the server sent, so they cannot drift from what it charges. */
   protected planName(tier: string): string {
     return this.plans().find((p) => p.tier === tier)?.name ?? tier;
@@ -374,12 +485,12 @@ export class BillingPage {
   protected async toggleAutoRenew(): Promise<void> {
     const current = this.subscription();
     if (!current || this.togglingAutoRenew()) return;
-    this.purchaseError.set(null);
+    this.packageError.set(null);
     this.togglingAutoRenew.set(true);
     try {
       await this.billing.setAutoRenew(!current.autoRenew);
     } catch (err) {
-      this.purchaseError.set(err instanceof Error ? err.message : 'could not change auto-renew');
+      this.packageError.set(err instanceof Error ? err.message : 'could not change auto-renew');
     } finally {
       this.togglingAutoRenew.set(false);
     }

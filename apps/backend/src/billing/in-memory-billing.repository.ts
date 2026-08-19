@@ -7,6 +7,7 @@ import type {
   Deposit,
   DepositStatus,
   PaidPlanTier,
+  PlanTier,
   Subscription,
 } from '@lobster/shared-types';
 
@@ -15,6 +16,7 @@ import type {
   AgentUsageRow,
   BillingRepository,
   DepositReversal,
+  PlanChangeOutcome,
   StoredDeposit,
 } from './billing.repository';
 
@@ -51,6 +53,21 @@ export class InMemoryBillingRepository implements BillingRepository {
     description: string;
     metadata?: Record<string, unknown>;
   }): Promise<CreditTransaction | null> {
+    return this.applyMove(entry);
+  }
+
+  /**
+   * The body of {@link move}, kept SYNCHRONOUS so callers that must not suspend mid-operation can
+   * reuse it. See {@link changePlan}, which depends on there being no await between its
+   * compare-and-swap and this debit.
+   */
+  private applyMove(entry: {
+    teamId: string;
+    kind: CreditTxKind;
+    amountCents: number;
+    description: string;
+    metadata?: Record<string, unknown>;
+  }): CreditTransaction | null {
     const current = this.balances.get(entry.teamId) ?? 0;
     const next = current + entry.amountCents;
     if (next < 0) return null; // insufficient Credit — leave the balance untouched
@@ -261,6 +278,20 @@ export class InMemoryBillingRepository implements BillingRepository {
     currentPeriodStart: Date;
     currentPeriodEnd: Date;
   }): Promise<Subscription> {
+    return this.writeSubscription(args);
+  }
+
+  /** Synchronous body of {@link activateSubscription}, for the same reason {@link applyMove} is. */
+  private writeSubscription(args: {
+    teamId: string;
+    tier: PaidPlanTier;
+    profileLimit: number;
+    priceCents: number;
+    billingPeriod: BillingPeriod;
+    billingAnchorDay: number;
+    currentPeriodStart: Date;
+    currentPeriodEnd: Date;
+  }): Subscription {
     const row: Subscription = {
       teamId: args.teamId,
       tier: args.tier,
@@ -275,6 +306,55 @@ export class InMemoryBillingRepository implements BillingRepository {
     };
     this.subscriptions.set(args.teamId, row);
     return row;
+  }
+
+  async changePlan(args: {
+    teamId: string;
+    expected: {
+      tier: PlanTier;
+      billingPeriod: BillingPeriod;
+      currentPeriodEnd: string | null;
+    } | null;
+    dueCents: number;
+    description: string;
+    metadata: Record<string, unknown>;
+    tier: PaidPlanTier;
+    profileLimit: number;
+    priceCents: number;
+    billingPeriod: BillingPeriod;
+    billingAnchorDay: number;
+    currentPeriodStart: Date;
+    currentPeriodEnd: Date;
+  }): Promise<PlanChangeOutcome> {
+    const existing = this.subscriptions.get(args.teamId) ?? null;
+
+    // The same compare-and-swap contract the Prisma implementation enforces with a transaction:
+    // a row that appeared, vanished or moved on since the change was priced means another attempt
+    // committed first, and this one must not charge.
+    if (!args.expected !== !existing) return { status: 'superseded' };
+    if (
+      existing &&
+      args.expected &&
+      (existing.tier !== args.expected.tier ||
+        (existing.billingPeriod ?? 'monthly') !== args.expected.billingPeriod ||
+        (existing.currentPeriodEnd ?? null) !== args.expected.currentPeriodEnd)
+    ) {
+      return { status: 'superseded' };
+    }
+
+    // NOTHING BELOW AWAITS, which is what makes the claim, the debit and the ledger row one
+    // indivisible step here — see the note on this class. Both helpers are the synchronous bodies
+    // of their public counterparts precisely so this stays true.
+    const charge = this.applyMove({
+      teamId: args.teamId,
+      kind: 'purchase',
+      amountCents: -args.dueCents,
+      description: args.description,
+      metadata: args.metadata,
+    });
+    if (!charge) return { status: 'insufficient_credit' };
+
+    return { status: 'changed', subscription: this.writeSubscription(args) };
   }
 
   async setAutoRenew(teamId: string, autoRenew: boolean): Promise<Subscription> {

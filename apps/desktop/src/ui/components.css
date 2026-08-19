@@ -592,6 +592,29 @@
   }
 }
 
+/* The mark inside the ring: the SAME rounded violet square the launched window shows in the taskbar,
+   down to the initials and the ramp stop — that is the whole point of it, so an operator can match a
+   row here to one of a dozen otherwise identical windows. The tint is an inline style because it is
+   per-profile data, not a theme decision.
+
+   `border-radius` is a PERCENTAGE, not a token: the engine draws the corner at 22% of the side
+   (lobium_profile_icon.cc, kCornerRadiusRatio) because that still reads as a square at 16px, and a
+   fixed radius here would agree at one size and disagree at every other. */
+.profile-mark__square {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 22%;
+  overflow: hidden;
+  color: var(--on-brand);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.2px;
+  user-select: none;
+}
+
 /* --- Tabs --------------------------------------------------------------------------------------- */
 .lb-tabs {
   display: flex;
@@ -868,6 +891,20 @@
 /* Replaced the separate `.plan-usage` card. Plan, allowance, Credit and identity are one subject
    and now one block, and — unlike the two gated fragments before it — it always renders something.
    The card is bordered because it is the one element in the sidebar that is not navigation. */
+/* Pins the account card and the Upgrade button together at the foot of the sidebar. The auto margin
+   belongs on THIS element because it is the flex child of `.sidebar`; on the card itself it would
+   push the card down and leave the button stranded below the fold it just created. */
+.sidebar__foot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: auto;
+}
+
+.sidebar__upgrade {
+  flex: none;
+}
+
 .account-panel {
   display: flex;
   flex-direction: column;
@@ -876,10 +913,6 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
-  /* Pins the whole card to the foot of the sidebar. It belongs on THIS element because this is the
-     flex child of `.sidebar`; on the account row nested inside it, the auto margin would only push
-     that row around within the card. */
-  margin-top: auto;
 }
 
 .account-panel__body {

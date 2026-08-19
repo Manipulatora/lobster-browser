@@ -403,17 +403,32 @@ function Dashboard({
               looks for their account. Its states are handled inside; it never renders nothing,
               which is what the previous two separately-gated blocks did whenever the billing call
               did not succeed. */}
-          <AccountPanel
-            state={account}
-            used={profiles.length}
-            accountLabel={accountLabel}
-            menuOpen={accountMenuOpen}
-            onToggleMenu={() => setAccountMenuOpen((open) => !open)}
-            onSignOut={() => void handleSignOut()}
-            onOpenBilling={() => void accountClient.openBilling()}
-            onRetry={() => setAccountAttempt((n) => n + 1)}
-            menuRef={accountMenuRef}
-          />{' '}
+          <div className="sidebar__foot">
+            <AccountPanel
+              state={account}
+              used={profiles.length}
+              accountLabel={accountLabel}
+              menuOpen={accountMenuOpen}
+              onToggleMenu={() => setAccountMenuOpen((open) => !open)}
+              onSignOut={() => void handleSignOut()}
+              onOpenBilling={() => void accountClient.openBilling()}
+              onRetry={() => setAccountAttempt((n) => n + 1)}
+              menuRef={accountMenuRef}
+            />
+            {/* Buying happens on the website, never in the app: the purchase debits Credit and the
+                top-up rail is a hosted payment flow, so the app would only be re-drawing a page it
+                cannot complete. Hidden on Max, where there is nothing above to move to — an Upgrade
+                button that leads to your own plan is an advert, not a control. */}
+            {account.kind === 'ready' && account.summary.tier !== 'max' ? (
+              <button
+                type="button"
+                className="lb-btn lb-btn--primary lb-btn--block sidebar__upgrade"
+                onClick={() => void accountClient.openBilling()}
+              >
+                Upgrade
+              </button>
+            ) : null}
+          </div>
         </aside>
 
         <main className="main">

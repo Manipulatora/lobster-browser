@@ -187,6 +187,87 @@ impl SnapshotVault {
         Ok(plaintext)
     }
 
+    /// Take a manifest and its artifact PLAINTEXTS that were produced somewhere else — another
+    /// machine's ledger, a `.lobprofile` file — and write them here as a new version.
+    ///
+    /// The re-seal is the whole reason this is not a loop of [`Self::put_artifact`] followed by
+    /// [`Self::commit`]. Sealing happens under THIS install's Local Store Key with a fresh nonce, so
+    /// every `sealed_digest` the incoming manifest carries describes a blob that does not exist in
+    /// this ledger and never will. Committing them unchanged writes a snapshot whose own
+    /// [`Self::get_artifact`] rejects it as transplanted — a restore that cannot succeed on any
+    /// machine, including the one that wrote it.
+    ///
+    /// `plain_digest` is the one digest that survives the crossing, so it is checked here, BEFORE the
+    /// bytes are sealed: a payload that does not match the manifest that describes it is refused
+    /// while the ledger is still untouched, rather than after a version has been committed.
+    pub fn adopt(
+        &self,
+        profile_id: &str,
+        manifest: &SnapshotManifest,
+        artifacts: Vec<(String, Vec<u8>)>,
+    ) -> Result<SnapshotManifest> {
+        let (version, _dir) = self.begin(profile_id)?;
+        match self.adopt_into(profile_id, version, manifest, artifacts) {
+            Ok(adopted) => Ok(adopted),
+            Err(err) => {
+                // An uncommitted directory is invisible to `versions()`, but leaving it behind makes
+                // the next version number skip and confuses a later reader.
+                let _ = self.discard(profile_id, version);
+                Err(err)
+            }
+        }
+    }
+
+    fn adopt_into(
+        &self,
+        profile_id: &str,
+        version: u64,
+        manifest: &SnapshotManifest,
+        artifacts: Vec<(String, Vec<u8>)>,
+    ) -> Result<SnapshotManifest> {
+        let mut adopted = manifest.clone();
+        adopted.profile_id = profile_id.to_string();
+        adopted.version = version;
+
+        // Consumed as they are matched, so a payload sent twice cannot stand in for one that was
+        // never sent at all.
+        let mut carried = artifacts;
+        for record in &mut adopted.artifacts {
+            let found = carried
+                .iter()
+                .position(|(id, _)| *id == record.id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "INCOMPLETE_TRANSFER: `{}` is named by this snapshot's own manifest but its \
+                         bytes did not arrive",
+                        record.id
+                    )
+                })?;
+            let (_, bytes) = carried.swap_remove(found);
+            let plain = digest_hex(&bytes);
+            if plain != record.plain_digest {
+                bail!(
+                    "PLAIN_DIGEST_MISMATCH: `{}` arrived as {plain}, but its manifest records {}",
+                    record.id,
+                    record.plain_digest
+                );
+            }
+            let (sealed_digest, sealed_bytes) =
+                self.put_artifact(profile_id, version, &record.id, &bytes)?;
+            record.sealed_digest = sealed_digest;
+            record.sealed_bytes = sealed_bytes;
+            // Everything lands in ONE version here, including artifacts an earlier capture carried
+            // forward as stale — the versions they came from do not exist in this ledger.
+            record.captured_in_version = version;
+        }
+        if let Some((id, _)) = carried.first() {
+            bail!("UNNAMED_ARTIFACT: `{id}` arrived but this snapshot's manifest does not name it");
+        }
+
+        self.commit(&adopted)?;
+        Ok(adopted)
+    }
+
     /// Commit the manifest. Written LAST and atomically, so a version directory only becomes
     /// restorable once every artifact it names is already on disk.
     pub fn commit(&self, manifest: &SnapshotManifest) -> Result<()> {
@@ -294,6 +375,7 @@ mod tests {
             counts: Vec::new(),
             captured_in_version: 1,
             offset_ms: 0,
+            content_digest: None,
             portable: None,
         }
     }

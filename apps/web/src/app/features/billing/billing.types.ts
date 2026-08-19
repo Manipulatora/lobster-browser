@@ -75,6 +75,46 @@ export interface BillingOverview {
   entitledProfileLimit: number;
 }
 
+/**
+ * What buying a package would mean for a team that already has one.
+ *
+ * `new`, `upgrade` and `extend` are charged; `same`, `downgrade` and `shorten` are refused. The
+ * server decides which one applies — this is only the vocabulary the dialog labels it with.
+ */
+export type PlanChangeKind = 'new' | 'upgrade' | 'extend' | 'same' | 'downgrade' | 'shorten';
+
+/**
+ * Everything the confirmation dialog states, priced by the server.
+ *
+ * PRORATION CANNOT BE COMPUTED HERE. An upgrade credits the unused remainder of the live period,
+ * which depends on the real period bounds and on the server's clock; a dialog that worked it out
+ * locally would quote one amount and the purchase would take another. Every figure below is the
+ * one the charge will use.
+ */
+export interface PlanChangeQuote {
+  tier: PaidPlanTier;
+  period: BillingPeriod;
+  kind: PlanChangeKind;
+  /** False for the three refused kinds — a different next step, not a failure. */
+  allowed: boolean;
+  priceCents: number;
+  /** Credit for the unused remainder of the current period; 0 when there is none. */
+  unusedCreditCents: number;
+  /** What is actually debited. */
+  dueCents: number;
+  balanceCents: number;
+  /** What the balance becomes. Negative exactly when the balance cannot cover it. */
+  balanceAfterCents: number;
+  /** How much more Credit is needed; 0 when the balance covers it. */
+  shortfallCents: number;
+  currentTier: PlanTier;
+  currentPeriod: BillingPeriod | null;
+  /** When the current package runs out — what a refused change has to wait for. */
+  currentPeriodEnd: string | null;
+  /** When the next renewal would charge, if this purchase went through now. */
+  nextBillingAt: string;
+}
+
 export type CreditTxKind =
   'deposit' | 'purchase' | 'renewal' | 'refund' | 'adjustment' | 'agent_usage';
 

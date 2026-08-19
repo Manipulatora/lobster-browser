@@ -169,7 +169,29 @@ function is the stable anchor.
 
 Cosmetic only, no fingerprint effect: `account-menu-trim`, `omnibox-profile-chip`,
 `product-icon-lobster`, `signin-disable`, `ntp-branding`, `profile-lockdown` (removes guest mode and
-profile creation from the browser UI — Lobium manages profiles itself), and `device-frame`.
+profile creation from the browser UI — Lobium manages profiles itself), `device-frame`, and
+`profile-window-icon`.
+
+| Patch | File · function | What it does |
+| --- | --- | --- |
+| `branding/profile-window-icon.patch` | `chrome/browser/ui/views/frame/browser_view.cc` · `GetWindowIcon` | the profile's rounded violet initials square in the window's SMALL icon slot — `WM_SETICON`/`ICON_SMALL` on Windows, the first `_NET_WM_ICON` entry on Linux |
+| | same · `GetWindowAppIcon` | the same square, larger, in the LARGE slot — `ICON_BIG` (the taskbar button) at 48 DIP on Windows, the second `_NET_WM_ICON` entry at 128 DIP on Linux, where the window manager scales from the published list |
+| | same · `GetWindowTitle` | the full profile name replaces the product-name suffix on tabbed windows — the title is also what the taskbar tooltip and the window-list entry read |
+| | `chrome/browser/shell_integration_linux.cc` · `GetProgramClassName` | the profile name replaces the `--user-data-dir` path stock Chromium appends to `WM_CLASS`, which gnome-shell shows verbatim |
+
+The engine derives none of it. A 16px icon holds one or two glyphs, so what it shows is a
+*reduction* of the profile name, and a reduction is only useful if the manager's row avatar and the
+launched window reduce identically — Unicode word and grapheme splitting done twice is done two ways
+the first time a name is not plain ASCII. The launcher therefore passes the finished strings on
+`--lobium-profile-initials`, `--lobium-profile-word` and `--lobium-profile-tint`
+(`packages/engine-runner/src/runners/profile-mark.ts`, mirrored byte for byte in
+`apps/desktop/src/ui/profile-mark.ts` and gated by `profile-mark.test.ts`). With no switches the icon
+is null and the window keeps the stock Chromium icon.
+
+Windows taskbar **grouping** needed no hook: `BrowserWindowPropertyManager` already derives the
+AppUserModelID from the profile path via `shell_integration::win::GetAppUserModelIdForBrowser`, and
+every Lobster profile already launches with its own `--user-data-dir`, so the buttons separate on
+their own once they stop looking identical.
 
 > `branding/device-frame.patch` is **incomplete and Linux-only**. Every hook is
 > `#if BUILDFLAG(IS_LINUX)`, the created `lobium_device_frame_view.cc` is in no GN target so it is
@@ -184,6 +206,11 @@ profile creation from the browser UI — Lobium manages profiles itself), and `d
 `//components/lobium_fp/` is a `//base`-only leaf, deliberately skia-free so it can be linked from
 Blink core, Blink common, Blink modules and `content/renderer` without dragging graphics types
 around. Hooks pass raw buffers in.
+
+The one piece of the directory that cannot be `//base`-only — `lobium_profile_icon.{h,cc}`, which
+draws with Skia and lays out text — is a **separate GN target**, `:lobium_profile_icon`, depended on
+only by `//chrome/browser/ui`. Same directory, so it rebases as painlessly as the rest; different
+target, so no renderer inherits the views drawing stack for the sake of one browser-process caller.
 
 - **`lobium_fp_config.{h,cc}`** — the config reader. `Current()` is a `base::NoDestructor` static
   parsed once per process.

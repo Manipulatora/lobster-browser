@@ -270,11 +270,73 @@
           </button>
         </div>
 
-        @if (purchaseError()) {
-          <p class="field-error mt-3">{{ purchaseError() }}</p>
+        @if (packageError()) {
+          <p class="field-error mt-3">{{ packageError() }}</p>
         }
       </section>
     }
+
+    <!-- ── Packages ──────────────────────────────────────────────────────────
+         The buying surface. It lives on the account page as well as on the pricing table because
+         this is where the balance is: someone who has just topped up is already here, and sending
+         them back to the marketing page to spend it would be the long way round.
+         The term toggle is load-bearing rather than decorative — it is what puts `period=yearly`
+         on the purchase, and a yearly package charges a different amount for a different length of
+         time. Rows rather than cards: this page is one narrow column, and the sections above and
+         below it are the same shape. -->
+    <section class="mt-14">
+      <div class="flex items-center justify-between gap-4">
+        <h2 class="text-[0.9375rem] text-muted">Packages</h2>
+        <div
+          class="inline-flex items-center gap-1 rounded-full border-[0.5px] border-hairline-strong bg-surface p-0.5"
+          role="radiogroup"
+          aria-label="Billing term"
+        >
+          @for (term of [{ id: 'monthly', label: 'Monthly' }, { id: 'yearly', label: 'Yearly' }]; track term.id) {
+            <button
+              type="button"
+              role="radio"
+              [attr.aria-checked]="planPeriod() === term.id"
+              class="rounded-full px-3 py-1 text-[0.8125rem] transition-colors"
+              [class]="planPeriod() === term.id ? 'bg-brand-600 text-white' : 'text-muted hover:text-ink'"
+              (click)="setPlanPeriod($any(term.id))"
+            >
+              {{ term.label }}
+            </button>
+          }
+        </div>
+      </div>
+
+      <ul class="mt-3 divide-y-[0.5px] divide-hairline border-y-[0.5px] border-hairline">
+        @for (plan of plans(); track plan.tier) {
+          <li class="flex items-center justify-between gap-4 py-3">
+            <span class="min-w-0">
+              <span class="block truncate text-[0.9375rem] text-ink">{{ plan.name }}</span>
+              <span class="block text-xs text-muted">
+                {{ plan.profileLimit }} profiles · {{ formatCredit(periodPrice(plan)) }}
+                {{ planPeriod() === 'yearly' ? 'a year' : 'a month' }}
+              </span>
+              <!-- Stated on the row, before the dialog opens, so a package the balance cannot
+                   reach is visible as such rather than discovered one click later. -->
+              @if (!planIsCurrent(plan) && !canAfford(plan)) {
+                <span class="block text-xs text-muted">
+                  {{ formatCredit(shortfall(plan)) }} short
+                </span>
+              }
+            </span>
+            <button
+              type="button"
+              class="btn btn-sm shrink-0"
+              [class]="planIsCurrent(plan) ? 'btn-secondary' : 'btn-primary'"
+              [disabled]="planIsCurrent(plan)"
+              (click)="choosePlan(plan)"
+            >
+              {{ planCta(plan) }}
+            </button>
+          </li>
+        }
+      </ul>
+    </section>
 
     <!-- ── History ───────────────────────────────────────────────────────── -->
     @if (transactions().length) {
@@ -299,6 +361,13 @@
     }
   </div>
 </div>
+
+<!-- ── Confirm the package ─────────────────────────────────────────────────
+     The same dialog the pricing table opens, so a purchase reads identically wherever it started.
+     It debits Credit directly — there is nothing else to authorise. -->
+@if (pending(); as p) {
+  <app-plan-confirm-dialog [tier]="p.tier" [period]="p.period" (closed)="closeConfirm()" />
+}
 
 <!-- ── Confirm before paying ───────────────────────────────────────────────
      A deliberate stop. Everything shown is frozen from the moment Pay was pressed, so what is

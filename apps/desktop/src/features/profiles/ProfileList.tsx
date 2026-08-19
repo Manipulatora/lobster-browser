@@ -4,8 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import type { LaunchInfo } from '../../api/tauri';
-import appIcon from '../../assets/brand/icon.png';
-import { EmptyState } from '../../ui';
+import { EmptyState, ProfileMark } from '../../ui';
 import { isAndroidTarget, osLabel, STATUS_META } from './options';
 import { OsIcon } from './OsIcon';
 import { FlagChip } from './FlagChip';
@@ -429,20 +428,15 @@ export function ProfileList({
                 </td>
                 <td>
                   <div className="profile-title-cell">
-                    {/* The ring IS the status. No `title` here as well as the bubble — WebView2
-                        would render the native tooltip too, two labels 300ms apart. */}
-                    <span
-                      className="lb-tooltip lb-tooltip--right profile-mark"
-                      data-status={ringStatus}
-                      role="img"
-                      aria-label={`Status: ${statusWord}`}
-                      tabIndex={0}
-                    >
-                      <img className="row-mark" src={appIcon} alt="" aria-hidden />
-                      <span className="lb-tooltip__bubble" aria-hidden>
-                        {statusWord}
-                      </span>
-                    </span>
+                    {/* The ring IS the status. The mark inside it is the same violet initials square
+                        the launched window wears, so a row and its taskbar button are recognisably
+                        the same profile. */}
+                    <ProfileMark
+                      name={profile.name}
+                      profileId={profile.id}
+                      status={ringStatus}
+                      statusLabel={statusWord}
+                    />
                     <div className="profile-title-text">
                       <div className="table-title cell-ellipsis" title={profile.name}>
                         {profile.name}

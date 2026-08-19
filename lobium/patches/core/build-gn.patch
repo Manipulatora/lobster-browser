@@ -14,6 +14,8 @@ is_official_build credits step). COMPILE-VERIFIED on Chromium 152.0.7928.0.
 
   â€¢ components/embedder_support/BUILD.gn â€” user_agent target deps on //components/lobium_fp (native UA header + Sec-CH-UA metadata).
   â€¢ content/renderer/BUILD.gn â€” renderer startup applies configured ICU locale before Blink/V8 init.
+  â€¢ chrome/browser/ui/BUILD.gn â€” the separate :lobium_profile_icon target (browser-process Skia, //ui/gfx),
+    kept out of the Blink-facing :lobium_fp so no renderer target inherits the views drawing stack.
 
 diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
 --- a/chrome/BUILD.gn
@@ -30,6 +32,19 @@ diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
        "//components/memory_system",
        "//components/policy:generated",
        "//components/webapps/isolated_web_apps:scheme",
+diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -793,6 +793,9 @@ static_library("ui") {
+     "//components/lens:enterprise_policy",
+     "//components/live_caption:constants",
+     "//components/live_caption:utils",
++    # Lobium: the per-profile window icon. Browser-process only - BrowserView hands it to the
++    # window's icon slots, which are what the taskbar, the title bar and the window list read.
++    "//components/lobium_fp:lobium_profile_icon",
+     "//components/local_state",
+     "//components/lookalikes/core",
+     "//components/media_router/common/providers/cast/certificate",
 diff --git a/components/embedder_support/BUILD.gn b/components/embedder_support/BUILD.gn
 --- a/components/embedder_support/BUILD.gn
 +++ b/components/embedder_support/BUILD.gn

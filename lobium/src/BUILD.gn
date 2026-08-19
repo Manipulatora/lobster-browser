@@ -34,3 +34,21 @@ source_set("lobium_fp") {
   # and no Blink DEPS include-rule is needed.
   deps = [ "//crypto" ]
 }
+
+# The per-profile window icon, drawn with Skia in the browser process.
+#
+# A SEPARATE TARGET, deliberately. ":lobium_fp" is depended on by Blink core, Blink modules, Blink
+# common and content/renderer, and this code needs //ui/gfx - the whole views-side text and canvas
+# stack. Folding it into ":lobium_fp" would push that dependency into every renderer target that
+# only wanted the fingerprint config, for the benefit of one browser-process caller.
+source_set("lobium_profile_icon") {
+  sources = [
+    "lobium_profile_icon.cc",
+    "lobium_profile_icon.h",
+  ]
+
+  # public_deps: the header returns gfx::ImageSkia by value, so //ui/gfx is part of this target's
+  # public interface. It re-exports //base, //skia and //cc/paint, which is everything the
+  # implementation needs.
+  public_deps = [ "//ui/gfx" ]
+}

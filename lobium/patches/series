@@ -123,6 +123,13 @@ branding/omnibox-profile-chip.patch
 # Product glyph -> lobster brand mark. chrome://version page logos are done by
 # scripts/apply-lobium-branding.mjs (binary PNGs), not by a patch.
 branding/product-icon-lobster.patch
+# Per-profile window identity for the OPERATING SYSTEM: the taskbar/dock entry, the title-bar icon
+# and the alt-tab entry get a rounded violet square with the profile's initials, the window title
+# carries the full name, and Linux WM_CLASS stops naming the --user-data-dir path. Drawn natively
+# from --lobium-profile-initials / -word / -tint by the added components/lobium_fp module.
+# CHAIN: after device-frame.patch; both hook browser_view.cc, and the hunks below are cut against
+# the tree with that one already applied.
+branding/profile-window-icon.patch
 branding/signin-disable.patch
 # REQUIRES scripts/apply-lobium-branding.mjs to have staged the NTP icon PNGs into
 # chrome/browser/resources/new_tab_page/icons/ first: this patch adds them to that directory's

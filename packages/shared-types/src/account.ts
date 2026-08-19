@@ -174,6 +174,116 @@ export function planByTier(tier: PaidPlanTier): PlanDefinition {
   return plan;
 }
 
+/**
+ * Where a package sits in the range, ascending. `free` is below all four.
+ *
+ * Read off {@link PLAN_CATALOG}, which is already ordered by price, so there is ONE definition of
+ * "a bigger package" — the storefront's Upgrade label, the purchase endpoint's downgrade refusal
+ * and the quote a confirmation dialog renders cannot disagree about which way a change goes.
+ */
+export function planRank(tier: PlanTier): number {
+  return tier === 'free' ? -1 : PLAN_CATALOG.findIndex((p) => p.tier === tier);
+}
+
+/**
+ * What a requested package means for a team that already has one.
+ *
+ * THREE ARE CHARGED and three are refused, which is the whole plan-change policy in one type:
+ *
+ *   new       nothing is live — no package, a lapsed one, or a period that has already run out.
+ *             The full period price is charged and no time is credited back.
+ *   upgrade   a bigger package while a period is still paid for. The unused remainder is credited
+ *             and the difference charged.
+ *   extend    the same package, moving from monthly onto a year. Priced exactly like an upgrade.
+ *
+ *   same      already on this package, on this term.
+ *   downgrade a smaller package while a bigger one is still paid for.
+ *   shorten   leaving a prepaid year for a monthly term.
+ *
+ * WHY THE LAST TWO ARE REFUSED RATHER THAN PRORATED. Both hand Credit back for time already
+ * granted, and both withdraw an allowance the team is using — a Max subscriber who moves to Light
+ * loses 990 profiles the instant it applies. The product has exactly one way to spend less, and it
+ * is the same one that reaches the free tier: turn auto-renew off, and buy the smaller package
+ * when the current one runs out. Refusing here keeps that single path rather than adding a second
+ * one that only works between two paid packages.
+ *
+ * The split also guarantees the arithmetic never inverts: every allowed change moves onto a package
+ * that costs MORE than the credit it reclaims, so a purchase can never be a net refund.
+ */
+export type PlanChangeKind = 'new' | 'upgrade' | 'extend' | 'same' | 'downgrade' | 'shorten';
+
+/** Whether {@link PlanChangeKind} is one of the three that are charged. */
+export function planChangeAllowed(kind: PlanChangeKind): boolean {
+  return kind === 'new' || kind === 'upgrade' || kind === 'extend';
+}
+
+/** The package a change is measured against. */
+export interface CurrentPlan {
+  tier: PlanTier;
+  /** The term the package is on. Meaningless, and ignored, when it is not `live`. */
+  period: BillingPeriod;
+  /**
+   * Whether a paid period is still running.
+   *
+   * A package that lapsed, was cancelled, or whose period simply ran out protects nothing and is
+   * not owed anything back — so every purchase made against one is a plain `new` purchase.
+   */
+  live: boolean;
+}
+
+/** Classify a requested package against what the team already has. Pure; money is priced elsewhere. */
+export function classifyPlanChange(
+  current: CurrentPlan,
+  target: { tier: PaidPlanTier; period: BillingPeriod },
+): PlanChangeKind {
+  if (!current.live || current.tier === 'free') return 'new';
+  // Checked before the tier comparison: moving UP a tier but off a prepaid year is still leaving
+  // eleven paid months on the table, and it is the yearly term that has to be answered for.
+  if (current.period === 'yearly' && target.period === 'monthly') return 'shorten';
+
+  const delta = planRank(target.tier) - planRank(current.tier);
+  if (delta > 0) return 'upgrade';
+  if (delta < 0) return 'downgrade';
+  return current.period === target.period ? 'same' : 'extend';
+}
+
+/**
+ * Everything a client needs to show what buying a package would do, BEFORE it does it.
+ *
+ * PRICED BY THE SERVER, on purpose. A confirmation dialog has to state the exact figure that will
+ * leave the balance, and proration is the one number a client cannot work out for itself — it
+ * depends on the real period bounds and on the server's clock. A dialog that computed it locally
+ * would quote one amount and charge another.
+ *
+ * The money fields describe the charge as it would be made. When `allowed` is false there is no
+ * charge to describe, so no credit is applied and `dueCents` is simply the list price.
+ */
+export interface PlanChangeQuote {
+  tier: PaidPlanTier;
+  period: BillingPeriod;
+  kind: PlanChangeKind;
+  allowed: boolean;
+  /** List price of one period of the target package, in USD cents. */
+  priceCents: number;
+  /** Credit for the unused remainder of the live period; 0 when there is none to give back. */
+  unusedCreditCents: number;
+  /** What will actually be debited: `priceCents - unusedCreditCents`. Always above zero. */
+  dueCents: number;
+  balanceCents: number;
+  /** What the balance becomes. Negative exactly when the balance cannot cover the purchase. */
+  balanceAfterCents: number;
+  /** How much more Credit is needed; 0 when the balance covers it. */
+  shortfallCents: number;
+  /** The tier in force right now. */
+  currentTier: PlanTier;
+  /** The term the live package is on, or null when nothing is live. */
+  currentPeriod: BillingPeriod | null;
+  /** When the live period runs out — what a refused change has to wait for. Null when none is. */
+  currentPeriodEnd: string | null;
+  /** The instant the next renewal would charge, if this purchase went through now. */
+  nextBillingAt: string;
+}
+
 export type SubscriptionStatus = 'active' | 'past_due' | 'canceled' | 'trialing';
 
 export interface Subscription {

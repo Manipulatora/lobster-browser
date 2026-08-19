@@ -47,18 +47,85 @@ const MAX_DIR_BYTES: u64 = 128 * 1024 * 1024;
 /// `tar::Builder::append_dir_all` provides none of this — it neither sorts nor normalises — so a
 /// snapshot built with it would appear to change every time the directory was re-read.
 pub fn tar_dirs(roots: &[(String, PathBuf)]) -> Result<Vec<u8>> {
+    Ok(tar_dirs_with_digest(roots)?.bytes)
+}
+
+/// A tarred directory set: the gzipped bytes that travel, and the digest of the tar BEFORE it was
+/// compressed.
+pub struct TarredDirs {
+    pub bytes: Vec<u8>,
+    pub content_digest: String,
+}
+
+/// Tar and gzip in one pass, hashing the UNCOMPRESSED stream on the way through.
+///
+/// The second digest costs nothing here — the bytes are already flowing past — and it buys the
+/// restore an entire deflate pass. Verifying a restored directory used to mean re-compressing the
+/// unpacked tree and comparing the gzip output, which is the single most expensive step of restoring
+/// a profile with a large extension store, and which silently bets that the deflate implementation
+/// and level never change. Neither is a bet worth taking for a check that only has to prove the FILES
+/// are the files.
+pub fn tar_dirs_with_digest(roots: &[(String, PathBuf)]) -> Result<TarredDirs> {
     let mut total = 0u64;
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    let mut builder = tar::Builder::new(encoder);
+    let mut builder = tar::Builder::new(HashingWriter::new(encoder));
     for (prefix, root) in roots {
         if !root.is_dir() {
             continue;
         }
         append_dir(&mut builder, root, Path::new(prefix), &mut total)?;
     }
-    let encoder = builder.into_inner().context("finishing tar")?;
-    let bytes = encoder.finish().context("finishing gzip")?;
-    Ok(bytes)
+    let hashing = builder.into_inner().context("finishing tar")?;
+    let (encoder, content_digest) = hashing.finish();
+    Ok(TarredDirs {
+        bytes: encoder.finish().context("finishing gzip")?,
+        content_digest,
+    })
+}
+
+/// The content digest alone, for a read-back. Tars into the hasher and nothing else — no compression,
+/// and no buffer holding the archive.
+pub fn tar_content_digest(roots: &[(String, PathBuf)]) -> Result<String> {
+    let mut total = 0u64;
+    let mut builder = tar::Builder::new(HashingWriter::new(std::io::sink()));
+    for (prefix, root) in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        append_dir(&mut builder, root, Path::new(prefix), &mut total)?;
+    }
+    Ok(builder.into_inner().context("finishing tar")?.finish().1)
+}
+
+/// Hashes everything written through it, then hands the inner writer back.
+struct HashingWriter<W> {
+    inner: W,
+    hasher: blake3::Hasher,
+}
+
+impl<W: Write> HashingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: blake3::Hasher::new(),
+        }
+    }
+
+    fn finish(self) -> (W, String) {
+        (self.inner, self.hasher.finalize().to_hex().to_string())
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.hasher.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// Chromium creates these trees 0600/0700 and nothing in them is executable, so the mode is set

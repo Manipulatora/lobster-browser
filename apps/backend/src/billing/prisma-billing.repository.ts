@@ -6,6 +6,7 @@ import type {
   Deposit,
   DepositStatus,
   PaidPlanTier,
+  PlanTier,
   Subscription,
 } from '@lobster/shared-types';
 
@@ -15,14 +16,16 @@ import type {
   AgentUsageRow,
   BillingRepository,
   DepositReversal,
+  PlanChangeOutcome,
   StoredDeposit,
 } from './billing.repository';
 
 /**
- * Thrown inside `renewSubscription`'s transaction to abort it when Credit is short.
+ * Thrown inside a subscription transaction — `renewSubscription`, `changePlan` — to abort it when
+ * Credit is short.
  *
  * Prisma only rolls an interactive transaction back if the callback REJECTS, so signalling this
- * with a return value would commit the period extension without the charge — a free month. A
+ * with a return value would commit the period write without the charge — a free month. A
  * private sentinel class (rather than a bare Error) lets the catch distinguish this deliberate
  * unwind from a genuine database fault, which must still propagate.
  */
@@ -399,6 +402,106 @@ export class PrismaBillingRepository implements BillingRepository {
       update: data,
     });
     return toSubscription(row);
+  }
+
+  async changePlan(args: {
+    teamId: string;
+    expected: {
+      tier: PlanTier;
+      billingPeriod: BillingPeriod;
+      currentPeriodEnd: string | null;
+    } | null;
+    dueCents: number;
+    description: string;
+    metadata: Record<string, unknown>;
+    tier: PaidPlanTier;
+    profileLimit: number;
+    priceCents: number;
+    billingPeriod: BillingPeriod;
+    billingAnchorDay: number;
+    currentPeriodStart: Date;
+    currentPeriodEnd: Date;
+  }): Promise<PlanChangeOutcome> {
+    const data = {
+      tier: args.tier,
+      profileLimit: args.profileLimit,
+      priceCents: args.priceCents,
+      billingPeriod: args.billingPeriod,
+      billingAnchorDay: args.billingAnchorDay,
+      currentPeriodStart: args.currentPeriodStart,
+      currentPeriodEnd: args.currentPeriodEnd,
+      status: 'active' as const,
+      autoRenew: true,
+      lastRenewalAt: new Date(),
+      lastFailureCode: null,
+    };
+
+    return this.prisma
+      .$transaction(async (tx) => {
+        // 1. CLAIM, exactly as `renewSubscription` does — but on the whole package rather than on
+        //    its end date alone, because an upgrade bought at the same instant of the month as the
+        //    package it replaces lands on the SAME period end, and a date-only guard would then
+        //    match a second time. A first purchase has no row to swap, so there the claim is the
+        //    INSERT itself: `skipDuplicates` compiles to ON CONFLICT DO NOTHING, reporting the
+        //    collision as a count of zero rather than raising — an error would poison the
+        //    transaction the debit still has to run in.
+        const expected = args.expected;
+        if (expected) {
+          const claimed = await tx.subscription.updateMany({
+            where: {
+              teamId: args.teamId,
+              tier: expected.tier,
+              billingPeriod: expected.billingPeriod,
+              currentPeriodEnd: expected.currentPeriodEnd
+                ? new Date(expected.currentPeriodEnd)
+                : null,
+            },
+            data,
+          });
+          if (claimed.count === 0) return { status: 'superseded' } as const;
+        } else {
+          const created = await tx.subscription.createMany({
+            data: { teamId: args.teamId, ...data },
+            skipDuplicates: true,
+          });
+          if (created.count === 0) return { status: 'superseded' } as const;
+        }
+
+        // 2. CHARGE, same transaction and the same conditional UPDATE `move` uses. Zero rows means
+        //    the balance is short, and throwing rolls the claim back — the team keeps the package
+        //    it had and no Credit moves.
+        await tx.wallet.upsert({
+          where: { teamId: args.teamId },
+          create: { teamId: args.teamId },
+          update: {},
+        });
+        const debited = await tx.wallet.updateMany({
+          where: { teamId: args.teamId, balanceCents: { gte: args.dueCents } },
+          data: { balanceCents: { decrement: args.dueCents } },
+        });
+        if (debited.count === 0) throw new InsufficientCreditRollback();
+
+        const wallet = await tx.wallet.findUniqueOrThrow({ where: { teamId: args.teamId } });
+        await tx.creditTransaction.create({
+          data: {
+            teamId: args.teamId,
+            kind: 'purchase',
+            amountCents: -args.dueCents,
+            balanceAfterCents: wallet.balanceCents,
+            description: args.description,
+            metadata: args.metadata as never,
+          },
+        });
+
+        const row = await tx.subscription.findUniqueOrThrow({ where: { teamId: args.teamId } });
+        return { status: 'changed', subscription: toSubscription(row) } as const;
+      })
+      .catch((err: unknown) => {
+        if (err instanceof InsufficientCreditRollback) {
+          return { status: 'insufficient_credit' } as const;
+        }
+        throw err;
+      });
   }
 
   async setAutoRenew(teamId: string, autoRenew: boolean): Promise<Subscription> {

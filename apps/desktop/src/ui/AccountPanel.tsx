@@ -140,12 +140,9 @@ function renderBody(
     <>
       <div className="account-panel__row">
         <span className="account-panel__plan">{planLabel(summary.tier)}</span>
-        {/* Upgrade is offered only when it would change something: on the top plan it is an advert. */}
-        {summary.tier !== 'max' ? (
-          <button type="button" className="account-panel__link" onClick={onOpenBilling}>
-            {atCap ? 'Get more' : 'Upgrade'}
-          </button>
-        ) : null}
+        {/* Upgrade lives at the foot of the sidebar, not here: two controls opening the same page
+            from one card is the duplication the topbar Credit chip already had to lose. */}
+        {atCap ? <span className="account-panel__hint">At your limit</span> : null}
       </div>
 
       <div

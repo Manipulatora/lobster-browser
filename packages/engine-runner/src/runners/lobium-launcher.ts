@@ -47,6 +47,7 @@ import {
   installMobileEmulationForAllTargets,
   type MobileEmulationController,
 } from '../mobile-emulation.js';
+import { profileMark } from './profile-mark.js';
 // NTP branding is native (patched engine resources); no CDP start-page injection.
 import type { Launcher, LaunchContext, LaunchHandle } from './types.js';
 
@@ -359,6 +360,7 @@ export async function buildNativeLobiumProcessArgs(
       'authenticated proxy requires the local proxy auth adapter — call createLobiumLauncher (not buildNativeLobiumProcessArgs alone)',
     );
   }
+  const mark = ctx.profileName ? profileMark(ctx.profileName, ctx.profileId) : undefined;
   const deviceFrame =
     ctx.isMobileProfile && ctx.mobileFormFactor
       ? deviceFrameGeometry(
@@ -388,6 +390,17 @@ export async function buildNativeLobiumProcessArgs(
     // Profile name for the NATIVE toolbar chip (rendered left of the omnibox by the Lobium engine
     // patch). Replaces the old in-page profile chip drawn by the injected NTP.
     ...(ctx.profileName ? [`--lobium-profile-name=${ctx.profileName}`] : []),
+    // The rounded violet square the engine draws for the OS taskbar entry, the title-bar icon and the
+    // window list. Reduced HERE, not in the engine: the manager's row avatar reads the same rule from
+    // the same module, and a name's initials computed twice would eventually be computed differently.
+    // Omitted for a name with no glyphs at all, in which case the engine keeps the stock icon.
+    ...(mark && mark.initials
+      ? [
+          `--lobium-profile-initials=${mark.initials}`,
+          `--lobium-profile-word=${mark.word}`,
+          `--lobium-profile-tint=${mark.tint}`,
+        ]
+      : []),
     // Android keeps a normal full-size Lobium window. Native BrowserView lays the real WebContents
     // inside the sourced centered device stage below the desktop tab strip/omnibox.
     ...(deviceFrame

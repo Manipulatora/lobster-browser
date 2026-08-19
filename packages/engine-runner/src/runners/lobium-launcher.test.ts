@@ -22,6 +22,7 @@ import {
   proxySummaryFromServer,
   resolveLobiumBinary,
 } from './lobium-launcher.js';
+import { profileMark } from './profile-mark.js';
 import type { LaunchContext } from './types.js';
 
 const fp = deriveFingerprint('seed-lobium-test', { os: 'windows', engine: 'lobium' });
@@ -379,6 +380,27 @@ test('buildNativeLobiumProcessArgs is direct native Chromium args, not Patchrigh
     // previous tabs reopen instead of a forced New Tab Page (which discarded unpinned tabs).
     assert.ok(args.includes('--restore-last-session'));
     assert.ok(!args.includes('chrome://newtab/'));
+  } finally {
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('buildNativeLobiumProcessArgs hands the engine a per-profile window mark', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-profile-mark-'));
+  try {
+    const ctx = ctxWith(userDataDir);
+    ctx.profileName = 'Acme US';
+    const args = await buildNativeLobiumProcessArgs(ctx);
+
+    assert.ok(args.includes('--lobium-profile-name=Acme US'));
+    assert.ok(args.includes('--lobium-profile-initials=AU'));
+    assert.ok(args.includes('--lobium-profile-word=Acme'));
+    assert.ok(args.includes(`--lobium-profile-tint=${profileMark('Acme US', ctx.profileId).tint}`));
+
+    // A profile with no name at all leaves every mark switch off, so the engine keeps the stock
+    // Chromium icon rather than drawing an empty violet square.
+    const unnamed = await buildNativeLobiumProcessArgs(ctxWith(userDataDir));
+    assert.ok(!unnamed.some((arg) => arg.startsWith('--lobium-profile-')));
   } finally {
     await rm(userDataDir, { recursive: true, force: true });
   }

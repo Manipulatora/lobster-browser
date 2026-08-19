@@ -110,3 +110,9 @@
     </div>
   </div>
 </section>
+
+<!-- The purchase itself. Opened over the table rather than on another page: the choice was made on
+     the card, and what follows it is a confirmation of the figures, not a second decision. -->
+@if (pending(); as p) {
+  <app-plan-confirm-dialog [tier]="p.tier" [period]="p.period" (closed)="closeConfirm()" />
+}

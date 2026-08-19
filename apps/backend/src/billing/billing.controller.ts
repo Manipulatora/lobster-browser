@@ -16,6 +16,7 @@ import type {
   CreditTransaction,
   Deposit,
   PaidPlanTier,
+  PlanChangeQuote,
   Subscription,
 } from '@lobster/shared-types';
 
@@ -71,6 +72,23 @@ class PurchaseDto {
 
   // Honoured only after the caller's membership is verified server-side — never trusted as an
   // ambient identity.
+  @IsOptional()
+  @IsString()
+  teamId?: string;
+}
+
+/**
+ * Query for the quote. Same fields as {@link PurchaseDto} and validated identically — a quote that
+ * accepted a tier the purchase would reject is a dialog quoting a package nobody can buy.
+ */
+class QuoteDto {
+  @IsIn(PAID_TIERS)
+  tier!: PaidPlanTier;
+
+  @IsOptional()
+  @IsIn(BILLING_PERIODS)
+  period?: BillingPeriod;
+
   @IsOptional()
   @IsString()
   teamId?: string;
@@ -146,6 +164,29 @@ export class BillingController {
   ): Promise<ApiResponse<DepositInstruction>> {
     return ok(
       await this.billing.createDeposit(user.id, dto.amountCents, dto.currencyCode, dto.teamId),
+    );
+  }
+
+  /**
+   * What buying a package would do, without doing it.
+   *
+   * A GET because it changes nothing and reserves nothing — the balance can move between this and
+   * the purchase, and `purchasePlan` prices the change again for itself rather than trusting an
+   * answer the client is holding.
+   */
+  @Get('quote')
+  @UseGuards(JwtAuthGuard)
+  async quote(
+    @CurrentUser() user: { id: string },
+    @Query() query: QuoteDto,
+  ): Promise<ApiResponse<PlanChangeQuote>> {
+    return ok(
+      await this.billing.quotePlanChange(
+        user.id,
+        query.tier,
+        query.period ?? 'monthly',
+        query.teamId,
+      ),
     );
   }
 

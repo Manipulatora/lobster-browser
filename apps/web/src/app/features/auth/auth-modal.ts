@@ -175,8 +175,24 @@ export class AuthModal {
 
     this.modal.completed();
     // Straight to billing: a new account has no Credit and no package, so the dashboard would
-    // only be able to tell them to go there.
-    void this.router.navigate(['/account/billing']);
+    // only be able to tell them to go there. `next` overrides it when something sent the user
+    // here mid-task — the auth guard, and the pricing CTAs, which put the chosen package in it so
+    // the visitor lands back on the purchase they picked rather than on a page that forgot it.
+    void this.router.navigateByUrl(this.nextUrl() ?? '/account/billing');
+  }
+
+  /**
+   * The `next` query on the current URL, if it is safe to follow.
+   *
+   * SAME-ORIGIN PATHS ONLY. `next` arrives in a link anyone can write, and following an absolute
+   * URL out of it would turn every "sign in" link into an open redirect — the classic phishing
+   * hop, made more valuable here by landing straight after an authentication. A leading `//` is
+   * protocol-relative and goes off-site too, which is why it is not enough to require a `/`.
+   */
+  private nextUrl(): string | null {
+    const next = this.router.parseUrl(this.router.url).queryParams['next'];
+    if (typeof next !== 'string') return null;
+    return next.startsWith('/') && !next.startsWith('//') ? next : null;
   }
 
   /** Errors stay hidden until the field has been visited or the form submitted once. */

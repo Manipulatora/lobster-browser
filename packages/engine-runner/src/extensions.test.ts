@@ -104,7 +104,10 @@ function signedCrxFixture(): { crx: Buffer; id: string } {
   const spki = publicKey.export({ format: 'der', type: 'spki' });
   const id = idFromKey(spki);
   const zip = storedZip([
-    { name: 'manifest.json', contents: '{"manifest_version":3,"name":"Fixture","version":"1"}' },
+    {
+      name: 'manifest.json',
+      contents: '{"manifest_version":3,"name":"Fixture","version":"1.0.0"}',
+    },
     { name: 'worker.js', contents: 'console.log("fixture")' },
   ]);
   const signedHeader = protoBytes(1, crxIdBytes(id));
@@ -339,5 +342,72 @@ test('detectUnloadableUserExtensions names browser-installed extensions only', a
     ]);
   } finally {
     await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
+test('an unchanged extension is not re-extracted, and an in-place edit survives a relaunch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ext-reuse-'));
+  const { crx, id } = signedCrxFixture();
+  const options = {
+    cacheDir: join(root, 'cache'),
+    fetch: async () => new Response(crx, { status: 200 }),
+    webStoreDownloadUrl: () => 'https://clients2.google.com/service/update2/crx?fixture=true',
+  };
+  const refs = [{ source: 'chrome_web_store' as const, enabled: true, id }];
+  const userDataDir = join(root, 'profile');
+  try {
+    const [first] = await prepareProfileExtensions(refs, userDataDir, options);
+    assert.ok(first);
+    // A marker Chromium would never write. It exists to prove the second launch reused the tree
+    // instead of deleting and rebuilding it, which is what silently discarded a developer's edits.
+    await writeFile(join(first, 'edited-in-place.txt'), 'still here');
+
+    const [second] = await prepareProfileExtensions(refs, userDataDir, options);
+    assert.equal(second, first);
+    assert.equal(await readFile(join(first, 'edited-in-place.txt'), 'utf8'), 'still here');
+
+    // The version is recorded, which nothing did before: the download always asks for the latest
+    // published build, so this is the only record of what a session ran under.
+    const installed = JSON.parse(
+      await readFile(join(userDataDir, 'lobium-extensions', 'installed.json'), 'utf8'),
+    );
+    assert.equal(installed.length, 1);
+    assert.equal(installed[0].id, id);
+    assert.equal(installed[0].version, '1.0.0');
+    assert.equal(installed[0].source, 'chrome_web_store');
+    assert.ok(installed[0].installedAt);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a changed local extension is re-snapshotted rather than reused', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ext-changed-'));
+  try {
+    const source = join(root, 'source');
+    await mkdir(source);
+    await writeFile(
+      join(source, 'manifest.json'),
+      '{"manifest_version":3,"name":"Local","version":"1.2.3"}',
+    );
+    const refs = [{ source: 'unpacked' as const, enabled: true, path: source }];
+    const userDataDir = join(root, 'profile');
+    const [snapshot] = await prepareProfileExtensions(refs, userDataDir, {});
+    assert.ok(snapshot);
+    assert.match(await readFile(join(snapshot, 'manifest.json'), 'utf8'), /1\.2\.3/);
+
+    await writeFile(
+      join(source, 'manifest.json'),
+      '{"manifest_version":3,"name":"Local","version":"2.0.0"}',
+    );
+    await prepareProfileExtensions(refs, userDataDir, {});
+    assert.match(await readFile(join(snapshot, 'manifest.json'), 'utf8'), /2\.0\.0/);
+
+    const installed = JSON.parse(
+      await readFile(join(userDataDir, 'lobium-extensions', 'installed.json'), 'utf8'),
+    );
+    assert.equal(installed[0].version, '2.0.0');
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

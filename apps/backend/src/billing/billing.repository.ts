@@ -5,6 +5,7 @@ import type {
   Deposit,
   DepositStatus,
   PaidPlanTier,
+  PlanTier,
   Subscription,
 } from '@lobster/shared-types';
 
@@ -36,6 +37,18 @@ export interface DepositReversal {
   clawedBackCents: number;
   unrecoveredCents: number;
 }
+
+/**
+ * Outcome of {@link BillingRepository.changePlan}.
+ *
+ * `superseded` is not an error condition of the database — it is the ordinary answer to a
+ * double-submitted purchase, and it is reported rather than retried: the second attempt was priced
+ * against a period that no longer exists, so charging it would bill the team twice for one change.
+ */
+export type PlanChangeOutcome =
+  | { status: 'changed'; subscription: Subscription }
+  | { status: 'insufficient_credit' }
+  | { status: 'superseded' };
 
 /**
  * One metered Lobee call, as written to the usage audit.
@@ -250,6 +263,49 @@ export interface BillingRepository {
     currentPeriodStart: Date;
     currentPeriodEnd: Date;
   }): Promise<Subscription>;
+
+  /**
+   * Buy or change a package: debit the net cost and write the new period, atomically.
+   *
+   * WHY THIS IS ONE CALL AND NOT "debit, then activate". Purchases arrive from a browser, and a
+   * browser double-submits — a second click, a retried request, two tabs. Two attempts that both
+   * read the same subscription both price the same upgrade and both find the balance sufficient,
+   * so the service-level "are you already on this package" check passes twice and the team is
+   * charged twice for one plan change. `move` cannot prevent it: both debits are individually
+   * legitimate against a healthy balance.
+   *
+   * The fix is the one {@link renewSubscription} uses — a compare-and-swap on the subscription
+   * performed in the SAME transaction as the debit. Whichever attempt commits first moves the
+   * period, so the other's CAS matches nothing and it reports `superseded` without charging. A
+   * crash between the two rolls both back, leaving the team neither charged nor moved.
+   *
+   * @param expected the package this change was priced against, or null when the team had no
+   *                 subscription row at all — which is why it is a nullable object rather than a
+   *                 bare date: "no row yet" must CREATE, and a row whose period end happens to be
+   *                 null must not. All three fields are compared, not just the date: an upgrade
+   *                 bought at the same instant of the month as the package it replaces produces
+   *                 the same period end, and a date-only guard would let a duplicate through.
+   * @param dueCents what to debit. Positive: an allowed change always costs more than the credit
+   *                 it reclaims, so a purchase is never a net refund.
+   */
+  changePlan(args: {
+    teamId: string;
+    expected: {
+      tier: PlanTier;
+      billingPeriod: BillingPeriod;
+      currentPeriodEnd: string | null;
+    } | null;
+    dueCents: number;
+    description: string;
+    metadata: Record<string, unknown>;
+    tier: PaidPlanTier;
+    profileLimit: number;
+    priceCents: number;
+    billingPeriod: BillingPeriod;
+    billingAnchorDay: number;
+    currentPeriodStart: Date;
+    currentPeriodEnd: Date;
+  }): Promise<PlanChangeOutcome>;
 
   setAutoRenew(teamId: string, autoRenew: boolean): Promise<Subscription>;
 

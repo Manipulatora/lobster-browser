@@ -8,6 +8,7 @@ import type {
   Deposit,
   DepositInstruction,
   PaidPlanTier,
+  PlanChangeQuote,
 } from './billing.types';
 
 /**
@@ -83,6 +84,19 @@ export class BillingStore {
     // Refresh the pending list so the new deposit appears without a manual reload.
     void this.refreshDeposits();
     return instruction;
+  }
+
+  /**
+   * What buying a package would do — the exact debit, the balance it leaves, and whether the
+   * change is allowed at all.
+   *
+   * Never cached. The quote is a statement about a balance and a period that both move, and a
+   * dialog opened twice must not show the first answer the second time.
+   */
+  quote(tier: PaidPlanTier, period: BillingPeriod = 'monthly'): Promise<PlanChangeQuote> {
+    return this.api.get<PlanChangeQuote>(
+      `/billing/quote?tier=${encodeURIComponent(tier)}&period=${encodeURIComponent(period)}`,
+    );
   }
 
   /** Buy a package. `period` picks the monthly price or twelve months at the yearly discount. */

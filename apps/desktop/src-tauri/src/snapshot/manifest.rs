@@ -230,6 +230,18 @@ pub struct ArtifactRecord {
     /// Milliseconds since the capture's first artifact started, so the coherence window is
     /// attributable to a specific pair rather than only reported as a total.
     pub offset_ms: u64,
+    /// Digest of this artifact's content in a form that does NOT depend on the compressor.
+    ///
+    /// Only the tar-backed artifacts carry one. Their `plain_digest` is over the GZIPPED payload, so
+    /// verifying a restore meant re-compressing the whole unpacked tree and comparing the deflate
+    /// output — the single most expensive step of restoring a profile with a large extension store,
+    /// and a check that quietly bets the deflate implementation and level never change. This is the
+    /// digest of the tar itself, which proves the same thing: the files are the files.
+    ///
+    /// Absent on manifests written before it existed, which fall back to the re-compressing
+    /// comparison. That fallback is why this is an added field rather than a manifest version bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
     /// Present iff this artifact was captured in portable form: which store it is, and the OSCrypt
     /// scheme its values were decrypted FROM. Its presence is how [`crate::snapshot`]'s restore knows
     /// the payload carries a plaintext sidecar to re-seal, rather than a database to write verbatim.
@@ -776,6 +788,7 @@ mod tests {
                 counts: vec![("rows".into(), 181)],
                 captured_in_version: 3,
                 offset_ms: 0,
+                content_digest: None,
                 portable: None,
             }],
             absent: vec!["bookmarks".into()],

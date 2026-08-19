@@ -106,6 +106,8 @@ struct Captured {
     fidelity: Fidelity,
     backend: Option<String>,
     counts: Vec<(String, u64)>,
+    /// Set by the tar-backed codecs only. See [`ArtifactRecord::content_digest`].
+    content_digest: Option<String>,
     /// Set for the three OSCrypt-bearing artifacts: which store, and the scheme its values were
     /// decrypted from. Its presence in the manifest is how a restore knows the payload is a portable
     /// [`PortableArtifact`] rather than a verbatim [`FileSet`].
@@ -334,6 +336,7 @@ fn capture_artifacts(
             counts: captured.counts,
             captured_in_version: version,
             offset_ms,
+            content_digest: captured.content_digest,
             portable: captured.portable,
         });
     }
@@ -401,6 +404,7 @@ fn capture_artifact(
                         fidelity: Fidelity::Full,
                         backend: None,
                         counts,
+                        content_digest: None,
                         portable: Some(Portable {
                             kind,
                             source_scheme,
@@ -425,6 +429,7 @@ fn capture_artifact(
                         fidelity: Fidelity::Full,
                         backend: None,
                         counts,
+                        content_digest: None,
                         portable: None,
                     }
                 }
@@ -462,6 +467,7 @@ fn capture_artifact(
                         fidelity: Fidelity::Full,
                         backend: Some(backend.label().to_string()),
                         counts,
+                        content_digest: None,
                         portable: None,
                     }))
                 }
@@ -471,15 +477,17 @@ fn capture_artifact(
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| "leveldb".to_string());
-                    let payload = dir_tar::tar_dirs(&[(prefix, dir)])?;
-                    let counts = vec![("files".to_string(), dir_tar::tar_file_count(&payload)?)];
+                    let tarred = dir_tar::tar_dirs_with_digest(&[(prefix, dir)])?;
+                    let counts =
+                        vec![("files".to_string(), dir_tar::tar_file_count(&tarred.bytes)?)];
                     Ok(Some(Captured {
-                        payload,
+                        payload: tarred.bytes,
                         // A LevelDB DOM store is as opaque as any other LevelDB directory: the tar
                         // proves the bytes, not the store's internal consistency.
                         fidelity: Fidelity::Opaque,
                         backend: Some(backend.label().to_string()),
                         counts,
+                        content_digest: Some(tarred.content_digest),
                         portable: None,
                     }))
                 }
@@ -503,6 +511,7 @@ fn capture_artifact(
                 fidelity: Fidelity::Full,
                 backend: None,
                 counts,
+                content_digest: None,
                 portable: None,
             }))
         }
@@ -517,16 +526,17 @@ fn capture_artifact(
             if roots.is_empty() {
                 return Ok(None);
             }
-            let payload = dir_tar::tar_dirs(&roots)?;
+            let tarred = dir_tar::tar_dirs_with_digest(&roots)?;
             let counts = vec![
-                ("files".to_string(), dir_tar::tar_file_count(&payload)?),
+                ("files".to_string(), dir_tar::tar_file_count(&tarred.bytes)?),
                 ("dirs".to_string(), roots.len() as u64),
             ];
             Ok(Some(Captured {
-                payload,
+                payload: tarred.bytes,
                 fidelity: Fidelity::Opaque,
                 backend: None,
                 counts,
+                content_digest: Some(tarred.content_digest),
                 portable: None,
             }))
         }
@@ -553,6 +563,7 @@ fn capture_artifact(
                 fidelity: Fidelity::Full,
                 backend: None,
                 counts,
+                content_digest: None,
                 portable: None,
             }))
         }
@@ -572,6 +583,7 @@ fn capture_artifact(
                 fidelity: Fidelity::Full,
                 backend: None,
                 counts,
+                content_digest: None,
                 portable: None,
             }))
         }
@@ -786,6 +798,16 @@ pub fn restore(
     target: &Identity,
     force: bool,
 ) -> Result<RestoreReport> {
+    // The user-data-dir has to exist before the key is resolved, not after. On Windows the key lives
+    // in `<udd>/Local State` and a restore into a directory that has never been launched must WRITE
+    // one — that is the normal case for an import and for a first sync onto a new machine, and it is
+    // the difference between a restored profile that is logged in and one whose passwords silently
+    // did not come back.
+    if !udd.is_dir() {
+        std::fs::create_dir_all(udd)
+            .with_context(|| format!("creating user-data-dir {}", udd.display()))?;
+    }
+
     // Resolve the TARGET machine's key to re-seal portable values under. Unlike capture this is
     // allowed to FAIL: a denied macOS Keychain, an unwritable Local State. An unreachable key is not a
     // restore failure — cookies fall back to the plaintext `value` column, and passwords/autofill are
@@ -1153,11 +1175,7 @@ fn stage_artifact(
                             record.id
                         );
                     }
-                    assert_readback(
-                        &record.id,
-                        &record.plain_digest,
-                        &dir_tar::tar_dirs(&[(prefix, staged_path.clone())])?,
-                    )?;
+                    assert_tar_readback(record, &[(prefix, staged_path.clone())])?;
                     Ok(StageOutcome::Ready(Staged {
                         id: record.id.clone(),
                         placements: vec![(live, staged_path)],
@@ -1212,11 +1230,7 @@ fn stage_artifact(
                     detail: "nothing to apply".into(),
                 });
             }
-            assert_readback(
-                &record.id,
-                &record.plain_digest,
-                &dir_tar::tar_dirs(&roots)?,
-            )?;
+            assert_tar_readback(record, &roots)?;
             Ok(StageOutcome::Ready(Staged {
                 id: record.id.clone(),
                 placements,
@@ -1374,6 +1388,28 @@ fn stage_portable_artifact(
         counts,
         detail,
     }))
+}
+
+/// Verify an unpacked directory set against what the manifest recorded.
+///
+/// Prefers the compressor-independent `content_digest` and re-compresses only for a manifest written
+/// before that field existed — which is the whole point of the field: the common path never runs a
+/// second deflate over the restored tree.
+fn assert_tar_readback(record: &ArtifactRecord, roots: &[(String, PathBuf)]) -> Result<()> {
+    match &record.content_digest {
+        Some(expected) => {
+            let actual = dir_tar::tar_content_digest(roots)?;
+            if actual != *expected {
+                bail!(
+                    "READBACK_DIGEST_MISMATCH: {} unpacked to content {actual}, but the manifest \
+                     recorded {expected}; refusing to move it into the profile",
+                    record.id
+                );
+            }
+            Ok(())
+        }
+        None => assert_readback(&record.id, &record.plain_digest, &dir_tar::tar_dirs(roots)?),
+    }
 }
 
 fn assert_readback(id: &str, expected_digest: &str, readback: &[u8]) -> Result<()> {
@@ -2103,6 +2139,82 @@ mod tests {
     /// which makes the test about the filesystem instead of about the rollback. The contract under test
     /// is "every move is journalled and every journalled move can be wound back", and that is exactly
     /// what this asserts, including the `-wal` sidecar travelling with its database.
+    /// A snapshot captured before the compressor-independent digest existed must still restore.
+    ///
+    /// Its tar artifacts were verified by re-compressing and comparing gzip output, and the fallback
+    /// keeps doing exactly that — so an existing local backup does not become unrestorable because a
+    /// faster check arrived. This is the reason `content_digest` is an added optional field rather
+    /// than a manifest version bump.
+    #[test]
+    fn a_snapshot_captured_before_the_content_digest_still_restores() {
+        let root = temp_root("no-content-digest");
+        let udd = root.join("prf_old");
+        build_profile(&udd, "authToken=carried-forward", "ls-old");
+        let vault = vault_at(&root);
+
+        let mut manifest = capture(
+            &vault,
+            &udd,
+            "prf_old",
+            CaptureMode::Quiesced,
+            &Identity::fixture(),
+            &CaptureOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            manifest
+                .artifacts
+                .iter()
+                .any(|a| a.content_digest.is_some()),
+            "the fixture must contain a tar-backed artifact for this to mean anything"
+        );
+
+        for record in &mut manifest.artifacts {
+            record.content_digest = None;
+        }
+        vault.commit(&manifest).unwrap();
+
+        std::fs::remove_dir_all(&udd).unwrap();
+        let report = restore(
+            &vault,
+            &udd,
+            "prf_old",
+            manifest.version,
+            &Identity::fixture(),
+            false,
+        )
+        .unwrap();
+        assert!(report.ok, "{:?}", report.failure);
+        assert_eq!(read_cookie(&udd), "authToken=carried-forward");
+        assert_eq!(
+            std::fs::read(udd.join("Default/Extension State/000003.log")).unwrap(),
+            b"ext state"
+        );
+    }
+
+    /// And the fast path is not merely faster: a tampered directory must still be caught by it.
+    #[test]
+    fn the_content_digest_catches_a_changed_file_without_recompressing() {
+        let roots_root = temp_root("content-digest");
+        let dir = roots_root.join("store");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("000003.log"), b"original").unwrap();
+
+        let roots = vec![("store".to_string(), dir.clone())];
+        let tarred = dir_tar::tar_dirs_with_digest(&roots).unwrap();
+        assert_eq!(
+            dir_tar::tar_content_digest(&roots).unwrap(),
+            tarred.content_digest,
+            "the streaming digest and the standalone one must agree, or the fast path is a lie"
+        );
+
+        std::fs::write(dir.join("000003.log"), b"tampered").unwrap();
+        assert_ne!(
+            dir_tar::tar_content_digest(&roots).unwrap(),
+            tarred.content_digest
+        );
+    }
+
     #[test]
     fn pruning_keeps_the_newest_parked_copy_and_removes_the_rest() {
         let udd = temp_root("prune");

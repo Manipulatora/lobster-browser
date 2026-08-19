@@ -4,11 +4,16 @@ import { test } from 'node:test';
 import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import {
+  classifyPlanChange,
   entitledProfileLimit,
   FREE_PLAN_PROFILE_LIMIT,
   PLAN_CATALOG,
   planByTier,
+  planChangeAllowed,
   yearlyPriceCents,
+  type BillingPeriod,
+  type PaidPlanTier,
+  type PlanTier,
 } from '@lobster/shared-types';
 
 import type { UsersRepository } from '../auth/users.repository';
@@ -122,6 +127,43 @@ test('a year costs twelve months less the advertised twenty per cent', () => {
   );
 });
 
+test('the plan-change policy, every case', () => {
+  // The whole policy in one table, because it is a product decision rather than an implementation
+  // detail: three of these are charged and three are refused, and which is which is what the
+  // storefront's buttons, the confirmation dialog and the purchase endpoint all resolve through.
+  const live = (tier: PlanTier, period: BillingPeriod) => ({ tier, period, live: true });
+  const target = (tier: PaidPlanTier, period: BillingPeriod) => ({ tier, period });
+
+  // Nothing live: every package is a plain purchase, including one smaller than the lapsed row.
+  assert.equal(
+    classifyPlanChange({ tier: 'free', period: 'monthly', live: false }, target('pro', 'monthly')),
+    'new',
+  );
+  assert.equal(
+    classifyPlanChange({ tier: 'max', period: 'monthly', live: false }, target('light', 'monthly')),
+    'new',
+  );
+
+  // Live, and moving up — the two that are charged.
+  assert.equal(classifyPlanChange(live('light', 'monthly'), target('pro', 'monthly')), 'upgrade');
+  assert.equal(classifyPlanChange(live('light', 'yearly'), target('pro', 'yearly')), 'upgrade');
+  assert.equal(classifyPlanChange(live('pro', 'monthly'), target('pro', 'yearly')), 'extend');
+
+  // Live, and not moving up — the three that are refused.
+  assert.equal(classifyPlanChange(live('pro', 'monthly'), target('pro', 'monthly')), 'same');
+  assert.equal(classifyPlanChange(live('pro', 'yearly'), target('pro', 'yearly')), 'same');
+  assert.equal(classifyPlanChange(live('max', 'monthly'), target('light', 'monthly')), 'downgrade');
+  assert.equal(classifyPlanChange(live('max', 'yearly'), target('light', 'yearly')), 'downgrade');
+  // A bigger package on a shorter term is still a shortening: the year is what was paid for.
+  assert.equal(classifyPlanChange(live('light', 'yearly'), target('max', 'monthly')), 'shorten');
+  assert.equal(classifyPlanChange(live('pro', 'yearly'), target('pro', 'monthly')), 'shorten');
+
+  assert.deepEqual(
+    (['new', 'upgrade', 'extend', 'same', 'downgrade', 'shorten'] as const).map(planChangeAllowed),
+    [true, true, true, false, false, false],
+  );
+});
+
 // --- Credit arithmetic -------------------------------------------------------
 
 test('a debit larger than the balance is refused and changes nothing', async () => {
@@ -230,32 +272,165 @@ test('switching packages credits back the unused part of the current period', as
   assert.equal((await repo.getSubscription(TEAM))?.profileLimit, 200);
 });
 
-test('a downgrade worth more than the new plan lands as a refund, not a negative charge', async () => {
+test('a downgrade is refused while the bigger package is still paid for', async () => {
+  // THE POLICY, and the reason it is a refusal rather than a prorated refund: applying it would
+  // hand back most of a period as Credit AND withdraw 990 profiles the team is using, mid-month.
+  // There is exactly one way to spend less — auto-renew off, then buy the smaller package when the
+  // current one runs out — which is also the only way to reach the free tier.
+  const { svc, repo } = makeService();
+  await fund(repo, 30_000);
+  await svc.purchasePlan(USER, 'max'); // -20_000 → 10_000, a live month of Max
+
+  await assert.rejects(() => svc.purchasePlan(USER, 'light'), ConflictException);
+
+  assert.equal(await repo.getBalanceCents(TEAM), 10_000, 'a refused change moves no Credit');
+  assert.equal((await repo.getSubscription(TEAM))?.tier, 'max', 'and leaves the package alone');
+});
+
+test('leaving a prepaid year for a monthly term is refused, even for a bigger package', async (t) => {
+  // Tier-wise this is an upgrade; term-wise it abandons eleven months already paid for and would
+  // return them as Credit. The yearly term is the one that has to be answered for, so Max YEARLY
+  // is the move that is open — and it is.
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-06-05T10:00:00.000Z') });
+  const { svc, repo } = makeService();
+  const year = yearlyPriceCents(planByTier('plus'));
+  await fund(repo, 400_000);
+  await svc.purchasePlan(USER, 'plus', 'yearly');
+  const afterPlus = await repo.getBalanceCents(TEAM);
+
+  await assert.rejects(() => svc.purchasePlan(USER, 'max', 'monthly'), ConflictException);
+  assert.equal(await repo.getBalanceCents(TEAM), afterPlus, 'nothing was charged');
+
+  const max = await svc.purchasePlan(USER, 'max', 'yearly');
+  assert.equal(max.tier, 'max');
+  assert.equal(max.billingPeriod, 'yearly');
+  // The whole Plus year is unused to the cent, so Max costs its year less that year.
+  assert.equal(
+    await repo.getBalanceCents(TEAM),
+    afterPlus - (yearlyPriceCents(planByTier('max')) - year),
+  );
+});
+
+test('the smaller package can be bought once the period it replaces has run out', async () => {
+  // The other half of the downgrade policy: refusing mid-period would be a dead end if the wait
+  // did not actually open the door. An elapsed period owes nothing back, so this is a plain
+  // purchase at the list price.
   const { svc, repo } = makeService();
   await fund(repo, 30_000);
   await svc.purchasePlan(USER, 'max'); // -20_000 → 10_000
+  await expire(repo, 1);
 
-  // Almost the whole Max period unused: ~$200 of credit against a $10 Light plan.
-  await repo.activateSubscription({
-    teamId: TEAM,
-    tier: 'max',
-    profileLimit: 1_000,
-    priceCents: 20_000,
-    billingPeriod: 'monthly',
-    billingAnchorDay: 1,
-    currentPeriodStart: new Date(),
-    currentPeriodEnd: new Date(Date.now() + 30 * 24 * 3600 * 1000),
-  });
+  const light = await svc.purchasePlan(USER, 'light');
 
-  await svc.purchasePlan(USER, 'light');
+  assert.equal(light.tier, 'light');
+  assert.equal(light.profileLimit, 10);
+  assert.equal(await repo.getBalanceCents(TEAM), 9_000, 'charged Light in full, nothing credited');
+});
 
-  const balance = await repo.getBalanceCents(TEAM);
-  // 10_000 + (20_000 - 1_000) = 29_000, give or take the floor.
-  assert.ok(Math.abs(balance - 29_000) <= 2, `expected ~29_000, got ${balance}`);
+test('an upgrade the balance cannot cover is refused without charging or changing the package', async () => {
+  const { svc, repo } = makeService();
+  await fund(repo, 10_000);
+  await svc.purchasePlan(USER, 'light'); // -1_000 → 9_000, a live month of Light
 
-  const [latest] = await repo.listTransactions(TEAM, 1);
-  assert.equal(latest?.kind, 'refund', 'a net credit must be recorded as a refund');
-  assert.ok(latest!.amountCents > 0, 'a refund must be a positive movement');
+  // Max is $200; a whole unused month of Light is worth $10 at most, so $9,000 is far short.
+  await assert.rejects(() => svc.purchasePlan(USER, 'max'), BadRequestException);
+
+  assert.equal(await repo.getBalanceCents(TEAM), 9_000, 'no partial charge');
+  const sub = await repo.getSubscription(TEAM);
+  assert.equal(sub?.tier, 'light', 'the package they paid for is untouched');
+  assert.equal(sub?.profileLimit, 10);
+});
+
+test('a double-submitted upgrade is charged once, not twice', async (t) => {
+  // The double-click, and the reason the debit and the period write are one transaction. Both
+  // requests read the same live Light period, both price the same upgrade, and both find the
+  // balance sufficient — so nothing in the service alone can tell them apart.
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-04-10T09:00:00.000Z') });
+  const { svc, repo } = makeService();
+  await fund(repo, 30_000);
+  await svc.purchasePlan(USER, 'light'); // -1_000 → 29_000
+
+  const results = await Promise.allSettled([
+    svc.purchasePlan(USER, 'pro'),
+    svc.purchasePlan(USER, 'pro'),
+  ]);
+
+  assert.equal(
+    results.filter((r) => r.status === 'fulfilled').length,
+    1,
+    'exactly one upgrade may be applied',
+  );
+  // 29_000 less Pro's $100, itself less the whole unused month of Light the upgrade credits back.
+  assert.equal(await repo.getBalanceCents(TEAM), 20_000, 'one Pro charge, not two');
+  const purchases = (await repo.listTransactions(TEAM, 100)).filter((tx) => tx.kind === 'purchase');
+  assert.equal(purchases.length, 2, 'the Light purchase and one Pro upgrade');
+});
+
+test('a quote states the figure the purchase then charges, and the balance it leaves', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-01-31T12:00:00.000Z') });
+  const { svc, repo } = makeService();
+  await fund(repo, 30_000);
+  await svc.purchasePlan(USER, 'light'); // -1_000 → 29_000, runs to 2026-02-28
+
+  t.mock.timers.tick(10 * 24 * 3600 * 1000); // 2026-02-10T12:00Z
+
+  const quote = await svc.quotePlanChange(USER, 'pro');
+
+  assert.equal(quote.kind, 'upgrade');
+  assert.equal(quote.allowed, true);
+  assert.equal(quote.priceCents, 10_000);
+  assert.equal(quote.unusedCreditCents, 642, '18 of Light’s 28 days are unused');
+  assert.equal(quote.dueCents, 10_000 - 642);
+  assert.equal(quote.balanceCents, 29_000);
+  assert.equal(quote.balanceAfterCents, 29_000 - (10_000 - 642));
+  assert.equal(quote.shortfallCents, 0);
+  assert.equal(quote.currentTier, 'light');
+  assert.equal(quote.currentPeriodEnd, '2026-02-28T12:00:00.000Z');
+  assert.equal(quote.nextBillingAt, '2026-03-10T12:00:00.000Z');
+
+  await svc.purchasePlan(USER, 'pro');
+  assert.equal(
+    await repo.getBalanceCents(TEAM),
+    quote.balanceAfterCents,
+    'the quote is the charge',
+  );
+});
+
+test('a quote for a refused change explains it instead of pricing a proration', async () => {
+  const { svc, repo } = makeService();
+  await fund(repo, 30_000);
+  await svc.purchasePlan(USER, 'max');
+
+  const down = await svc.quotePlanChange(USER, 'light');
+  assert.equal(down.kind, 'downgrade');
+  assert.equal(down.allowed, false);
+  assert.equal(
+    down.unusedCreditCents,
+    0,
+    'no credit is quoted against a change that cannot happen',
+  );
+  assert.equal(down.dueCents, 1_000, 'what it will cost when the current package ends');
+
+  const same = await svc.quotePlanChange(USER, 'max');
+  assert.equal(same.kind, 'same');
+  assert.equal(same.allowed, false);
+
+  const extend = await svc.quotePlanChange(USER, 'max', 'yearly');
+  assert.equal(extend.kind, 'extend');
+  assert.equal(extend.allowed, true);
+});
+
+test('a quote tells an empty wallet how much more Credit it needs', async () => {
+  const { svc, repo } = makeService();
+  await fund(repo, 2_500);
+
+  const quote = await svc.quotePlanChange(USER, 'plus');
+
+  assert.equal(quote.kind, 'new');
+  assert.equal(quote.allowed, true, 'affording it is a separate question from being allowed it');
+  assert.equal(quote.dueCents, 6_000);
+  assert.equal(quote.shortfallCents, 3_500);
+  assert.equal(quote.balanceAfterCents, -3_500);
 });
 
 test('a lapsed subscription earns no unused-time credit', async () => {

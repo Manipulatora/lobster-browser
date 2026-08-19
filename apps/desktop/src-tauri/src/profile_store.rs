@@ -42,9 +42,14 @@ CREATE TABLE IF NOT EXISTS profiles (
     status                 TEXT NOT NULL DEFAULT 'idle', -- shared-types ProfileStatus
     password_hash          TEXT,
     trashed_at             TEXT,
+    remote_id              TEXT,                   -- the account's id for this profile, once synced
+    remote_version         INTEGER NOT NULL DEFAULT 0, -- server blob version this machine last saw
+    synced_at              TEXT,                   -- ISO-8601: last successful push or pull
     created_at             TEXT NOT NULL,          -- ISO-8601
     updated_at             TEXT NOT NULL           -- ISO-8601
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_remote_id ON profiles(remote_id)
+    WHERE remote_id IS NOT NULL;
 ";
 
 /// Profile OS targets accepted by the control plane. Android launches through the ADB/APK runner.
@@ -253,6 +258,28 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn,
         "password_hash",
         "ALTER TABLE profiles ADD COLUMN password_hash TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "remote_id",
+        "ALTER TABLE profiles ADD COLUMN remote_id TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "remote_version",
+        "ALTER TABLE profiles ADD COLUMN remote_version INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "synced_at",
+        "ALTER TABLE profiles ADD COLUMN synced_at TEXT",
+    )?;
+    // The index cannot live in `SCHEMA` alone: a database created before the column existed runs the
+    // ALTERs above and would otherwise never get it, and two local rows pointing at one account row
+    // means two machines' sessions overwriting each other under one blob key.
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_remote_id ON profiles(remote_id) \
+         WHERE remote_id IS NOT NULL",
     )?;
     Ok(())
 }
@@ -695,6 +722,74 @@ pub fn mark_cookie_import_applied(conn: &Connection, id: &str) -> Result<bool> {
          WHERE id = ?1 AND cookies_import IS NOT NULL AND cookies_import_applied_at IS NULL",
         params![id, now],
     )? > 0)
+}
+
+/// Where a profile stands against the account.
+///
+/// `remote_id` is the account's id for it — the identifier both machines agree on, and the one the
+/// blob and its content key are keyed by. `remote_version` is the server blob version this machine
+/// last saw, which a push sends as `baseVersion`: a stale one is a 409 rather than an overwrite of
+/// somebody else's session.
+#[derive(Debug, Clone)]
+pub struct SyncLink {
+    pub remote_id: Option<String>,
+    pub remote_version: u64,
+    pub synced_at: Option<String>,
+    /// The profile changed locally after its last successful sync, so a push would carry something
+    /// new. Derived rather than stored: a `dirty` flag has to be set by every write path, and one
+    /// path that forgets is a profile that silently stops backing up.
+    pub dirty: bool,
+}
+
+pub fn sync_link(conn: &Connection, id: &str) -> Result<Option<SyncLink>> {
+    let mut stmt = conn.prepare(
+        "SELECT remote_id, remote_version, synced_at, updated_at FROM profiles WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query(params![id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let synced_at: Option<String> = row.get(2)?;
+    let updated_at: String = row.get(3)?;
+    Ok(Some(SyncLink {
+        remote_id: row.get(0)?,
+        remote_version: row.get::<_, i64>(1)?.max(0) as u64,
+        dirty: synced_at.as_deref().is_none_or(|at| updated_at.as_str() > at),
+        synced_at,
+    }))
+}
+
+/// Bind a local profile to the account's row for it.
+pub fn set_remote_id(conn: &Connection, id: &str, remote_id: &str) -> Result<bool> {
+    // `updated_at` is deliberately NOT touched: binding is bookkeeping, not an edit to the profile,
+    // and bumping it would make every freshly-linked profile look dirty forever.
+    Ok(conn.execute(
+        "UPDATE profiles SET remote_id = ?2 WHERE id = ?1",
+        params![id, remote_id],
+    )? > 0)
+}
+
+/// Record that this machine and the account now agree at `remote_version`.
+pub fn mark_synced(conn: &Connection, id: &str, remote_version: u64) -> Result<bool> {
+    let now = chrono::Utc::now().to_rfc3339();
+    Ok(conn.execute(
+        "UPDATE profiles SET remote_version = ?2, synced_at = ?3 WHERE id = ?1",
+        params![id, remote_version as i64, now],
+    )? > 0)
+}
+
+/// The local profile bound to an account row, if this machine has one.
+pub fn find_by_remote_id(
+    conn: &Connection,
+    cipher: &SecretCipher,
+    remote_id: &str,
+) -> Result<Option<Profile>> {
+    let mut stmt = conn.prepare("SELECT * FROM profiles WHERE remote_id = ?1")?;
+    let mut rows = stmt.query(params![remote_id])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(row_to_profile(cipher, row)?)),
+        None => Ok(None),
+    }
 }
 
 /// Make persisted lifecycle state agree with the sidecar's authoritative running set.
@@ -1244,5 +1339,72 @@ mod tests {
             "idle"
         );
         assert!(delete(&conn, &created.id).unwrap());
+    }
+
+    /// The sync link decides direction, so its two facts have to be right: which account row this is,
+    /// and whether the profile has changed since it last agreed with that row.
+    #[test]
+    fn the_sync_link_tracks_the_account_row_and_whether_the_profile_has_moved_on() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("Syncable")).unwrap();
+
+        // Never synced: no link, and dirty — there is nothing on the account to be clean against.
+        let link = sync_link(&conn, &created.id).unwrap().unwrap();
+        assert!(link.remote_id.is_none());
+        assert_eq!(link.remote_version, 0);
+        assert!(link.dirty);
+
+        assert!(set_remote_id(&conn, &created.id, "srv-1").unwrap());
+        assert!(mark_synced(&conn, &created.id, 4).unwrap());
+        let link = sync_link(&conn, &created.id).unwrap().unwrap();
+        assert_eq!(link.remote_id.as_deref(), Some("srv-1"));
+        assert_eq!(link.remote_version, 4);
+        assert!(!link.dirty, "a profile that was just pushed is not dirty");
+
+        // An edit moves it on again, which is the whole trigger for the next push.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        update(
+            &conn,
+            &cipher,
+            &created.id,
+            UpdateProfilePatch {
+                notes: Some("changed here".into()),
+                ..patch_with_cookies(None)
+            },
+        )
+        .unwrap();
+        assert!(sync_link(&conn, &created.id).unwrap().unwrap().dirty);
+
+        // Binding is not an edit: it must not make a freshly linked profile look changed forever.
+        assert!(mark_synced(&conn, &created.id, 5).unwrap());
+        assert!(set_remote_id(&conn, &created.id, "srv-1").unwrap());
+        assert!(!sync_link(&conn, &created.id).unwrap().unwrap().dirty);
+
+        assert_eq!(
+            find_by_remote_id(&conn, &cipher, "srv-1")
+                .unwrap()
+                .unwrap()
+                .id,
+            created.id
+        );
+        assert!(find_by_remote_id(&conn, &cipher, "srv-nothing")
+            .unwrap()
+            .is_none());
+    }
+
+    /// Two local profiles pointing at one account row would fight over a single blob, each push
+    /// clobbering the other. The database refuses it rather than the code remembering to.
+    #[test]
+    fn one_account_row_can_only_be_claimed_by_one_local_profile() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let first = create(&conn, &cipher, input("First")).unwrap();
+        let second = create(&conn, &cipher, input("Second")).unwrap();
+
+        assert!(set_remote_id(&conn, &first.id, "srv-shared").unwrap());
+        assert!(set_remote_id(&conn, &second.id, "srv-shared").is_err());
+        // Unlinked rows are all NULL and must not collide with each other.
+        assert!(sync_link(&conn, &second.id).unwrap().unwrap().remote_id.is_none());
     }
 }

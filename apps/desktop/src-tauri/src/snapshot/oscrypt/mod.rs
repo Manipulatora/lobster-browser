@@ -45,6 +45,10 @@
 #![allow(dead_code)]
 
 pub mod linux;
+/// Windows key custody minus the FFI. Compiled everywhere on purpose — see the module docs: there is
+/// no Windows CI runner, so the only way this logic is ever executed by a test is by keeping it out
+/// of the `#[cfg(windows)]` block.
+pub mod local_state;
 pub mod macos;
 pub mod transcode;
 #[cfg(windows)]

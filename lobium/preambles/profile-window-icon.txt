@@ -1,0 +1,47 @@
+Lobium - give every launched profile its own window identity: icon, title, and WM_CLASS.
+
+A Lobster profile is a whole browser identity, but until this patch the only place it was visible
+was inside the window: the omnibox chip. The OPERATING SYSTEM saw nothing. Ten running profiles
+produced ten taskbar buttons with the same executable icon, ten alt-tab entries reading "Lobium",
+and - on Linux - a window-switcher label of "Lobium (/home/.../profiles/<uuid>)", a raw filesystem
+path where a name belongs. Picking the right window out of that is guesswork.
+
+  * chrome/browser/ui/views/frame/browser_view.cc
+
+    GetWindowIcon()    -> the rounded violet square at kProfileWindowIconSizeDip, for the window's
+                          SMALL icon slot. Widget::UpdateWindowIcon rasterizes it into WM_SETICON /
+                          ICON_SMALL on Windows (title bar, window list) and into the first
+                          _NET_WM_ICON entry on Linux. Placed AFTER the devtools and web-app early
+                          returns and after the popup page-icon branch, so only a normal tabbed
+                          window - the device-frame window included, since that is the same
+                          BrowserView - is affected.
+
+    GetWindowAppIcon() -> the same square at kProfileAppIconSizeDip, for the LARGE slot: ICON_BIG
+                          (the taskbar button) on Windows, the second _NET_WM_ICON entry on Linux.
+                          Bigger than the small icon, and a different size per platform, because
+                          ICON_BIG is a 32px taskbar icon while _NET_WM_ICON is a list a window
+                          manager scales from - see the header for the numbers.
+
+    GetWindowTitle()   -> the profile name replaces the product-name suffix on tabbed windows. The
+                          icon holds two glyphs; the title is where the FULL name fits, and it is
+                          also what the taskbar tooltip and the window-list entry read.
+
+  * chrome/browser/shell_integration_linux.cc
+
+    GetProgramClassName() -> the profile name replaces the --user-data-dir path that stock Chromium
+                          appends to WM_CLASS, which gnome-shell shows verbatim in its window
+                          switcher for a binary with no matching .desktop file.
+
+WINDOWS TASKBAR GROUPING needs no hook: BrowserWindowPropertyManager already derives the
+AppUserModelID from the profile path through shell_integration::win::GetAppUserModelIdForBrowser,
+and every Lobster profile already has its own --user-data-dir, so the buttons group per profile on
+their own once they stop looking identical.
+
+The drawing lives in the ADDED module, components/lobium_fp/lobium_profile_icon.{h,cc}, in its own
+GN target so that //ui/gfx does not reach the Blink-facing :lobium_fp target. It derives nothing:
+the initials, the word and the tint arrive already reduced on --lobium-profile-initials /
+--lobium-profile-word / --lobium-profile-tint, from the same module the manager's row avatar uses,
+so an app showing "AU" can never sit beside a window showing "AC". With no switches the icon is
+null and the window keeps the stock Chromium icon.
+
+CHAIN: after branding/device-frame.patch, which also hooks browser_view.cc.

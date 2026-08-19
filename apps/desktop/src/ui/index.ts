@@ -10,5 +10,8 @@ export { ToastProvider, useToast } from './Toast';
 export type { ToastTone } from './Toast';
 export { CommandPalette } from './CommandPalette';
 export type { Command } from './CommandPalette';
+export { ProfileMark } from './ProfileMark';
+export type { ProfileMarkStatus } from './ProfileMark';
+export { profileMark } from './profile-mark';
 export { Skeleton, EmptyState, CodeBlock } from './misc';
 export { ErrorBoundary } from './ErrorBoundary';
