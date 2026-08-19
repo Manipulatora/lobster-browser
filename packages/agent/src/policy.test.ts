@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { parseAction } from './actions.js';
 import {
   actionCommitIntent,
+  commitIntentGatesUnattended,
   actionRisk,
   assessCurrentPage,
   assessNavigation,
@@ -439,11 +440,6 @@ test('every browser commit path is classified before execution', () => {
       kind: 'keyboard-activation',
     },
     {
-      name: 'selection-changing arrow key',
-      action: { kind: 'key', key: 'ArrowDown' },
-      kind: 'keyboard-activation',
-    },
-    {
       name: 'destructive drag destination',
       action: { kind: 'drag', fromId: 6, toId: 7 },
       kind: 'drag-drop',
@@ -465,16 +461,6 @@ test('every browser commit path is classified before execution', () => {
         operation: 'new',
         url: 'https://shop.example/unsubscribe?list=weekly',
       },
-      kind: 'semantic-commit',
-    },
-    {
-      name: 'generic JavaScript button activation',
-      action: { kind: 'click', id: 4 },
-      kind: 'semantic-commit',
-    },
-    {
-      name: 'context-menu activation',
-      action: { kind: 'click', id: 4, button: 'right' },
       kind: 'semantic-commit',
     },
     {
@@ -507,6 +493,55 @@ test('every browser commit path is classified before execution', () => {
   assert.equal(isTextEntryElement(commitPage.elements[5]!), false);
   assert.equal(isTextEntryElement(commitPage.elements[9]!), false);
   assert.equal(isTextEntryElement(commitPage.elements[10]!), true);
+});
+
+test('gestures whose only risk is unreadable page script defer to the autonomy setting', () => {
+  const box = { x: 1, y: 1, w: 10, h: 10 };
+  const opaquePage: RawPerception = {
+    ...page,
+    elements: [
+      { index: 0, tag: 'div', role: 'button', name: 'Show details', ...box },
+      { index: 1, tag: 'button', role: 'button', name: 'Place order', ...box },
+      { index: 2, tag: 'button', role: 'button', name: '', submitsForm: true, ...box },
+      { index: 3, tag: 'select', role: 'combobox', name: 'Plan', ...box },
+      { index: 4, tag: 'li', role: 'listitem', name: 'Report', ...box },
+      { index: 5, tag: 'div', role: 'generic', name: 'Trash', ...box },
+    ],
+  };
+
+  // Classified, and reported to the model as risky — but not a reason to stop an UNATTENDED run,
+  // because it is true of every click on the web. Gating on it made Auto and Review the same mode.
+  const deferred: Parameters<typeof actionCommitIntent>[0][] = [
+    { kind: 'click', id: 0 },
+    { kind: 'click', id: 0, button: 'right' },
+    { kind: 'key', key: 'ArrowDown' },
+    { kind: 'key', key: 'PageDown' },
+    { kind: 'key', key: 'Escape' },
+  ];
+  for (const action of deferred) {
+    const intent = actionCommitIntent(action, opaquePage);
+    assert.ok(intent, JSON.stringify(action));
+    assert.equal(commitIntentGatesUnattended(intent), false, JSON.stringify(action));
+    assert.equal(actionRisk(action, opaquePage).high, true, JSON.stringify(action));
+  }
+
+  // The keys that can submit, activate the focused control, or blur-save still gate everywhere.
+  for (const key of ['Enter', 'Space', ' ', 'Tab', 'Delete', 'Backspace', 'a']) {
+    const intent = actionCommitIntent({ kind: 'key', key }, opaquePage);
+    assert.ok(intent, key);
+    assert.equal(commitIntentGatesUnattended(intent), true, key);
+  }
+  for (const action of [
+    { kind: 'click', id: 1 },
+    { kind: 'click', id: 2 },
+    { kind: 'click_at', x: 10, y: 10 },
+    { kind: 'select', id: 3, values: ['pro'] },
+    { kind: 'drag', fromId: 4, toId: 5 },
+  ] as Parameters<typeof actionCommitIntent>[0][]) {
+    const intent = actionCommitIntent(action, opaquePage);
+    assert.ok(intent, JSON.stringify(action));
+    assert.equal(commitIntentGatesUnattended(intent), true, JSON.stringify(action));
+  }
 });
 
 test('composition and non-activation actions stay outside the commit boundary', () => {

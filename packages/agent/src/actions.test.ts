@@ -127,7 +127,21 @@ test('key parsing canonicalizes to the one vocabulary the driver can press', () 
     'a named key is canonicalized, not passed through as typed',
   );
 
-  for (const key of ['F13', 'Ctrl', '', '  ', 'ab', 'Meta+C']) {
+  // The chords a site may bind and no other action can express. A composer whose primary submit is
+  // Ctrl+Enter was undriveable while select-all was the only combination in the vocabulary.
+  for (const [typed, canonical] of [
+    ['control+enter', 'Control+Enter'],
+    ['meta+enter', 'Meta+Enter'],
+    ['shift+enter', 'Shift+Enter'],
+    ['meta+c', 'Meta+C'],
+    ['control+v', 'Control+V'],
+  ]) {
+    const parsed = parseAction({ kind: 'key', key: typed! });
+    assert.ok(parsed.ok && parsed.action.kind === 'key', typed);
+    assert.equal(parsed.action.key, canonical);
+  }
+
+  for (const key of ['F13', 'Ctrl', '', '  ', 'ab', 'Alt+F4', 'Control+Shift+P']) {
     const parsed = parseAction({ kind: 'key', key });
     assert.equal(parsed.ok, false, `${JSON.stringify(key)} must not parse as a pressable key`);
   }

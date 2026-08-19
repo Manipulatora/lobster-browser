@@ -9,7 +9,13 @@ export {
   type RunJournalPhase,
   type RunJournalState,
 } from './reducer.js';
-export { projectRunRecovery, type RunRecoveryProjection } from './recovery.js';
+export {
+  projectRunRecovery,
+  resolveRunRecovery,
+  type ResolvableRunJournalStore,
+  type RunRecoveryProjection,
+  type RunRecoveryResolution,
+} from './recovery.js';
 export {
   JournalValidationError,
   MAX_JOURNAL_BYTES,

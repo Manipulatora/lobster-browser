@@ -120,12 +120,41 @@ class SequencedPerceptionDriver extends FakeDriver {
   }
 }
 
+/**
+ * A page whose query string the redactor hides. `currentUrl()` answers with the raw location, because
+ * that is what a real driver returns; perception is what redacts. Any code that derives page identity
+ * from the model-facing spelling instead of the raw one refuses every action on a page like this — and
+ * `?code=`, `?keyword=` and `?authuser=` are an OAuth callback, an ordinary search, and Google.
+ */
+const TOKEN_URL = 'https://example.test/callback?code=live-oauth-code&keyword=shoes';
+
+class TokenUrlDriver extends FakeDriver {
+  override async evaluate<T>(expression: string): Promise<T> {
+    if (expression === EXTRACT_SCRIPT) return { ...PAGE, url: TOKEN_URL } as unknown as T;
+    if (expression === 'location.href') return TOKEN_URL as unknown as T;
+    return super.evaluate<T>(expression);
+  }
+  override async currentUrl(): Promise<string> {
+    return TOKEN_URL;
+  }
+}
+
+/**
+ * A page whose pixels never stop moving. Every full-frame capture differs — a caret, a spinner, a
+ * video frame, a CSS transition — which is the ordinary state of a real page. Only when
+ * `targetMoves` is set does the neighbourhood of the coordinate itself change too.
+ */
 class ChangingScreenshotDriver extends FakeDriver {
   private captures = 0;
 
-  override async screenshot(): Promise<string> {
+  constructor(private readonly targetMoves = true) {
+    super();
+  }
+
+  override async screenshot(clip?: { x: number; y: number }): Promise<string> {
     this.captures += 1;
-    return this.captures === 1 ? 'c2NyZWVuLWJlZm9yZQ==' : 'c2NyZWVuLWFmdGVy';
+    if (!clip) return `ZnJhbWU${this.captures}`;
+    return this.targetMoves ? `cGF0Y2g${this.captures}` : 'cGF0Y2hzdGFibGU=';
   }
 }
 
@@ -273,6 +302,31 @@ function run(
   };
 }
 
+test('a page whose query is redacted still agrees with its own live identity', async () => {
+  const { driver, memory, events, promise } = run(
+    [
+      { kind: 'click', id: 1 },
+      { kind: 'done', success: true, summary: 'went through the callback' },
+    ],
+    'ok',
+    6,
+    new TokenUrlDriver(),
+  );
+  await promise;
+
+  assert.deepEqual(driver.clicks, [{ x: 320, y: 40 }]);
+  assert.doesNotMatch(
+    JSON.stringify(memory.steps),
+    /navigated after it was observed/,
+    'the redacted spelling of a URL must not read as a different page from the live one',
+  );
+  // The identity may be computed from the raw location; nothing may SHOW it.
+  assert.doesNotMatch(JSON.stringify(events), /live-oauth-code/);
+  const observation = events.find((event) => event.type === 'step.observation');
+  assert.ok(observation?.type === 'step.observation');
+  assert.match(observation.url, /code=%5BREDACTED%5D/);
+});
+
 test('runs a type+submit then finishes done, emitting the expected event arc', async () => {
   const { driver, memory, events, promise } = run([
     { kind: 'type', id: 0, text: 'shoes', submit: true },
@@ -402,7 +456,7 @@ test('approval requested/resolved and dispatch boundaries use one action id', as
       'approve',
       4,
       new FakeDriver(),
-      {},
+      { autonomy: 'confirm' },
       journal,
     );
     await promise;
@@ -531,6 +585,79 @@ test('deterministic write preflight failures cancel cleanly without requiring re
       rejected.some((event) => event.type === 'action.dispatching'),
       false,
     );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a settle failure after a delivered click is an ordinary failed step, not a profile lockout', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-journal-settle-'));
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    // The click itself lands; only the wait that follows it rejects — the shape of an ordinary CDP
+    // timeout. Recording that as a possible unverifiable write refused every LATER run on the profile.
+    class UnsettlingDriver extends FakeDriver {
+      override async waitForSettle(): Promise<void> {
+        throw new Error('Timed out waiting for the page to settle');
+      }
+    }
+    const driver = new UnsettlingDriver();
+    const { memory, promise } = run(
+      [
+        { kind: 'click', id: 1 },
+        { kind: 'done', success: true, summary: 'carried on after the timeout' },
+      ],
+      'approve',
+      4,
+      driver,
+      {},
+      journal,
+    );
+    await promise;
+
+    assert.equal(memory.finished?.status, 'done');
+    assert.deepEqual(driver.clicks, [{ x: 320, y: 40 }]);
+    const snapshot = await journal.load('s1');
+    assert.ok(snapshot);
+    assert.equal(snapshot.state.phase, 'completed');
+    const observed = snapshot.journal.events.find((event) => event.type === 'action.observed');
+    assert.ok(observed?.type === 'action.observed');
+    assert.notEqual(observed.outcome, 'unknown');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a rejection while an input is in flight stays ambiguous and stops the run', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-loop-journal-inflight-'));
+  try {
+    const journal = new RunJournalStore(dir, { encryptionKey: randomBytes(32) });
+    // The driver rejects the dispatch itself, so the page may have seen part of it. This is the one
+    // case that genuinely cannot be told apart from a completed write, and it must still block.
+    class RefusingDriver extends FakeDriver {
+      override async click(): Promise<void> {
+        throw new Error('Target closed while dispatching the click');
+      }
+    }
+    const { promise } = run(
+      [
+        { kind: 'click', id: 1 },
+        { kind: 'done', success: true, summary: 'unreachable' },
+      ],
+      'approve',
+      4,
+      new RefusingDriver(),
+      {},
+      journal,
+    );
+    await assert.rejects(promise, /ambiguous/);
+
+    const snapshot = await journal.load('s1');
+    assert.ok(snapshot);
+    assert.equal(snapshot.state.phase, 'recovery_required');
+    const observed = snapshot.journal.events.find((event) => event.type === 'action.observed');
+    assert.ok(observed?.type === 'action.observed');
+    assert.equal(observed.outcome, 'unknown');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -785,6 +912,8 @@ test('Ask mode enforces the configured token budget before calling the model', a
     6,
     new FakeDriver(),
     { mode: 'ask', tokenBudget: 1_000 },
+    undefined,
+    `summarise this: ${'lorem ipsum dolor sit amet '.repeat(400)}`,
   );
   await promise;
 
@@ -793,6 +922,20 @@ test('Ask mode enforces the configured token budget before calling the model', a
   assert.ok(finished?.type === 'run.finished');
   assert.equal(finished.status, 'stopped');
   assert.match(finished.result ?? '', /Token budget \(1000\)/);
+});
+
+test('the input reserve is a token estimate, not a byte count', async () => {
+  // Reserving one token per BYTE made the shipped 100k panel default behave like a ~25k one: an
+  // ordinary run halted around step ten with "leaves too little room" while its real spend was a
+  // fraction of the budget. A budget several times the prompt's byte size must still permit a call.
+  const { promise, llm } = run([{ __prose: 'A bounded answer.' }], 'ok', 6, new FakeDriver(), {
+    mode: 'ask',
+    tokenBudget: 3_000,
+  });
+  await promise;
+
+  assert.equal(llm.requests.length, 1);
+  assert.ok((llm.requests[0]?.maxTokens ?? 0) > 0);
 });
 
 test('Ask mode turns the remaining token allowance into the request maxTokens cap', async () => {
@@ -865,6 +1008,167 @@ test('Agent mode does not execute a returned action after provider usage exceeds
   assert.ok(finished?.type === 'run.finished');
   assert.equal(finished.status, 'stopped');
   assert.match(finished.result ?? '', /no action was executed/i);
+});
+
+test('a cached prompt prefix is not charged to the budget at full price', async () => {
+  // Every step re-reads the whole prefix, so counting cache reads at full price made the budget grow
+  // by an entire prompt per step: caching, the one thing that makes a long run affordable, was what
+  // ended it. The same numbers as the over-budget test above, with the re-read marked as cached.
+  const driver = new FakeDriver();
+  const memory = new FakeMemory();
+  const events: AgentEvent[] = [];
+  const requests: LlmRequest[] = [];
+  const llm: LlmClient = {
+    provider: 'cached',
+    async complete(request): Promise<LlmResult> {
+      requests.push(request);
+      return {
+        toolCall: {
+          id: `cached_${requests.length}`,
+          name: 'act',
+          input:
+            requests.length === 1
+              ? { kind: 'click', id: 1 }
+              : { kind: 'done', success: true, summary: 'finished inside the budget' },
+        },
+        stopReason: 'tool',
+        usage: { tokensIn: 100_001, tokensOut: 1, cachedTokensIn: 99_500 },
+      };
+    },
+  };
+  let n = 0;
+  await runAgent(
+    {
+      sessionId: 'cached-budget',
+      profileId: 'p1',
+      task: 'click Go',
+      runId: 'cached-budget',
+      llmConfig: { provider: 'anthropic', model: 'm', apiKey: 'x' },
+      config: resolveConfig({ tokenBudget: 100_000, maxSteps: 4, autonomy: 'auto' }),
+    },
+    {
+      driver,
+      llm,
+      memory,
+      emit: (event) => events.push(event),
+      waitForInput: async () => 'approve',
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+
+  assert.equal(requests.length, 2, 'a cached re-read must not exhaust the budget in one step');
+  const finished = events.find((event) => event.type === 'run.finished');
+  assert.ok(finished?.type === 'run.finished');
+  assert.equal(finished.status, 'done');
+});
+
+test('the run carries a bounded ledger of what it has already done', async () => {
+  // `history` accumulated a line per step and only its last entry was ever read, so on a multi-phase
+  // task the model had no cross-step structure at all and re-derived its plan every few steps.
+  const { llm, promise } = run(
+    [
+      { kind: 'navigate', url: 'https://example.test/login' },
+      { kind: 'type', id: 0, text: 'shoes' },
+      { kind: 'click', id: 1 },
+      { kind: 'scroll', direction: 'down' },
+      { kind: 'done', success: true, summary: 'ok' },
+    ],
+    'approve',
+    8,
+    new FakeDriver(),
+    { autonomy: 'auto' },
+  );
+  await promise;
+
+  const last = allText(llm.requests[llm.requests.length - 1]!);
+  assert.match(last, /What this run has already done/);
+  assert.match(last, /navigated to https:\/\/example\.test\/login/);
+  assert.match(last, /typed "shoes"/);
+
+  // One copy only: the block is rebuilt every step, and older duplicates are re-billed in full.
+  const earlier = allText(llm.requests[llm.requests.length - 1]!).split(
+    'What this run has already done',
+  );
+  assert.equal(earlier.length, 2);
+});
+
+test('a mutating step reads the DOM once, not three times', async () => {
+  // The extraction walks up to 500 candidates, every open shadow root and each same-origin frame.
+  // Running it at the top of the step AND inside post-action verification — then discarding the
+  // verified result and re-reading immediately — tripled both the latency and the main-world
+  // footprint of a product whose value proposition is being indistinguishable from a person.
+  class CountingDriver extends FakeDriver {
+    extractions = 0;
+    override async evaluate<T>(expression: string): Promise<T> {
+      if (expression === EXTRACT_SCRIPT) this.extractions += 1;
+      return super.evaluate<T>(expression);
+    }
+  }
+  const driver = new CountingDriver();
+  const { promise } = run(
+    [
+      { kind: 'click', id: 1 },
+      { kind: 'click', id: 1 },
+      { kind: 'click', id: 1 },
+      { kind: 'done', success: true, summary: 'clicked three times' },
+    ],
+    'approve',
+    6,
+    driver,
+    { autonomy: 'auto' },
+  );
+  await promise;
+
+  assert.equal(driver.clicks.length, 3);
+  assert.ok(
+    driver.extractions <= 5,
+    `four steps must not need more than one read each plus the first, got ${driver.extractions}`,
+  );
+});
+
+test('a full element list is re-sent before the last one ages out of the verbatim window', async () => {
+  // On a static page every step after the first said only "(interactive elements unchanged)", while
+  // pruning reduced every tool result older than the verbatim window to its header line. After enough
+  // such steps the model had no element list anywhere and was still asked to act on indices.
+  const { llm, promise } = run([
+    { kind: 'wait', ms: 1 },
+    { kind: 'wait', ms: 1 },
+    { kind: 'wait', ms: 1 },
+    { kind: 'wait', ms: 1 },
+    { kind: 'wait', ms: 1 },
+    { kind: 'wait', ms: 1 },
+    { kind: 'wait', ms: 1 },
+    { kind: 'done', success: true, summary: 'waited it out' },
+  ]);
+  await promise;
+
+  for (const request of llm.requests) {
+    assert.ok(
+      /\[1\] button "Go"/.test(allText(request)),
+      'every step prompt must still contain a usable element list',
+    );
+  }
+});
+
+test('an extract that read nothing may be retried on the same page view', async () => {
+  // FakeDriver returns empty page text, so the first extract legitimately fails. Marking the view
+  // extracted anyway refused the retry — the exact case ("it may still be loading") the failure
+  // message tells the model to retry — and each refusal counts toward the run's block ceiling.
+  const { memory, promise } = run([
+    { kind: 'extract', description: 'the prices' },
+    { kind: 'extract', description: 'the prices' },
+    { kind: 'done', success: true, summary: 'gave up on the text' },
+  ]);
+  await promise;
+
+  const outcomes = (memory.steps as Array<{ outcome?: string }>).map((step) => step.outcome ?? '');
+  assert.equal(outcomes.filter((outcome) => /no readable text/.test(outcome)).length, 2);
+  assert.equal(
+    outcomes.some((outcome) => /already extracted/.test(outcome)),
+    false,
+  );
 });
 
 test('a bad element index does not crash — it is fed back and the run continues', async () => {
@@ -1749,6 +2053,9 @@ test('a context-window 400 is recovered from, not turned into a dead run', async
   const seen: number[] = [];
   const llm: LlmClient = {
     provider: 'fake',
+    // This transport really does spend the effort budget from `max_tokens`, so the loop reserves the
+    // larger output cap — which is what makes the 400 reachable and the retry's reduction visible.
+    sendsEffort: () => true,
     complete: (req: LlmRequest) => {
       call += 1;
       seen.push(req.maxTokens);
@@ -1928,7 +2235,6 @@ const commitGateCases: Array<{ name: string; script: ScriptedStep[]; vision?: bo
   { name: 'Delete shortcut outside text entry', script: [{ kind: 'key', key: 'Delete' }] },
   { name: 'Backspace shortcut outside text entry', script: [{ kind: 'key', key: 'Backspace' }] },
   { name: 'Tab blur handler', script: [{ kind: 'key', key: 'Tab' }] },
-  { name: 'ArrowDown change handler', script: [{ kind: 'key', key: 'ArrowDown' }] },
   {
     name: 'embedded Enter in typed text',
     script: [{ kind: 'type', id: 0, text: 'send this\n' }],
@@ -1946,14 +2252,6 @@ const commitGateCases: Array<{ name: string; script: ScriptedStep[]; vision?: bo
   {
     name: 'semantic commit click',
     script: [{ kind: 'click', id: 1, note: 'Place order' }],
-  },
-  {
-    name: 'generic JavaScript button click',
-    script: [{ kind: 'click', id: 1 }],
-  },
-  {
-    name: 'right-click context handler',
-    script: [{ kind: 'click', id: 1, button: 'right' }],
   },
   {
     name: 'durable remembered fact',
@@ -2020,6 +2318,63 @@ for (const scenario of commitGateCases) {
     assert.deepEqual(driver.selections, [], `${scenario.name} must not select before approval`);
     assert.deepEqual(driver.drags, [], `${scenario.name} must not drag before approval`);
     assert.deepEqual(driver.navigations, [], `${scenario.name} must not navigate before approval`);
+  });
+}
+
+/**
+ * Gestures whose only evidence of risk is that page JavaScript cannot be read — true of every click
+ * on the web. They defer to the autonomy setting: `confirm` asks, `auto` does not. Gating them in
+ * both modes made the two modes identical, fired a modal roughly every other step, and killed any
+ * run genuinely left unattended at the first click, because the human-input wait times out.
+ */
+const reviewGateCases: Array<{ name: string; script: ScriptedStep[] }> = [
+  { name: 'generic JavaScript button click', script: [{ kind: 'click', id: 1 }] },
+  { name: 'right-click context handler', script: [{ kind: 'click', id: 1, button: 'right' }] },
+  { name: 'ArrowDown page movement', script: [{ kind: 'key', key: 'ArrowDown' }] },
+];
+
+for (const scenario of reviewGateCases) {
+  test(`review mode gates ${scenario.name} and auto mode does not`, async () => {
+    const gated = run(
+      [...scenario.script, { kind: 'done', success: true, summary: 'continued safely' }],
+      'reject',
+      5,
+      new FakeDriver(),
+      { autonomy: 'confirm' },
+    );
+    await gated.promise;
+    assert.equal(
+      gated.events.filter((event) => event.type === 'run.needsInput' && event.kind === 'confirm')
+        .length,
+      1,
+      `${scenario.name} must request confirmation in review mode`,
+    );
+    assert.deepEqual(gated.driver.clicks, [], `${scenario.name} must not click before approval`);
+    assert.deepEqual(
+      gated.driver.pressedKeys,
+      [],
+      `${scenario.name} must not press a key before approval`,
+    );
+
+    const unattended = run(
+      [...scenario.script, { kind: 'done', success: true, summary: 'continued safely' }],
+      () => assert.fail(`${scenario.name} must not ask a human in auto mode`),
+      5,
+      new FakeDriver(),
+      { autonomy: 'auto' },
+    );
+    await unattended.promise;
+    assert.equal(
+      unattended.events.filter(
+        (event) => event.type === 'run.needsInput' && event.kind === 'confirm',
+      ).length,
+      0,
+    );
+    assert.equal(
+      unattended.driver.clicks.length + unattended.driver.pressedKeys.length,
+      1,
+      `${scenario.name} must reach the driver in auto mode`,
+    );
   });
 }
 
@@ -2225,6 +2580,31 @@ test('a coordinate approval is invalidated when only the screenshot changes', as
 
   assert.deepEqual(driver.clicks, [], 'an approval for the old visual frame must not click');
   assert.match(JSON.stringify(memory.steps), /visual page changed while confirmation was pending/);
+});
+
+test('motion away from the target does not veto an approved coordinate gesture', async () => {
+  // The gate compared two byte-identical FULL-PAGE screenshots taken either side of a human reading a
+  // modal, so one blinking caret anywhere on the page refused the click. That made the documented
+  // fallback for canvas widgets, captchas and cross-origin payment frames unreachable in practice.
+  const driver = new ChangingScreenshotDriver(false);
+  const { promise, memory } = run(
+    [
+      { kind: 'screenshot' },
+      { kind: 'click_at', x: 320, y: 40 },
+      { kind: 'done', success: true, summary: 'clicked the widget' },
+    ],
+    'approve',
+    5,
+    driver,
+    { visionFallback: true },
+  );
+  await promise;
+
+  assert.deepEqual(driver.clicks, [{ x: 320, y: 40 }]);
+  assert.doesNotMatch(
+    JSON.stringify(memory.steps),
+    /visual page changed while confirmation was pending/,
+  );
 });
 
 test('sensitive coordinate handoff is also invalidated by visual-only drift', async () => {

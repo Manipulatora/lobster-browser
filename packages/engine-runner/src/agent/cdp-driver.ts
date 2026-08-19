@@ -15,6 +15,7 @@ import type { CdpTarget, PersistentCdpSession } from './persistent-cdp.js';
 
 const CTRL = 2;
 const META = 4;
+const SHIFT = 8;
 /**
  * How long a real command may be slow before the cheap liveness question is worth asking.
  *
@@ -173,12 +174,23 @@ export class CdpBrowserDriver implements BrowserDriver {
   }
 
   async pressKey(rawKey: string): Promise<void> {
-    const combo = /^(Control|Meta)\+A$/i.exec(rawKey);
+    const key = normalizeKey(rawKey);
+    const combo = /^(Control|Meta|Shift)\+(.+)$/.exec(key);
     if (combo) {
-      await this.dispatchKey('a', 'KeyA', 65, combo[1]?.toLowerCase() === 'meta' ? META : CTRL);
+      const modifier = combo[1] === 'Meta' ? META : combo[1] === 'Shift' ? SHIFT : CTRL;
+      const info = keyInfo(combo[2]!);
+      // A modified keystroke produces no character — Ctrl+C copies, it does not type "c" — so `text`
+      // is sent only for Shift, where the browser still generates one. Passing it under Control/Meta
+      // inserted the literal letter into the focused field instead of invoking the shortcut.
+      await this.dispatchKey(
+        combo[2]!.length === 1 ? combo[2]!.toLowerCase() : combo[2]!,
+        info.code,
+        info.vk,
+        modifier,
+        modifier === SHIFT ? info.text : undefined,
+      );
       return;
     }
-    const key = normalizeKey(rawKey);
     const info = keyInfo(key);
     await this.dispatchKey(key, info.code, info.vk, 0, info.text);
   }
@@ -524,10 +536,17 @@ export class CdpBrowserDriver implements BrowserDriver {
     }
   }
 
-  async screenshot(): Promise<string> {
+  async screenshot(clip?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }): Promise<string> {
     const result = (await this.page.send('Page.captureScreenshot', {
       format: 'png',
       captureBeyondViewport: false,
+      // `scale` is required alongside a clip; 1 keeps the patch comparable across captures.
+      ...(clip ? { clip: { ...clip, scale: 1 } } : {}),
     })) as { data?: string };
     return result.data ?? '';
   }

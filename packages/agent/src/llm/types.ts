@@ -100,6 +100,16 @@ export interface LlmClient {
   complete(req: LlmRequest): Promise<LlmResult>;
   /** Provider label for logs/usage. */
   readonly provider: string;
+  /**
+   * Will this adapter actually put `effort` on the wire for this model?
+   *
+   * The loop raises its output reservation eightfold when effort is set, because where effort IS sent
+   * the reasoning budget comes out of `max_tokens`. Adapters that silently drop it — the direct
+   * Anthropic and Google ones, and every non-reasoning model on the OpenAI dialect — got the
+   * eightfold reservation anyway, draining the run's token allowance for no reasoning at all. An
+   * adapter that omits this answers "no", which is the safe reading of an unimplemented capability.
+   */
+  sendsEffort?(model: string, effort: NonNullable<LlmRequest['effort']>): boolean;
 }
 
 /**

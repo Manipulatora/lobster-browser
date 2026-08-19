@@ -5,6 +5,20 @@
     <title>Lobster Browser — the anti-detect browser with a native fingerprint engine</title>
     <base href="/" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The site is served as prerendered static files, so there is no request-time nonce to hand
+         Angular: `script-src` has to allow the inline hydration/event-replay scripts the build
+         emits, which means this policy cannot stop injected script from *running*. What it does
+         stop is where that script could reach — no third-party origin may be fetched, posted to,
+         or used as a base URI — and that is what matters for a bearer token kept in localStorage
+         (see core/auth/token.store.ts). `wasm-unsafe-eval` and `blob:` are what the 3D scenes need:
+         a worker and a wasm module for the draco decoder, and blob fetches for the textures glTF
+         embeds in the model file. The two font origins are the stylesheets below.
+         `frame-ancestors` is intentionally absent — a <meta> policy cannot express it, and the
+         edge config sends X-Frame-Options for that. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; base-uri 'self'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self'; connect-src 'self' blob: https://*.lobrowser.com http://localhost:8080"
+    />
     <meta name="color-scheme" content="light" />
     <meta name="theme-color" content="#7c3aed" />
     <meta
@@ -22,8 +36,19 @@
       property="og:description"
       content="Coherent, isolated browser profiles that pass modern anti-bot systems. Fingerprints applied in C++ inside the engine."
     />
-    <meta property="og:image" content="/brand/logo-lockup.png" />
+    <!-- Absolute, not root-relative: unfurlers fetch the HTML on their own and most of them do not
+         resolve a relative og:image against the page URL. SeoService rewrites og:url per route on
+         navigation; this is the value the prerendered home page ships with. -->
+    <meta property="og:url" content="https://lobrowser.com/" />
+    <meta property="og:image" content="https://lobrowser.com/brand/og-card.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="Lobster Browser — the anti-detect browser with a native fingerprint engine"
+    />
+    <meta name="twitter:image" content="https://lobrowser.com/brand/og-card.png" />
 
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/brand/mark.png" />

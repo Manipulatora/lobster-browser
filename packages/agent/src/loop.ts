@@ -18,7 +18,7 @@ import {
 import type { BrowserDriver } from './driver.js';
 import { MAX_SCREENSHOT_BASE64_CHARS } from './driver.js';
 import { executeAction } from './executor.js';
-import type { Sleep } from './executor.js';
+import type { EffectDelivery, Sleep } from './executor.js';
 import type { LlmClient } from './llm/index.js';
 import { usesAutomaticToolChoice } from './llm/index.js';
 import type { LlmMessage, LlmTool } from './llm/types.js';
@@ -36,6 +36,7 @@ import {
   assessCurrentPage,
   assessNavigation,
   assessNavigationDrift,
+  commitIntentGatesUnattended,
   normalizeAllowedDomains,
   targetUrlForAction,
 } from './policy.js';
@@ -47,6 +48,7 @@ import {
   buildStepPrompt,
   buildSystemPrompt,
   EVIDENCE_PREAMBLE,
+  PROGRESS_PREAMBLE,
   SITE_MEMORY_PREAMBLE,
   VERBATIM_OBSERVATIONS,
 } from './prompt.js';
@@ -150,6 +152,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
   const { sessionId, profileId, task, runId, threadId, llmConfig, config } = params;
   const { driver, llm, memory, emit, signal, now } = deps;
   const usage: AgentUsage = { tokensIn: 0, tokensOut: 0 };
+  const sendsEffort =
+    llmConfig.effort !== undefined &&
+    (llm.sendsEffort?.(llmConfig.stepModel || llmConfig.model, llmConfig.effort) ?? false);
   const history: string[] = [];
   const base = { sessionId, profileId };
   const safeTask = redactCredentialLikeText(task);
@@ -226,6 +231,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     operation: (beginEffect: () => Promise<void>) => Promise<T>,
     outcomeOf: (value: T) => string,
     verifyAfterEffect?: (value: T) => Promise<void>,
+    deliveryOf?: (value: T) => EffectDelivery | undefined,
   ): Promise<T> => {
     if (!journalSnapshot) return operation(async () => {});
     let effectBegan = false;
@@ -269,8 +275,34 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     }
     if (reportedFailure && effect !== 'read') {
       // Driver methods can fail after an input event was delivered (for example, wait-for-settle after
-      // a click). A returned error therefore does not prove a write was absent. Preserve that ambiguity
-      // and stop; a later run must never hide or replay the possible side effect.
+      // a click). A returned error therefore does not prove a write was absent. But it does not prove
+      // one HAPPENED either, and treating every driver rejection as possibly-written meant one CDP
+      // hiccup on an ordinary click recorded an unverifiable effect and refused every later run on the
+      // profile. The executor reports how far the action actually got, so only the case that is truly
+      // in doubt — a rejection while an input was in flight — is preserved as an ambiguity.
+      const delivery = deliveryOf?.(value);
+      if (delivery === 'none') {
+        await appendJournal({
+          type: 'action.cancelled',
+          actionId,
+          summary: 'The action failed before any input reached the page',
+        });
+        return value;
+      }
+      if (delivery === 'delivered') {
+        // Every input landed; only the settling or reading that follows failed. The effect is a fact,
+        // not a maybe, and the next observation is what tells the model where it ended up — so this is
+        // an ordinary failed step, not a profile-wide block. Post-effect verification is deliberately
+        // skipped: the driver has already said it cannot read this page, and re-asking could only
+        // downgrade a known state back into a lockout.
+        await appendJournal({
+          type: 'action.observed',
+          actionId,
+          outcome: 'succeeded',
+          summary: 'The input was delivered; the page state after it could not be read',
+        });
+        return value;
+      }
       await appendJournal({
         type: 'action.observed',
         actionId,
@@ -457,7 +489,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       const system = buildAskPrompt();
       const messages = normalizeMessages([...priorTurns, { role: 'user' as const, content: task }]);
       const tools: LlmTool[] = [];
-      const desiredMaxTokens = llmConfig.effort ? 8000 : 2048;
+      const desiredMaxTokens = sendsEffort ? 8000 : 2048;
       const maxTokens = budgetedMaxTokens({
         desiredMaxTokens,
         tokenBudget: config.tokenBudget,
@@ -587,7 +619,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           return 'navigation finished';
         },
         (outcome) => outcome,
-        () => verifyBrowserStateObserved(driver),
+        async () => {
+          await verifyBrowserStateObserved(driver);
+        },
       );
     }
 
@@ -609,6 +643,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       toolChoiceIsAdvisory: usesAutomaticToolChoice(llmConfig.provider, llmConfig.model),
     });
     let previous: RawPerception | null = null;
+    let stepsSinceFullSnapshot = 0;
     /** This run's assistant/tool exchange, appended to the thread's prior turns each step. */
     const stepMessages: LlmMessage[] = [];
     /** The call id the NEXT observation answers, so the pairing providers require stays intact. */
@@ -662,6 +697,17 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       }
     };
     let lastExtractedView = '';
+    /**
+     * The post-action observation, reused as the next step's page read.
+     *
+     * A mutating step used to run the full DOM extraction THREE times — once at the top, once after
+     * approval, and once inside post-action verification, whose result was then thrown away and
+     * immediately re-read by the next iteration. The extraction walks up to 500 candidates, every
+     * open shadow root and each same-origin frame, so on a product whose value proposition is being
+     * indistinguishable from a person, running it three times a step is both latency and footprint.
+     * Verification has already proved this observation agrees with the live URL.
+     */
+    let carriedPerception: RawPerception | undefined;
 
     for (let step = 1; step <= config.maxSteps; step += 1) {
       if (signal.aborted) return await finish('stopped', 'Stopped by user.');
@@ -674,7 +720,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         );
       }
 
-      const raw = await perceive(driver);
+      const raw = carriedPerception ?? (await perceive(driver));
+      carriedPerception = undefined;
       const currentPageDecision = assessCurrentPage(raw.url, config);
       if (currentPageDecision.verdict === 'deny') {
         return await finish(
@@ -698,10 +745,19 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           }
         }
       }
-      const rendered =
-        previous && sameElements(previous, raw)
-          ? `url: ${raw.url} | ${JSON.stringify(raw.title)}\n(interactive elements unchanged from the previous step)`
-          : renderObservation(raw);
+      // A summarised observation is only safe while a FULL one is still in the verbatim window.
+      // Older tool results are pruned to their header line, so after enough consecutive unchanged
+      // steps — collect, remember, wait, a blocked action — every surviving result would say only
+      // "unchanged" and the model would be acting on element indices it can no longer see anywhere.
+      // That is exactly how hallucinated indices and "no element [n]" loops start.
+      const unchanged =
+        previous !== null &&
+        sameElements(previous, raw) &&
+        stepsSinceFullSnapshot < VERBATIM_OBSERVATIONS - 1;
+      const rendered = unchanged
+        ? `url: ${raw.url} | ${JSON.stringify(raw.title)}\n(interactive elements unchanged from the previous step)`
+        : renderObservation(raw);
+      stepsSinceFullSnapshot = unchanged ? stepsSinceFullSnapshot + 1 : 0;
       previous = raw;
       emit({
         type: 'step.observation',
@@ -758,6 +814,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         // the tool result should report.
         ...(history.length ? { outcome: history[history.length - 1]! } : {}),
         ...(readEvidence.length ? { readState: readEvidence.join('\n\n') } : {}),
+        ...(history.length ? { progress: runLedger(history) } : {}),
         ...(siteMemoryContext ? { siteMemoryContext } : {}),
       });
       // Step 1 opens the turn as a user message; every later step is the RESULT of the tool call the
@@ -773,8 +830,10 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       }
       // Reasoning effort consumes from `max_tokens` (OpenRouter converts effort→thinking budget for
       // Anthropic, up to ~0.8×max_tokens at High), so raise the cap when effort is on to leave room for
-      // the forced action call; otherwise the tiny tool-call output only needs ~1024.
-      const desiredMaxTokens = llmConfig.effort ? 8000 : 1024;
+      // the forced action call; otherwise the tiny tool-call output only needs ~1024. Ask the adapter
+      // rather than the config: a transport that discards `effort` would otherwise reserve eight
+      // times the output it can use and drain the run's token allowance for no reasoning at all.
+      const desiredMaxTokens = sendsEffort ? 8000 : 1024;
       const conversation = normalizeMessages([...priorTurns, ...pruneObservations(stepMessages)]);
       const imageForStep = pendingImage;
       const requestMessages = imageForStep
@@ -1030,7 +1089,11 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
               (prompt, pending) => confirmJournaled(prompt, pending, actionId),
             ),
           (value) => value.outcome,
-          askEffect === 'read' ? undefined : () => verifyBrowserStateObserved(driver),
+          askEffect === 'read'
+            ? undefined
+            : async () => {
+                await verifyBrowserStateObserved(driver);
+              },
         );
         if (!handled.ok) history.push(`${step}. ${handled.outcome}`);
         continue;
@@ -1182,9 +1245,15 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // This is only safe because the pause can now END. `waitForInput` has a timeout, and a
       // panel-origin run with no panel attached fails immediately rather than waiting for an answer
       // nobody can give — without those, a gate here would have wedged the profile permanently.
+      let approvedTargetPatch: string | undefined;
+      // `risk.consequential` stays true for every classified gesture, because the JOURNAL must keep
+      // treating an unverifiable click as a possible commit. Who has to authorize it is a different
+      // question, and for the gestures whose only evidence of risk is unreadable page script it is
+      // the autonomy setting that answers it.
+      const gatesUnattended =
+        commitIntent === undefined ? risk.consequential : commitIntentGatesUnattended(commitIntent);
       const needsConfirm =
-        Boolean(commitIntent) ||
-        risk.consequential ||
+        gatesUnattended ||
         (config.autonomy === 'confirm' && (actionCapability(action.kind).mutating || risk.high));
       if (needsConfirm && !navigationApproved) {
         // The prompt must name the files and the destination. Redaction is right for the transcript,
@@ -1194,6 +1263,10 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           action.kind === 'upload'
             ? `Approve uploading ${action.paths.map((p) => JSON.stringify(basename(p))).join(', ')} to ${hostOf(raw.url) || redactUrl(raw.url)}?`
             : `Approve ${describeSafeAction(action, raw)}${risk.reason ? `? (${risk.reason})` : '?'}`;
+        // What the human is about to approve, in pixels, captured before they are asked. A canvas or
+        // cross-origin frame changes without touching DOM perception, so this is the only evidence
+        // that the thing under the coordinate is still the thing that was approved.
+        approvedTargetPatch = await visualTargetPatch(driver, action);
         const approved = await confirmJournaled(prompt, safeAction, journalActionId);
         if (!approved) {
           history.push(`${step}. user rejected ${describeSafeAction(action, raw)}`);
@@ -1230,8 +1303,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         // Do this LAST, after the DOM check, to make the unobservable screenshot-to-dispatch race as
         // small as possible. Canvas and cross-origin frame changes do not appear in `afterApproval`.
         if (action.kind === 'click_at' || action.kind === 'type_at') {
-          const freshImage = await driver.screenshot?.().catch(() => undefined);
-          if (!imageForStep || !freshImage || freshImage !== imageForStep) {
+          if (!imageForStep || !(await visualTargetHeld(driver, action, approvedTargetPatch))) {
             const outcome =
               'blocked: the visual page changed while confirmation was pending; capture a fresh screenshot and request approval again';
             noteBlocked('the visual page changed while confirmation was pending');
@@ -1333,6 +1405,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       }
       if (stuckCount >= 3 || repeatCount >= 8) recovery = true;
 
+      let verifiedPerception: RawPerception | undefined;
       const outcome = await dispatchJournaled(
         journalActionId,
         journalEffect,
@@ -1347,7 +1420,13 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         (value) => value.outcome,
         journalEffect === 'read'
           ? undefined
-          : () => verifyBrowserStateObserved(driver, movesBrowserOnly(action)),
+          : async () => {
+              verifiedPerception = await verifyBrowserStateObserved(
+                driver,
+                movesBrowserOnly(action),
+              );
+            },
+        (value) => value.delivery,
       );
       // An action that actually ran clears the consecutive streak (but not the total): the agent found
       // something it is allowed to do, so it is no longer stuck against the same wall.
@@ -1406,7 +1485,13 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         history[history.length - 1] =
           `${step}. collected ${added} new row(s)${skipped > 0 ? `, ${skipped} duplicate(s) ignored` : ''} — ${dataset.length} total so far`;
       }
-      if (action.kind === 'extract') lastExtractedView = observationFingerprint(raw);
+      // Only a read that produced something closes this view. An extract can legitimately fail — the
+      // page was still loading, or its text renders in a cross-origin frame — and marking the view
+      // extracted anyway refused the retry with "already extracted; use the existing result" when
+      // there was no result, which is precisely the case the guard is supposed to allow through.
+      if (action.kind === 'extract' && outcome.extracted) {
+        lastExtractedView = observationFingerprint(raw);
+      }
       if (outcome.image) pendingImage = outcome.image;
 
       // Catch redirects/popups/JS navigations that could not be predicted from an href. `browser_config`
@@ -1490,6 +1575,15 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             }
           }
         }
+      }
+
+      // Reuse the verified observation only while it still describes the live page. Everything above
+      // this point that could have moved the browser — a rollback, an approved drift, a popup the
+      // driver adopted — invalidates it, and a stale element list is worse than a second read.
+      if (verifiedPerception) {
+        const live = await safe(() => driver.currentUrl(), '');
+        const identity = verifiedPerception.urlIdentity ?? urlIdentity(verifiedPerception.url);
+        if (live && urlIdentity(live) === identity) carriedPerception = verifiedPerception;
       }
     }
     return await finish('stopped', `Reached the ${config.maxSteps}-step budget without finishing.`);
@@ -1616,6 +1710,9 @@ async function handleAsk(
     // policy, not the human — can see what handler sits under it. Reaching that click through `ask`
     // does not make it less of an activation: without this gate the model chose the coordinate, the
     // human was shown only the question, and the click was dispatched with no approval bound to it.
+    // A canvas/frame can change without affecting DOM perception, so the target's own pixels are
+    // captured before the human is asked and required to still be there afterwards.
+    const approvedTargetPatch = await visualTargetPatch(deps.driver, directAction);
     const approved = await requestApproval(
       `Type the value you just supplied at visual coordinate (${action.targetX}, ${action.targetY}) on ${redactUrl(afterInput.url)}. Anything under that point will be clicked first.`,
       directAction,
@@ -1623,10 +1720,10 @@ async function handleAsk(
     if (!approved) {
       return { ok: false, outcome: 'the sensitive coordinate handoff was rejected' };
     }
-    // A canvas/frame can change without affecting DOM perception. Capture immediately before the
-    // focus click and require the exact image the human/model acted against.
-    const freshImage = await deps.driver.screenshot?.().catch(() => undefined);
-    if (!approvedImage || !freshImage || freshImage !== approvedImage) {
+    if (
+      !approvedImage ||
+      !(await visualTargetHeld(deps.driver, directAction, approvedTargetPatch))
+    ) {
       return {
         ok: false,
         outcome:
@@ -1985,14 +2082,12 @@ interface BudgetedRequest {
 }
 
 /**
- * Cap the request's output by the allowance left after its CURRENT input. UTF-8 bytes form a simple
- * tokenizer-independent upper-ish bound for text (deliberately much more conservative than the old
- * chars/3.5 guess), while explicit structural overhead covers roles/provider wrappers. Provider usage
- * remains authoritative after the response and is checked before any returned action is dispatched.
+ * Cap the request's output by the allowance left after its CURRENT input. Provider usage remains
+ * authoritative after the response and is checked before any returned action is dispatched.
  */
 function budgetedMaxTokens(request: BudgetedRequest): number {
   if (request.tokenBudget === undefined) return request.desiredMaxTokens;
-  const remaining = request.tokenBudget - totalTokens(request.usage);
+  const remaining = request.tokenBudget - budgetedTokens(request.usage);
   const outputRoom = remaining - requestInputReserve(request);
   if (outputRoom < MIN_USEFUL_OUTPUT_TOKENS) return 0;
   return Math.min(request.desiredMaxTokens, Math.floor(outputRoom));
@@ -2004,10 +2099,10 @@ function requestInputReserve(
   const FIXED_REQUEST_OVERHEAD = 256;
   const MESSAGE_OVERHEAD = 24;
   const TOOL_OVERHEAD = 32;
-  let reserve = FIXED_REQUEST_OVERHEAD + utf8Bytes(request.system);
-  reserve += utf8Bytes(JSON.stringify(request.tools)) + request.tools.length * TOOL_OVERHEAD;
+  let reserve = FIXED_REQUEST_OVERHEAD + estimatedTokens(request.system);
+  reserve += estimatedTokens(JSON.stringify(request.tools)) + request.tools.length * TOOL_OVERHEAD;
   for (const message of request.messages) {
-    reserve += MESSAGE_OVERHEAD + utf8Bytes(messageText(message));
+    reserve += MESSAGE_OVERHEAD + estimatedTokens(messageText(message));
     if (message.role === 'user') {
       for (const image of message.images ?? []) {
         // Native image inputs are billed by pixels rather than base64 text. The compressed byte count
@@ -2020,16 +2115,40 @@ function requestInputReserve(
   return reserve;
 }
 
-function utf8Bytes(value: string): number {
-  return Buffer.byteLength(value, 'utf8');
+/**
+ * Tokens a string is worth, for reserving room BEFORE the provider has counted it.
+ *
+ * Reserving UTF-8 bytes was tokenizer-independent but not a token estimate at all: English prose is
+ * about one byte per character and roughly four characters per token, so the reserve came out ~4×
+ * the real input and the budget appeared spent long before it was. Dividing keeps the property that
+ * mattered — no tokenizer, and still an over-estimate — while staying in the right order of
+ * magnitude. The divisor is deliberately below the ~4 bytes/token English average so the reserve
+ * errs high, and multi-byte scripts (which pack more bytes into a token) land near 1 token/char.
+ */
+function estimatedTokens(value: string): number {
+  return Math.ceil(Buffer.byteLength(value, 'utf8') / 3);
 }
 
-function totalTokens(value: AgentUsage): number {
-  return value.tokensIn + value.tokensOut;
+/** A cached prefix read is billed at roughly a tenth of a fresh one. */
+const CACHE_READ_BUDGET_WEIGHT = 0.1;
+
+/**
+ * What this run has spent against its budget.
+ *
+ * The budget exists to bound COST. Counting cache reads at full price meant prompt caching — the one
+ * mechanism that makes a long run affordable — accelerated the shutdown instead: every step re-reads
+ * the whole prefix, so the total grew by an entire prompt per step and a forty-step run halted around
+ * step ten. `tokensIn` stays the honest context measure everything else reports; only this
+ * arithmetic is weighted.
+ */
+function budgetedTokens(value: AgentUsage): number {
+  const cached = Math.min(value.cachedTokensIn ?? 0, value.tokensIn);
+  const fresh = value.tokensIn - cached;
+  return fresh + Math.ceil(cached * CACHE_READ_BUDGET_WEIGHT) + value.tokensOut;
 }
 
 function tokenBudgetExceeded(tokenBudget: number | undefined, usage: AgentUsage): boolean {
-  return tokenBudget !== undefined && totalTokens(usage) > tokenBudget;
+  return tokenBudget !== undefined && budgetedTokens(usage) > tokenBudget;
 }
 
 /** All text in a message, for budgeting. */
@@ -2133,12 +2252,39 @@ function pruneObservations(messages: readonly LlmMessage[]): LlmMessage[] {
   });
 }
 
+/** Steps kept verbatim at each end of the ledger before the middle is elided. */
+const LEDGER_HEAD = 3;
+const LEDGER_TAIL = 8;
+
+/**
+ * The run's own history, bounded, as one re-sent block.
+ *
+ * `history` accumulated a line per step for the whole run and only its LAST entry was ever read, so
+ * the model's only cross-step structure was six verbatim observations and a row of header lines.
+ * That is enough to react and not enough to carry a plan: on a multi-phase task the model re-derives
+ * what it was doing every few steps, or quietly stops doing it. Keeping both ends and eliding the
+ * middle bounds the cost — the recent steps say where it is, the first ones say what it set out to
+ * do — and turns the ledger from dead memory growth into the run's working state.
+ */
+function runLedger(history: readonly string[]): string {
+  const clip = (line: string): string => (line.length > 200 ? `${line.slice(0, 199)}…` : line);
+  if (history.length <= LEDGER_HEAD + LEDGER_TAIL) return history.map(clip).join('\n');
+  const omitted = history.length - LEDGER_HEAD - LEDGER_TAIL;
+  return [
+    ...history.slice(0, LEDGER_HEAD).map(clip),
+    `… ${omitted} earlier step(s) omitted …`,
+    ...history.slice(-LEDGER_TAIL).map(clip),
+  ].join('\n');
+}
+
 function hasResentBlocks(message: LlmMessage): message is LlmMessage & { content: string } {
   if (message.role === 'assistant') return false;
   const content = message.content;
   return (
     typeof content === 'string' &&
-    (content.includes(EVIDENCE_PREAMBLE) || content.includes(SITE_MEMORY_PREAMBLE))
+    (content.includes(EVIDENCE_PREAMBLE) ||
+      content.includes(SITE_MEMORY_PREAMBLE) ||
+      content.includes(PROGRESS_PREAMBLE))
   );
 }
 
@@ -2163,7 +2309,11 @@ function stripResentBlocks(content: string): string {
     return `${text.slice(0, start)}(earlier copy of this block omitted; the current one is below)\n${text.slice(end + endFence.length + 1)}`;
   };
   return cut(
-    cut(content, EVIDENCE_PREAMBLE, 'END_UNTRUSTED_WEB_CONTENT'),
+    cut(
+      cut(content, EVIDENCE_PREAMBLE, 'END_UNTRUSTED_WEB_CONTENT'),
+      PROGRESS_PREAMBLE,
+      'END_UNTRUSTED_WEB_CONTENT',
+    ),
     SITE_MEMORY_PREAMBLE,
     'END_UNTRUSTED_LOCAL_MEMORY',
   );
@@ -2236,10 +2386,14 @@ function movesBrowserOnly(action: AgentAction): boolean {
   return action.kind === 'navigate' || action.kind === 'back' || action.kind === 'tab';
 }
 
+/**
+ * Confirm the page can testify about what just happened — and hand back the observation it used, so
+ * the next step reads the page it already read instead of extracting the whole DOM again.
+ */
 async function verifyBrowserStateObserved(
   driver: BrowserDriver,
   browserMoveOnly = false,
-): Promise<void> {
+): Promise<RawPerception | undefined> {
   for (let attempt = 1; ; attempt += 1) {
     const observed = await perceive(driver);
     if (observed.signals?.includes('page-unreadable') && !browserMoveOnly) {
@@ -2248,13 +2402,15 @@ async function verifyBrowserStateObserved(
     if (observed.signals?.includes('page-unreadable')) {
       // The move itself is not in doubt, and the next step's own observation carries the reason the
       // page cannot be read — a blocking dialog, a hostile CSP — so the model can hand off or leave.
-      return;
+      return undefined;
     }
     if (driver.ready && !driver.ready()) {
       throw new Error('the browser detached before post-action verification');
     }
     const liveUrl = await driver.currentUrl();
-    if (urlIdentity(liveUrl) === (observed.urlIdentity ?? urlIdentity(observed.url))) return;
+    if (urlIdentity(liveUrl) === (observed.urlIdentity ?? urlIdentity(observed.url))) {
+      return observed;
+    }
     if (attempt >= POST_ACTION_SETTLE_ATTEMPTS) {
       throw new Error('the page changed during post-action verification');
     }
@@ -2262,6 +2418,61 @@ async function verifyBrowserStateObserved(
     // itself part of the evidence that the state is not observable.
     await driver.waitForSettle(3000).catch(() => {});
   }
+}
+
+/**
+ * Side of the square of pixels around a coordinate gesture that must survive an approval unchanged.
+ *
+ * The check used to demand two byte-identical FULL-PAGE screenshots taken either side of a human
+ * reading a modal. Any caret blink, spinner, lazy image, video frame, or CSS transition anywhere on
+ * the page changed those bytes, so the documented escape hatch for canvas widgets, captchas and
+ * cross-origin payment frames could essentially never run: the agent burned a screenshot, an
+ * approval and a block, then reported failure. Bounding the comparison to the neighbourhood of the
+ * click keeps the property that actually matters — the thing under the cursor is still the thing
+ * that was approved — and stops unrelated motion from vetoing it.
+ */
+const VISUAL_TARGET_PATCH_PX = 160;
+
+/** How many times a patch is re-sampled before the target counts as changed. */
+const VISUAL_TARGET_SAMPLES = 3;
+
+function visualTargetPatch(
+  driver: BrowserDriver,
+  action: AgentAction,
+): Promise<string | undefined> {
+  if ((action.kind !== 'click_at' && action.kind !== 'type_at') || !driver.screenshot) {
+    return Promise.resolve(undefined);
+  }
+  const half = Math.round(VISUAL_TARGET_PATCH_PX / 2);
+  return driver
+    .screenshot({
+      x: Math.max(0, Math.round(action.x) - half),
+      y: Math.max(0, Math.round(action.y) - half),
+      width: VISUAL_TARGET_PATCH_PX,
+      height: VISUAL_TARGET_PATCH_PX,
+    })
+    .catch(() => undefined);
+}
+
+/**
+ * Is the approved coordinate's neighbourhood still the one that was approved?
+ *
+ * Re-sampled a few times because a patch can legitimately differ for one frame — a caret in a field
+ * the gesture is about to focus, a hover transition finishing — without the target having moved. A
+ * missing capture is a refusal, not a pass: an unverifiable coordinate gesture is exactly the case
+ * this gate exists for.
+ */
+async function visualTargetHeld(
+  driver: BrowserDriver,
+  action: AgentAction,
+  approved: string | undefined,
+): Promise<boolean> {
+  if (!approved) return false;
+  for (let sample = 0; sample < VISUAL_TARGET_SAMPLES; sample += 1) {
+    const fresh = await visualTargetPatch(driver, action);
+    if (fresh && fresh === approved) return true;
+  }
+  return false;
 }
 
 async function rollbackNavigation(driver: BrowserDriver, priorUrl: string): Promise<void> {

@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { FileMemoryStore } from '@lobster/agent';
+import { FileMemoryStore, RunJournalStore } from '@lobster/agent';
 import type { AgentStartParams } from '@lobster/shared-types';
 import type { AgentEvent, AgentRunSnapshot } from '@lobster/shared-types';
 import { AgentBridge } from './bridge.js';
@@ -401,5 +401,91 @@ test('input request IDs are session-bound, replayable, and conflict-safe', async
   } finally {
     await bridge.close();
     forgetProfile(profileId);
+  }
+});
+
+test('an interrupted run that blocks admission can be listed and closed by an operator', async () => {
+  // Blocking every later run on an unverifiable effect is only defensible while the block can be
+  // lifted. Without these routes one CDP hiccup disabled the agent for a profile permanently.
+  const profileId = `bridge-recovery-${Date.now()}`;
+  const token = issueBridgeToken(profileId);
+  const root = await mkdtemp(join(tmpdir(), 'lobee-bridge-recovery-'));
+  const memoryDir = join(root, 'agent');
+  const memoryKey = randomBytes(32).toString('base64');
+  provisionProfile(profileId, { memoryDir, memoryKey });
+  const runs: AgentRunSnapshot[] = [];
+  const agents = {
+    setPresenceProbe: () => {},
+    status: () => ({ runs }),
+  } as unknown as AgentManager;
+  const bridge = new AgentBridge(agents);
+  const origin = await bridge.start();
+  try {
+    const journals = new RunJournalStore(join(memoryDir, 'journals'), {
+      encryptionKey: memoryKey,
+    });
+    let snapshot = await journals.create({ runId: 'stuck', task: 'buy the thing', mode: 'agent' });
+    snapshot = await journals.append(
+      'stuck',
+      {
+        type: 'action.proposed',
+        actionId: 'a1',
+        actionKind: 'click',
+        effect: 'consequential',
+        summary: 'Proposed click action',
+      },
+      snapshot.journal.revision,
+    );
+    await journals.append(
+      'stuck',
+      { type: 'action.dispatching', actionId: 'a1' },
+      snapshot.journal.revision,
+    );
+
+    const listed = (await (
+      await fetch(`${origin}/recovery`, { headers: { 'x-lobee-token': token } })
+    ).json()) as { runs: Array<{ runId: string; blocking: boolean; action?: string }> };
+    assert.equal(listed.runs.length, 1);
+    assert.equal(listed.runs[0]?.runId, 'stuck');
+    assert.equal(listed.runs[0]?.blocking, true);
+    assert.equal(listed.runs[0]?.action, 'Proposed click action');
+
+    runs.push({ status: 'running' } as AgentRunSnapshot);
+    const whileRunning = await fetch(`${origin}/recovery/resolve`, {
+      method: 'POST',
+      headers: { 'x-lobee-token': token, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        runId: 'stuck',
+        resolution: 'abandoned',
+        requestId: 'recovery-request-000000',
+      }),
+    });
+    assert.equal(
+      whileRunning.status,
+      409,
+      'a live run must not have its journal closed underneath',
+    );
+    runs.length = 0;
+
+    const resolved = await fetch(`${origin}/recovery/resolve`, {
+      method: 'POST',
+      headers: { 'x-lobee-token': token, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        runId: 'stuck',
+        resolution: 'verified_not_applied',
+        requestId: 'recovery-request-000001',
+      }),
+    });
+    assert.equal(resolved.status, 200);
+    assert.deepEqual(await journals.listUnfinished(), []);
+
+    const empty = (await (
+      await fetch(`${origin}/recovery`, { headers: { 'x-lobee-token': token } })
+    ).json()) as { runs: unknown[] };
+    assert.deepEqual(empty.runs, []);
+  } finally {
+    await bridge.close();
+    forgetProfile(profileId);
+    await rm(root, { recursive: true, force: true });
   }
 });

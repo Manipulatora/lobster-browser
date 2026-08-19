@@ -89,6 +89,54 @@ test('an unpressable key is refused before the durable dispatch barrier', async 
   assert.deepEqual(order, [], 'nothing may be dispatched, and no durable barrier may be crossed');
 });
 
+/** A page with one labelled control, and a point-probe that answers with a DIFFERENT control. */
+function movedPage(role: string, name: string): { page: RawPerception; driver: BrowserDriver } {
+  const page: RawPerception = {
+    url: 'https://example.test/',
+    title: 'Example',
+    scrollY: 0,
+    viewportH: 720,
+    docH: 720,
+    canScrollUp: false,
+    canScrollDown: false,
+    elements: [
+      { index: 0, tag: 'select', role, name, x: 100, y: 200, w: 180, h: 30 },
+      { index: 1, tag: 'li', role: 'listitem', name: 'Row two', x: 100, y: 400, w: 180, h: 30 },
+    ],
+    truncated: 0,
+  };
+  const driver = {
+    evaluate: async () => ({ name: 'Accept all cookies', role: 'button' }),
+    select: async () => {
+      throw new Error('the stale target was dispatched to');
+    },
+    drag: async () => {
+      throw new Error('the stale target was dispatched to');
+    },
+    waitForSettle: async () => {},
+  } as unknown as BrowserDriver;
+  return { page, driver };
+}
+
+test('a select whose target moved under the measured point is refused, not dispatched', async () => {
+  // A select commits a quantity, a shipping method, an account. It is classified as a commit-capable
+  // gesture for that reason, so the coordinate it fires at has to be re-identified like a click's.
+  const { page: moved, driver } = movedPage('combobox', 'Quantity');
+  const result = await executeAction({ kind: 'select', id: 0, values: ['3'] }, moved, driver, {
+    beforeEffect: async () => assert.fail('the durable barrier must not be crossed'),
+  });
+  assert.match(result.outcome, /^error: the page moved/);
+  assert.match(result.outcome, /Accept all cookies/);
+});
+
+test('a drag is refused when either endpoint moved under its measured point', async () => {
+  const { page: moved, driver } = movedPage('listitem', 'Row one');
+  const result = await executeAction({ kind: 'drag', fromId: 0, toId: 1 }, moved, driver, {
+    beforeEffect: async () => assert.fail('the durable barrier must not be crossed'),
+  });
+  assert.match(result.outcome, /^error: the page moved/);
+});
+
 test('a space is pressable and reaches the driver under the name the driver knows', async () => {
   // `{key:' '}` passed validation and then threw inside the driver, which has no entry for a literal
   // space — after the barrier had already been crossed.

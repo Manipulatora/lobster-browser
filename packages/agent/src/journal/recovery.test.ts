@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { projectRunRecovery } from './recovery.js';
+import { projectRunRecovery, resolveRunRecovery } from './recovery.js';
 import type { JournalActionEffect } from './schema.js';
 import { RunJournalStore, type RunJournalSnapshot } from './store.js';
 
@@ -145,6 +145,63 @@ test('sensitive unfinished journals are non-resumable regardless of action phase
     kind: 'non_resumable',
     reason: 'sensitive_journal',
   });
+});
+
+test('an operator can close every blocking phase, and the run ends as an honest stop', async () => {
+  // A block on an unverifiable effect is only defensible while it can be lifted. Each of these phases
+  // refuses admission for the profile, so each of them has to have a way out that does not replay.
+  const blocking: Array<[string, Parameters<RunJournalStore['append']>[1][]]> = [
+    ['dispatching', [proposal('consequential'), { type: 'action.dispatching', actionId: 'a1' }]],
+    [
+      'recovery_required',
+      [
+        proposal('write'),
+        { type: 'action.dispatching', actionId: 'a1' },
+        {
+          type: 'action.observed',
+          actionId: 'a1',
+          outcome: 'unknown',
+          summary: 'no acknowledgement',
+        },
+      ],
+    ],
+    ['awaiting_approval', [proposal('write'), { type: 'approval.requested', actionId: 'a1' }]],
+    [
+      'unreconciled_navigation',
+      [
+        {
+          type: 'action.proposed',
+          actionId: 'a1',
+          actionKind: 'navigation_reconcile',
+          effect: 'write',
+          summary: 'Restore the prior page',
+          host: 'example.com',
+        },
+        { type: 'action.dispatching', actionId: 'a1' },
+      ],
+    ],
+  ];
+  const dir = await mkdtemp(join(tmpdir(), 'lobee-recovery-resolve-'));
+  try {
+    const store = new RunJournalStore(dir, { encryptionKey: randomBytes(32), clock: () => NOW });
+    for (const [phase, events] of blocking) {
+      let snapshot = await store.create({ runId: phase, task: 'Complete the task', mode: 'agent' });
+      for (const event of events) {
+        snapshot = await store.append(phase, event, snapshot.journal.revision);
+      }
+      assert.equal(await resolveRunRecovery(store, phase, 'abandoned'), 'resolved');
+      const resolved = await store.load(phase);
+      assert.deepEqual(projectRunRecovery(resolved!.state), {
+        kind: 'terminal',
+        status: 'stopped',
+        summary: 'Interrupted run closed after operator recovery',
+      });
+      assert.equal(await resolveRunRecovery(store, phase, 'abandoned'), 'already_terminal');
+    }
+    assert.deepEqual(await store.listUnfinished(), []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('terminal journals project their result and are never presented as resumable', async () => {

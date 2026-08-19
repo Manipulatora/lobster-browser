@@ -132,8 +132,13 @@ export class LazyBrowserDriver implements BrowserDriver {
   async closeTabById(id: string): Promise<void> {
     return (await this.ensure()).closeTabById(id);
   }
-  async screenshot(): Promise<string> {
-    return (await this.ensure()).screenshot();
+  async screenshot(clip?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }): Promise<string> {
+    return (await this.ensure()).screenshot(clip);
   }
 
   // ---- reads: safe no-ops while the browser is closed --------------------------------------------

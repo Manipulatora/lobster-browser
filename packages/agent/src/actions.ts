@@ -152,7 +152,26 @@ export const NAMED_KEYS = [
   'Space',
 ] as const;
 
-const MODIFIER_COMBOS = ['Control+A', 'Meta+A'];
+/**
+ * The chords a page may bind that no other action can express.
+ *
+ * Enumerated rather than open-ended for the same reason {@link NAMED_KEYS} is: whatever passes here
+ * must be pressable by the driver, and a chord that validates but has no dispatch path crosses the
+ * durable barrier before failing. Select-all was the only entry, so a site whose primary submit is
+ * Ctrl+Enter — every modern comment box, chat composer and code editor — could not be driven at all,
+ * and Shift+Enter (newline without sending) had no expression either.
+ */
+const MODIFIER_COMBOS = [
+  'Control+A',
+  'Meta+A',
+  'Control+C',
+  'Meta+C',
+  'Control+V',
+  'Meta+V',
+  'Control+Enter',
+  'Meta+Enter',
+  'Shift+Enter',
+];
 
 /**
  * Canonicalize a model-supplied key, or return undefined when nothing can press it.

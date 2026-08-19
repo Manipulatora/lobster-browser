@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { fetchWithRetry } from './http.js';
-import { createLlmClient } from './index.js';
+import { createLlmClient, usesAutomaticToolChoice } from './index.js';
 import type { LlmRequest } from './types.js';
 
 const request: LlmRequest = {
@@ -387,6 +387,50 @@ test('Anthropic cache-read input counts toward the run token budget', async () =
     });
     const result = await client.complete({ ...request, tools: [], forceTool: '' });
     assert.deepEqual(result.usage, { tokensIn: 18, tokensOut: 2, cachedTokensIn: 11 });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('adapters declare whether effort reaches the wire, so the loop stops over-reserving output', () => {
+  // Turning effort on raised the output reservation eightfold on EVERY provider, including the two
+  // adapters that send no reasoning parameter at all — draining the run's token allowance for nothing.
+  const openRouter = createLlmClient({ provider: 'openrouter', model: 'anthropic/x', apiKey: 'k' });
+  assert.equal(openRouter.sendsEffort?.('anthropic/x', 'high'), true);
+
+  const openai = createLlmClient({ provider: 'openai', model: 'gpt-5', apiKey: 'k' });
+  assert.equal(openai.sendsEffort?.('gpt-5', 'high'), true);
+  assert.equal(openai.sendsEffort?.('gpt-4o', 'high'), false);
+
+  for (const provider of ['anthropic', 'google'] as const) {
+    const client = createLlmClient({ provider, model: 'm', apiKey: 'k' });
+    assert.equal(client.sendsEffort?.('m', 'high') ?? false, false, provider);
+  }
+});
+
+test('the direct Anthropic path admits it cannot force the tool, so the prompt compensates', async () => {
+  // The adapter hardcoded `auto` while the predicate the system prompt reads answered `false` for
+  // `provider: 'anthropic'`. The model was therefore free to answer in prose and never told not to —
+  // and three prose replies end a run with "repeatedly returned no valid action".
+  assert.equal(usesAutomaticToolChoice('anthropic', 'claude-test'), true);
+
+  const original = globalThis.fetch;
+  let sent: Record<string, unknown> | undefined;
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    sent = JSON.parse(String(init.body)) as Record<string, unknown>;
+    return new Response(
+      JSON.stringify({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as unknown as typeof fetch;
+  try {
+    const client = createLlmClient({
+      provider: 'anthropic',
+      model: 'claude-test',
+      apiKey: 'anthropic-private',
+    });
+    await client.complete(request);
+    assert.deepEqual(sent?.tool_choice, { type: 'auto' });
   } finally {
     globalThis.fetch = original;
   }

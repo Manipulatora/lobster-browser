@@ -3,14 +3,17 @@ import { fetchWithRetry } from './http.js';
 
 /**
  * True when this (provider, model) pair cannot be given a FORCED tool choice, so the model may answer
- * in prose instead of calling `act`. Claude's adaptive-thinking models reject `tool_choice: {function}`
- * over OpenRouter, so the adapter sends `'auto'` for them.
+ * in prose instead of calling `act`. Claude's adaptive-thinking models reject `tool_choice: {function}`,
+ * so both the OpenRouter dialect and the direct Anthropic adapter send `'auto'` for them.
  *
  * Exported because the system prompt has to compensate with an explicit "every step is one `act` call"
- * clause — and the condition must be stated in exactly ONE place, or the prompt and the wire drift
- * apart silently.
+ * clause, and the adapters decide their wire `tool_choice` from it — the condition is stated in exactly
+ * ONE place, or the prompt and the wire drift apart silently. They did: the direct BYOK path hardcoded
+ * `auto` while this predicate answered only for `anthropic/*` over OpenRouter, so on BYOK Anthropic the
+ * model was free to answer in prose and was never told not to. Three prose replies end a run.
  */
 export function usesAutomaticToolChoice(provider: string, model: string): boolean {
+  if (provider === 'anthropic') return true;
   const openRouter = provider === 'managed' || provider === 'openrouter';
   return openRouter && model.startsWith('anthropic/');
 }
@@ -34,6 +37,12 @@ export class OpenAiCompatibleClient implements LlmClient {
     this.baseUrl = opts.baseUrl.replace(/\/$/, '');
     this.defaultModel = opts.model;
     this.openRouter = opts.provider === 'managed' || opts.provider === 'openrouter';
+  }
+
+  /** Answered from the same mapping `complete` uses, so the two cannot disagree about a model. */
+  sendsEffort(model: string, effort: NonNullable<LlmRequest['effort']>): boolean {
+    const mapped = reasoningParameters(this.provider, model || this.defaultModel, effort);
+    return Object.keys(mapped).length > 0;
   }
 
   async complete(req: LlmRequest): Promise<LlmResult> {

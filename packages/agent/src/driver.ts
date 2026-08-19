@@ -151,8 +151,12 @@ export interface BrowserDriver {
   /**
    * Capture a viewport screenshot as a base64 PNG for the on-demand vision fallback (`Page.captureScreenshot`
    * — also a command, no `Page.enable`). Optional: a driver may omit it if vision is unsupported.
+   *
+   * `clip` narrows the capture to a viewport rectangle. Freshness checks around a coordinate gesture
+   * use it: comparing whole frames meant a caret blink or a spinner anywhere on the page counted as
+   * "the visual target moved", so the visual fallback could essentially never execute.
    */
-  screenshot?(): Promise<string>;
+  screenshot?(clip?: { x: number; y: number; width: number; height: number }): Promise<string>;
 
   /**
    * Report (and clear) a popup the driver adopted as the working target since the last call. Optional;

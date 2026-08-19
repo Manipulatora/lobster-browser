@@ -29,7 +29,11 @@ const NOW = '2026-08-03T12:00:00.000Z';
  * on operationally — the path exists, is the right kind of object, and is still writable, so the
  * next append can rewrite it.
  */
-async function assertOwnerOnly(path: string, posixMode: number, kind: 'dir' | 'file'): Promise<void> {
+async function assertOwnerOnly(
+  path: string,
+  posixMode: number,
+  kind: 'dir' | 'file',
+): Promise<void> {
   const st = await stat(path);
   assert.equal(kind === 'dir' ? st.isDirectory() : st.isFile(), true, `${path} is not a ${kind}`);
   if (process.platform === 'win32') {
@@ -37,7 +41,11 @@ async function assertOwnerOnly(path: string, posixMode: number, kind: 'dir' | 'f
     assert.equal((st.mode & 0o200) !== 0, true, `${path} lost its write bit`);
     return;
   }
-  assert.equal(st.mode & 0o777, posixMode, `${path} has wider permissions than ${posixMode.toString(8)}`);
+  assert.equal(
+    st.mode & 0o777,
+    posixMode,
+    `${path} has wider permissions than ${posixMode.toString(8)}`,
+  );
 }
 
 async function withStore(

@@ -15,8 +15,21 @@ import type { PerceivedElement, RawPerception } from './types.js';
 export type Sleep = (ms: number) => Promise<void>;
 const realSleep: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * How far a failing action got towards the page.
+ *
+ * `none` means nothing was handed to the driver, `attempted` means an input dispatch was in flight when
+ * the driver rejected (so the page may have seen part of it), and `delivered` means every input landed
+ * and only the settling/reading that follows failed. Only `attempted` is genuinely ambiguous, and
+ * telling the three apart is what keeps an ordinary CDP timeout from being recorded as a possible
+ * unverifiable write — the record that blocks every later run on the profile.
+ */
+export type EffectDelivery = 'none' | 'attempted' | 'delivered';
+
 export interface ExecOutcome {
   outcome: string;
+  /** Present on a thrown failure only; a returned refusal never reaches the driver. */
+  delivery?: EffectDelivery;
   terminal?: { success: boolean; summary: string };
   needsInput?: { prompt: string; sensitive?: boolean; targetId?: number };
   extracted?: string;
@@ -239,6 +252,16 @@ export async function executeAction(
   const sleep = opts.sleep ?? realSleep;
   const maxWaitMs = opts.maxWaitMs ?? 8000;
   const beforeEffect = opts.beforeEffect ?? (async () => {});
+  let delivery: EffectDelivery = 'none';
+  // Wrap ONLY the calls that hand an input to the page. Everything that follows one — waitForSettle,
+  // a read-back, a policy check — leaves `delivery` at `delivered`, so a driver that rejects there is
+  // reported as a completed effect with an unread result rather than as a possible one.
+  const dispatchInput = async <T>(input: () => Promise<T>): Promise<T> => {
+    delivery = 'attempted';
+    const value = await input();
+    delivery = 'delivered';
+    return value;
+  };
   try {
     assertNotAborted(opts.signal);
     switch (action.kind) {
@@ -248,10 +271,12 @@ export async function executeAction(
         const fresh = await pointStillMatches(driver, el);
         if (!fresh.ok) return staleTarget(action.id, el, fresh.found);
         await beforeEffect();
-        await driver.click(point(el), {
-          ...(action.button ? { button: action.button } : {}),
-          ...(action.count ? { count: action.count } : {}),
-        });
+        await dispatchInput(() =>
+          driver.click(point(el), {
+            ...(action.button ? { button: action.button } : {}),
+            ...(action.count ? { count: action.count } : {}),
+          }),
+        );
         await driver.waitForSettle();
         return { outcome: `clicked [${action.id}] ${el.role} ${JSON.stringify(el.name)}` };
       }
@@ -259,12 +284,14 @@ export async function executeAction(
         if (!inViewport(action.x, action.y, perception))
           return { outcome: 'blocked: click coordinates are outside the current viewport' };
         await beforeEffect();
-        await driver.click(
-          { x: action.x, y: action.y },
-          {
-            ...(action.button ? { button: action.button } : {}),
-            ...(action.count ? { count: action.count } : {}),
-          },
+        await dispatchInput(() =>
+          driver.click(
+            { x: action.x, y: action.y },
+            {
+              ...(action.button ? { button: action.button } : {}),
+              ...(action.count ? { count: action.count } : {}),
+            },
+          ),
         );
         await driver.waitForSettle();
         return { outcome: `clicked visual coordinate (${action.x}, ${action.y})` };
@@ -287,11 +314,11 @@ export async function executeAction(
         const stillThere = await pointStillMatches(driver, el);
         if (!stillThere.ok) return staleTarget(action.id, el, stillThere.found);
         await beforeEffect();
-        await driver.click(point(el));
-        if (action.clear) await driver.selectAll();
-        await driver.type(action.text);
+        await dispatchInput(() => driver.click(point(el)));
+        if (action.clear) await dispatchInput(() => driver.selectAll());
+        await dispatchInput(() => driver.type(action.text));
         if (action.submit) {
-          await driver.pressKey('Enter');
+          await dispatchInput(() => driver.pressKey('Enter'));
           await driver.waitForSettle();
         }
         const shown = isSensitiveElement(el)
@@ -305,11 +332,11 @@ export async function executeAction(
         if (!inViewport(action.x, action.y, perception))
           return { outcome: 'blocked: type coordinates are outside the current viewport' };
         await beforeEffect();
-        await driver.click({ x: action.x, y: action.y });
-        if (action.clear) await driver.selectAll();
-        await driver.type(action.text);
+        await dispatchInput(() => driver.click({ x: action.x, y: action.y }));
+        if (action.clear) await dispatchInput(() => driver.selectAll());
+        await dispatchInput(() => driver.type(action.text));
         if (action.submit) {
-          await driver.pressKey('Enter');
+          await dispatchInput(() => driver.pressKey('Enter'));
           await driver.waitForSettle();
         }
         return {
@@ -319,8 +346,13 @@ export async function executeAction(
       case 'select': {
         const el = findElement(perception, action.id);
         if (!el) return missing(action.id, perception);
+        // A select is classified as a commit-capable gesture — quantity, shipping method, account — so
+        // a banner or lazily loaded row shifting layout under the measured point is exactly the wrong
+        // target the staleness check exists to catch.
+        const stillThere = await pointStillMatches(driver, el);
+        if (!stillThere.ok) return staleTarget(action.id, el, stillThere.found);
         await beforeEffect();
-        await driver.select(point(el), action.values);
+        await dispatchInput(() => driver.select(point(el), action.values));
         await driver.waitForSettle(3000);
         return {
           outcome: `selected ${action.values.map((value) => JSON.stringify(value)).join(', ')} in [${action.id}]`,
@@ -333,7 +365,7 @@ export async function executeAction(
         const key = normalizeActionKey(action.key);
         if (!key) return { outcome: `blocked: unsupported key ${JSON.stringify(action.key)}` };
         await beforeEffect();
-        await driver.pressKey(key);
+        await dispatchInput(() => driver.pressKey(key));
         await driver.waitForSettle(3000);
         return { outcome: `pressed ${key}` };
       }
@@ -358,8 +390,14 @@ export async function executeAction(
         const to = findElement(perception, action.toId);
         if (!from) return missing(action.fromId, perception);
         if (!to) return missing(action.toId, perception);
+        // Both ends are measured coordinates, and a drag that grabs the right handle and drops it on
+        // the wrong row is as damaging as one that grabs the wrong handle, so both are re-identified.
+        const fromFresh = await pointStillMatches(driver, from);
+        if (!fromFresh.ok) return staleTarget(action.fromId, from, fromFresh.found);
+        const toFresh = await pointStillMatches(driver, to);
+        if (!toFresh.ok) return staleTarget(action.toId, to, toFresh.found);
         await beforeEffect();
-        await driver.drag(point(from), point(to));
+        await dispatchInput(() => driver.drag(point(from), point(to)));
         await driver.waitForSettle(3000);
         return { outcome: `dragged [${action.fromId}] to [${action.toId}]` };
       }
@@ -375,7 +413,7 @@ export async function executeAction(
         if (!stillThere.ok) return staleTarget(action.id, el, stillThere.found);
         const paths = await validateUploadPaths(action.paths, roots);
         await beforeEffect();
-        await driver.uploadFiles(point(el), paths);
+        await dispatchInput(() => driver.uploadFiles(point(el), paths));
         await driver.waitForSettle(3000);
         return {
           outcome: `uploaded ${paths.length} approved local file(s) through [${action.id}]`,
@@ -393,13 +431,13 @@ export async function executeAction(
           }
         }
         await beforeEffect();
-        await driver.navigate(action.url);
+        await dispatchInput(() => driver.navigate(action.url));
         await driver.waitForSettle();
         return { outcome: `navigated to ${redactUrl(action.url)}` };
       }
       case 'back':
         await beforeEffect();
-        await driver.goBack();
+        await dispatchInput(() => driver.goBack());
         await driver.waitForSettle();
         return { outcome: 'went back' };
       case 'tab': {
@@ -433,16 +471,17 @@ export async function executeAction(
             }
           }
           await beforeEffect();
-          await driver.newTab(action.url);
+          await dispatchInput(() => driver.newTab(action.url));
           await driver.waitForSettle();
           return { outcome: `opened a new tab${action.url ? ` at ${redactUrl(action.url)}` : ''}` };
         }
         if (action.tabId) {
           // Stable addressing: unaffected by other tabs opening or closing between list and act.
+          const tabId = action.tabId;
           const byId = action.operation === 'switch' ? driver.switchTabById : driver.closeTabById;
           if (!byId) return { outcome: 'error: this driver cannot address tabs by id' };
           await beforeEffect();
-          await byId.call(driver, action.tabId);
+          await dispatchInput(() => byId.call(driver, tabId));
           if (action.operation === 'switch') await driver.waitForSettle();
           return {
             outcome: `${action.operation === 'switch' ? 'switched to' : 'closed'} tab ${action.tabId}`,
@@ -450,14 +489,15 @@ export async function executeAction(
         }
         if (action.index === undefined)
           return { outcome: `error: tab ${action.operation} needs a tabId or index` };
+        const index = action.index;
         if (action.operation === 'switch') {
           await beforeEffect();
-          await driver.switchTab(action.index);
+          await dispatchInput(() => driver.switchTab(index));
           await driver.waitForSettle();
-          return { outcome: `switched to tab [${action.index}]` };
+          return { outcome: `switched to tab [${index}]` };
         }
         await beforeEffect();
-        await driver.closeTab(action.index);
+        await dispatchInput(() => driver.closeTab(index));
         return { outcome: `closed tab [${action.index}]` };
       }
       case 'wait': {
@@ -513,7 +553,7 @@ export async function executeAction(
           // change live. When done, the agent should CLOSE this tab (tab close) to leave the user where
           // they were. The guard already screened the URL; this stays leak-free (Page.navigate only).
           await beforeEffect();
-          await driver.newTab(assessment.settingsUrl, { background: true });
+          await dispatchInput(() => driver.newTab(assessment.settingsUrl, { background: true }));
           await driver.waitForSettle();
           const hint = action.value
             ? ` Now set "${action.value}" using the on-page controls (perceive the page, then click/select), then CLOSE this settings tab when the change is confirmed.`
@@ -522,7 +562,8 @@ export async function executeAction(
             outcome: `opened ${assessment.settingsUrl} in a separate background tab (the user's tab is untouched).${hint}`,
           };
         }
-        if (!driver.browserConfig) {
+        const browserConfig = driver.browserConfig;
+        if (!browserConfig) {
           return { outcome: 'error: browser configuration is unavailable in this driver' };
         }
         const command: BrowserConfigCommand = {
@@ -534,7 +575,7 @@ export async function executeAction(
           ...(action.behavior ? { behavior: action.behavior } : {}),
         };
         await beforeEffect();
-        const result = await driver.browserConfig(command);
+        const result = await dispatchInput(() => browserConfig.call(driver, command));
         return { outcome: result };
       }
       case 'ask':
@@ -577,8 +618,11 @@ export async function executeAction(
       }
     }
   } catch (error) {
-    if (opts.signal?.aborted) return { outcome: 'error: action aborted' };
-    return { outcome: `error: ${error instanceof Error ? error.message : String(error)}` };
+    if (opts.signal?.aborted) return { outcome: 'error: action aborted', delivery };
+    return {
+      outcome: `error: ${error instanceof Error ? error.message : String(error)}`,
+      delivery,
+    };
   }
 }
 

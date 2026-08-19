@@ -117,3 +117,32 @@ test('cookie CDP calls reject broad public/private suffix scopes before reading 
   }
   assert.equal(browserCalls, 0);
 });
+
+test('modifier chords dispatch as shortcuts, not as typed characters', async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const instance = driver(
+    session(),
+    session(async (method, params) => {
+      if (method === 'Input.dispatchKeyEvent') events.push(params as Record<string, unknown>);
+      return {};
+    }),
+  );
+
+  // A site whose primary submit is Ctrl+Enter — every modern composer — could not be driven at all,
+  // and sending `text` under a Control/Meta modifier types the letter instead of invoking the
+  // shortcut, so Ctrl+C would have inserted "c" into the focused field.
+  await instance.pressKey('Control+Enter');
+  await instance.pressKey('Meta+C');
+  await instance.pressKey('Shift+Enter');
+
+  const down = events.filter((event) => event.type === 'keyDown');
+  assert.deepEqual(
+    down.map((event) => [event.key, event.code, event.modifiers, event.text]),
+    [
+      ['Enter', 'Enter', 2, undefined],
+      ['c', 'KeyC', 4, undefined],
+      ['Enter', 'Enter', 8, undefined],
+    ],
+  );
+  assert.equal(events.filter((event) => event.type === 'keyUp').length, 3);
+});

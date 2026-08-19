@@ -59,8 +59,8 @@ export type { MemoryStore, FactRecord, MemorySettings, RunRecord } from './memor
 
 // Narrow production recovery surface. Journal crypto/schema internals remain package-private; the
 // sidecar only needs the authenticated store and the non-replayable recovery projection.
-export { projectRunRecovery, RunJournalStore } from './journal/index.js';
-export type { RunJournalSnapshot } from './journal/index.js';
+export { projectRunRecovery, resolveRunRecovery, RunJournalStore } from './journal/index.js';
+export type { RunJournalSnapshot, RunRecoveryResolution } from './journal/index.js';
 
 export { runAgent, resolveConfig } from './loop.js';
 export type { AgentRunDeps, AgentRunParams } from './loop.js';
@@ -68,6 +68,7 @@ export {
   actionCommitIntent,
   actionRisk,
   assessCurrentPage,
+  commitIntentGatesUnattended,
   isTextEntryElement,
   normalizeAllowedDomains,
 } from './policy.js';

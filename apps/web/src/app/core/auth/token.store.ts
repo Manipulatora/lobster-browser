@@ -16,8 +16,12 @@ const STORAGE_KEY = 'lobster.token';
  * any script that executes on this origin, so a successful XSS is a session compromise. An
  * httpOnly cookie would not be. It is used anyway because the API is bearer-token based and the
  * desktop launcher needs the same token over the same endpoints; moving the web to cookies would
- * mean two auth mechanisms in one backend. The mitigation that matters is therefore keeping the
- * origin free of injection — the CSP and Angular's default escaping — not the storage choice.
+ * mean two auth mechanisms in one backend. What compensates is not the storage choice but keeping
+ * the origin free of injection: Angular escapes interpolated values by default, and the
+ * Content-Security-Policy in `index.html` confines any script that does get in to this origin plus
+ * the API — it cannot fetch, post a form to, or load an image from an attacker's host. That policy
+ * has to allow inline script (a prerendered site has no nonce to hand out), so it narrows the blast
+ * radius rather than closing it; treat any injection sink on this origin as session-critical.
  */
 @Injectable({ providedIn: 'root' })
 export class TokenStore {

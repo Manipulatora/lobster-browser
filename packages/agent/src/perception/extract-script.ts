@@ -323,7 +323,14 @@ ${NAME_ROLE_HELPERS}
       if (blindFrames > 0) signals.push('cross-origin-frame:' + blindFrames);
     } catch (e) {}
     return {
-      url: safeUrl(location.href),
+      // The page's OWN location goes back unredacted, and the caller redacts it before the model or any
+      // event surface sees it. Redacting it here instead produced two different spellings of "which page
+      // is this" — this one, and the raw string \`currentUrl()\` returns — and the loop compares their
+      // digests before every action. On any URL carrying a query key the redactor rewrites (\`?code=\` on
+      // an OAuth callback, \`?authuser=\` on Google, a plain \`?keyword=\` search) they could never agree,
+      // so every proposed action was refused as "the page navigated after it was observed". Element
+      // hrefs stay redacted in-page: nothing computes an identity from those.
+      url: location.href,
       title: document.title || '',
       scrollY: Math.round(scrollY), viewportW: topW, viewportH: topH, devicePixelRatio: window.devicePixelRatio || 1, docH,
       canScrollUp: scrollY > 4,

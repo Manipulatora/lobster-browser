@@ -52,8 +52,8 @@ export async function perceive(driver: BrowserDriver): Promise<RawPerception> {
     failure = error instanceof Error ? error.message : String(error);
   }
   if (!raw || !Array.isArray(raw.elements) || failure) {
-    const fullUrl = text(raw?.url ?? (await safeUrl(driver)), 8192);
-    const url = redactUrl(fullUrl);
+    const fullUrl = typeof raw?.url === 'string' ? raw.url : await safeUrl(driver);
+    const url = redactUrl(text(fullUrl, 8192));
     // Do NOT present a failed read as a blank page. "(no interactive elements visible)" is a claim
     // about the page; when the read itself failed it is a false one, and the model would respond by
     // scrolling or waiting forever instead of recovering or handing off. Say what went wrong.
@@ -69,8 +69,13 @@ export async function perceive(driver: BrowserDriver): Promise<RawPerception> {
       text: `The page could not be read: ${redactUrl(text(failure || 'the page returned no readable content', 500))}`,
     };
   }
-  const fullPageUrl = text(raw.url, 8192);
-  const pageUrl = redactUrl(fullPageUrl);
+  // ONE source of truth for "which page is this": the page's own unredacted location. The model-facing
+  // string is derived from it by redaction; the identity digest is taken from it verbatim, so it equals
+  // the digest of `driver.currentUrl()` — the comparison the loop's pre-dispatch fence and post-action
+  // verification both depend on. Clipping is display-only for the same reason: an 8k+ URL must not
+  // acquire a different identity from the one the driver reports.
+  const fullPageUrl = typeof raw.url === 'string' ? raw.url : '';
+  const pageUrl = redactUrl(text(fullPageUrl, 8192));
   const pageUrlIdentity = urlIdentity(fullPageUrl);
   // `about:blank` can inherit its opener's effective origin and be populated with arbitrary DOM. Its
   // location string does not reveal that origin, so forwarding content/elements would let a file:/

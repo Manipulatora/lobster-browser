@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { BrowserDriver } from '../driver.js';
+import { urlIdentity } from '../security.js';
+import { EXTRACT_SCRIPT } from './extract-script.js';
 import { perceive } from './perceive.js';
 
 function driverWith(overrides: Partial<BrowserDriver>): BrowserDriver {
@@ -73,6 +75,42 @@ test('redacted URLs retain a private identity that distinguishes hidden credenti
   assert.ok(first.urlIdentity);
   assert.notEqual(first.urlIdentity, second.urlIdentity);
   assert.doesNotMatch(JSON.stringify(first), /first-secret-code/);
+});
+
+test('page identity is the digest of the same raw URL the driver reports', async () => {
+  // The loop compares this digest with `urlIdentity(await driver.currentUrl())` before every action and
+  // again after it. `currentUrl()` is unredacted, so an identity taken over the redacted spelling can
+  // never match on a page carrying one of the hidden query keys — an OAuth callback, an `?authuser=`
+  // Google property, a plain `?keyword=` search — and every action on such a page is refused as drift.
+  const live = 'https://example.test/callback?code=live-oauth-code&keyword=shoes';
+  const raw = await perceive(
+    driverWith({
+      evaluate: async <T>() =>
+        ({
+          url: live,
+          title: 'Callback',
+          scrollY: 0,
+          viewportH: 800,
+          docH: 800,
+          canScrollUp: false,
+          canScrollDown: false,
+          truncated: 0,
+          elements: [],
+        }) as T,
+      currentUrl: async () => live,
+    }),
+  );
+
+  assert.equal(raw.urlIdentity, urlIdentity(live));
+  assert.doesNotMatch(raw.url, /live-oauth-code/);
+  assert.match(raw.url, /code=%5BREDACTED%5D/);
+});
+
+test('the extraction script hands its location over unredacted for the caller to redact', () => {
+  // Redacting in the page would give the run two different spellings of "which page is this" and only
+  // one of them can match the driver's. This is the seam the identity contract above rests on, and it
+  // cannot be exercised without a browser, so pin the source.
+  assert.match(EXTRACT_SCRIPT, /\n\s+url: location\.href,\n/);
 });
 
 test('about:blank is synthetic and never exposes inherited DOM content', async () => {

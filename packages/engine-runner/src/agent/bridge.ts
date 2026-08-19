@@ -4,7 +4,14 @@ import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { AgentEvent, AgentLlmConfig } from '@lobster/shared-types';
-import { FileMemoryStore, normalizeAllowedDomains } from '@lobster/agent';
+import {
+  FileMemoryStore,
+  normalizeAllowedDomains,
+  projectRunRecovery,
+  resolveRunRecovery,
+  RunJournalStore,
+} from '@lobster/agent';
+import type { RunRecoveryResolution } from '@lobster/agent';
 import type { AgentManager } from './manager.js';
 import { getBridgeOrigin, resolveBridgeToken, setBridgeOrigin } from './bridge-registry.js';
 
@@ -148,6 +155,16 @@ export class AgentBridge {
       if (req.method === 'POST' && url.pathname === '/stop') {
         const r = this.agents.stop(profileId);
         return json(res, 200, { ok: true, ...r });
+      }
+      if (req.method === 'GET' && url.pathname === '/recovery') {
+        return await this.recovery(res, entry);
+      }
+      if (req.method === 'POST' && url.pathname === '/recovery/resolve') {
+        const body = await readJson(req);
+        const result = await deduplicateMutation('recovery', profileId, body, () =>
+          this.resolveRecovery(entry, body),
+        );
+        return json(res, result.status, result.body);
       }
       return json(res, 404, { ok: false, error: 'not found' });
     } catch (e) {
@@ -316,6 +333,81 @@ export class AgentBridge {
     return reply(200, { ok: true, ...result, requestId: body.requestId });
   }
 
+  /** The journals for this profile, in the same encrypted directory the manager admits runs from. */
+  private journals(entry: NonNullable<ReturnType<typeof resolveBridgeToken>>): RunJournalStore {
+    if (!entry.memoryDir || !entry.memoryKey) {
+      throw new Error('this profile is not provisioned for Lobee runs');
+    }
+    return new RunJournalStore(join(entry.memoryDir, 'journals'), {
+      encryptionKey: entry.memoryKey,
+    });
+  }
+
+  /**
+   * What an interrupted run left behind, and whether it is blocking new runs on this profile.
+   *
+   * An unverifiable effect blocks admission, which is the right default — but only while a human can
+   * see WHAT is blocked and clear it. Without this pair of routes the block had no in-product exit:
+   * one CDP hiccup disabled the agent for a profile permanently. What is returned is the journal's
+   * non-executable digest, which by construction carries no arguments, coordinates, values, or paths.
+   */
+  private async recovery(
+    res: ServerResponse,
+    entry: NonNullable<ReturnType<typeof resolveBridgeToken>>,
+  ): Promise<void> {
+    const unfinished = await this.journals(entry).listUnfinished();
+    return json(res, 200, {
+      ok: true,
+      runs: unfinished.map((snapshot) => {
+        const projection = projectRunRecovery(snapshot.state);
+        return {
+          runId: snapshot.journal.runId,
+          startedAt: snapshot.journal.events[0]?.at,
+          phase: snapshot.state.phase,
+          blocking: projection.kind === 'recovery_required' || projection.kind === 'non_resumable',
+          reason: 'reason' in projection ? projection.reason : undefined,
+          action: snapshot.state.activeAction?.summary,
+          host: snapshot.state.activeAction?.host,
+        };
+      }),
+    });
+  }
+
+  private async resolveRecovery(
+    entry: NonNullable<ReturnType<typeof resolveBridgeToken>>,
+    body: Record<string, unknown>,
+  ): Promise<BridgeReply> {
+    const runId = body.runId;
+    if (typeof runId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(runId)) {
+      return reply(400, { ok: false, error: 'invalid runId' });
+    }
+    const resolution = body.resolution;
+    if (
+      resolution !== 'verified_applied' &&
+      resolution !== 'verified_not_applied' &&
+      resolution !== 'abandoned'
+    ) {
+      return reply(400, {
+        ok: false,
+        error: 'resolution must be verified_applied, verified_not_applied, or abandoned',
+      });
+    }
+    // Closing a journal a live run is still appending to would race the reducer's revision check and
+    // could hide an effect that has not happened yet. The run has to be over first.
+    const active = this.agents
+      .status(entry.profileId)
+      .runs.some((run) => run.status === 'running' || run.status === 'awaiting_input');
+    if (active) {
+      return reply(409, { ok: false, error: 'stop the running agent before resolving a journal' });
+    }
+    const outcome = await resolveRunRecovery(
+      this.journals(entry),
+      runId,
+      resolution as RunRecoveryResolution,
+    );
+    return reply(200, { ok: true, outcome, requestId: body.requestId });
+  }
+
   private input(profileId: string, body: Record<string, unknown>): BridgeReply {
     if (typeof body.sessionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(body.sessionId)) {
       return reply(400, { ok: false, error: 'invalid sessionId' });
@@ -440,7 +532,7 @@ function addStableTurnIds<
 }
 
 async function deduplicateMutation(
-  kind: 'run' | 'input',
+  kind: 'run' | 'input' | 'recovery',
   profileId: string,
   body: Record<string, unknown>,
   execute: () => Promise<BridgeReply> | BridgeReply,

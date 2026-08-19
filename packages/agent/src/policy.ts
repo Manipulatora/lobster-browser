@@ -2,6 +2,7 @@ import type { AgentAction, AgentConfig } from '@lobster/shared-types';
 import { isIP } from 'node:net';
 import { domainToASCII } from 'node:url';
 import { parse as parseDomain } from 'tldts';
+import { normalizeActionKey } from './actions.js';
 import { isVettedBrowserConfigUrl } from './browser-config-guard.js';
 import type { PerceivedElement, RawPerception } from './types.js';
 
@@ -30,8 +31,43 @@ export interface CommitIntent {
     | 'keyboard-activation'
     | 'selection-change'
     | 'drag-drop'
-    | 'coordinate-activation';
+    | 'coordinate-activation'
+    | 'opaque-activation';
   reason: string;
+}
+
+/**
+ * Keys whose whole purpose is to move around the page rather than to act on it.
+ *
+ * Everything else — Enter, Space, Tab, Delete, Backspace, a letter — can submit a form, activate the
+ * focused control, or blur-save a field, so it stays on the always-gated side.
+ */
+const NAVIGATION_KEYS = new Set([
+  'ArrowUp',
+  'ArrowDown',
+  'ArrowLeft',
+  'ArrowRight',
+  'Home',
+  'End',
+  'PageUp',
+  'PageDown',
+  'Escape',
+]);
+
+/**
+ * Must a human authorize this gesture even when the run was started as unattended (`auto`)?
+ *
+ * `auto` promises the agent does not stop to check its work; it never promised it may spend money or
+ * delete an account. But treating EVERY classified gesture alike collapsed the distinction the panel
+ * toggle advertises: an ordinary click on an ordinary button gated too, so a twenty-step task fired
+ * about ten modals in the mode named "Auto", and a run genuinely left alone died at the first click
+ * when the human-input wait timed out. `opaque-activation` marks the gestures whose only evidence of
+ * risk is that page JavaScript is unreadable — true of every click on the web. Those defer to the
+ * autonomy setting. Everything else — a form submit, an explicit Enter, a coordinate gesture, a
+ * high-risk label, a consequential destination — gates regardless.
+ */
+export function commitIntentGatesUnattended(intent: CommitIntent): boolean {
+  return intent.kind !== 'opaque-activation';
 }
 
 /**
@@ -101,6 +137,12 @@ export function actionCommitIntent(
   }
   if (action.kind === 'key') {
     const focused = perception.elements.find((candidate) => candidate.focused);
+    if (NAVIGATION_KEYS.has(normalizeActionKey(action.key) ?? action.key)) {
+      return {
+        kind: 'opaque-activation',
+        reason: `${action.key} moves within the page, but a site may still bind it to a shortcut`,
+      };
+    }
     return {
       kind: 'keyboard-activation',
       reason: focused
@@ -141,10 +183,11 @@ export function actionCommitIntent(
     }
     // Page JavaScript is opaque to the harness. A generic-looking button, checkbox, label, or even
     // context-menu handler can send/persist/delete immediately, so page activation cannot be proved
-    // composition-only from its attacker-controlled label. Semantic typing has its own verified
-    // text-entry path; explicit click gestures therefore fail closed in every autonomy mode.
+    // composition-only from its attacker-controlled label. That is a reason to TELL the human, not a
+    // reason to stop an unattended run: it is true of every click on the web, so gating on it alone
+    // meant "Auto" gated as often as "Review" and no run could proceed without a human.
     return {
-      kind: 'semantic-commit',
+      kind: 'opaque-activation',
       reason: `page activation may immediately persist or invoke an uninspectable handler: ${el?.name || `element ${action.id}`}`,
     };
   }

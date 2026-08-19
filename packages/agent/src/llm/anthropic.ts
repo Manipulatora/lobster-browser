@@ -1,6 +1,6 @@
 import type { LlmClient, LlmMessage, LlmRequest, LlmResult, LlmToolCall } from './types.js';
 import { fetchWithRetry } from './http.js';
-import { classifyProviderError } from './openai-compatible.js';
+import { classifyProviderError, usesAutomaticToolChoice } from './openai-compatible.js';
 
 /**
  * Anthropic Messages API adapter (BYOK), via raw fetch — no SDK. Raw HTTP is the deliberate choice
@@ -30,8 +30,12 @@ export class AnthropicClient implements LlmClient {
   }
 
   async complete(req: LlmRequest): Promise<LlmResult> {
+    const model = req.model || this.defaultModel;
+    // Read from the same predicate the system prompt reads, so "the transport may not force the tool"
+    // and "the prompt says every step is one `act` call" cannot disagree.
+    const automaticToolChoice = usesAutomaticToolChoice(this.provider, model);
     const body: Record<string, unknown> = {
-      model: req.model || this.defaultModel,
+      model,
       max_tokens: req.maxTokens,
       system: [
         {
@@ -48,7 +52,10 @@ export class AnthropicClient implements LlmClient {
               description: t.description,
               input_schema: t.inputSchema,
             })),
-            tool_choice: { type: 'auto' },
+            tool_choice:
+              req.forceTool && !automaticToolChoice
+                ? { type: 'tool', name: req.forceTool }
+                : { type: 'auto' },
           }
         : {}),
     };
