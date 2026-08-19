@@ -85,11 +85,15 @@ pub async fn fetch() -> Result<AccountSummary> {
 /// A LAPSED SUBSCRIPTION IS NOT A PLAN. `past_due` or `canceled` means the paid allowance is not
 /// being honoured, so the UI must show the free tier and its smaller cap — showing "Pro · 12/200"
 /// to someone whose payment failed invites them to create profiles the server will refuse.
+///
+/// A TRIAL IS ONE. `trialing` is a live entitlement period, not a lapse, so it reads as its plan:
+/// collapsing it to the free cap would tell someone mid-trial they cannot create profiles the server
+/// would happily accept — the opposite error, from the same reasoning.
 fn summarize(overview: Overview) -> AccountSummary {
     let active = overview
         .subscription
         .as_ref()
-        .filter(|s| s.status.as_deref() == Some("active"));
+        .filter(|s| matches!(s.status.as_deref(), Some("active") | Some("trialing")));
 
     AccountSummary {
         balance_cents: overview.balance_cents.unwrap_or(0),
@@ -134,11 +138,20 @@ mod tests {
     fn a_lapsed_subscription_shows_the_free_allowance_it_is_actually_getting() {
         // Showing "Pro / 200" to someone whose payment failed invites them to create profiles the
         // server will refuse.
-        for status in ["past_due", "canceled", "trialing"] {
+        for status in ["past_due", "canceled"] {
             let s = summarize(overview("pro", status, 200));
             assert_eq!(s.tier, "free", "{status} must not read as a paid plan");
             assert_eq!(s.profile_limit, 3, "{status} gets the free cap");
         }
+    }
+
+    #[test]
+    fn a_trial_shows_the_plan_it_is_currently_entitled_to() {
+        // A trial is a live entitlement, so under-reporting it stops someone creating profiles the
+        // server would have allowed — the mirror image of the lapsed case above.
+        let s = summarize(overview("pro", "trialing", 200));
+        assert_eq!(s.tier, "pro");
+        assert_eq!(s.profile_limit, 200);
     }
 
     #[test]

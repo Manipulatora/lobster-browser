@@ -845,7 +845,9 @@ pub fn restore_with_keyring(
                     "the proxy is gone, which would flip WebRTC to expose host candidates"
                         .to_string()
                 }
-                IdentityMismatch::ProxyChanged { .. } => unreachable!("not blocking"),
+                IdentityMismatch::ProxyChanged { .. } | IdentityMismatch::ProxyGained { .. } => {
+                    unreachable!("not blocking")
+                }
                 IdentityMismatch::EngineDowngrade { from, to } => {
                     format!("engine downgrade {from} -> {to} would raze a newer database")
                 }
@@ -859,13 +861,21 @@ pub fn restore_with_keyring(
         );
     }
     for m in &mismatches {
-        if let IdentityMismatch::ProxyChanged { from, to } = m {
-            tracing::warn!(
+        match m {
+            IdentityMismatch::ProxyChanged { from, to } => tracing::warn!(
                 profile_id,
                 version,
                 %from, %to,
                 "restoring a session whose proxy endpoint has changed — the exit IP will differ"
-            );
+            ),
+            IdentityMismatch::ProxyGained { to } => tracing::warn!(
+                profile_id,
+                version,
+                to = to.as_deref().unwrap_or("an unnamed endpoint"),
+                "restoring a session captured without a proxy into a profile that has one — the exit \
+                 IP will differ"
+            ),
+            _ => {}
         }
     }
     if !udd.is_dir() {

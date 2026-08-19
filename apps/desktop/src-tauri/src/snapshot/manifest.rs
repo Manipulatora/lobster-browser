@@ -354,6 +354,10 @@ pub enum IdentityMismatch {
     ProxyLost,
     /// Report: same persona, different proxy endpoint. The user may genuinely have rotated it.
     ProxyChanged { from: String, to: String },
+    /// Report: the session was established from the host's own IP and the target now exits through a
+    /// proxy. Never a leak — the direction the WebRTC refusal above guards is the other one — but the
+    /// exit IP for that session changes, which is exactly the discontinuity a restore should name.
+    ProxyGained { to: Option<String> },
     /// Refuse: restoring into an older engine, which razes a too-new database.
     EngineDowngrade { from: String, to: String },
 }
@@ -361,11 +365,15 @@ pub enum IdentityMismatch {
 impl IdentityMismatch {
     /// Whether this difference must block a restore rather than merely be reported.
     ///
-    /// A changed proxy endpoint is the one difference a user can legitimately have caused (rotating
-    /// a residential exit is routine), so it informs rather than blocks. Everything else means the
-    /// restored profile is not the browser the session came from.
+    /// A changed or newly-added proxy is the one difference a user can legitimately have caused
+    /// (rotating a residential exit is routine, and so is putting a proxy on a profile that never had
+    /// one), so it informs rather than blocks. Everything else means the restored profile is not the
+    /// browser the session came from.
     pub fn blocks_restore(&self) -> bool {
-        !matches!(self, IdentityMismatch::ProxyChanged { .. })
+        !matches!(
+            self,
+            IdentityMismatch::ProxyChanged { .. } | IdentityMismatch::ProxyGained { .. }
+        )
     }
 }
 
@@ -419,6 +427,10 @@ impl Identity {
                 }),
                 _ => {}
             }
+        } else if !self.proxy_present && target.proxy_present {
+            out.push(IdentityMismatch::ProxyGained {
+                to: target.proxy_endpoint.clone(),
+            });
         }
         // A NEWER engine on the target is fine — Chromium migrates its own databases forward. Only
         // the downgrade direction destroys data.
@@ -614,6 +626,26 @@ mod tests {
             vec![IdentityMismatch::ProxyChanged {
                 from: "proxy.example:8080".to_string(),
                 to: "proxy.example:9090".to_string(),
+            }]
+        );
+        assert!(!diff[0].blocks_restore());
+    }
+
+    /// The inverse of ProxyLost. Adding a proxy cannot leak the host IP, so it must not block — but a
+    /// session whose cookies were established from the host's own IP will now exit somewhere else,
+    /// and a restore that says nothing about that hides the discontinuity the user cares about.
+    #[test]
+    fn gaining_a_proxy_reports_the_exit_ip_change_without_blocking() {
+        let mut snap = Identity::fixture();
+        snap.proxy_present = false;
+        snap.proxy_endpoint = None;
+        let target = Identity::fixture();
+
+        let diff = snap.diff(&target);
+        assert_eq!(
+            diff,
+            vec![IdentityMismatch::ProxyGained {
+                to: Some("proxy.example:8080".to_string()),
             }]
         );
         assert!(!diff[0].blocks_restore());

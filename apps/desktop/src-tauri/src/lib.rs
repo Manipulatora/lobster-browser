@@ -1433,6 +1433,10 @@ pub fn run() {
                                 uuid::Uuid::new_v4().simple()
                             );
                             let _ = std::fs::write(&key_path, &k);
+                            // Owner-only where the platform expresses it as a mode. On Windows the
+                            // file inherits the user-profile ACL and stays in the clear on purpose:
+                            // this is a bearer token that external automation clients READ, so it
+                            // cannot be user-bound the way the store key is (see `keychain`).
                             #[cfg(unix)]
                             {
                                 use std::os::unix::fs::PermissionsExt;

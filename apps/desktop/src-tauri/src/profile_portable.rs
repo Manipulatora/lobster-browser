@@ -501,8 +501,13 @@ fn base64_decode(text: &str) -> Result<Vec<u8>> {
         .context("the file header's salt is not valid base64")
 }
 
-/// Read and validate the plaintext header. Does not touch the encrypted body.
-fn read_header(path: &Path) -> Result<(FileHeader, u64, usize)> {
+/// Read and validate the plaintext header, returning it with the whole file and the offset the
+/// sealed body starts at.
+///
+/// The bytes come back rather than being dropped because the importer needs them: reading a file
+/// that can carry tens of megabytes of site data twice doubles the import's disk cost, and the
+/// header validated on the first pass would not be the header the second pass decrypts.
+fn read_header(path: &Path) -> Result<(FileHeader, Vec<u8>, usize)> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     if bytes.len() < 8 || &bytes[..4] != MAGIC {
         bail!("this is not a Lobster profile file");
@@ -525,7 +530,7 @@ fn read_header(path: &Path) -> Result<(FileHeader, u64, usize)> {
             header.format_version
         );
     }
-    Ok((header, bytes.len() as u64, end))
+    Ok((header, bytes, end))
 }
 
 #[tauri::command]
@@ -538,6 +543,7 @@ pub fn inspect_profile_file(
 
 fn inspect_inner(state: &State<'_, AppState>, path: &Path) -> Result<ImportPreview> {
     let (header, bytes, _) = read_header(path)?;
+    let bytes = bytes.len() as u64;
 
     let (already_present, name_collision) = {
         let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
@@ -586,8 +592,7 @@ fn import_inner(
     name_override: Option<String>,
 ) -> Result<ImportReport> {
     // 1. Open the file. NOTHING is written until this has fully succeeded.
-    let (header, _bytes, body_offset) = read_header(path)?;
-    let all = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let (header, all, body_offset) = read_header(path)?;
     let sealed = &all[body_offset..];
 
     let salt = base64_decode(&header.kdf.salt_b64)?;

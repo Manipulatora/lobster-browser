@@ -166,11 +166,13 @@ fn write_local_state_atomic(path: &Path, root: &serde_json::Value) -> Result<()>
 
 // --- DPAPI FFI -----------------------------------------------------------------------------------
 
-fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
+/// Also used by `keychain` to bind the on-disk Local Store Key copy to the current user. The FFI
+/// lives here because this is the only module that may link it, not because OSCrypt owns it.
+pub(crate) fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
     dpapi_call(data, /* protect = */ true)
 }
 
-fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>> {
     dpapi_call(data, /* protect = */ false)
 }
 

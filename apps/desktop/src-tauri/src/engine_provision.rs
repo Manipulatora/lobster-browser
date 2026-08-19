@@ -9,18 +9,26 @@
 //! partial engine in place — extraction happens in a sibling temp dir and is atomically renamed only
 //! after the whole archive is verified.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 
+/// No TOTAL request timeout — the archive is ~840 MB and a slow line is not an error. What must not
+/// happen is an indefinite hang on first launch, so a connect deadline plus an idle deadline on the
+/// response and on every body chunk turn a half-open or silently dropped connection into a retryable
+/// error instead of a frozen progress bar the user can only escape by killing the app.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Where a manifest / env points the download.
 #[derive(Debug, Clone)]
 pub struct EngineSource {
     pub url: String,
-    /// Lowercase hex SHA-256 of the `.tar.gz` archive.
+    /// Lowercase hex SHA-256 of the engine archive.
     pub sha256: String,
     pub version: String,
 }
@@ -174,28 +182,50 @@ where
     let tmp_archive = parent.join(".lobium-engine.download");
     let _ = std::fs::remove_file(&tmp_archive);
     let client = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .context("building HTTP client")?;
-    let resp = client
-        .get(&source.url)
-        .send()
-        .await
-        .with_context(|| format!("requesting engine archive {}", source.url))?;
-    if !resp.status().is_success() {
-        bail!(
-            "engine download failed: HTTP {} for {}",
-            resp.status(),
-            source.url
-        );
-    }
-    let total = resp.content_length();
-    let mut hasher = Sha256::new();
-    let mut received: u64 = 0;
-    {
+    let downloaded = async {
+        // The connect deadline ends at the TCP/TLS handshake; a server that accepts the connection
+        // and then never answers would still wedge here, so the header wait gets the same deadline
+        // the body chunks get.
+        let resp = tokio::time::timeout(CHUNK_IDLE_TIMEOUT, client.get(&source.url).send())
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "the engine host accepted the connection but sent no response within {}s; \
+                     retry the download",
+                    CHUNK_IDLE_TIMEOUT.as_secs()
+                )
+            })?
+            .with_context(|| format!("requesting engine archive {}", source.url))?;
+        if !resp.status().is_success() {
+            bail!(
+                "engine download failed: HTTP {} for {}",
+                resp.status(),
+                source.url
+            );
+        }
+        let total = resp.content_length();
+        let mut hasher = Sha256::new();
+        let mut received: u64 = 0;
         let mut file =
             std::fs::File::create(&tmp_archive).with_context(|| "creating temp engine archive")?;
         let mut stream = resp.bytes_stream();
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let next = tokio::time::timeout(CHUNK_IDLE_TIMEOUT, stream.next())
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "engine download stalled for {}s with {received} of {} bytes received; \
+                         the connection died mid-stream — retry the download",
+                        CHUNK_IDLE_TIMEOUT.as_secs(),
+                        total
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "?".to_string())
+                    )
+                })?;
+            let Some(chunk) = next else { break };
             let chunk = chunk.context("reading engine archive chunk")?;
             hasher.update(&chunk);
             file.write_all(&chunk)
@@ -205,10 +235,20 @@ where
         }
         file.flush().ok();
         file.sync_all().ok();
+        Ok(hex_lower(&hasher.finalize()))
     }
+    .await;
+    // A failed or abandoned download must not leave ~840 MB of unusable bytes behind, and a partial
+    // file under the fixed temp name would be appended to nothing on the next attempt.
+    let digest = match downloaded {
+        Ok(digest) => digest,
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp_archive);
+            return Err(err);
+        }
+    };
 
     // 2) Verify integrity BEFORE touching the install location.
-    let digest = hex_lower(&hasher.finalize());
     if digest != source.sha256.to_ascii_lowercase() {
         let _ = std::fs::remove_file(&tmp_archive);
         bail!(
@@ -223,17 +263,18 @@ where
     let archive_path = tmp_archive.clone();
     let staging_for_task = staging.clone();
     let runtime_owned = runtime_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<()> {
+    let extracted = tokio::task::spawn_blocking(move || -> Result<()> {
         extract_and_swap(&archive_path, &staging_for_task, &runtime_owned)
     })
     .await
-    .context("engine extraction task panicked")??;
+    .context("engine extraction task panicked")?;
 
     let _ = std::fs::remove_file(&tmp_archive);
+    extracted?;
     if !engine_present(runtime_dir) {
         bail!(
-            "engine extraction completed but {}/chrome is missing",
-            runtime_dir.display()
+            "engine extraction completed but {} is missing",
+            runtime_dir.join(crate::CHROME_BIN).display()
         );
     }
     std::fs::write(
@@ -244,28 +285,108 @@ where
     Ok(())
 }
 
-fn extract_and_swap(archive: &Path, staging: &Path, runtime_dir: &Path) -> Result<()> {
-    if staging.exists() {
-        std::fs::remove_dir_all(staging).ok();
+/// How the downloaded engine runtime is packaged.
+///
+/// The Linux artifact is a `.tar.gz` and the Windows one a `.zip` — the Windows build host packages
+/// with `Compress-Archive`, and demanding a tarball there would mean shipping a tar implementation
+/// with the packaging script. Both must therefore be installable, and the form is read from the
+/// file's own magic bytes rather than the URL: a release asset can be redirected, renamed, or served
+/// without an extension, and the bytes cannot lie about what they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveForm {
+    TarGz,
+    Zip,
+}
+
+fn archive_form(archive: &Path) -> Result<ArchiveForm> {
+    let mut magic = [0u8; 2];
+    std::fs::File::open(archive)
+        .with_context(|| "opening downloaded engine archive")?
+        .read_exact(&mut magic)
+        .with_context(|| "reading the engine archive header")?;
+    match magic {
+        [0x1f, 0x8b] => Ok(ArchiveForm::TarGz),
+        // Any zip local-file/central-directory/spanning marker starts "PK"; a malformed one is the
+        // zip reader's error to report, with far more detail than a magic-byte guess could give.
+        [b'P', b'K'] => Ok(ArchiveForm::Zip),
+        _ => bail!(
+            "the engine archive is neither a gzip tarball nor a zip (starts {:02x} {:02x}); \
+             refusing to install it",
+            magic[0],
+            magic[1]
+        ),
     }
-    std::fs::create_dir_all(staging).with_context(|| "creating engine staging dir")?;
+}
+
+fn unpack_tar_gz(archive: &Path, staging: &Path) -> Result<()> {
     let file = std::fs::File::open(archive).with_context(|| "opening downloaded engine archive")?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut tar = tar::Archive::new(gz);
     tar.set_preserve_permissions(true);
     tar.unpack(staging)
-        .with_context(|| "extracting engine archive")?;
+        .with_context(|| "extracting engine archive")
+}
 
-    // The archive is created with `tar -C <lobium> .`, so entries land directly under staging.
-    // Atomic-ish swap: move any existing runtime aside, rename staging in, then delete the old one.
+fn unpack_zip(archive: &Path, staging: &Path) -> Result<()> {
+    let file = std::fs::File::open(archive).with_context(|| "opening downloaded engine archive")?;
+    let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file))
+        .with_context(|| "reading the engine zip directory")?;
+    // `extract` refuses entries whose path escapes the destination and restores unix modes when the
+    // producer recorded them — a zip written on Windows records none, which is harmless there because
+    // nothing has to be marked executable.
+    zip.extract(staging)
+        .with_context(|| "extracting engine archive")?;
+    Ok(())
+}
+
+/// The directory inside `staging` that actually holds the engine.
+///
+/// The tarball is created with `tar -C <lobium> .`, so its entries land directly under staging. A zip
+/// is not guaranteed to be packed that way — compressing the runtime FOLDER rather than its contents
+/// nests everything one level deep — so a single wrapping directory that contains the browser binary
+/// is unwrapped instead of installing a runtime dir whose only child is another directory.
+fn extracted_root(staging: &Path) -> Result<PathBuf> {
+    if staging.join(crate::CHROME_BIN).is_file() {
+        return Ok(staging.to_path_buf());
+    }
+    let mut entries = std::fs::read_dir(staging)
+        .with_context(|| "listing the extracted engine")?
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| "listing the extracted engine")?;
+    if entries.len() == 1 {
+        let only = entries.remove(0).path();
+        if only.join(crate::CHROME_BIN).is_file() {
+            return Ok(only);
+        }
+    }
+    bail!(
+        "the engine archive does not contain {} at its root",
+        crate::CHROME_BIN
+    )
+}
+
+fn extract_and_swap(archive: &Path, staging: &Path, runtime_dir: &Path) -> Result<()> {
+    if staging.exists() {
+        std::fs::remove_dir_all(staging).ok();
+    }
+    std::fs::create_dir_all(staging).with_context(|| "creating engine staging dir")?;
+    match archive_form(archive)? {
+        ArchiveForm::TarGz => unpack_tar_gz(archive, staging)?,
+        ArchiveForm::Zip => unpack_zip(archive, staging)?,
+    }
+    let root = extracted_root(staging)?;
+
+    // Atomic-ish swap: move any existing runtime aside, rename the extracted root in, then delete the
+    // old one.
     let backup = PathBuf::from(format!("{}.old", runtime_dir.display()));
     if runtime_dir.exists() {
         let _ = std::fs::remove_dir_all(&backup);
         std::fs::rename(runtime_dir, &backup).with_context(|| "moving previous engine aside")?;
     }
-    match std::fs::rename(staging, runtime_dir) {
+    match std::fs::rename(&root, runtime_dir) {
         Ok(()) => {
             let _ = std::fs::remove_dir_all(&backup);
+            let _ = std::fs::remove_dir_all(staging);
             Ok(())
         }
         Err(err) => {
@@ -292,30 +413,56 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    /// Build an in-memory `.tar.gz` containing an executable `chrome` + the engine marker, and its sha.
+    const FAKE_CHROME: &[u8] = b"#!/bin/sh\necho fake-chrome\n";
+    const MARKER: &[u8] = b"{\"engine\":\"lobium\"}";
+
+    /// Build an in-memory `.tar.gz` containing an executable browser binary + the engine marker, and
+    /// its sha. The binary is named after [`crate::CHROME_BIN`] so the fixture describes the platform
+    /// the test is running on rather than always the Linux one.
     fn synthetic_archive() -> (Vec<u8>, String) {
         let mut gz_buf = Vec::new();
         {
             let enc = flate2::write::GzEncoder::new(&mut gz_buf, flate2::Compression::fast());
             let mut builder = tar::Builder::new(enc);
-            let chrome = b"#!/bin/sh\necho fake-chrome\n";
             let mut h = tar::Header::new_gnu();
-            h.set_path("chrome").unwrap();
-            h.set_size(chrome.len() as u64);
+            h.set_path(crate::CHROME_BIN).unwrap();
+            h.set_size(FAKE_CHROME.len() as u64);
             h.set_mode(0o755);
             h.set_cksum();
-            builder.append(&h, &chrome[..]).unwrap();
-            let marker = b"{\"engine\":\"lobium\"}";
+            builder.append(&h, FAKE_CHROME).unwrap();
             let mut h2 = tar::Header::new_gnu();
             h2.set_path("LOBSTER_ENGINE.json").unwrap();
-            h2.set_size(marker.len() as u64);
+            h2.set_size(MARKER.len() as u64);
             h2.set_mode(0o644);
             h2.set_cksum();
-            builder.append(&h2, &marker[..]).unwrap();
+            builder.append(&h2, MARKER).unwrap();
             builder.into_inner().unwrap().finish().unwrap();
         }
         let sha = hex_lower(&Sha256::digest(&gz_buf));
         (gz_buf, sha)
+    }
+
+    /// The same runtime packaged the way the Windows build host packages it: a zip, with everything
+    /// nested under the runtime folder the way `Compress-Archive <dir>` writes it.
+    fn synthetic_zip() -> (Vec<u8>, String) {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            // Stored, not deflated: the fixture is about the container, and an uncompressed entry
+            // keeps the test independent of which compression features are enabled.
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            w.start_file(format!("lobium-runtime/{}", crate::CHROME_BIN), opts)
+                .unwrap();
+            w.write_all(FAKE_CHROME).unwrap();
+            w.start_file("lobium-runtime/LOBSTER_ENGINE.json", opts)
+                .unwrap();
+            w.write_all(MARKER).unwrap();
+            w.finish().unwrap();
+        }
+        let bytes = buf.into_inner();
+        let sha = hex_lower(&Sha256::digest(&bytes));
+        (bytes, sha)
     }
 
     /// Serve `body` once over a throwaway localhost port; returns the URL.
@@ -374,5 +521,38 @@ mod tests {
             "must NOT install an unverified engine"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The Windows artifact is a zip, and it is the FIRST first-run that would discover it: an
+    /// installer that only knows tar would fail after an ~840 MB download that passed its checksum.
+    #[tokio::test]
+    async fn installs_a_zip_artifact_the_same_way_as_a_tarball() {
+        let (archive, sha) = synthetic_zip();
+        let url = serve_once(archive);
+        let base = std::env::temp_dir().join(format!("lobium-prov-zip-{}", uuid::Uuid::new_v4()));
+        let dir = base.join("lobium");
+        let src = EngineSource {
+            url,
+            sha256: sha,
+            version: "test".into(),
+        };
+        provision(&src, &dir, |_, _| {}).await.unwrap();
+        assert!(engine_present(&dir), "the browser binary must be installed");
+        assert!(
+            dir.join("LOBSTER_ENGINE.json").is_file(),
+            "the wrapping directory must be unwrapped, not installed as the runtime root"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Neither form: refuse before extraction rather than surface an inflate error that reads like a
+    /// corrupt download when the artifact is simply not an archive (an HTML error page, say).
+    #[test]
+    fn refuses_an_archive_that_is_neither_gzip_nor_zip() {
+        let path = std::env::temp_dir().join(format!("lobium-form-{}.bin", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"<!doctype html>").unwrap();
+        let err = archive_form(&path).unwrap_err().to_string();
+        assert!(err.contains("neither"), "unexpected error: {err}");
+        let _ = std::fs::remove_file(&path);
     }
 }
