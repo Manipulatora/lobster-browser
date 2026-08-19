@@ -30,7 +30,11 @@ param(
     # bundled sidecar on the user's machine.
     [string] $NodeVersion = 'v22.23.2',
     [switch] $Force,
-    [switch] $SkipBuild
+    [switch] $SkipBuild,
+    # Build an installer that is meant to be handed to a user. Adds the checks a developer build does
+    # not need but a release cannot ship without - today, that the engine manifest can actually serve
+    # this platform.
+    [switch] $Release
 )
 
 $ErrorActionPreference = 'Stop'
@@ -126,6 +130,22 @@ foreach ($r in @('sidecar', 'node', 'lobee', 'engine-manifest.json')) {
     if (Test-Path $p) { Ok $r } else { Die "resources\$r is missing - tauri-build will refuse to bundle" }
 }
 Write-Host '    --  fonts: intentionally absent on Windows (see the header comment)' -ForegroundColor DarkGray
+
+# The installer does not carry the engine, so a user who installs it can only launch a profile if
+# first-run provisioning finds a win-x64 entry in the manifest. engine_provision.rs fails closed when
+# the host platform is absent, which means an installer shipped ahead of the archive is an app that
+# installs cleanly and then dead-ends on its one core action. A developer building locally does not
+# hit this - they place an engine under %LOCALAPPDATA% by hand - so it is only fatal with -Release.
+$manifest = Get-Content (Join-Path $Resources 'engine-manifest.json') -Raw | ConvertFrom-Json
+$winEntry = $manifest.platforms.'win-x64'
+if ($winEntry -and $winEntry.url) {
+    Ok "engine manifest serves win-x64 ($($winEntry.version))"
+} elseif ($Release) {
+    Die 'engine-manifest.json has no win-x64 entry - this installer cannot provision an engine. Publish the archive (scripts\package-lobium-runtime.ps1, then bump-engine-version.mjs) before building a release.'
+} else {
+    Write-Host '    --  engine manifest has no win-x64 entry: this build is NOT distributable' -ForegroundColor Yellow
+    Write-Host '        (fine locally - the app falls back to %LOCALAPPDATA%\lobster\lobium)' -ForegroundColor DarkGray
+}
 
 # ---------------------------------------------------------------------------------------------------
 if ($SkipBuild) { Step 'Stopping before the build (-SkipBuild)'; exit 0 }

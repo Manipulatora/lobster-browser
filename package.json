@@ -37,7 +37,8 @@
     "gate:desktop-css": "node ci/validation/desktop-css-contract.mjs",
     "gate:migrations": "node ci/validation/migration-gate.mjs",
     "gate:oracles": "node ci/validation/audit-oracles.mjs",
-    "gate:fonts": "node ci/validation/font-isolation-gate.mjs"
+    "gate:fonts": "node ci/validation/font-isolation-gate.mjs",
+    "e2e:desktop": "playwright test --config ci/playwright.desktop.config.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.5",

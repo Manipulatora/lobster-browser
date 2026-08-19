@@ -36,6 +36,112 @@ jobs:
       - run: npm run build --if-present
       - run: npm run test --workspaces --if-present
 
+  # The `gate:*` scripts in the root package.json. Every one of them is pure Node over files already
+  # in the checkout — no engine, no GPU, no database, no browser — and none of them ran in any
+  # workflow, so the contracts they encode were enforced only when somebody remembered to type the
+  # command. They are separated from the other jobs because they are seconds long and they fail with
+  # a precise reason, which makes this the job a reviewer reads first.
+  #
+  # `gate:series` is NOT here: it replays the patch series against a Chromium checkout and is
+  # therefore meaningless on a runner that has none (see the patch-series job below). `gate:kernels`
+  # is not here either — it is a PowerShell entry point for the Windows build host.
+  offline-gates:
+    name: Offline gates (engine contracts / desktop CSS / migrations)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      # Patch-series well-formedness, version coherence across the pins, and source hygiene (ASCII,
+      # no BOM, strict-JSON parses). These read the tree, never a build.
+      - run: npm run gate:engine
+      # Every class the desktop markup uses has a rule. A deleted rule is invisible in review and
+      # ships as an unstyled control.
+      - run: npm run gate:desktop-css
+      # The Prisma migration chain applied to PGlite — real Postgres compiled to WASM, so it needs no
+      # service container and no DATABASE_URL. It asserts the schema AND the billing invariants
+      # (conditional debit refuses an overdraw, a deposit credits exactly once).
+      - run: npm run gate:migrations
+
+  # The desktop UI end-to-end suite. `apps/desktop/e2e` had no Playwright config and no workflow, so
+  # `npx playwright test` collected nothing and eleven specs ran nowhere for as long as they existed.
+  #
+  # This needs no Tauri shell: the UI falls back to its in-memory mock client whenever
+  # `__TAURI_INTERNALS__` is absent (apps/desktop/src/api/tauri.ts), so a plain Chromium against the
+  # vite dev server exercises the real components, reducers and validation.
+  #
+  # BLOCKING on purpose. Six of the eleven specs currently assert the pre-migration UI — a native
+  # <select> for the OS field where the shell now renders a listbox button, a removed
+  # 'Open command palette' button, renderer mode 'host' where the default is now a per-OS preset —
+  # and they must be updated with the UI, not carried as a permanent `continue-on-error`. A suite
+  # that cannot red the branch is a suite nobody repairs.
+  desktop-e2e:
+    name: Desktop UI e2e (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      # The global PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD only suppresses the postinstall hook; this is the
+      # explicit install, and it is the one browser this suite runs.
+      - run: npx playwright install --with-deps chromium
+      # The config starts the vite dev server itself (webServer), so there is nothing to launch here.
+      - run: npm run e2e:desktop
+      - name: Upload the Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-e2e-report-${{ github.run_id }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # `gate:series` — replay every patch in lobium/patches/series into a scratch tree built from
+  # pristine git blobs and diff the result against the working checkout. It is the only check that
+  # proves the series reproduces the binary that was actually tested: a hook present in the checkout
+  # but missing from its patch still reports itself in the capability manifest, so the sidecar would
+  # launch profiles trusting spoofing the next clean build does not contain.
+  #
+  # OPT-IN on the build host, NOT a github-hosted job and NOT advisory. It needs a Chromium checkout
+  # at LOBIUM_CHROMIUM_SRC, and it legitimately exits 1 on any host whose tree has moved on from the
+  # patch bases — the current Linux build box fails six patches for exactly that reason. Wiring it as
+  # a required check on a runner without the tree would make it permanently red, which is how a real
+  # signal gets trained out of a team. Enable LOBSTER_ENABLE_SERIES_REPLAY on a self-hosted runner
+  # labelled `lobium-build` whose checkout is synced to the pinned ref, and it blocks from that
+  # moment.
+  patch-series:
+    name: Patch series replay (build host, opt-in)
+    runs-on: [self-hosted, lobium-build]
+    if: ${{ vars.LOBSTER_ENABLE_SERIES_REPLAY == 'true' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Replay the series against the pristine tree
+        env:
+          LOBIUM_CHROMIUM_SRC: ${{ vars.LOBIUM_CHROMIUM_SRC }}
+        run: |
+          # An enabled gate with a missing prerequisite must FAIL rather than skip: verify-series.mjs
+          # would otherwise stage zero pristine blobs and report every patch as a clean apply against
+          # empty files, which is a green run that proves nothing.
+          if [ -z "${LOBIUM_CHROMIUM_SRC:-}" ] || [ ! -d "$LOBIUM_CHROMIUM_SRC/.git" ]; then
+            echo "::error::LOBIUM_CHROMIUM_SRC is unset or is not a git checkout ($LOBIUM_CHROMIUM_SRC)."
+            echo "Point the repo variable at the Chromium tree this runner builds from."
+            exit 1
+          fi
+          npm run gate:series
+
   secret-scan:
     name: Secret scan
     runs-on: ubuntu-latest

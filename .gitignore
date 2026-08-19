@@ -37,6 +37,8 @@ engines/cache/
 
 # Environment / secrets
 .env
+# Also catches the timestamped `.env.bak.<epoch>` copies an edit-in-place leaves behind: a backup
+# duplicates JWT_SECRET and DATABASE_URL into a second file that nobody remembers to delete.
 .env.*
 !.env.example
 *.pem
@@ -80,5 +82,6 @@ __pycache__/
 venv/
 ci/validation/reports/*.png
 
-# Local GitHub token handed over for a one-off push — never commit.
-ghtoken.txt
+# A GitHub token handed over for a one-off push. No such file should exist in a clone — this stays
+# so that pasting one back in cannot be committed by a `git add .`, not as permission to keep one.
+ghtoken*.txt

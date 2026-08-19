@@ -1,0 +1,51 @@
+# The unit nginx proxies to. It ran on the box for months while existing nowhere in the tree, so a
+# host loss meant reconstructing the service — env file, restart policy, user — from memory.
+#
+# Install: see deploy/README.md. Paths here are the documented layout, not guesses about a
+# particular box; change them in one place if the deployment moves.
+
+[Unit]
+Description=Lobster Browser backend API (NestJS)
+Documentation=https://github.com/Manipulatora/lobster-browser/blob/main/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+# Give up rather than flap forever on a deploy that cannot start; `systemctl reset-failed` clears it.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=lobster
+Group=lobster
+WorkingDirectory=/opt/lobster/backend
+
+# Secrets live in /etc, owned by root and readable only by the service user — never in the repo
+# tree, where a `git add -f` or a directory backup carries JWT_SECRET and DATABASE_URL with it.
+EnvironmentFile=/etc/lobster/backend.env
+ExecStart=/usr/bin/node dist/main.js
+
+# `/health` is unconditional liveness; `/health/ready` additionally proves Postgres answers, which
+# is what makes a start with a wrong DATABASE_URL fail here instead of on the first user request.
+ExecStartPost=/usr/bin/env sh -c 'for i in $(seq 1 30); do curl -fsS -o /dev/null "http://127.0.0.1:${PORT:-8080}/health/ready" && exit 0; sleep 1; done; echo "backend never became ready" >&2; exit 1'
+TimeoutStartSec=60
+
+Restart=always
+RestartSec=2
+
+# The blob store is the only path the service writes; everything else is read-only to it.
+ReadWritePaths=/var/lib/lobster
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lobster-backend
+
+[Install]
+WantedBy=multi-user.target
