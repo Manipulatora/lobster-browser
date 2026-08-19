@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import test from 'node:test';
 import { FileMemoryStore, RunJournalStore } from '@lobster/agent';
 import type { AgentStartParams } from '@lobster/shared-types';
 import type { AgentEvent, AgentRunSnapshot } from '@lobster/shared-types';
-import { AgentBridge } from './bridge.js';
+import { AgentBridge, uploadRoots } from './bridge.js';
 import { forgetProfile, issueBridgeToken, provisionProfile } from './bridge-registry.js';
 import type { AgentManager } from './manager.js';
 
@@ -487,5 +487,26 @@ test('an interrupted run that blocks admission can be listed and closed by an op
     await bridge.close();
     forgetProfile(profileId);
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('LOBSTER_UPLOAD_ROOTS splits on the host path delimiter, not always on a colon', async () => {
+  const previous = process.env.LOBSTER_UPLOAD_ROOTS;
+  const dir = await mkdtemp(join(tmpdir(), 'lobster-upload-roots-'));
+  try {
+    // Whatever the host joins with must come back whole. On Windows `delimiter` is ';', which is
+    // what keeps C:\\Users\\me\\uploads from being split into 'C' and '\\Users\\me\\uploads' —
+    // the drive letter is a colon, so splitting on ':' emptied the canonical root list and refused
+    // every upload. Only Windows can assert the drive-letter case, so express the invariant instead.
+    const roots =
+      process.platform === 'win32'
+        ? ['C:\\Users\\me\\uploads', 'D:\\shared']
+        : ['/srv/uploads', '/srv/shared'];
+    process.env.LOBSTER_UPLOAD_ROOTS = roots.join(delimiter);
+    assert.deepEqual(await uploadRoots(join(dir, 'agent')), roots);
+  } finally {
+    if (previous === undefined) delete process.env.LOBSTER_UPLOAD_ROOTS;
+    else process.env.LOBSTER_UPLOAD_ROOTS = previous;
+    await rm(dir, { recursive: true, force: true });
   }
 });

@@ -2,7 +2,7 @@ import { createHash, createHmac } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import type { AgentEvent, AgentLlmConfig } from '@lobster/shared-types';
 import {
   FileMemoryStore,
@@ -651,9 +651,13 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
  * in and the agent can attach it), and Downloads, because that is where the files people actually want
  * to attach already are. Override with LOBSTER_UPLOAD_ROOTS (path-separated) for a different policy.
  */
-async function uploadRoots(memoryDir: string): Promise<string[]> {
+export async function uploadRoots(memoryDir: string): Promise<string[]> {
+  // `path.delimiter`, not ':'. Splitting on a colon turns the Windows path C:\Users\me\uploads into
+  // the two roots 'C' and '\Users\me\uploads'; neither resolves, the canonical root list comes out
+  // empty, and every upload is refused with a message that names none of that. Windows separates
+  // with ';', which is exactly what this constant is.
   const configured = (process.env.LOBSTER_UPLOAD_ROOTS ?? '')
-    .split(':')
+    .split(delimiter)
     .map((entry) => entry.trim())
     .filter(Boolean);
   if (configured.length) return configured.slice(0, 20);

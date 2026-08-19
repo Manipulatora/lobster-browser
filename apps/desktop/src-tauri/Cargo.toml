@@ -61,7 +61,14 @@ sha1 = "0.10"
 base64 = "0.22"
 # SEC-2: OS keychain wrap for the Local Store Key (LSK) — Secret Service / DPAPI / Keychain.
 # Falls back to the 0600 secrets.key file when no keyring backend is available (headless CI).
-keyring = "3"
+#
+# THE BACKEND IS A FEATURE, AND WITHOUT ONE THIS CRATE STORES NOTHING. keyring 3 made every
+# platform store opt-in: with no features it still compiles, still returns Ok from set_password,
+# and still hands back the value within the same process — but it is an in-memory mock, so the
+# secret is gone the moment the process exits. That is indistinguishable from working until you
+# restart the app, which is why `cloud_auth` could persist a sign-in that never survived.
+# The real stores are selected per target below; this entry carries only the shared version.
+keyring = { version = "3", default-features = false }
 # HKDF for deriving Profile Content Keys from a Team Data Key (mirrors @lobster/crypto).
 hkdf = "0.12"
 sha2 = "0.10"
@@ -115,6 +122,9 @@ tauri-plugin-single-instance = "2"
 # cmd treats `&` as a command separator and Rust does not quote an argument containing no spaces, so
 # every query parameter after the first was stripped off the URL. See `open_in_browser` in lib.rs.
 [target."cfg(windows)".dependencies]
+# DPAPI-backed Credential Manager. Without this feature keyring falls back to its in-memory mock
+# and the sign-in does not survive a restart.
+keyring = { version = "3", features = ["windows-native"] }
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Security_Cryptography",
@@ -129,7 +139,15 @@ windows-sys = { version = "0.59", features = [
 # key derivation and the --use-mock-keychain guard live in `oscrypt` cfg-independently and ARE
 # unit-tested on Linux.
 [target."cfg(target_os = \"macos\")".dependencies]
+# macOS Keychain, for the same reason as the Windows entry above.
+keyring = { version = "3", features = ["apple-native"] }
 security-framework = "2"
+
+# D-Bus Secret Service (GNOME Keyring, KWallet). `crypto-rust` keeps the session encryption in
+# pure Rust so a build host needs no OpenSSL headers. A headless box with no Secret Service still
+# falls back to the 0600 secrets.key file, which is what the fallback above describes.
+[target."cfg(target_os = \"linux\")".dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [features]
 # Enabled by tauri-cli in production builds; keeps custom-protocol assets embedded.
