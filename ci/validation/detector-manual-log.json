@@ -1,0 +1,16 @@
+{
+  "$schema": "Dated, artifact-backed verification records for the detectors no parser can score.",
+  "$why": "16 of the 19 tools in detector-matrix.json are manual-verdict: their result is a page a human reads, not a value a script can extract without becoming a second, unmaintained detector. Automating them badly would be worse than not automating them - a parser that silently mis-scores browserleaks turns a red result green. So they are a LEDGER instead: every claim that a detector passes has a date, an engine build, a scenario and a screenshot behind it, and detector-checklist.mjs prints exactly which claims have none.",
+  "$howToAdd": "Run the scenario per docs/OPERATIONS.md, save the capture under ci/validation/reports/, then append an entry here. `node ci/validation/detector-checklist.mjs --check` validates the shape; it never invents a verdict.",
+  "$entrySchema": {
+    "tool": "id from detector-matrix.json tools[]",
+    "scenario": "id from detector-matrix.json scenarios[]",
+    "verifiedAt": "ISO date of the run",
+    "engineBuild": "Lobium version the run used, e.g. 152.0.7977.42",
+    "verdict": "pass | fail | inconclusive",
+    "artifact": "repo-relative path to the screenshot or capture that backs the verdict",
+    "notes": "what the reviewer saw; required for anything other than a clean pass"
+  },
+  "maxAgeDays": 30,
+  "entries": []
+}

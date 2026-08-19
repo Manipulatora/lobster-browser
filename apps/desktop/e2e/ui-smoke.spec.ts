@@ -213,6 +213,10 @@ test('fingerprint edit preserves the validated per-OS renderer and other profile
 
   await openProfileEditor();
   const dialog = page.getByRole('dialog', { name: 'Edit profile' });
+  // A profile created with default settings leaves its machine to its seed, so the device pickers sit
+  // behind the advanced choice. Pinning is what writes a renderer into the profile at all.
+  await expect(dialog.getByLabel('Device source')).toHaveValue('seed');
+  await dialog.getByLabel('Device source').selectOption('pinned');
   const renderer = dialog.getByLabel('WebGL renderer');
   const rendererPreset = await renderer.inputValue();
   expect(rendererPresetById(await selectedOs(dialog), rendererPreset)).toBeTruthy();
@@ -222,6 +226,7 @@ test('fingerprint edit preserves the validated per-OS renderer and other profile
 
   await openProfileEditor();
   await expect(dialog.getByLabel('Speakers')).toHaveValue('4');
+  await expect(dialog.getByLabel('Device source')).toHaveValue('pinned');
   await expect(dialog.getByLabel('WebGL renderer')).toHaveValue(rendererPreset);
 });
 

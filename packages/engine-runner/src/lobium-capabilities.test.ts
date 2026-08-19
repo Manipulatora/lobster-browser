@@ -20,6 +20,25 @@ const policy: FingerprintLaunchPolicy = {
   mediaDevices: { cameras: 1, microphones: 1, speakers: 2, stableDeviceIds: true },
 };
 
+test('the navigator/UA-CH hook is required by every profile, whatever its policy', () => {
+  // A build with the config channel but without this hook parses the persona and then reports the
+  // host's UA, platform, hardwareConcurrency and deviceMemory — a launch that succeeds while the
+  // profile is fully identifiable, so no policy combination may make it optional.
+  for (const platform of ['win32', 'darwin', 'linux'] as const) {
+    assert.ok(
+      requiredLobiumCapabilities(
+        {
+          ...policy,
+          hardwareNoise: { canvas: false, webgl: false, audio: false, clientRects: false },
+        },
+        false,
+        platform,
+      ).includes('navigator-ua-ch'),
+      `navigator-ua-ch must be required on ${platform}`,
+    );
+  }
+});
+
 test('required capability set follows selected native policies', () => {
   const required = requiredLobiumCapabilities(policy, true);
   assert.ok(required.includes('native-geolocation'));

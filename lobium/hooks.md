@@ -72,6 +72,13 @@ operator believes is on. A list duplicated into a patch literal drifts in exactl
 check that every `fingerprint/` patch is covered by some capability, which is what surfaced
 `screen-metrics` and `mobile-persona` as shipped-but-unrequirable surfaces.
 
+`navigator-ua-ch` is reported separately from `config-channel-v1` because the two patches are
+separable in practice: the transport hooks one file, `core/navigator-ua-ch.patch` hooks five others.
+A tree where the transport applied and that patch rejected still parses the persona config perfectly
+and still answers `navigator.userAgent`, `platform`, `hardwareConcurrency`, `deviceMemory` and every
+`Sec-CH-UA*` header from the HOST — a leak with no symptom, because the launch succeeds and the
+profile opens. Folding it into `config-channel-v1` would make that build pass the gate.
+
 `font-isolation` is emitted only under `BUILDFLAG(IS_WIN)`, and `requiredLobiumCapabilities` asks for
 it only on `win32`. A Linux build genuinely does not contain the DirectWrite hooks; claiming
 otherwise would be the same lie in a different place.

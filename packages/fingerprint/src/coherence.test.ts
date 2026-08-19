@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { Fingerprint, FingerprintOverrides, GeoInfo } from '@lobster/shared-types';
 import {
   applyGeoToFingerprint,
+  DESKTOP_DEVICE_MEMORY_VALUES,
   DEVICE_MEMORY_VALUES,
   normalizeColorDepth,
   normalizeDeviceMemory,
@@ -261,12 +262,18 @@ test('flags an implausible hardwareConcurrency, OS-aware (96 cores ok on Windows
   mac.navigator.hardwareConcurrency = 96; // > 56, impossible on macOS
   assertFlags(mac, /hardwareConcurrency .* range for "macos"/);
 
+  // 96 threads is fine on Windows — on the workstation this GPU says it is.
   const win = coherentBase();
-  win.navigator.hardwareConcurrency = 96; // fine on Windows
+  win.webgl = {
+    ...win.webgl,
+    renderer: 'ANGLE (NVIDIA, NVIDIA RTX A6000 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+    unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA RTX A6000 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  };
+  win.navigator.hardwareConcurrency = 96;
   assert.ok(!validateFingerprintCoherence(win).some((i) => /hardwareConcurrency/.test(i)));
 });
 
-test('flags an unrealistic colorDepth and devicePixelRatio, but allows fractional scaling', () => {
+test('flags an unrealistic colorDepth, and a devicePixelRatio off the OS scale ladder', () => {
   const depth = coherentBase();
   depth.screen.colorDepth = 32;
   assertFlags(depth, /colorDepth/);
@@ -279,10 +286,145 @@ test('flags an unrealistic colorDepth and devicePixelRatio, but allows fractiona
   zero.screen.devicePixelRatio = 0;
   assertFlags(zero, /devicePixelRatio/);
 
-  // A genuine fractional-scaling / zoomed display (DPR < 1) must NOT be flagged.
-  const fractional = coherentBase();
-  fractional.screen.devicePixelRatio = 0.5;
-  assert.ok(!validateFingerprintCoherence(fractional).some((i) => /devicePixelRatio/.test(i)));
+  // Windows scales in 25% steps and a page reads the ratio directly, so a value between the steps —
+  // or below 1, which only page zoom produces — is a setting no display offers.
+  const offLadder = coherentBase();
+  offLadder.screen.devicePixelRatio = 1.1;
+  assertFlags(offLadder, /devicePixelRatio/);
+
+  const zoomedOut = coherentBase();
+  zoomedOut.screen.devicePixelRatio = 0.5;
+  assertFlags(zoomedOut, /devicePixelRatio/);
+});
+
+test('flags a screen size and devicePixelRatio that no panel and scale step can produce', () => {
+  // 1920x1080 at 125% is the 2400x1350 panel that was never built; the same CSS size at 200% is a
+  // 4K panel at the scaling every 4K laptop ships with, and must stay legal.
+  const invented = coherentBase();
+  invented.screen = { ...invented.screen, width: 1920, height: 1080, devicePixelRatio: 1.25 };
+  assertFlags(invented, /not a mode any real windows display produces/);
+
+  for (const [width, height, dpr] of [
+    [1920, 1080, 2],
+    [1536, 864, 1.25],
+    [1280, 720, 1.5],
+    [1707, 960, 1.5],
+    [2560, 1440, 1.5],
+    [3440, 1440, 1],
+  ] as const) {
+    const real = coherentBase();
+    real.screen = {
+      ...real.screen,
+      width,
+      height,
+      availWidth: width,
+      availHeight: height - 40,
+      devicePixelRatio: dpr,
+    };
+    assert.ok(
+      !validateFingerprintCoherence(real).some((issue) => /display produces/.test(issue)),
+      `${width}x${height}@${dpr} is a real Windows display mode`,
+    );
+  }
+});
+
+test('a Retina Mac reports one of Apple s scaled modes, never the panel at dpr 2', () => {
+  const mac = deriveFingerprint('mac-display-modes', { os: 'macos', engine: 'lobium' });
+  const scaled = structuredClone(mac);
+  // The 16" MacBook Pro panel IS 3456x2234, but macOS reports it as "looks like 1728x1117" at dpr 2.
+  // A persona stating the panel itself at dpr 2 claims a 6912x4468 display.
+  scaled.screen = {
+    ...scaled.screen,
+    width: 3456,
+    height: 2234,
+    availWidth: 3456,
+    availHeight: 2209,
+    devicePixelRatio: 2,
+  };
+  assertFlags(scaled, /not a mode any real macos display produces/);
+
+  const real = structuredClone(mac);
+  real.screen = {
+    ...real.screen,
+    width: 1728,
+    height: 1117,
+    availWidth: 1728,
+    availHeight: 1092,
+    devicePixelRatio: 2,
+  };
+  assert.ok(!validateFingerprintCoherence(real).some((issue) => /display produces/.test(issue)));
+});
+
+test('rejects hardware combinations no machine ships, without rejecting real ones', () => {
+  // The reported case: every value individually legal, the machine impossible.
+  const implausible = coherentBase();
+  implausible.webgl = {
+    ...implausible.webgl,
+    vendor: 'Google Inc. (Intel)',
+    renderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+    unmaskedVendor: 'Google Inc. (Intel)',
+    unmaskedRenderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  };
+  implausible.navigator.hardwareConcurrency = 24;
+  implausible.navigator.deviceMemory = 4;
+  assertFlags(implausible, /24-thread machine/);
+
+  // A discrete GPU is never found next to 4 GB of RAM...
+  const starvedGpu = coherentBase();
+  starvedGpu.webgl = {
+    ...starvedGpu.webgl,
+    renderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+    unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  };
+  starvedGpu.navigator.hardwareConcurrency = 12;
+  starvedGpu.navigator.deviceMemory = 4;
+  assertFlags(starvedGpu, /below the high-discrete GPU tier's minimum/);
+
+  // ...but the same GPU behind an ageing 4-core CPU is an ordinary upgrade path, and an office laptop
+  // with an integrated GPU and 4 GB is the commonest machine there is. Neither may be rejected.
+  const upgraded = structuredClone(starvedGpu);
+  upgraded.navigator.hardwareConcurrency = 4;
+  upgraded.navigator.deviceMemory = 8;
+  assert.deepEqual(validateFingerprintCoherence(upgraded), []);
+
+  const office = coherentBase();
+  office.webgl = {
+    ...office.webgl,
+    renderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+    unmaskedRenderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+  };
+  office.navigator.hardwareConcurrency = 4;
+  office.navigator.deviceMemory = 4;
+  assert.deepEqual(validateFingerprintCoherence(office), []);
+});
+
+test('an M-series Mac never reports fewer cores than Apple has ever shipped', () => {
+  const mac = deriveFingerprint('mac-tier-base', { os: 'macos', engine: 'lobium', arch: 'arm64' });
+  const fp = structuredClone(mac);
+  fp.navigator.hardwareConcurrency = 4; // the base M1 already has 8
+  assertFlags(fp, /outside the apple-silicon GPU tier's plausible/);
+});
+
+test('the desktop deviceMemory choices are exactly the spec rungs a desktop may report', () => {
+  assert.deepEqual([...DESKTOP_DEVICE_MEMORY_VALUES], [4, 8]);
+  for (const value of DEVICE_MEMORY_VALUES) {
+    const fp = coherentBase();
+    // An integrated-GPU laptop: the tier with the lowest memory floor there is, so what remains is
+    // the desktop floor itself.
+    fp.webgl = {
+      ...fp.webgl,
+      renderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+      unmaskedRenderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+    };
+    fp.navigator.deviceMemory = value;
+    fp.navigator.hardwareConcurrency = 8;
+    const flagged = validateFingerprintCoherence(fp).some((issue) => /deviceMemory/.test(issue));
+    assert.equal(
+      flagged,
+      !DESKTOP_DEVICE_MEMORY_VALUES.includes(value),
+      `deviceMemory ${value} must be ${DESKTOP_DEVICE_MEMORY_VALUES.includes(value) ? 'accepted' : 'rejected'} on a desktop`,
+    );
+  }
 });
 
 /** A coherent, freshly derived macOS fingerprint to mutate in the WebGL rule tests. */

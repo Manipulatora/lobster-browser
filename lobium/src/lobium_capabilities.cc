@@ -23,6 +23,13 @@ constexpr std::string_view kPortableCapabilities[] = {
     // The config channel itself. Everything below is inert without it, so a build that reports any
     // capability must report this one.
     "config-channel-v1",
+    // navigator.userAgent/platform/hardwareConcurrency/deviceMemory/maxTouchPoints, the outgoing
+    // User-Agent header and the whole Sec-CH-UA family. Reported separately from the config channel
+    // because the two are genuinely separable: core/navigator-ua-ch.patch hooks five upstream files
+    // that core/config-channel.patch does not touch, so a tree with the transport applied and this
+    // patch rejected still parses the persona and still reports the HOST on every one of those
+    // surfaces - a failure that looks exactly like a working launch from the outside.
+    "navigator-ua-ch",
     "navigator-languages",
     "network-accept-language",
     "process-locale-timezone",

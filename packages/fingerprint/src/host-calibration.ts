@@ -15,6 +15,7 @@ import {
   validateFingerprintCoherence,
 } from './coherence.js';
 import { deriveFromPools } from './derive.js';
+import { normalizeDevicePixelRatio } from './displays.js';
 
 export interface DeriveFromHostOptions {
   engine: EngineKind;
@@ -27,10 +28,6 @@ export interface DeriveFromHostOptions {
 function clampInt(n: number, min: number, max: number): number {
   if (!Number.isFinite(n)) return min;
   return Math.min(max, Math.max(min, Math.round(n)));
-}
-
-function positiveNumber(n: number, fallback: number): number {
-  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 function normalizeHostScreen(
@@ -48,7 +45,14 @@ function normalizeHostScreen(
     availWidth,
     availHeight,
     colorDepth: normalizeColorDepth(host.colorDepth),
-    devicePixelRatio: positiveNumber(host.devicePixelRatio, fallback.devicePixelRatio),
+    // The capture reads window.devicePixelRatio, which folds in the probing tab's page zoom, so an
+    // unnoticed 110% zoom would otherwise persist a ratio no display setting can produce.
+    devicePixelRatio: normalizeDevicePixelRatio(
+      os,
+      Number.isFinite(host.devicePixelRatio) && host.devicePixelRatio > 0
+        ? host.devicePixelRatio
+        : fallback.devicePixelRatio,
+    ),
   };
 
   screen.availLeft =

@@ -1,10 +1,13 @@
 import { expect, test } from '@playwright/test';
 
+import { DESKTOP_MIN_DEVICE_MEMORY, deriveFingerprint } from '@lobster/fingerprint';
 import type { Profile } from '@lobster/shared-types';
 
 import { OS_OPTIONS } from '../src/features/profiles/options';
 import {
+  DEVICE_MEMORY_OPTIONS,
   androidModelsForSelection,
+  devicePixelRatioOptionsFor,
   fontPresetsForTarget,
   rendererPresetById,
   rendererPresetsForTarget,
@@ -12,7 +15,11 @@ import {
 import {
   changeDraftOs,
   createProfileDraft,
+  derivedDeviceForDraft,
+  draftUserAgent,
   hydrateProfileDraft,
+  pinDerivedDevice,
+  profileDraftWarnings,
   serializeProfileDraft,
   validateProfileDraft,
 } from '../src/features/profiles/profileDraft';
@@ -196,8 +203,102 @@ test('rich font and WebGL catalogs remain exposed to the profile editor', () => 
   expect(fontPresetsForTarget('macos_arm').length).toBeGreaterThan(400);
   expect(fontPresetsForTarget('linux').length).toBeGreaterThan(300);
   expect(rendererPresetsForTarget('windows').length).toBeGreaterThan(100);
-  expect(rendererPresetsForTarget('macos_intel').length).toBeGreaterThan(100);
   expect(rendererPresetsForTarget('linux').length).toBeGreaterThan(100);
+  // Intel Macs are a closed hardware matrix — a couple of dozen GPUs across 2013–2020 — so this list
+  // is short by nature. Anything larger would mean PC parts that never sat behind a Metal driver.
+  expect(rendererPresetsForTarget('macos_intel').length).toBeGreaterThan(20);
+});
+
+test('a default draft leaves its machine to the seed and pins it only on request', () => {
+  const draft = { ...createProfileDraft('windows'), name: 'Seed derived' };
+  expect(draft.deviceSource).toBe('seed');
+  const device = derivedDeviceForDraft(draft);
+  expect(device).toBeTruthy();
+  // What the modal shows is the machine the seed produced, not the first entry of every picker.
+  expect(draft.screenResolution).toBe(`${device?.screen.width}x${device?.screen.height}`);
+  expect(draft.cpuCores).toBe(String(device?.hardwareConcurrency));
+  expect(draft.ramSize).toBe(String(device?.deviceMemory));
+
+  const { input } = serializeProfileDraft(draft);
+  // None of it is written down: overriding these keys is what made every profile one computer.
+  expect(input.fingerprintOverrides?.screen).toBeUndefined();
+  expect(input.fingerprintOverrides?.renderer).toBeUndefined();
+  expect(input.fingerprintOverrides?.webgl).toBeUndefined();
+  expect(input.fingerprintOverrides?.navigator?.hardwareConcurrency).toBeUndefined();
+  expect(input.fingerprintOverrides?.navigator?.deviceMemory).toBeUndefined();
+  expect(input.fingerprintSeed).toBe(draft.fingerprintSeed);
+
+  const pinned = serializeProfileDraft(pinDerivedDevice(draft)).input.fingerprintOverrides;
+  expect(pinned?.screen?.width).toBe(device?.screen.width);
+  expect(pinned?.screen?.devicePixelRatio).toBe(device?.screen.devicePixelRatio);
+  expect(pinned?.navigator?.hardwareConcurrency).toBe(device?.hardwareConcurrency);
+  expect(pinned?.renderer?.mode).toBe('validated_preset');
+});
+
+test('two default drafts describe two different machines, and either one is pinnable', () => {
+  const devices = new Set<string>();
+  for (const os of ['windows', 'linux', 'macos_arm', 'macos_intel'] as const) {
+    for (let index = 0; index < 12; index += 1) {
+      const draft = { ...createProfileDraft(os), name: 'Pinnable' };
+      const device = derivedDeviceForDraft(draft);
+      if (os === 'windows') {
+        devices.add(`${device?.deviceId}|${device?.screen.width}x${device?.screen.height}`);
+      }
+      // Pinning must never produce a machine the launch-time coherence gate then refuses: the pickers
+      // have to be able to express every device derivation can land on.
+      expect(validateProfileDraft(pinDerivedDevice(draft))).toEqual([]);
+    }
+  }
+  expect(devices.size).toBeGreaterThan(1);
+});
+
+test('the desktop editor offers only values the launch gate accepts', () => {
+  // Coherence refuses deviceMemory < 4 on a desktop UA, so a picker offering 2 GB could only ever
+  // produce a profile that saves and then cannot start.
+  expect(DEVICE_MEMORY_OPTIONS.every((value) => value >= DESKTOP_MIN_DEVICE_MEMORY)).toBe(true);
+  const draft = {
+    ...createProfileDraft('windows'),
+    name: 'Low memory',
+    deviceSource: 'pinned' as const,
+  };
+  const messages = validateProfileDraft({ ...draft, ramSize: '2' }).map((issue) => issue.message);
+  expect(messages).toContain('Choose a Lobium-compatible reported memory value.');
+
+  // 1536x864 is a 1080p panel at 125%; claiming it at 1 states a panel nobody manufactures.
+  expect(devicePixelRatioOptionsFor('windows', '1536x864')).not.toContain(1);
+  expect(devicePixelRatioOptionsFor('windows', '1536x864')).toContain(1.25);
+  expect(devicePixelRatioOptionsFor('windows', '1920x1080')).toContain(1);
+  const scaled = validateProfileDraft({
+    ...draft,
+    screenResolution: '1536x864',
+    devicePixelRatio: '1',
+  }).map((issue) => issue.message);
+  expect(scaled).toContain('Choose a scaling factor this screen size is actually presented at.');
+});
+
+test('WebRTC Real is refused next to a proxy, and Based on IP without one is a warning', () => {
+  const draft = { ...createProfileDraft('windows'), name: 'WebRTC', proxyId: 'proxy-1' };
+  const messages = validateProfileDraft({ ...draft, webrtcMode: 'real' }).map(
+    (issue) => issue.message,
+  );
+  expect(messages).toContain(
+    'WebRTC "Real" leaks the host IP past the proxy — choose Based on IP.',
+  );
+  expect(validateProfileDraft(draft).map((issue) => issue.message)).not.toContain(
+    'WebRTC "Real" leaks the host IP past the proxy — choose Based on IP.',
+  );
+  expect(profileDraftWarnings(draft)).toEqual([]);
+
+  const proxyless = profileDraftWarnings({ ...draft, proxyId: '' });
+  expect(proxyless).toHaveLength(1);
+  expect(proxyless[0]?.message).toContain('no proxy');
+});
+
+test('the previewed User-Agent is the one the engine derives', () => {
+  const draft = createProfileDraft('windows');
+  const derived = deriveFingerprint(draft.fingerprintSeed, { os: 'windows', engine: 'lobium' });
+  expect(draftUserAgent(draft)).toBe(derived.navigator.userAgent);
+  expect(draftUserAgent(createProfileDraft('macos_arm'))).toContain('Macintosh');
 });
 
 test('validation checks desktop values, extension links, media limits, and password intent', () => {

@@ -6,7 +6,9 @@ import {
   applyGeoToFingerprint,
   validateFingerprintCoherence,
 } from './coherence.js';
-import { deriveFingerprint, deriveFromPools } from './derive.js';
+import { deriveDevicePersona, deriveFingerprint, deriveFromPools } from './derive.js';
+import { resolveSourcedRendererPreset } from './catalog.js';
+import { isPlausibleDisplayMode } from './displays.js';
 import { buildChromeBrands, DEVICE_TEMPLATES } from './pools.js';
 import { generateSeed } from './seed.js';
 
@@ -270,6 +272,126 @@ test('different seeds select DIVERSE GPU vendors per OS (not one collapsed devic
   );
   for (const v of ['NVIDIA', 'Intel', 'AMD', 'Apple']) {
     assert.ok(allVendors.has(v), `catalog is missing a ${v} device class`);
+  }
+});
+
+// --- The seed-derived device the profile UI previews ------------------------------------------
+
+test('deriveDevicePersona previews exactly the device the fingerprint launches with', () => {
+  // The UI shows the persona; the sidecar launches the fingerprint. If they can disagree, the default
+  // device the user was shown is not the one the page sees.
+  for (let i = 0; i < 25; i++) {
+    const seed = generateSeed();
+    for (const os of OSES) {
+      const persona = deriveDevicePersona(seed, { os });
+      const fp = deriveFingerprint(seed, { os, engine: 'lobium' });
+
+      assert.equal(persona.arch, fp.arch, `arch ${os} seed=${seed}`);
+      assert.deepEqual(persona.screen, fp.screen, `screen ${os} seed=${seed}`);
+      assert.equal(persona.hardwareConcurrency, fp.navigator.hardwareConcurrency);
+      assert.equal(persona.deviceMemory, fp.navigator.deviceMemory);
+      assert.equal(persona.webgl.renderer, fp.webgl.renderer);
+      assert.deepEqual(persona.fonts, fp.fonts);
+      assert.ok(persona.gpuLabel.length > 0, `gpu label ${os} seed=${seed}`);
+      assert.ok(
+        !persona.gpuLabel.includes('ANGLE'),
+        `gpu label is a model name, not the raw string`,
+      );
+    }
+  }
+});
+
+test('two seeds describe two different MACHINES, not one machine with two noise patterns', () => {
+  // The whole anti-detect premise: profiles created with default settings must not share a device.
+  // Before the seed-derived default the modal pinned one screen, one GPU preset, one core count and
+  // one memory size into every profile, so a hundred profiles were one machine a hundred times.
+  for (const os of OSES) {
+    const devices = new Set<string>();
+    const screens = new Set<string>();
+    const ratios = new Set<number>();
+    for (let i = 0; i < 200; i++) {
+      const persona = deriveDevicePersona(generateSeed(), { os });
+      devices.add(
+        [
+          persona.webgl.renderer,
+          persona.hardwareConcurrency,
+          persona.deviceMemory,
+          persona.screen.width,
+          persona.screen.height,
+          persona.screen.devicePixelRatio,
+        ].join('|'),
+      );
+      screens.add(`${persona.screen.width}x${persona.screen.height}`);
+      ratios.add(persona.screen.devicePixelRatio);
+    }
+    assert.ok(
+      devices.size >= 150,
+      `${os} produced only ${devices.size} distinct devices in 200 seeds`,
+    );
+    assert.ok(screens.size >= 4, `${os} produced only ${screens.size} distinct screens`);
+    // Every Mac in the catalog is Retina, so macOS legitimately reports one ratio; a PC persona that
+    // always claims 100% scaling would be hiding the fact that most laptops do not run at it.
+    assert.ok(
+      os === 'macos' ? ratios.size === 1 : ratios.size >= 2,
+      `${os} devicePixelRatio spread (${[...ratios].join(', ')}) — scaling is part of the device`,
+    );
+  }
+});
+
+test('every seed-derived device is a machine the coherence gate accepts', () => {
+  for (let i = 0; i < 150; i++) {
+    const seed = generateSeed();
+    for (const os of OSES) {
+      const persona = deriveDevicePersona(seed, { os });
+      assert.ok(
+        isPlausibleDisplayMode(os, {
+          width: persona.screen.width,
+          height: persona.screen.height,
+          dpr: persona.screen.devicePixelRatio,
+        }),
+        `${os} seed=${seed} derived ${persona.screen.width}x${persona.screen.height}@${persona.screen.devicePixelRatio}`,
+      );
+      assert.deepEqual(
+        validateFingerprintCoherence(deriveFingerprint(seed, { os, engine: 'lobium' })),
+        [],
+        `${os} seed=${seed} derived an incoherent machine`,
+      );
+    }
+  }
+});
+
+test('a derived GPU is one the profile UI can name, and a string a driver could emit', () => {
+  // Derivation used to draw from the RAW sourced arrays, which are provenance data: two thirds of the
+  // Windows rows carry a pci.ids parser artefact ("GeForce 6800 Ultra]") or a card from 2004, and both
+  // went straight into the page-visible ANGLE renderer string.
+  for (let i = 0; i < 120; i++) {
+    const seed = generateSeed();
+    for (const os of OSES) {
+      const persona = deriveDevicePersona(seed, { os });
+      assert.doesNotMatch(persona.webgl.renderer, /[[\]]/, `${os} seed=${seed} renderer artefact`);
+      assert.doesNotMatch(persona.gpuLabel, /[[\]]/, `${os} seed=${seed} label artefact`);
+      if (persona.rendererPresetId !== undefined) {
+        assert.ok(
+          resolveSourcedRendererPreset(persona.rendererPresetId),
+          `${os} seed=${seed} derived preset ${persona.rendererPresetId} is not one the UI can offer`,
+        );
+      }
+    }
+  }
+});
+
+test('a derived Mac is a Retina Mac and a derived PC keeps its own panel', () => {
+  for (let i = 0; i < 40; i++) {
+    const seed = generateSeed();
+    const mac = deriveDevicePersona(seed, { os: 'macos', arch: 'arm64' });
+    assert.equal(mac.screen.devicePixelRatio, 2, `Apple Silicon is always Retina seed=${seed}`);
+    assert.equal(mac.screen.colorDepth, 30, `Apple Silicon panels are wide-gamut seed=${seed}`);
+    assert.match(mac.webgl.renderer, /Apple M\d/, `Apple Silicon GPU seed=${seed}`);
+
+    const win = deriveDevicePersona(seed, { os: 'windows' });
+    assert.equal(win.arch, 'x86_64');
+    assert.equal(win.screen.availTop, 0);
+    assert.equal(win.screen.colorDepth, 24);
   }
 });
 

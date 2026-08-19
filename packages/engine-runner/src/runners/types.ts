@@ -15,8 +15,6 @@ export interface LaunchContext {
   /** Human-readable Lobster profile name (NTP chip + Chromium profile prefs). */
   profileName?: string;
   engine: EngineKind;
-  /** Profile-selected OS build/version label, when present. */
-  osVersion?: string;
   /** The fully-resolved fingerprint — serialized into Lobium's native config channel. */
   fingerprint: Fingerprint;
   /** Native policy fields resolved from profile overrides and proxy state. */

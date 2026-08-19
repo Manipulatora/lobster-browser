@@ -157,7 +157,6 @@ test('WebRTC policy is proxy-aware, and proxy config carries NO credentials', ()
 test('buildLobiumConfig carries explicit profile launch policy', () => {
   const config = buildLobiumConfig(fp(), {
     seed: 'policy',
-    osVersion: 'Windows 11 23H2',
     webrtcPolicy: 'proxy_only',
     proxy: { type: 'http', host: 'proxy.example', port: 8080 },
     rendererPolicy: { mode: 'normalized_host' },
@@ -165,7 +164,6 @@ test('buildLobiumConfig carries explicit profile launch policy', () => {
     mediaDevices: { cameras: 2, microphones: 1, speakers: 3, stableDeviceIds: false },
   });
 
-  assert.equal(config.policy.osVersion, 'Windows 11 23H2');
   assert.equal(config.net.webrtcPolicy, 'proxy_only');
   assert.equal(config.policy.webrtc, 'proxy_only');
   assert.deepEqual(config.policy.renderer, { mode: 'normalized_host' });

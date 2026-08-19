@@ -443,6 +443,17 @@ jobs:
       # regression in the detector-matrix grader or the native-policy contract reached main green.
       - run: node ci/validation/detector-matrix.mjs --check
       - run: node --test ci/validation/detector-matrix.test.mjs ci/validation/antibot-exam.test.mjs ci/validation/native-policy-contract.test.mjs ci/validation/version-coherence.test.mjs
+      # The offline half of the per-aspect anti-detect bar. Scoring the oracles needs an engine, but the
+      # CONTRACT does not: every declared aspect must have an oracle, no oracle may land outside the
+      # declared aspects, and an inconclusive measurement must never score as a pass. Those are the
+      # rules a green number depends on, so they are checked on every PR rather than nightly on the GPU
+      # box — a new aspect with no probe behind it is caught here, before it can be claimed.
+      - run: node --test ci/validation/aspect-coverage.test.mjs
+      # Shape-checks the manual detector ledger: an entry naming a tool or scenario that does not exist,
+      # or claiming a verdict with no artifact behind it, is evidence that cannot be re-examined. Missing
+      # evidence is reported, never failed — an empty ledger is an accurate statement, and reddening PRs
+      # for it would only teach people to delete rows.
+      - run: node ci/validation/detector-checklist.mjs --check
       # Offline W4 guard: the build ref, the UA-claimed version, and the engine manifest must agree,
       # and the pin must not be a canary/branch-point build. This is what would have caught the repo
       # sitting on canary 152.0.7928.0. The ONLINE half (is the pin behind stable / still a real

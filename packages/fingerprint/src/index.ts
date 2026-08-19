@@ -12,8 +12,22 @@
  */
 export { SeededRandom, hashStringToUint32, mulberry32 } from './prng.js';
 export { generateSeed, isValidSeed } from './seed.js';
-export { deriveFingerprint, deriveFromPools } from './derive.js';
+export { deriveDevicePersona, deriveFingerprint, deriveFromPools } from './derive.js';
 export { ENGINE_CHROME } from './pools.js';
+export {
+  DEVICE_TIER_ENVELOPES,
+  HIGH_CORE_MEMORY_FLOOR,
+  catalogRendererCounts,
+  gpuTierFromRenderer,
+} from './device-tiers.js';
+export {
+  MACOS_APPLE_SILICON_MODES,
+  MACOS_INTEL_MODES,
+  MACOS_RETINA_MODES,
+  displayModesFor,
+  isPlausibleDisplayMode,
+  normalizeDevicePixelRatio,
+} from './displays.js';
 export { deriveAndroidFingerprint, validateAndroidFingerprintCoherence } from './android.js';
 export {
   applyGeoToFingerprint,
@@ -22,6 +36,7 @@ export {
   normalizeDeviceMemory,
   normalizeColorDepth,
   DEVICE_MEMORY_VALUES,
+  DESKTOP_DEVICE_MEMORY_VALUES,
   DESKTOP_MIN_DEVICE_MEMORY,
 } from './coherence.js';
 export { applyOverrides } from './overrides.js';
@@ -48,7 +63,9 @@ export {
   VALIDATED_RENDERER_PRESETS,
   WINDOWS_RENDERER_PRESETS,
 } from './catalog.js';
-export type { DeriveOptions } from './derive.js';
+export type { DeriveDeviceOptions, DeriveOptions, DerivedDevicePersona } from './derive.js';
+export type { DeviceTierEnvelope, GpuTier } from './device-tiers.js';
+export type { DisplayMode } from './displays.js';
 export type { DeriveAndroidOptions } from './android.js';
 export type { DeriveFromHostOptions } from './host-calibration.js';
 export type { AndroidDeviceCatalogEntry, RendererCatalogEntry } from './catalog.generated.js';

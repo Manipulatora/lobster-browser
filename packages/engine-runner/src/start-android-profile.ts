@@ -20,6 +20,7 @@ import {
   type AndroidLaunchPlan,
 } from './android-bridge.js';
 import { buildAndroidLobiumConfig, writeAndroidLobiumConfig } from './android-config.js';
+import { assertBasedOnIpHasProxy, basedOnIpPersonaKnobs } from './based-on-ip.js';
 import { assertUpstreamReachable } from './proxy-auth-adapter.js';
 import { resolveWebRtcPolicy } from './launch-policy.js';
 import {
@@ -128,10 +129,7 @@ function androidNeedsGeo(params: StartProfileParams): boolean {
 }
 
 function androidExplicitlyNeedsGeo(params: StartProfileParams): boolean {
-  const overrides = params.fingerprintOverrides;
-  return [overrides?.languageMode, overrides?.timezoneMode, overrides?.geolocationMode].some(
-    (mode) => mode === 'based_ip',
-  );
+  return basedOnIpPersonaKnobs(params).length > 0;
 }
 
 /**
@@ -172,6 +170,7 @@ async function launchAndroidProfile(
       `startAndroidProfile requires os=android (got "${String(params.os)}"); use startProfile for desktop`,
     );
   }
+  assertBasedOnIpHasProxy(params, 'Android profile');
 
   const bridge = new AndroidDeviceBridge(opts.adb);
   const devices = await bridge.listDevices();

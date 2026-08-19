@@ -18,6 +18,8 @@ export const LOBIUM_CAPABILITY_CONTRACT_VERSION = 1;
  */
 export const LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES = [
   'config-channel-v1',
+  /** UA, UA-CH brands, platform, hardwareConcurrency, deviceMemory and maxTouchPoints. */
+  'navigator-ua-ch',
   'navigator-languages',
   'network-accept-language',
   'process-locale-timezone',
@@ -121,6 +123,12 @@ export function requiredLobiumCapabilities(
 ): LobiumNativeFingerprintCapability[] {
   const required: LobiumNativeFingerprintCapability[] = [
     'config-channel-v1',
+    // navigator.userAgent, the Sec-CH-UA family, navigator.platform, hardwareConcurrency and
+    // deviceMemory. Unconditional, and the most important entry in this list: a build that has the
+    // config channel but not this hook accepts the persona, launches successfully, and then reports
+    // the HOST's identity on the surfaces every detector reads first — a failure that looks exactly
+    // like a working profile until the account is banned.
+    'navigator-ua-ch',
     'navigator-languages',
     'network-accept-language',
     'process-locale-timezone',

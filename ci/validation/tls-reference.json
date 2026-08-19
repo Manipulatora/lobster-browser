@@ -1,0 +1,7 @@
+{
+  "$schema": "stock-Chrome network-fingerprint references, keyed by Chrome major version",
+  "$why": "Lobium's ClientHello and HTTP/2 SETTINGS must be byte-identical to the stock Chrome it forks. A shape check (t13d....h2) passes on every TLS1.3 browser and therefore proves nothing; only equality against a real stock capture catches a reordered extension, a dropped ALPS entry or a changed SETTINGS frame - each of which changes the hash a WAF keys on while leaving the shape intact.",
+  "$capture": "LOBSTER_STOCK_CHROME_BIN=<stock chrome of that major> node ci/validation/tls-fingerprint.mjs --capture-reference",
+  "$policy": "Values here are MEASURED, never hand-written. An unpinned major BLOCKS the gate (exit 2) rather than passing it: no reference means no comparison, which is not the same as agreement. Recapture whenever the engine is rebased onto a new Chromium major.",
+  "references": {}
+}

@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { parseJson, parseNetscape } from '@lobster/cookies';
-import { normalizeDeviceMemory } from '@lobster/fingerprint';
-
 import type {
   CookieImportDraft,
   CookieImportMode,
@@ -36,12 +34,11 @@ import {
   WEBRTC_MODE_OPTIONS,
   androidModelsForSelection,
   defaultSelectedFontsForTarget,
-  defaultUserAgent,
+  devicePixelRatioOptionsFor,
   findAndroidCatalogEntry,
-  parseScreenOption,
-  rendererPresetById,
   rendererPresetsForTarget,
-  screenOptionsForTarget,
+  screenChoicesFor,
+  uaPlatformVersionForSelection,
   type AndroidDeviceType,
   type PersonaMode,
   type WebRtcUiMode,
@@ -50,10 +47,15 @@ import {
   changeDraftOs,
   chromeWebStoreExtensionId,
   createProfileDraft,
+  derivedDeviceForDraft,
+  draftUserAgent,
   hydrateProfileDraft,
   hydrateTemplateDraft,
+  pinDerivedDevice,
+  profileDraftWarnings,
   serializeProfileDraft,
   validateProfileDraft,
+  type DeviceSource,
   type ProfileDraft,
 } from './profileDraft';
 import { Icon } from '../../ui/Icon';
@@ -124,10 +126,21 @@ function isNonNegativeInteger(value: string): boolean {
   return Number.isInteger(parsed) && parsed >= 0;
 }
 
-const initialState: FormState = {
-  ...createProfileDraft(),
-  androidDeviceModel: androidModelsForSelection('mobile', OS_VERSION_OPTIONS.android[0])[0] ?? '',
-};
+/**
+ * Built per mount, never once per module: the draft now carries the profile's fingerprint seed, and a
+ * shared initial value would hand every profile created in one session the same identity.
+ */
+function initialDraft(): FormState {
+  return {
+    ...createProfileDraft(),
+    androidDeviceModel: androidModelsForSelection('mobile', OS_VERSION_OPTIONS.android[0])[0] ?? '',
+  };
+}
+
+const DEVICE_SOURCE_OPTIONS: ReadonlyArray<{ value: DeviceSource; label: string }> = [
+  { value: 'seed', label: 'From profile seed' },
+  { value: 'pinned', label: 'Pinned (advanced)' },
+];
 
 const emptyCustomProxy: CustomProxyDraft = {
   title: '',
@@ -227,34 +240,14 @@ function validationIssues(
     add('general', 'The selected proxy is no longer available.');
   }
 
-  if (form.os === 'android') {
-    if (!findAndroidCatalogEntry(form.androidDeviceType, form.androidDeviceModel)) {
-      add('fingerprint', 'Choose a verified Android device model from the list.');
-    }
-  } else {
-    if (!parseScreenOption(form.screenResolution)) {
-      add('fingerprint', 'Choose a valid screen resolution.');
-    }
-    if (form.fonts.mode === 'manual' && form.fonts.selected.length === 0) {
-      add('fingerprint', 'Select at least one OS-compatible font.');
-    }
-    if (
-      form.rendererPresetId !== 'host' &&
-      form.rendererPresetId !== 'normalized_host' &&
-      !rendererPresetById(form.os, form.rendererPresetId)
-    ) {
-      add('fingerprint', 'Choose the calibrated host renderer or a sourced renderer preset.');
-    }
-    if (!CPU_CORE_OPTIONS.includes(Number(form.cpuCores) as (typeof CPU_CORE_OPTIONS)[number])) {
-      add('fingerprint', 'Choose a verified CPU core count.');
-    }
-    if (
-      !DEVICE_MEMORY_OPTIONS.includes(
-        Number(form.ramSize) as (typeof DEVICE_MEMORY_OPTIONS)[number],
-      )
-    ) {
-      add('fingerprint', 'Choose a Lobium-compatible reported memory value.');
-    }
+  // Device, font, locale and media checks belong to the draft (validateProfileDraft) — they apply
+  // wherever a draft is serialized, not only in this dialog. What is left here is what only this
+  // dialog knows: the proxy and template pickers it owns, and the Android model list it renders.
+  if (
+    form.os === 'android' &&
+    !findAndroidCatalogEntry(form.androidDeviceType, form.androidDeviceModel)
+  ) {
+    add('fingerprint', 'Choose a verified Android device model from the list.');
   }
 
   if (form.languageMode === 'manual') {
@@ -589,7 +582,7 @@ export function NewProfileForm({
 }: NewProfileFormProps): JSX.Element {
   const [step, setStep] = useState<WizardStep>('general');
   const [form, setForm] = useState<FormState>(() => {
-    const hydrated = profile ? hydrateProfileDraft(profile) : initialState;
+    const hydrated = profile ? hydrateProfileDraft(profile) : initialDraft();
     const initial =
       profile?.proxy && !profile.proxyId ? { ...hydrated, proxyId: CUSTOM_PROXY_VALUE } : hydrated;
     return initial;
@@ -661,7 +654,8 @@ export function NewProfileForm({
   }, [form.os, loadFontFamilies]);
 
   const versionOptions = OS_VERSION_OPTIONS[form.os];
-  const screenOptions = screenOptionsForTarget(form.os);
+  const screenOptions = screenChoicesFor(form.os, form.screenResolution);
+  const dprOptions = devicePixelRatioOptionsFor(form.os, form.screenResolution);
   const rendererOptions = rendererPresetsForTarget(form.os);
   const androidModels = androidModelsForSelection(form.androidDeviceType, form.osVersion);
   const selectedProxy = proxies.find((proxy) => proxy.id === form.proxyId);
@@ -670,7 +664,16 @@ export function NewProfileForm({
   const legacyAndroid = false;
   const editing = Boolean(profile);
   const isCustomProxy = form.proxyId === CUSTOM_PROXY_VALUE;
-  const userAgent = defaultUserAgent(form.os, form.androidDeviceType);
+  const hasProxy = Boolean(form.proxyId);
+  const derivedDevice = useMemo(() => derivedDeviceForDraft(form), [form.os, form.fingerprintSeed]);
+  const userAgent = useMemo(
+    () => draftUserAgent(form),
+    [form.os, form.fingerprintSeed, form.androidDeviceType],
+  );
+  const uaPlatformVersion = uaPlatformVersionForSelection(form.os, form.osVersion);
+  // Linux is absent on purpose: Chrome reports an EMPTY Sec-CH-UA-Platform-Version on every
+  // distribution, so there is no distro-specific value for the modal to offer or preview.
+  const showOsVersion = form.os !== 'linux';
   const issues = useMemo(() => {
     const draftIssues = validateProfileDraft(form);
     return [
@@ -686,8 +689,13 @@ export function NewProfileForm({
   const currentStepIssues = showValidation ? issues.filter((issue) => issue.step === step) : [];
   const canSubmit = !submitting && !fontCatalogLoading && fontCatalogError === null;
 
+  const personaWarnings = useMemo(
+    () => profileDraftWarnings(form).map((warning) => warning.message),
+    [form],
+  );
+
   const warnings = useMemo(() => {
-    const items: string[] = [];
+    const items: string[] = [...personaWarnings];
     if (form.proxyId && !isCustomProxy && !selectedProxy) {
       items.push('Selected proxy is no longer available.');
     }
@@ -704,10 +712,48 @@ export function NewProfileForm({
       items.push('Enabled extensions are verified and installed before Lobium starts.');
     }
     return items;
-  }, [form, selectedProxy, isCustomProxy]);
+  }, [form, personaWarnings, selectedProxy, isCustomProxy]);
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]): void {
     setForm((prev) => ({ ...prev, [key]: value }));
+    setError(null);
+  }
+
+  function setDeviceSource(deviceSource: DeviceSource): void {
+    // Pinning opens on the machine the seed produced, so switching to the advanced controls never
+    // silently swaps the device the user was just shown for the first entry of every list.
+    setForm((prev) =>
+      deviceSource === 'pinned' ? pinDerivedDevice(prev) : { ...prev, deviceSource },
+    );
+    setError(null);
+  }
+
+  function setScreenResolution(screenResolution: string): void {
+    // The scale factor belongs to the panel: 1536x864 exists only at 125%, 1920x1080 never does. A
+    // ratio kept across a size change would state a display that has never been built.
+    setForm((prev) => ({
+      ...prev,
+      screenResolution,
+      devicePixelRatio: String(
+        devicePixelRatioOptionsFor(prev.os, screenResolution).includes(
+          Number(prev.devicePixelRatio),
+        )
+          ? Number(prev.devicePixelRatio)
+          : (devicePixelRatioOptionsFor(prev.os, screenResolution)[0] ?? 1),
+      ),
+    }));
+    setError(null);
+  }
+
+  function setProxyId(proxyId: string): void {
+    // A proxy makes WebRTC "Real" a launch refusal, not a preference: host ICE candidates would name
+    // the address the proxy exists to hide. Attaching one moves the profile to the proxy-only policy.
+    setForm((prev) => ({
+      ...prev,
+      proxyId,
+      webrtcMode: proxyId && prev.webrtcMode === 'real' ? 'based_ip' : prev.webrtcMode,
+    }));
+    setProxyTest(null);
     setError(null);
   }
 
@@ -820,27 +866,8 @@ export function NewProfileForm({
       if (!template) return { ...prev, templateId };
       const hydrated = hydrateTemplateDraft(prev, template);
       const osVersion = template.osVersion ?? OS_VERSION_OPTIONS[template.os][0];
-      const screens = screenOptionsForTarget(template.os);
       const overrides = template.fingerprintOverrides;
       const geolocation = overrides?.locale?.geolocation;
-      const templateRenderer = overrides?.renderer;
-      const rendererPresetId =
-        templateRenderer?.mode === 'validated_preset' &&
-        rendererPresetById(template.os, templateRenderer.presetId)
-          ? templateRenderer.presetId
-          : 'host';
-      const templateScreen = overrides?.screen;
-      const matchingScreen = templateScreen
-        ? screens.find((option) => {
-            const parsed = parseScreenOption(option);
-            return (
-              parsed !== undefined &&
-              parsed.width === templateScreen.width &&
-              parsed.height === templateScreen.height &&
-              parsed.devicePixelRatio === (templateScreen.devicePixelRatio ?? 1)
-            );
-          })
-        : undefined;
       const webrtcMode: WebRtcUiMode = !overrides?.webrtc
         ? prev.webrtcMode
         : overrides.webrtc === 'proxy_only'
@@ -857,7 +884,6 @@ export function NewProfileForm({
         osVersion,
         proxyId: template.proxyId ?? prev.proxyId,
         tags: template.tags.length > 0 ? template.tags.join(', ') : prev.tags,
-        screenResolution: matchingScreen ?? screens[0] ?? prev.screenResolution,
         fonts: {
           ...hydrated.fonts,
           mode: overrides?.fontsMode ?? hydrated.fonts.mode,
@@ -877,13 +903,9 @@ export function NewProfileForm({
         geolocationLat: geolocation ? String(geolocation.latitude) : prev.geolocationLat,
         geolocationLng: geolocation ? String(geolocation.longitude) : prev.geolocationLng,
         geolocationAccuracy: geolocation ? String(geolocation.accuracy) : prev.geolocationAccuracy,
-        cpuCores: overrides?.navigator?.hardwareConcurrency
-          ? String(overrides.navigator.hardwareConcurrency)
-          : prev.cpuCores,
-        ramSize: overrides?.navigator?.deviceMemory
-          ? String(normalizeDeviceMemory(overrides.navigator.deviceMemory))
-          : prev.ramSize,
-        rendererPresetId,
+        // The device (screen, scaling, cores, memory, GPU and whether any of it is pinned at all)
+        // comes from `hydrated`: a template that pins nothing must leave the profile's own seed in
+        // charge rather than fall back to the first entry of every picker.
         webrtcMode,
         noiseWebgl: overrides?.hardwareNoise?.webgl ?? prev.noiseWebgl,
         noiseCanvas: overrides?.hardwareNoise?.canvas ?? prev.noiseCanvas,
@@ -1159,10 +1181,7 @@ export function NewProfileForm({
                 <select
                   className="lb-select"
                   value={form.proxyId}
-                  onChange={(e) => {
-                    set('proxyId', e.target.value);
-                    setProxyTest(null);
-                  }}
+                  onChange={(e) => setProxyId(e.target.value)}
                 >
                   <option value="">No proxy</option>
                   <option value={CUSTOM_PROXY_VALUE}>Custom proxy…</option>
@@ -1310,20 +1329,22 @@ export function NewProfileForm({
                   <span className="lb-field__label">Operating system</span>
                   <OsSelect value={form.os} options={OS_OPTIONS} onChange={setOs} />
                 </label>
-                <label className="lb-field">
-                  <span className="lb-field__label">OS version</span>
-                  <select
-                    className="lb-select"
-                    value={form.osVersion}
-                    onChange={(e) => setOsVersion(e.target.value)}
-                  >
-                    {versionOptions.map((version) => (
-                      <option key={version} value={version}>
-                        {version}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                {showOsVersion ? (
+                  <label className="lb-field">
+                    <span className="lb-field__label">OS version</span>
+                    <select
+                      className="lb-select"
+                      value={form.osVersion}
+                      onChange={(e) => setOsVersion(e.target.value)}
+                    >
+                      {versionOptions.map((version) => (
+                        <option key={version} value={version}>
+                          {version}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
               </div>
 
               <label className="lb-field lb-field--wide">
@@ -1336,6 +1357,10 @@ export function NewProfileForm({
                   readOnly
                   title={userAgent}
                 />
+                <span className="lb-field__hint">
+                  Sec-CH-UA-Platform-Version {uaPlatformVersion ?? '(empty, as Chrome sends here)'}
+                  {derivedDevice ? ` · Sec-CH-UA-Arch ${derivedDevice.arch}` : ''}
+                </span>
               </label>
 
               {isAndroid ? (
@@ -1382,20 +1407,74 @@ export function NewProfileForm({
                 </>
               ) : (
                 <>
-                  <label className="lb-field">
-                    <span className="lb-field__label">Screen resolution</span>
-                    <select
-                      className="lb-select"
-                      value={form.screenResolution}
-                      onChange={(e) => set('screenResolution', e.target.value)}
-                    >
-                      {screenOptions.map((screen) => (
-                        <option key={screen} value={screen}>
-                          {screen.replace('x', ' × ')}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <div className="fp-row">
+                    <label className="lb-field">
+                      <span className="lb-field__label">Device</span>
+                      <select
+                        className="lb-select"
+                        aria-label="Device source"
+                        value={form.deviceSource}
+                        onChange={(e) => setDeviceSource(e.target.value as DeviceSource)}
+                      >
+                        {DEVICE_SOURCE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      {derivedDevice ? (
+                        <span className="lb-field__hint">
+                          {derivedDevice.gpuLabel} · {derivedDevice.screen.width} ×{' '}
+                          {derivedDevice.screen.height} @ {derivedDevice.screen.devicePixelRatio}× ·{' '}
+                          {derivedDevice.hardwareConcurrency} cores · {derivedDevice.deviceMemory}{' '}
+                          GB
+                        </span>
+                      ) : null}
+                    </label>
+                    {form.deviceSource === 'seed' ? (
+                      <p className="lb-field__hint fp-row__grow">
+                        Each profile’s seed picks its own machine, so two profiles created with
+                        these settings are two different computers. Pinning replaces that with the
+                        exact values below — every profile pinned alike reports one machine.
+                      </p>
+                    ) : null}
+                  </div>
+
+                  {form.deviceSource === 'pinned' ? (
+                    <div className="fp-row">
+                      <label className="lb-field">
+                        <span className="lb-field__label">Screen resolution</span>
+                        <select
+                          className="lb-select"
+                          value={form.screenResolution}
+                          onChange={(e) => setScreenResolution(e.target.value)}
+                        >
+                          {screenOptions.map((screen) => (
+                            <option key={screen} value={screen}>
+                              {screen.replace('x', ' × ')}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="lb-field">
+                        <span className="lb-field__label">Scaling</span>
+                        <select
+                          className="lb-select"
+                          value={form.devicePixelRatio}
+                          onChange={(e) => set('devicePixelRatio', e.target.value)}
+                        >
+                          {dprOptions.map((dpr) => (
+                            <option key={dpr} value={String(dpr)}>
+                              {Math.round(dpr * 100)}% · dpr {dpr}
+                            </option>
+                          ))}
+                        </select>
+                        <span className="lb-field__hint">
+                          devicePixelRatio — only the steps this panel is presented at
+                        </span>
+                      </label>
+                    </div>
+                  ) : null}
 
                   <div className="lb-field lb-field--wide">
                     <span className="lb-field__label">Fonts</span>
@@ -1558,14 +1637,35 @@ export function NewProfileForm({
                   onChange={(e) => set('webrtcMode', e.target.value as WebRtcUiMode)}
                 >
                   {WEBRTC_MODE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
+                    <option
+                      key={option.value}
+                      value={option.value}
+                      // "Real" publishes the host's own ICE candidates, which travel outside the
+                      // proxy tunnel and name the real address on the first call. The launcher
+                      // refuses the pair, so the picker must not offer it.
+                      disabled={option.value === 'real' && hasProxy}
+                    >
                       {option.label}
                     </option>
                   ))}
                 </select>
+                {hasProxy ? (
+                  <span className="lb-field__hint">
+                    Real is unavailable while a proxy is attached — host ICE candidates would bypass
+                    it.
+                  </span>
+                ) : null}
               </label>
 
-              {!isAndroid ? (
+              {personaWarnings.length > 0 ? (
+                <div className="notice notice--warn lb-field--wide" role="status">
+                  {personaWarnings.map((warning) => (
+                    <p key={warning}>{warning}</p>
+                  ))}
+                </div>
+              ) : null}
+
+              {!isAndroid && form.deviceSource === 'pinned' ? (
                 <>
                   <div className="fp-row">
                     <label className="lb-field">

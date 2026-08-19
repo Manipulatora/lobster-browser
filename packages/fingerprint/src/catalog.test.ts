@@ -12,6 +12,8 @@ import {
 import { DEVICE_TEMPLATES } from './pools.js';
 import {
   LINUX_RENDERER_PRESETS as PRODUCT_LINUX_RENDERERS,
+  MACOS_ARM_RENDERER_PRESETS as PRODUCT_MAC_ARM_RENDERERS,
+  MACOS_INTEL_RENDERER_PRESETS as PRODUCT_MAC_INTEL_RENDERERS,
   WINDOWS_RENDERER_PRESETS as PRODUCT_WINDOWS_RENDERERS,
 } from './catalog.js';
 
@@ -97,4 +99,44 @@ test('product renderer facade removes malformed/obsolete default choices and sta
     assert.doesNotMatch(preset.label, /GeForce 6800|Engineering Sample|Mining/i);
   }
   assert.match(PRODUCT_WINDOWS_RENDERERS[0]?.label ?? '', /GTX|RTX|Radeon|Intel/i);
+});
+
+test('no product preset carries a pci.ids codename or a stray bracket into the page-visible string', () => {
+  // The catalog names GPUs the way pci.ids does — "Intel(R) Coffee Lake-U GT3e [Iris Plus Graphics
+  // 655]" — but a driver reports only the marketing half. Both the leftover bracket and the codename
+  // are strings no machine has ever produced, and the ANGLE renderer is read by every GPU probe.
+  for (const preset of [
+    ...PRODUCT_WINDOWS_RENDERERS,
+    ...PRODUCT_LINUX_RENDERERS,
+    ...PRODUCT_MAC_INTEL_RENDERERS,
+    ...PRODUCT_MAC_ARM_RENDERERS,
+  ]) {
+    assert.doesNotMatch(preset.label, /[[\]]/, `label keeps a bracket: ${preset.label}`);
+    assert.doesNotMatch(
+      preset.webgl.renderer,
+      /[[\]]/,
+      `renderer keeps a bracket: ${preset.webgl.renderer}`,
+    );
+    assert.doesNotMatch(
+      preset.label,
+      /\b(?:Coffee|Kaby|Comet|Whiskey|Alder|Raptor|Tiger|Rocket|Meteor|Jasper|Elkhart|Gemini|Broadwell|Skylake|Lakefield)\s?Lake|Broadwell|Skylake/i,
+      `label keeps a codename: ${preset.label}`,
+    );
+  }
+});
+
+test('the Mac catalog contains only GPUs Apple actually shipped', () => {
+  assert.ok(PRODUCT_MAC_ARM_RENDERERS.length >= 12);
+  assert.ok(PRODUCT_MAC_INTEL_RENDERERS.length >= 20);
+  for (const preset of PRODUCT_MAC_ARM_RENDERERS) {
+    // Metal reports the chip, not the GPU-core count: a 7-core and an 8-core M1 both say "Apple M1".
+    assert.match(preset.label, /^Apple M\d(?: (?:Pro|Max|Ultra))?$/, preset.label);
+  }
+  for (const preset of PRODUCT_MAC_INTEL_RENDERERS) {
+    assert.doesNotMatch(
+      preset.label,
+      /Iris Xe|Arc|UHD Graphics (?:6[12]0|7[0-9]0)|Radeon (?:PRO )?W[67]\d00\b(?!X)|RX \d/,
+      `not a GPU any Mac shipped: ${preset.label}`,
+    );
+  }
 });

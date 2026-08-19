@@ -309,7 +309,6 @@ export async function buildLobiumLaunchArgs(ctx: LaunchContext): Promise<string[
   const config = buildLobiumConfig(ctx.fingerprint, {
     ...(proxy ? { proxy } : {}),
     ...(ctx.fingerprintSeed !== undefined ? { seed: ctx.fingerprintSeed } : {}),
-    ...(ctx.osVersion !== undefined ? { osVersion: ctx.osVersion } : {}),
     ...(ctx.webrtcPolicy !== undefined ? { webrtcPolicy: ctx.webrtcPolicy } : {}),
     ...(ctx.fingerprintPolicy?.renderer !== undefined
       ? { rendererPolicy: ctx.fingerprintPolicy.renderer }

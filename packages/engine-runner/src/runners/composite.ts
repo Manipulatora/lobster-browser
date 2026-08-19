@@ -59,7 +59,6 @@ export class CompositeRunner implements EngineRunner {
       profileId: params.profileId,
       ...(params.profileName !== undefined ? { profileName: params.profileName } : {}),
       engine: params.engine,
-      ...(params.osVersion !== undefined ? { osVersion: params.osVersion } : {}),
       fingerprint: params.fingerprint,
       ...(params.fingerprintPolicy !== undefined
         ? { fingerprintPolicy: params.fingerprintPolicy }

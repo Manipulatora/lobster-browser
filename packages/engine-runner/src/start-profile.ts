@@ -16,6 +16,7 @@ import type {
   LaunchResult,
   StartProfileParams,
 } from '@lobster/shared-types';
+import { assertBasedOnIpHasProxy, basedOnIpPersonaKnobs } from './based-on-ip.js';
 import { assertUpstreamReachable } from './proxy-auth-adapter.js';
 import { resolveLaunchPolicy } from './launch-policy.js';
 import type { EngineRunner } from './runner.js';
@@ -68,10 +69,7 @@ function requiresProxyGeo(params: StartProfileParams): boolean {
 }
 
 function explicitlyRequiresProxyGeo(params: StartProfileParams): boolean {
-  const overrides = params.fingerprintOverrides;
-  return [overrides?.languageMode, overrides?.timezoneMode, overrides?.geolocationMode].some(
-    (mode) => mode === 'based_ip',
-  );
+  return basedOnIpPersonaKnobs(params).length > 0;
 }
 
 /**
@@ -95,6 +93,7 @@ export async function startProfile(
       )}"`,
     );
   }
+  assertBasedOnIpHasProxy(params, 'profile');
   const launchPolicy = resolveLaunchPolicy(params);
   // HC-3: host-calibrated derivation is the DEFAULT whenever a host profile has been captured. An
   // explicit `params.hostCalibration` (passed by the control plane) wins; otherwise, if a persisted

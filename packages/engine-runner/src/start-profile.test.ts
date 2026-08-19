@@ -467,3 +467,56 @@ test('startProfile fail-closes when the proxy TCP endpoint is unreachable', asyn
   );
   assert.equal(runner.launched.length, 0, 'unreachable proxy must never reach the engine');
 });
+
+test('startProfile REFUSES a Based on IP persona that has no proxy to be based on', async () => {
+  const runner = new RecordingRunner();
+  await assert.rejects(
+    startProfile(runner, {
+      ...base,
+      fingerprintOverrides: {
+        languageMode: 'based_ip',
+        timezoneMode: 'based_ip',
+        geolocationMode: 'manual',
+      },
+    }),
+    /languages, timezone are set to Based on IP, but the profile has no proxy/,
+  );
+  assert.equal(runner.launched.length, 0);
+
+  // Only the knobs actually bound to the exit IP are named, so the message says what to change.
+  const one = new RecordingRunner();
+  await assert.rejects(
+    startProfile(one, { ...base, fingerprintOverrides: { geolocationMode: 'based_ip' } }),
+    /geolocation is set to Based on IP/,
+  );
+});
+
+test('startProfile still launches a fully manual persona without a proxy', async () => {
+  const runner = new RecordingRunner();
+  await startProfile(runner, {
+    ...base,
+    fingerprintOverrides: {
+      languageMode: 'manual',
+      timezoneMode: 'manual',
+      geolocationMode: 'manual',
+    },
+  });
+  assert.equal(runner.launched.length, 1);
+});
+
+test('startProfile refuses a build without the navigator/UA-CH hook', async () => {
+  // The worst failure mode this gate exists for: the config channel is present, the launch looks
+  // healthy, and every navigator surface reports the host.
+  const runner = new RecordingRunner();
+  runner.capabilities = {
+    ...runner.capabilities,
+    capabilities: runner.capabilities.capabilities.filter(
+      (capability) => capability !== 'navigator-ua-ch',
+    ),
+  };
+  await assert.rejects(
+    startProfile(runner, base),
+    /lacks required native fingerprint hooks: navigator-ua-ch/,
+  );
+  assert.equal(runner.launched.length, 0);
+});

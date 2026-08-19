@@ -133,6 +133,85 @@ jobs:
           LOBSTER_GATE_REQUIRE_DETECT: '1'
         run: node ci/validation/gate.mjs
 
+      # ── The per-aspect anti-detect gate ─────────────────────────────────────────────────────────
+      #
+      # audit-oracles + font-isolation-gate existed as npm scripts that NO workflow ran, so an
+      # anti-detect regression — a canvas readback drifting, the font filter disengaging, the persona
+      # timezone silently not applying — could reach main green. They are blocking steps here, on the
+      # only runner that has an engine to measure.
+      #
+      # The TLS gate runs first because the oracles fold its report into the networkTls/networkHttp2
+      # aspects and refuse anything older than two hours: those two aspects are not readable from a
+      # page, and a run that never touched the network must not score them.
+      - name: TLS / HTTP2 network fingerprint vs stock Chrome
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_STOCK_CHROME_BIN: ${{ vars.LOBSTER_STOCK_CHROME_BIN }}
+          OSES: windows,linux
+          DISPLAY: ${{ vars.DISPLAY || ':0' }}
+        run: |
+          set +e
+          node ci/validation/tls-fingerprint.mjs
+          code=$?
+          set -e
+          if [ "$code" = "2" ]; then
+            # Not failed here, because "we could not measure" is not "we measured and it was wrong" —
+            # but it is not swept away either: the oracle step below scores networkTls/networkHttp2 as
+            # BLOCKED without this report and fails on it, which is the intended pressure.
+            echo "::warning::TLS gate BLOCKED — no stock Chrome reference, or the echo was unreachable."
+            echo "Set the repo variable LOBSTER_STOCK_CHROME_BIN to a stock Chrome of the same major, or pin"
+            echo "a reference with: node ci/validation/tls-fingerprint.mjs --capture-reference"
+            exit 0
+          fi
+          exit $code
+
+      # Headful on purpose: several oracles (real GPU, window geometry, media queries) only behave
+      # honestly headful, and the report marks a headless run as NOT release evidence.
+      #
+      # Both persona OSes: Windows ships first, and a Linux-only run leaves every Windows-specific
+      # surface — font isolation, native timezone, UA-CH platformVersion — unmeasured.
+      - name: Anti-detect oracles (per-aspect, blocking)
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_FONTS_DIR: ${{ vars.LOBSTER_FONTS_DIR }}
+          LOBSTER_GPU: gpu
+          LOBSTER_ANGLE_BACKEND: ${{ vars.LOBSTER_ANGLE_BACKEND || 'vulkan' }}
+          VK_ICD_FILENAMES: ${{ vars.VK_ICD_FILENAMES }}
+          DISPLAY: ${{ vars.DISPLAY || ':0' }}
+          LOBIUM_ORACLES_HEADFUL: '1'
+          LOBIUM_ORACLE_OS: ${{ vars.LOBIUM_ORACLE_OS || 'windows,linux' }}
+          LOBIUM_ORACLE_EXIT_IP: ${{ vars.LOBIUM_ORACLE_EXIT_IP }}
+        run: |
+          set +e
+          npm run gate:oracles
+          code=$?
+          set -e
+          if [ "$code" = "2" ]; then
+            echo "::error::Oracle gate BLOCKED (exit 2). The engine could not be measured — a build missing"
+            echo "hooks the launcher requires, or an aspect whose every probe was inconclusive. This is NOT a"
+            echo "pass and NOT a regression; see the ORACLE GATE line above for which aspect blocked."
+          elif [ "$code" != "0" ]; then
+            echo "::error::Oracle gate FAILED (exit 1). A closed anti-detect finding is detectable again —"
+            echo "see the REGRESSIONS section above and ci/validation/reports/aspect-coverage.json."
+          fi
+          exit $code
+
+      # Proves the Windows DirectWrite font filter actually engages, using a deliberately tiny persona
+      # font list that a realistic persona cannot discriminate. Self-skips (exit 0) on a build that does
+      # not carry the font-isolation capability, which is every non-Windows build.
+      - name: Font isolation gate (blocking)
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+          LOBSTER_FONTS_DIR: ${{ vars.LOBSTER_FONTS_DIR }}
+          DISPLAY: ${{ vars.DISPLAY || ':0' }}
+        run: npm run gate:fonts
+
+      # The dated ledger for the detectors no parser scores. Emitted every run so the release review has
+      # a current statement of which manual evidence exists and which is missing.
+      - name: Detector checklist (dated ledger)
+        if: always()
+        run: node ci/validation/detector-checklist.mjs
+
       # Non-blocking: record a real anti-bot datapoint on real hardware each run. A detector "fail" is a
       # product signal to triage, not a red build — so this never fails the gate.
       - name: Anti-bot exam (record datapoint)
@@ -154,3 +233,18 @@ jobs:
           path: ci/validation/reports/
           if-no-files-found: warn
           retention-days: 30
+
+      # The per-aspect score on its own, so a release review does not have to dig through the full
+      # report bundle to answer "which anti-detect aspects are green, and on what evidence".
+      - name: Upload anti-detect aspect coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aspect-coverage-${{ github.run_id }}
+          path: |
+            ci/validation/reports/aspect-coverage.json
+            ci/validation/reports/audit-oracles.json
+            ci/validation/reports/tls-fingerprint.json
+            ci/validation/reports/detector-checklist.md
+          if-no-files-found: warn
+          retention-days: 90

@@ -42,7 +42,7 @@ function ctxWith(
   return {
     profileId: 'p',
     engine: 'lobium',
-    ...(opts.policy ? { osVersion: 'Windows 11 23H2', webrtcPolicy: 'disabled' } : {}),
+    ...(opts.policy ? { webrtcPolicy: 'disabled' } : {}),
     fingerprint: fp,
     ...(opts.policy
       ? {
@@ -242,7 +242,9 @@ test('buildLobiumLaunchArgs writes profile policy into the native config', async
   try {
     await buildLobiumLaunchArgs(ctxWith(userDataDir, { policy: true }));
     const written = JSON.parse(await readFile(join(userDataDir, LOBIUM_CONFIG_FILENAME), 'utf8'));
-    assert.equal(written.policy.osVersion, 'Windows 11 23H2');
+    // The persona's OS-version label is not part of the document: the sidecar has already turned it
+    // into navigator.uaPlatformVersion, and the engine has no parser for the label itself.
+    assert.equal(written.policy.osVersion, undefined);
     assert.equal(written.net.webrtcPolicy, 'disabled');
     assert.equal(written.policy.webrtc, 'disabled');
     assert.deepEqual(written.policy.renderer, { mode: 'normalized_host' });

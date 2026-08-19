@@ -11,6 +11,7 @@ import type {
   LaunchResult,
   StartProfileParams,
 } from '@lobster/shared-types';
+import { assertBasedOnIpHasProxy } from './based-on-ip.js';
 import { assertUpstreamReachable } from './proxy-auth-adapter.js';
 import { resolveLaunchPolicy } from './launch-policy.js';
 import type { EngineRunner } from './runner.js';
@@ -55,6 +56,7 @@ export async function startAndroidEmulatedProfile(
       `refusing to launch profile ${params.profileId}: Lobium is the only supported engine`,
     );
   }
+  assertBasedOnIpHasProxy(params, 'profile');
   // Resolved before any proxy probe or persona derivation so an unsafe/invalid persona policy refuses
   // the launch immediately, exactly as it does on the desktop path.
   const launchPolicy = resolveLaunchPolicy(params, {

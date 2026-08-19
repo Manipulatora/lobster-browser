@@ -161,6 +161,14 @@ void ReadWebGpu(const base::DictValue& dict, WebGpuConfig& g) {
   if (const std::string* s = dict.FindString("adapterType")) g.adapter_type = *s;
 }
 
+void ReadMediaDevices(const base::DictValue& dict, MediaDevicesConfig& m) {
+  m.present = true;
+  m.cameras = dict.FindInt("cameras").value_or(0);
+  m.microphones = dict.FindInt("microphones").value_or(0);
+  m.speakers = dict.FindInt("speakers").value_or(0);
+  m.stable_device_ids = dict.FindBool("stableDeviceIds").value_or(true);
+}
+
 void ReadLocale(const base::DictValue& dict, LocaleConfig& l) {
   if (const std::string* s = dict.FindString("timezone")) l.timezone = *s;
   if (const std::string* s = dict.FindString("locale")) l.locale = *s;
@@ -208,21 +216,23 @@ std::optional<LobiumFpConfig> ParseConfig(std::string_view contents) {
     cfg.seeds.media_devices =
         static_cast<uint32_t>(seeds->FindDouble("mediaDevices").value_or(0));
   }
+  // `policy` is the sidecar's LAUNCH policy, and only its mediaDevices block describes a surface the
+  // engine renders. The rest reaches the engine by other routes and is deliberately not read here:
+  // hardwareNoise arrives as zeroed farbling seeds (seed == 0 is "off" for that surface), webrtc is
+  // read from net.webrtcPolicy, and renderer selects which persona the sidecar built rather than
+  // anything the engine can act on. Reading them twice would create two sources for one setting.
+  //
   // Prefer policy.mediaDevices (sidecar shape); accept a top-level mediaDevices for forward-compat.
-  if (const base::DictValue* policy = root.FindDict("policy")) {
-    if (const base::DictValue* md = policy->FindDict("mediaDevices")) {
-      cfg.media_devices.present = true;
-      cfg.media_devices.cameras = md->FindInt("cameras").value_or(0);
-      cfg.media_devices.microphones = md->FindInt("microphones").value_or(0);
-      cfg.media_devices.speakers = md->FindInt("speakers").value_or(0);
-      cfg.media_devices.stable_device_ids = md->FindBool("stableDeviceIds").value_or(true);
-    }
-  } else if (const base::DictValue* md = root.FindDict("mediaDevices")) {
-    cfg.media_devices.present = true;
-    cfg.media_devices.cameras = md->FindInt("cameras").value_or(0);
-    cfg.media_devices.microphones = md->FindInt("microphones").value_or(0);
-    cfg.media_devices.speakers = md->FindInt("speakers").value_or(0);
-    cfg.media_devices.stable_device_ids = md->FindBool("stableDeviceIds").value_or(true);
+  // Not chained on `policy` being absent: a sidecar that moves the block to the top level while
+  // still emitting a policy object would otherwise leave media_devices unset, and enumerateDevices
+  // then reports the HOST's real cameras and microphones.
+  const base::DictValue* policy = root.FindDict("policy");
+  const base::DictValue* media = policy ? policy->FindDict("mediaDevices") : nullptr;
+  if (!media) {
+    media = root.FindDict("mediaDevices");
+  }
+  if (media) {
+    ReadMediaDevices(*media, cfg.media_devices);
   }
   if (const base::DictValue* net = root.FindDict("net")) {
     if (const std::string* p = net->FindString("webrtcPolicy")) cfg.net.webrtc_policy = *p;

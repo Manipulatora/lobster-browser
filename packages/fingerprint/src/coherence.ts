@@ -1,4 +1,10 @@
 import { buildChromeBrands, renderChromeBrands } from './pools.js';
+import {
+  DEVICE_TIER_ENVELOPES,
+  HIGH_CORE_MEMORY_FLOOR,
+  gpuTierFromRenderer,
+} from './device-tiers.js';
+import { isPlausibleDisplayMode } from './displays.js';
 import type {
   AndroidFingerprint,
   Fingerprint,
@@ -369,6 +375,16 @@ export const DEVICE_MEMORY_VALUES: readonly number[] = [0.25, 0.5, 1, 2, 4, 8];
 /** A real desktop reports ≥ 4 GB via `navigator.deviceMemory`; 0.25/0.5/1/2 on a desktop UA is a tell. */
 export const DESKTOP_MIN_DEVICE_MEMORY = 4;
 
+/**
+ * The `navigator.deviceMemory` values a desktop profile may carry — the spec ladder above the desktop
+ * floor. Offering the full ladder in a desktop picker offers values the launch gate then refuses, so
+ * the UI builds its choices from this rather than from {@link DEVICE_MEMORY_VALUES}. The sub-4 rungs
+ * remain legal on Android, where 2 GB phones are ordinary.
+ */
+export const DESKTOP_DEVICE_MEMORY_VALUES: readonly number[] = DEVICE_MEMORY_VALUES.filter(
+  (value) => value >= DESKTOP_MIN_DEVICE_MEMORY,
+);
+
 /** Highest plausible logical-core count per OS. macOS tops out at the 28-core/56-thread Mac Pro. */
 const MAX_HW_CONCURRENCY: Record<OsFamily, number> = { windows: 128, linux: 128, macos: 56 };
 
@@ -737,15 +753,54 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
       `hardwareConcurrency (${nav.hardwareConcurrency}) is outside the plausible 1–${maxHw} range for "${fp.os}"`,
     );
   }
+  // A machine is not a bag of independent numbers. Cores, memory and GPU are bought together, so the
+  // combination is checkable even when every value is individually legal: 24 cores next to 4 GB and an
+  // integrated GPU is not a machine anyone owns, and a detector comparing those three does not need any
+  // one of them to be out of range to know it.
+  const tier = gpuTierFromRenderer(fp.webgl.unmaskedRenderer || fp.webgl.renderer);
+  const envelope = DEVICE_TIER_ENVELOPES[tier];
+  if (
+    Number.isInteger(nav.hardwareConcurrency) &&
+    (nav.hardwareConcurrency < envelope.minCores || nav.hardwareConcurrency > envelope.maxCores)
+  ) {
+    issues.push(
+      `hardwareConcurrency (${nav.hardwareConcurrency}) is outside the ${tier} GPU tier's plausible ` +
+        `${envelope.minCores}–${envelope.maxCores} cores: ${fp.webgl.renderer}`,
+    );
+  }
+  if (nav.deviceMemory < envelope.minDeviceMemory) {
+    issues.push(
+      `navigator.deviceMemory (${nav.deviceMemory}) is below the ${tier} GPU tier's minimum ` +
+        `${envelope.minDeviceMemory}: ${fp.webgl.renderer}`,
+    );
+  }
+  if (
+    nav.hardwareConcurrency >= HIGH_CORE_MEMORY_FLOOR.cores &&
+    nav.deviceMemory < HIGH_CORE_MEMORY_FLOOR.deviceMemory
+  ) {
+    issues.push(
+      `navigator.deviceMemory (${nav.deviceMemory}) is implausible on a ` +
+        `${nav.hardwareConcurrency}-thread machine (min ${HIGH_CORE_MEMORY_FLOOR.deviceMemory})`,
+    );
+  }
 
   // --- Display realism -----------------------------------------------------------------------------
   if (fp.screen.colorDepth !== 24 && fp.screen.colorDepth !== 30) {
     issues.push(`screen.colorDepth (${fp.screen.colorDepth}) is not a realistic value (24 or 30)`);
   }
-  // devicePixelRatio: allow genuine fractional-scaling / zoomed displays (< 1) but reject nonsense.
-  if (fp.screen.devicePixelRatio <= 0 || fp.screen.devicePixelRatio > 4) {
+  // screen size and devicePixelRatio are one measurement, not two: the CSS size is the panel divided by
+  // the OS scale factor. A pair that no panel/scale step produces (1920x1080 at dpr 1.5 would need a
+  // 2880x1620 panel; 1536x864 at dpr 2 a 3072x1728 one) is a contradiction a page reads in two lines.
+  if (
+    !isPlausibleDisplayMode(fp.os, {
+      width: fp.screen.width,
+      height: fp.screen.height,
+      dpr: fp.screen.devicePixelRatio,
+    })
+  ) {
     issues.push(
-      `devicePixelRatio (${fp.screen.devicePixelRatio}) is outside the plausible (0, 4] range`,
+      `screen ${fp.screen.width}x${fp.screen.height} at devicePixelRatio ` +
+        `${fp.screen.devicePixelRatio} is not a mode any real ${fp.os} display produces`,
     );
   }
 

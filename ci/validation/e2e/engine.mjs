@@ -81,7 +81,7 @@ export function resolveEngine() {
  * headless CI profile. It does NOT enable any CDP domain — the endpoint is opened, and the driver
  * under test is the only thing that talks to it.
  */
-export async function launchEngine({ bin, headless = true, extraArgs = [] }) {
+export async function launchEngine({ bin, headless = true, extraArgs = [], env = {} }) {
   const userDataDir = await mkdtemp(join(tmpdir(), 'lobee-e2e-profile-'));
   await clearDevToolsActivePort(userDataDir);
   const args = [
@@ -98,7 +98,14 @@ export async function launchEngine({ bin, headless = true, extraArgs = [] }) {
     ...extraArgs,
     'about:blank',
   ];
-  const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: false });
+  // Merged onto the inherited environment, never replacing it: the engine needs DISPLAY, PATH and the
+  // GPU driver variables to start at all, and `env` here only ever adds the per-profile values the
+  // production launcher also sets (TZ above all).
+  const child = spawn(bin, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: false,
+    env: { ...process.env, ...env },
+  });
   // Drain the pipes: a filled stdio buffer deadlocks the renderer on a chatty build.
   child.stdout.resume();
   child.stderr.resume();

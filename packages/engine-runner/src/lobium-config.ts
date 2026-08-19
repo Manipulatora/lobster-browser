@@ -51,10 +51,14 @@ export interface LobiumNetConfig {
   proxy?: { type: string; host: string; port: number };
 }
 
-export interface LobiumPolicyConfig extends FingerprintLaunchPolicy {
-  /** Profile-selected OS build/version label, when present. */
-  osVersion?: string;
-}
+/**
+ * Exactly the launch policy — nothing else. The profile's OS-version label deliberately does NOT
+ * appear here: it is a UI string ("Windows 11 23H2") whose only engine-visible meaning is the UA-CH
+ * platform version, which the sidecar already resolves into `navigator.uaPlatformVersion` before the
+ * config is built. Emitting the label too would put a second, unparsed OS-version claim in the
+ * document, and the native side would have to re-derive what it already receives.
+ */
+export type LobiumPolicyConfig = FingerprintLaunchPolicy;
 
 /** The exact JSON document written to `lobium-fp.json` and parsed by the native config-channel patch. */
 export interface LobiumConfig {
@@ -92,7 +96,6 @@ export interface BuildLobiumConfigOptions {
   proxy?: Pick<ProxyConfig, 'type' | 'host' | 'port'>;
   /** The profile's fingerprint seed; farbling seeds derive from it (else from a fingerprint signature). */
   seed?: string;
-  osVersion?: string;
   webrtcPolicy?: WebRtcPolicy;
   rendererPolicy?: RendererPolicy;
   hardwareNoise?: Partial<HardwareNoisePolicy>;
@@ -206,7 +209,6 @@ export function buildLobiumConfig(
     hardwareNoise: { ...DEFAULT_HARDWARE_NOISE, ...opts.hardwareNoise },
     mediaDevices: { ...DEFAULT_MEDIA_DEVICES, ...opts.mediaDevices },
   };
-  if (opts.osVersion) policy.osVersion = opts.osVersion;
   const noise = policy.hardwareNoise;
   // Gate farbling seeds by Hardware noise checkboxes. A zero seed disables native farbling for that
   // surface (Lobium treats seed==0 as off).

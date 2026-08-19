@@ -5,9 +5,24 @@
  * `node:crypto` and breaks Vite/browser bundles. Desktop UI only needs derive / coherence /
  * overrides — export those here and point Vite at this file.
  */
-export { deriveFingerprint, deriveFromPools } from './derive.js';
+export { deriveDevicePersona, deriveFingerprint, deriveFromPools } from './derive.js';
 export { ENGINE_CHROME } from './pools.js';
-export type { DeriveOptions } from './derive.js';
+export type { DeriveDeviceOptions, DeriveOptions, DerivedDevicePersona } from './derive.js';
+export {
+  DEVICE_TIER_ENVELOPES,
+  HIGH_CORE_MEMORY_FLOOR,
+  gpuTierFromRenderer,
+} from './device-tiers.js';
+export type { DeviceTierEnvelope, GpuTier } from './device-tiers.js';
+export {
+  MACOS_APPLE_SILICON_MODES,
+  MACOS_INTEL_MODES,
+  MACOS_RETINA_MODES,
+  displayModesFor,
+  isPlausibleDisplayMode,
+  normalizeDevicePixelRatio,
+} from './displays.js';
+export type { DisplayMode } from './displays.js';
 export {
   applyGeoToFingerprint,
   resolveFingerprintPersonaModes,
@@ -15,6 +30,7 @@ export {
   normalizeDeviceMemory,
   normalizeColorDepth,
   DEVICE_MEMORY_VALUES,
+  DESKTOP_DEVICE_MEMORY_VALUES,
   DESKTOP_MIN_DEVICE_MEMORY,
 } from './coherence.js';
 export { applyOverrides } from './overrides.js';
