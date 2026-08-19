@@ -6,34 +6,18 @@ import {
 import { deriveGeoFromExitIp, toEnginePlaywrightProxy } from '@lobster/proxy';
 import type {
   Fingerprint,
-  FingerprintLaunchPolicy,
   GeoInfo,
-  HardwareNoisePolicy,
   LaunchParams,
   LaunchResult,
-  MediaDeviceProfile,
   StartProfileParams,
 } from '@lobster/shared-types';
 import { assertUpstreamReachable } from './proxy-auth-adapter.js';
+import { resolveLaunchPolicy } from './launch-policy.js';
 import type { EngineRunner } from './runner.js';
 import {
   assertLobiumBuildCapabilities,
   requiredLobiumCapabilities,
 } from './lobium-capabilities.js';
-
-const DEFAULT_HARDWARE_NOISE: HardwareNoisePolicy = {
-  webgl: true,
-  canvas: true,
-  audio: true,
-  clientRects: false,
-};
-
-const DEFAULT_MEDIA_DEVICES: MediaDeviceProfile = {
-  cameras: 1,
-  microphones: 1,
-  speakers: 2,
-  stableDeviceIds: true,
-};
 
 /** True for the codes `deriveGeoFromExitIp`/upstream checks raise when the proxy is genuinely dead. */
 function isProxyUnreachableError(err: unknown): boolean {
@@ -71,6 +55,17 @@ export async function startAndroidEmulatedProfile(
       `refusing to launch profile ${params.profileId}: Lobium is the only supported engine`,
     );
   }
+  // Resolved before any proxy probe or persona derivation so an unsafe/invalid persona policy refuses
+  // the launch immediately, exactly as it does on the desktop path.
+  const launchPolicy = resolveLaunchPolicy(params, {
+    // The WebGL identity below always comes from Android's own device catalog (Adreno/Mali-class),
+    // never a host GPU capture — 'validated_preset' is the policy mode that means exactly that
+    // ("a pre-validated catalog persona, not host calibration"), even though no
+    // `resolveSourcedRendererPreset` lookup runs; native code never reads this mode (only the JS
+    // launch-policy bookkeeping and the required-capability list below do). A desktop renderer
+    // override cannot apply to a phone, so it is deliberately not honored here.
+    renderer: { mode: 'validated_preset', presetId: 'android-device-catalog' },
+  });
   const deviceType = params.fingerprintOverrides?.androidDeviceType ?? 'mobile';
   const deviceModel = params.fingerprintOverrides?.androidDeviceModel;
   const base = deriveAndroidFingerprint(params.fingerprintSeed, {
@@ -128,18 +123,6 @@ export async function startAndroidEmulatedProfile(
     webgl: android.webgl,
     locale: android.locale,
     fonts: android.fonts,
-  };
-
-  const launchPolicy: FingerprintLaunchPolicy = {
-    // The WebGL identity above already comes from Android's own device catalog (Adreno/Mali-class),
-    // never a host GPU capture — 'validated_preset' is the policy mode that means exactly that
-    // ("a pre-validated catalog persona, not host calibration"), even though no
-    // `resolveSourcedRendererPreset` lookup runs; native code never reads this mode (only the JS
-    // launch-policy bookkeeping and the required-capability list below do).
-    renderer: { mode: 'validated_preset', presetId: 'android-device-catalog' },
-    webrtc: params.proxy ? 'disable_non_proxied_udp' : 'default_public_interface_only',
-    hardwareNoise: DEFAULT_HARDWARE_NOISE,
-    mediaDevices: DEFAULT_MEDIA_DEVICES,
   };
 
   const buildCapabilities = await runner.getLobiumBuildCapabilities();

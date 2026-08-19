@@ -9,8 +9,8 @@
 import { homedir, platform as nodePlatform } from 'node:os';
 import { join } from 'node:path';
 import type { CpuArch, HostCalibrationProfile, OsFamily } from '@lobster/shared-types';
-import { validateHostCalibrationProfile } from '@lobster/fingerprint';
 import {
+  hostCalibrationIssues,
   loadHostCalibration,
   persistHostCalibration,
   resolveHostCalibrationPath,
@@ -60,16 +60,34 @@ export interface EnsureHostCalibrationResult {
   source: 'loaded' | 'probed' | 'missing';
 }
 
+// Keyed by the file being written. The probe spawns a real unspoofed browser and ends in a
+// read-modify-write of that file, and the sidecar handles requests concurrently, so two callers
+// asking for the same calibration must share one capture instead of racing two browsers into it.
+const inFlight = new Map<string, Promise<EnsureHostCalibrationResult>>();
+
 /**
  * Load or (when a probe is supplied) capture + persist the host calibration profile.
  */
-export async function ensureHostCalibration(
+export function ensureHostCalibration(
   opts: EnsureHostCalibrationOptions = {},
 ): Promise<EnsureHostCalibrationResult> {
   const path = opts.path ?? resolveHostCalibrationPath() ?? defaultHostCalibrationPath();
+  const running = inFlight.get(path);
+  if (running) return running;
+  const started = resolveHostCalibration(path, opts).finally(() => {
+    inFlight.delete(path);
+  });
+  inFlight.set(path, started);
+  return started;
+}
+
+async function resolveHostCalibration(
+  path: string,
+  opts: EnsureHostCalibrationOptions,
+): Promise<EnsureHostCalibrationResult> {
   const existing = await loadHostCalibration(path);
   if (existing) {
-    const issues = validateHostCalibrationProfile(existing, {
+    const issues = hostCalibrationIssues(existing, {
       allowSoftwareRenderer: allowProvisionalSoftwareGpu(),
     });
     if (issues.length === 0) {
@@ -92,7 +110,7 @@ export async function ensureHostCalibration(
   // cached it and then failed on every subsequent launch with the same error — and the cache made
   // it look permanent rather than like a bad capture. Refusing to persist keeps the failure
   // transient and self-correcting.
-  const issues = validateHostCalibrationProfile(profile, {
+  const issues = hostCalibrationIssues(profile, {
     allowSoftwareRenderer: allowProvisionalSoftwareGpu(),
   });
   if (issues.length > 0) {

@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, dirname } from 'node:path';
+import { signalProcessTree } from './process-tree.js';
 
 export interface AndroidMirrorOptions {
   serial: string;
@@ -73,19 +74,23 @@ export async function launchAndroidMirror(
   opts: AndroidMirrorOptions,
 ): Promise<AndroidMirrorHandle> {
   const executable = opts.executablePath ?? process.env.LOBSTER_SCRCPY_BIN ?? 'scrcpy';
-  if (executable.includes('/')) await access(executable, constants.X_OK);
+  // A bare name is resolved from PATH by the OS; only a configured path is ours to pre-check. Windows
+  // separates with a backslash, so `dirname` is what distinguishes the two on both platforms.
+  if (dirname(executable) !== '.') await access(executable, constants.X_OK);
   const child = spawn(executable, buildAndroidMirrorArgs(opts), {
     stdio: 'ignore',
+    detached: process.platform !== 'win32',
     windowsHide: false,
   });
   await waitForSpawn(child, executable);
   return {
     close: async () => {
       if (child.exitCode !== null || child.killed) return;
-      child.kill('SIGTERM');
+      // scrcpy runs its own adb server/tunnel children, which outlive a kill aimed at scrcpy alone.
+      signalProcessTree(child, 'SIGTERM');
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
-          if (child.exitCode === null) child.kill('SIGKILL');
+          if (child.exitCode === null) signalProcessTree(child, 'SIGKILL');
           resolve();
         }, 1500);
         child.once('exit', () => {

@@ -1,0 +1,226 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+
+// turns.ts is deliberately React-free, so the reducer and the migration rules can be exercised
+// directly. These are the parts where a mistake silently destroys someone's conversation.
+const {
+  applyEvent,
+  mergeStoredMetadata,
+  recentThreads,
+  snapshotToTurn,
+  storedToTurn,
+  toStoredTurn,
+  turnsFromThread,
+} = await import('./turns.ts');
+
+function running(overrides = {}) {
+  return {
+    id: 1,
+    threadId: 't1',
+    localRecord: true,
+    needsSecureMigration: true,
+    task: 'do the thing',
+    status: 'running',
+    statusText: 'Working…',
+    steps: new Map(),
+    answer: '',
+    failure: '',
+    streamed: false,
+    tokensIn: 0,
+    tokensOut: 0,
+    cachedTokensIn: 0,
+    memoryWarning: '',
+    stopError: '',
+    await: null,
+    inputError: '',
+    animateAnswer: false,
+    ...overrides,
+  };
+}
+
+test('a failure is never presented as an answer', () => {
+  const failed = applyEvent(running({ answer: 'partial' }), {
+    type: 'run.finished',
+    status: 'error',
+    error: 'the site refused the login',
+  });
+  assert.equal(failed.status, 'error');
+  assert.equal(failed.failure, 'the site refused the login');
+  assert.equal(failed.answer, 'partial');
+  assert.equal(failed.animateAnswer, false);
+
+  const empty = applyEvent(running(), { type: 'run.finished', status: 'error' });
+  assert.equal(empty.failure, 'The run ended without a result.');
+});
+
+test('a streamed reply is never replayed through the typewriter', () => {
+  const streamed = applyEvent(running(), { type: 'answer.delta', text: 'Hel' });
+  assert.equal(streamed.answer, 'Hel');
+  assert.equal(streamed.streamed, true);
+  const finished = applyEvent(streamed, { type: 'run.finished', status: 'done', result: 'Hello' });
+  assert.equal(finished.answer, 'Hello');
+  assert.equal(finished.animateAnswer, false);
+
+  // Nothing streamed, so the finished answer is the first time this text appears on screen.
+  const atOnce = applyEvent(running(), { type: 'run.finished', status: 'done', result: 'Hello' });
+  assert.equal(atOnce.animateAnswer, true);
+});
+
+test('finishing clears a pending stop question and settles the thinking step', () => {
+  const stopping = applyEvent(running({ stopError: 'the stop did not land' }), {
+    type: 'step.thinking',
+    step: 0,
+  });
+  assert.equal(stopping.steps.get(0).thinking, true);
+  const done = applyEvent(stopping, { type: 'run.finished', status: 'done', result: 'ok' });
+  assert.equal(done.stopError, '');
+  assert.equal(done.steps.get(0).thinking, false);
+  assert.equal(done.steps.get(0).done, true);
+});
+
+test('usage accumulates instead of being discarded', () => {
+  let turn = running();
+  turn = applyEvent(turn, { type: 'usage', usage: { tokensIn: 10, tokensOut: 2 } });
+  turn = applyEvent(turn, { type: 'usage', usage: { tokensIn: 5, cachedTokensIn: 4 } });
+  assert.equal(turn.tokensIn, 15);
+  assert.equal(turn.tokensOut, 2);
+  assert.equal(turn.cachedTokensIn, 4);
+});
+
+test('degraded memory is surfaced without failing the run', () => {
+  const turn = applyEvent(running(), { type: 'memory.degraded', scope: 'thread' });
+  assert.equal(turn.status, 'running');
+  assert.match(turn.memoryWarning, /could not be saved/);
+});
+
+test('only terminal, locally-owned turns are persisted, and bodies only while unverified', () => {
+  assert.equal(toStoredTurn(running()), null);
+  assert.equal(toStoredTurn(running({ status: 'done', localRecord: false })), null);
+
+  const unverified = toStoredTurn(
+    running({ status: 'done', answer: 'the reply', tokensIn: 7, needsSecureMigration: true }),
+  );
+  assert.equal(unverified.answer, 'the reply');
+  assert.equal(unverified.needsSecureMigration, true);
+  assert.equal(unverified.tokensIn, 7);
+
+  // Once the encrypted copy is verified the local row keeps correlation metadata and nothing else.
+  const verified = toStoredTurn(
+    running({ status: 'done', answer: 'the reply', needsSecureMigration: false }),
+  );
+  assert.equal(verified.answer, undefined);
+  assert.equal(verified.task, undefined);
+  assert.equal(verified.threadId, 't1');
+});
+
+test('a stored legacy row round-trips into a renderable turn', () => {
+  const turn = storedToTurn({
+    id: 4,
+    threadId: 't1',
+    status: 'error',
+    task: 'log in',
+    answer: 'it refused',
+    needsSecureMigration: true,
+    steps: [{ label: 'Navigate', ctx: 'example.com' }],
+  });
+  assert.equal(turn.failure, 'it refused');
+  assert.equal(turn.answer, '');
+  assert.equal(turn.statusText, 'Failed');
+  assert.equal(turn.stopError, '');
+  assert.equal(turn.steps.get(0).label, 'Navigate');
+});
+
+test('a retained snapshot keeps its awaiting prompt and stays unverified', () => {
+  const turn = snapshotToTurn(
+    {
+      sessionId: 's1',
+      profileId: 'p1',
+      task: 'book a table',
+      status: 'awaiting_input',
+      step: 2,
+      startedAt: '2026-01-01T00:00:00.000Z',
+      awaitingPrompt: 'Which time?',
+      awaitingKind: 'ask',
+    },
+    9,
+    't1',
+  );
+  assert.equal(turn.status, 'running');
+  assert.equal(turn.statusText, 'Needs you');
+  assert.equal(turn.await.prompt, 'Which time?');
+  assert.equal(turn.needsSecureMigration, true);
+});
+
+test('metadata only merges onto the encrypted turn it actually verifies', () => {
+  const encrypted = turnsFromThread(
+    [
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: 'one', turnId: 'k1' },
+      { role: 'user', content: 'second' },
+      { role: 'assistant', content: 'two', turnId: 'k2' },
+    ],
+    't1',
+  );
+  assert.equal(encrypted.length, 2);
+  assert.equal(encrypted[0].needsSecureMigration, false);
+
+  const merged = mergeStoredMetadata(encrypted, [
+    storedToTurn({
+      id: 41,
+      threadId: 't1',
+      status: 'done',
+      task: 'second',
+      answer: 'two',
+      needsSecureMigration: true,
+      tokensIn: 3,
+    }),
+  ]);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[1].id, 41);
+  assert.equal(merged[1].tokensIn, 3);
+  // The exact body was found in the encrypted thread, so the local plaintext may now be retired.
+  assert.equal(merged[1].needsSecureMigration, false);
+  assert.equal(merged[0].localRecord, false);
+});
+
+test('metadata that verifies nothing is kept as its own row rather than shifted onto a neighbour', () => {
+  const encrypted = turnsFromThread(
+    [
+      { role: 'user', content: 'first' },
+      { role: 'assistant', content: 'one' },
+    ],
+    't1',
+  );
+  const orphan = storedToTurn({
+    id: 77,
+    threadId: 't1',
+    status: 'done',
+    task: 'something else entirely',
+    answer: 'and a different answer',
+    needsSecureMigration: true,
+  });
+  const merged = mergeStoredMetadata(encrypted, [orphan]);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[1].id, 77);
+  assert.equal(merged[1].needsSecureMigration, true);
+});
+
+test('every conversation the index can reach is listed, current one first', () => {
+  const list = recentThreads(
+    [
+      { id: 1, threadId: 'old', status: 'done', startedAt: '2026-01-01T00:00:00.000Z' },
+      { id: 2, threadId: 'newer', status: 'done', startedAt: '2026-02-01T00:00:00.000Z' },
+      { id: 3, threadId: 'newer', status: 'done', startedAt: '2026-02-02T00:00:00.000Z' },
+      { id: 4, status: 'done' },
+    ],
+    'current',
+  );
+  assert.deepEqual(
+    list.map((thread) => thread.id),
+    ['current', 'newer', 'old'],
+  );
+  assert.equal(list[1].turns, 2);
+  assert.equal(list[1].at, '2026-02-02T00:00:00.000Z');
+  // A brand new conversation has no rows yet and still has to be reachable in the list.
+  assert.equal(list[0].turns, 0);
+});

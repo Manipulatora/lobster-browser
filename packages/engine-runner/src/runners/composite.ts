@@ -23,6 +23,11 @@ import type { LaunchContext, LaunchHandle, LauncherRegistry } from './types.js';
 export class CompositeRunner implements EngineRunner {
   private readonly launchers: LauncherRegistry;
   private readonly running = new Map<string, LaunchHandle>();
+  // Reserved for the whole duration of a launch, not just once it succeeds. The sidecar dispatches
+  // requests concurrently, so without this two starts of the same profile both pass the `running`
+  // check and spawn two browsers over one user-data-dir — the second corrupts the profile and the
+  // first handle is replaced in the map and can never be stopped.
+  private readonly starting = new Set<string>();
   private readonly recentErrors = new Map<string, string>();
 
   constructor(launchers: LauncherRegistry = defaultLaunchers) {
@@ -40,7 +45,7 @@ export class CompositeRunner implements EngineRunner {
   }
 
   async launch(params: LaunchParams): Promise<LaunchResult> {
-    if (this.running.has(params.profileId)) {
+    if (this.running.has(params.profileId) || this.starting.has(params.profileId)) {
       throw new Error(`profile ${params.profileId} is already running`);
     }
     this.recentErrors.delete(params.profileId);
@@ -48,6 +53,7 @@ export class CompositeRunner implements EngineRunner {
     if (!launcher) {
       throw new Error(`no launcher registered for engine "${params.engine}"`);
     }
+    this.starting.add(params.profileId);
 
     const ctx: LaunchContext = {
       profileId: params.profileId,
@@ -69,7 +75,12 @@ export class CompositeRunner implements EngineRunner {
       initScript: buildFingerprintInitScript(params.fingerprint),
     };
 
-    const handle = await launcher(ctx);
+    let handle: LaunchHandle;
+    try {
+      handle = await launcher(ctx);
+    } finally {
+      this.starting.delete(params.profileId);
+    }
     this.running.set(params.profileId, handle);
     // Evict the profile if the browser dies out-of-band (crash / user closes the window). Without this
     // the map entry survives and `launch` rejects with "already running" forever — a crash would brick

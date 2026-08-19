@@ -32,7 +32,11 @@ export async function resolveCdpTarget(wsUrl: string): Promise<string> {
   try {
     const u = new URL(wsUrl);
     const listUrl = `http://${u.hostname}:${u.port}/json/list`;
-    const targets = (await fetch(listUrl).then((r) => r.json())) as Array<{
+    // Bounded: this runs BEFORE the session timer below exists, so an endpoint that accepts the
+    // connection and never answers would hang the caller with no deadline at all.
+    const targets = (await fetch(listUrl, { signal: AbortSignal.timeout(5_000) }).then((r) =>
+      r.json(),
+    )) as Array<{
       type?: string;
       webSocketDebuggerUrl?: string;
     }>;
@@ -62,15 +66,52 @@ export async function withCdpSession<T>(
       number,
       { resolve: (v: unknown) => void; reject: (e: Error) => void }
     >();
-    const send = (method: string, params?: Record<string, unknown>) =>
+    const send = (
+      method: string,
+      params?: Record<string, unknown>,
+      sendOpts?: { timeoutMs?: number },
+    ) =>
       new Promise<unknown>((res, rej) => {
         const id = nextId++;
-        pending.set(id, { resolve: res, reject: rej });
-        ws.send(JSON.stringify({ id, method, params }));
+        // A per-command deadline is what lets a caller bound ONE slow command (a probe evaluate, a
+        // large cookie batch) without widening the whole session's deadline.
+        const commandTimeoutMs = sendOpts?.timeoutMs;
+        const commandTimer =
+          commandTimeoutMs === undefined
+            ? undefined
+            : setTimeout(() => {
+                pending.delete(id);
+                rej(new Error(`CDP command ${method} timed out after ${commandTimeoutMs}ms`));
+              }, commandTimeoutMs);
+        commandTimer?.unref();
+        pending.set(id, {
+          resolve: (value) => {
+            if (commandTimer) clearTimeout(commandTimer);
+            res(value);
+          },
+          reject: (error) => {
+            if (commandTimer) clearTimeout(commandTimer);
+            rej(error);
+          },
+        });
+        try {
+          ws.send(JSON.stringify({ id, method, params }));
+        } catch (err) {
+          pending.delete(id);
+          if (commandTimer) clearTimeout(commandTimer);
+          rej(err instanceof Error ? err : new Error(String(err)));
+        }
       });
+
+    /** Fail every in-flight command at once: nothing can answer them after the socket is gone. */
+    const rejectPending = (error: Error): void => {
+      for (const p of [...pending.values()]) p.reject(error);
+      pending.clear();
+    };
 
     const timer = setTimeout(() => {
       ws.close();
+      rejectPending(new Error('CDP operation timed out'));
       reject(new Error('CDP operation timed out'));
     }, timeoutMs);
 
@@ -79,12 +120,14 @@ export async function withCdpSession<T>(
         try {
           const result = await operation({ send });
           clearTimeout(timer);
-          ws.close();
+          // Settle before closing: the close handler below reports an unfinished session, and it must
+          // not win the race against the outcome this operation already produced.
           resolve(result);
+          ws.close();
         } catch (err) {
           clearTimeout(timer);
-          ws.close();
           reject(err instanceof Error ? err : new Error(String(err)));
+          ws.close();
         }
       })();
     });
@@ -107,7 +150,15 @@ export async function withCdpSession<T>(
     });
     ws.addEventListener('error', () => {
       clearTimeout(timer);
+      rejectPending(new Error('CDP websocket error'));
       reject(new Error('CDP websocket error'));
+    });
+    // The browser closing the transport mid-operation is otherwise invisible: the commands it never
+    // answered would sit pending until the coarse session timeout above expires.
+    ws.addEventListener('close', () => {
+      clearTimeout(timer);
+      rejectPending(new Error('CDP websocket closed'));
+      reject(new Error('CDP websocket closed'));
     });
   });
 }

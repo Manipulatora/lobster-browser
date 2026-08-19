@@ -29,6 +29,21 @@ function tcpReachable(port: number, host = '127.0.0.1', timeoutMs = 250): Promis
 }
 
 /**
+ * How long a launch waits for the engine to publish its CDP endpoint.
+ *
+ * A first run on a cold Windows box creates the profile directory, unpacks component data and does it
+ * all through an on-access virus scanner, which can push the endpoint well past the ten seconds a
+ * warm Linux dev machine needs. The old fixed cap turned that into a spurious "timed out waiting for
+ * the Lobium CDP endpoint" launch failure, so the deadline is generous and operators can raise it.
+ */
+const DEFAULT_ENDPOINT_TIMEOUT_MS = 45_000;
+
+function endpointTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env.LOBSTER_CDP_ENDPOINT_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_ENDPOINT_TIMEOUT_MS;
+}
+
+/**
  * Read Chromium's `DevToolsActivePort` file, written by `--remote-debugging-port=0`.
  *
  * A previous crash/kill can leave a stale file pointing at a dead port. Callers should
@@ -37,10 +52,12 @@ function tcpReachable(port: number, host = '127.0.0.1', timeoutMs = 250): Promis
  */
 export async function readDevToolsEndpoint(
   userDataDir: string,
-  retries = 100,
+  opts: { timeoutMs?: number } = {},
 ): Promise<{ port: number; ws: string }> {
   const file = join(userDataDir, 'DevToolsActivePort');
-  for (let attempt = 0; attempt < retries; attempt += 1) {
+  const timeoutMs = opts.timeoutMs ?? endpointTimeoutMs();
+  const deadline = Date.now() + timeoutMs;
+  for (let attempt = 0; ; attempt += 1) {
     try {
       const [portLine, pathLine] = (await readFile(file, 'utf8')).split('\n');
       const port = Number(portLine);
@@ -50,7 +67,12 @@ export async function readDevToolsEndpoint(
     } catch {
       // The browser is still starting and has not written the endpoint file yet.
     }
-    await delay(100);
+    if (Date.now() >= deadline) break;
+    // Poll tightly at first: the endpoint is published before the startup window is created, so every
+    // millisecond saved here is a millisecond of first-page load the launch still gets to configure.
+    await delay(attempt < 40 ? 25 : 100);
   }
-  throw new Error('timed out waiting for the Lobium CDP endpoint (DevToolsActivePort)');
+  throw new Error(
+    `timed out waiting for the Lobium CDP endpoint (DevToolsActivePort) after ${timeoutMs}ms`,
+  );
 }

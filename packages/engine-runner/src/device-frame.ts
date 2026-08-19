@@ -51,24 +51,47 @@ export function desktopWorkAreaFromEnv(): { width: number; height: number } {
 
 let detectedDesktopWorkArea: Promise<{ width: number; height: number }> | undefined;
 
-/** Resolve the real X11 work area once per sidecar process, with deterministic env/fallback paths. */
+/**
+ * Measure the desktop the device stage has to fit into.
+ *
+ * `xrandr` only exists under X11, so on Windows it fails and the phone window used to be centered
+ * against a hardcoded 1920x1080 — wrong on every laptop and every 4K desk. Windows reports the
+ * taskbar-excluded work area through WinForms, which needs no native dependency, and the query runs
+ * at most once per sidecar process.
+ */
+async function measureDesktopWorkArea(): Promise<{ width: number; height: number }> {
+  if (process.platform === 'win32') {
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        'Add-Type -AssemblyName System.Windows.Forms; ' +
+          '$area = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea; ' +
+          '"$($area.Width)x$($area.Height)"',
+      ],
+      { env: process.env, timeout: 5000, windowsHide: true },
+    );
+    const match = /(\d+)\s*x\s*(\d+)/.exec(stdout);
+    if (!match) return desktopWorkAreaFromEnv();
+    return { width: positiveInt(match[1], 1920), height: positiveInt(match[2], 1080) };
+  }
+  const { stdout } = await execFileAsync('xrandr', ['--current'], {
+    env: process.env,
+    timeout: 1500,
+  });
+  const match = /current\s+(\d+)\s+x\s+(\d+)/i.exec(stdout);
+  if (!match) return desktopWorkAreaFromEnv();
+  return { width: positiveInt(match[1], 1920), height: positiveInt(match[2], 1080) };
+}
+
+/** Resolve the real desktop work area once per sidecar process, with deterministic env/fallback paths. */
 export function resolveDesktopWorkArea(): Promise<{ width: number; height: number }> {
   if (process.env.LOBSTER_DESKTOP_WIDTH || process.env.LOBSTER_DESKTOP_HEIGHT) {
     return Promise.resolve(desktopWorkAreaFromEnv());
   }
-  detectedDesktopWorkArea ??= execFileAsync('xrandr', ['--current'], {
-    env: process.env,
-    timeout: 1500,
-  })
-    .then(({ stdout }) => {
-      const match = /current\s+(\d+)\s+x\s+(\d+)/i.exec(stdout);
-      if (!match) return desktopWorkAreaFromEnv();
-      return {
-        width: positiveInt(match[1], 1920),
-        height: positiveInt(match[2], 1080),
-      };
-    })
-    .catch(() => desktopWorkAreaFromEnv());
+  detectedDesktopWorkArea ??= measureDesktopWorkArea().catch(() => desktopWorkAreaFromEnv());
   return detectedDesktopWorkArea;
 }
 

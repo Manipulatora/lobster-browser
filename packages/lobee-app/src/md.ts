@@ -13,8 +13,12 @@ const AUTOLINK = /^(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/;
 
 function safeUrl(url: string, allowImage = false): string | null {
   const trimmed = url.trim().replace(/^<|>$/g, '');
+  // Only absolute references. A relative or protocol-relative one re-resolves against the panel's own
+  // chrome-extension:// origin, so `[docs](/about)` would render as a citation that can only ever
+  // open a dead extension URL. Rendering the label as plain text is the honest outcome.
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return null;
   try {
-    const parsed = new URL(trimmed, 'https://x.invalid');
+    const parsed = new URL(trimmed);
     const scheme = parsed.protocol;
     if (scheme === 'http:' || scheme === 'https:' || scheme === 'mailto:') return trimmed;
     // Inline images are a common way to render small diagrams; data: is safe for them because the
@@ -224,6 +228,23 @@ function tableCells(row: string): string[] {
 
 const DELIMITER_ROW = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/;
 
+/**
+ * A GFM table starts where a header row is immediately followed by its delimiter row.
+ *
+ * The delimiter must carry a pipe of its own, or a bare `---` under a sentence containing a pipe
+ * would be read as a one-column table instead of the horizontal rule it is.
+ */
+function startsTable(header: string | undefined, delimiter: string | undefined): boolean {
+  return (
+    !!header &&
+    header.includes('|') &&
+    !!delimiter &&
+    delimiter.includes('|') &&
+    delimiter.includes('-') &&
+    DELIMITER_ROW.test(delimiter)
+  );
+}
+
 function alignments(row: string): Array<'left' | 'center' | 'right' | null> {
   return tableCells(row).map((cell) => {
     const left = cell.startsWith(':');
@@ -352,6 +373,32 @@ function codeBlock(language: string, body: string): HTMLElement {
   return wrapper;
 }
 
+/**
+ * Where a streamed answer stops being able to change shape.
+ *
+ * Every block ends at a blank line, so text appended after the LAST blank line (one not sitting inside
+ * an open fence) can never reparse anything before it. Callers re-render only the part after this
+ * offset, which is what keeps a mid-stream text selection — and a code block's Copy button — alive
+ * instead of tearing the whole answer down on every token.
+ */
+export function stableBlockBoundary(src: string): number {
+  const text = String(src ?? '');
+  let boundary = 0;
+  let offset = 0;
+  let fence = '';
+  for (const line of text.split('\n')) {
+    const marker = /^\s*(```+|~~~+)/.exec(line);
+    if (fence) {
+      if (marker && new RegExp(`^\\s*${fence}+\\s*$`).test(line)) fence = '';
+    } else if (marker) {
+      fence = marker[1]!.slice(0, 3);
+    }
+    offset += line.length + 1;
+    if (!fence && !line.trim()) boundary = Math.min(offset, text.length);
+  }
+  return boundary;
+}
+
 export function renderMarkdown(src: string): DocumentFragment {
   const frag = document.createDocumentFragment();
   const cur: Cursor = {
@@ -390,8 +437,8 @@ export function renderMarkdown(src: string): DocumentFragment {
 
     // GFM table: a header row followed by a delimiter row.
     const next = cur.lines[cur.i + 1];
-    if (line.includes('|') && next && DELIMITER_ROW.test(next) && next.includes('-')) {
-      const align = alignments(next);
+    if (startsTable(line, next)) {
+      const align = alignments(next!);
       const table = document.createElement('table');
       const thead = document.createElement('thead');
       const headRow = document.createElement('tr');
@@ -474,7 +521,10 @@ export function renderMarkdown(src: string): DocumentFragment {
         /^(#{1,6}\s|\s*(?:```|~~~)|\s*>)/.test(candidate) ||
         BULLET.test(candidate) ||
         ORDERED.test(candidate) ||
-        /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(candidate)
+        /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/.test(candidate) ||
+        // Models introduce a table with a sentence and no blank line after it. Absorbing the header
+        // into that paragraph is what turned the table back into a run-on line of literal pipes.
+        startsTable(candidate, cur.lines[cur.i + 1])
       ) {
         break;
       }

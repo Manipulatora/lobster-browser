@@ -54,7 +54,7 @@ Object.defineProperty(globalThis, 'navigator', {
   configurable: true,
 });
 
-const { renderMarkdown } = await import('./md.ts');
+const { renderMarkdown, stableBlockBoundary } = await import('./md.ts');
 
 /** Depth-first search for the first element with this tag. */
 function find(node, tag) {
@@ -93,6 +93,26 @@ test('renders a GFM table with alignment instead of a run-on line of pipes', () 
   // Alignment from the delimiter row is honoured.
   assert.equal(findAll(table, 'th')[1].style.textAlign, 'right');
   assert.equal(findAll(table, 'th')[2].style.textAlign, 'center');
+});
+
+test('a table directly under its introducing sentence is still a table', () => {
+  // The shape models emit constantly: one line of prose, then the table, with no blank line between.
+  const frag = renderMarkdown(
+    ['Here are the results:', '| a | b |', '| --- | --- |', '| 1 | 2 |'].join('\n'),
+  );
+  const paragraph = find(frag, 'p');
+  assert.equal(paragraph.textContent, 'Here are the results:');
+  const table = find(frag, 'table');
+  assert.ok(table, 'the table must not be absorbed into the paragraph as literal pipes');
+  assert.deepEqual(
+    findAll(table, 'td').map((cell) => cell.textContent),
+    ['1', '2'],
+  );
+
+  // A bare rule under a line that merely contains a pipe stays a rule, not a one-column table.
+  const rule = renderMarkdown('a | b\n---');
+  assert.equal(findAll(rule, 'table').length, 0);
+  assert.ok(find(rule, 'hr'));
 });
 
 test('nested lists nest, and an ordered list keeps its starting number', () => {
@@ -149,6 +169,37 @@ test('dangerous URLs are refused while their text is kept', () => {
   assert.equal(findAll(frag, 'a').length, 0, 'a javascript: URL must never become a link');
   assert.match(frag.textContent, /click me/);
   assert.equal(findAll(renderMarkdown('![x](javascript:alert(1))'), 'img').length, 0);
+});
+
+test('relative and protocol-relative references never become links', () => {
+  // They would resolve against the panel's own chrome-extension:// origin and only ever error.
+  const relative = renderMarkdown('[docs](/about)');
+  assert.equal(findAll(relative, 'a').length, 0);
+  assert.match(relative.textContent, /docs/);
+  assert.equal(findAll(renderMarkdown('[pr](//evil.tld/x)'), 'a').length, 0);
+  assert.equal(findAll(renderMarkdown('[here]()'), 'a').length, 0);
+  // An absolute reference is untouched, including its exact spelling.
+  assert.equal(
+    find(renderMarkdown('[docs](https://example.com/a?b=1)'), 'a').getAttribute('href'),
+    'https://example.com/a?b=1',
+  );
+  assert.equal(
+    find(renderMarkdown('[mail](mailto:a@b.example)'), 'a').getAttribute('href'),
+    'mailto:a@b.example',
+  );
+});
+
+test('a streamed answer only has to rebuild the block it is still writing', () => {
+  assert.equal(stableBlockBoundary('one paragraph, no break yet'), 0);
+  const text = 'settled paragraph\n\nstill wri';
+  assert.equal(stableBlockBoundary(text), 'settled paragraph\n\n'.length);
+  assert.equal(text.slice(stableBlockBoundary(text)), 'still wri');
+  // A blank line inside an unterminated fence is part of the block being written, not a boundary.
+  assert.equal(stableBlockBoundary('```ts\nconst a = 1;\n\nconst b = 2;'), 0);
+  assert.equal(
+    stableBlockBoundary('```ts\nconst a = 1;\n```\n\ntail'),
+    '```ts\nconst a = 1;\n```\n\n'.length,
+  );
 });
 
 test('task lists, strikethrough, images and autolinks render', () => {
@@ -240,7 +291,10 @@ test('every extension manifest forbids remote subresources', () => {
     );
     for (const name of ['img-src', 'media-src', 'frame-src']) {
       const sources = directives.get(name);
-      assert.ok(sources, `${path}: ${name} must be declared — extension_pages replaces the default`);
+      assert.ok(
+        sources,
+        `${path}: ${name} must be declared — extension_pages replaces the default`,
+      );
       for (const source of sources) {
         assert.ok(
           !/^\*|^https?:|^\/\//.test(source),

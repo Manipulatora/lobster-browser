@@ -41,6 +41,7 @@ import {
   type LocalProxyAdapter,
 } from '../proxy-auth-adapter.js';
 import { resolveGpuMode } from '../gpu.js';
+import { signalProcessTree } from '../process-tree.js';
 import { deviceFrameGeometry, resolveDesktopWorkArea } from '../device-frame.js';
 import {
   installMobileEmulationForAllTargets,
@@ -161,7 +162,12 @@ export function resolveFontsBaseDir(): string | undefined {
     // Windows build finds its pack without the user setting LOBSTER_FONTS_DIR by hand.
     ...(process.platform === 'win32'
       ? [
-          join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), 'Lobster', 'lobium', 'fonts'),
+          join(
+            process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'),
+            'Lobster',
+            'lobium',
+            'fonts',
+          ),
           join(process.env.PROGRAMDATA ?? 'C:\\ProgramData', 'Lobster', 'lobium', 'fonts'),
         ]
       : []),
@@ -423,16 +429,6 @@ async function buildNativeLobiumEnv(
 ): Promise<NodeJS.ProcessEnv> {
   const extraEnv = opts.envFor ? await opts.envFor(ctx) : await buildLobiumLaunchEnv(ctx);
   return extraEnv ? { ...process.env, ...extraEnv } : process.env;
-}
-
-function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (!child.pid) return;
-  try {
-    if (process.platform === 'win32') child.kill(signal);
-    else process.kill(-child.pid, signal);
-  } catch {
-    child.kill(signal);
-  }
 }
 
 /**
@@ -807,6 +803,19 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
       );
       await reportUnloadableUserExtensions(ctx, args);
       const env = await buildNativeLobiumEnv(ctx, opts);
+      // Resolved BEFORE the spawn: everything between the CDP endpoint appearing and the emulation
+      // commands landing is time the startup tab spends at desktop metrics, so the work-area lookup
+      // must not sit in that window.
+      const mobileEmulationOptions = ctx.isMobileProfile
+        ? {
+            formFactor: ctx.mobileFormFactor ?? 'phone',
+            initialScale: deviceFrameGeometry(
+              ctx.fingerprint.screen,
+              ctx.mobileFormFactor ?? 'phone',
+              await resolveDesktopWorkArea(),
+            ).visualScale,
+          }
+        : undefined;
       const child = spawn(bin, args, {
         env,
         detached: process.platform !== 'win32',
@@ -846,17 +855,22 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
         const { port, ws } = await waitForEndpointOrExit(child, ctx.options.userDataDir);
         // Cookie import must run after CDP is up; Patchright's connectOverCDP closes its own
         // connection on browser.close() without SIGTERM'ing our detached chrome (verified by E2E).
-        const cookieImportApplied = await applyCookiesToNativeLobium(ws, ctx.cookiesImport);
-        if (ctx.isMobileProfile) {
-          mobileEmulation = await installMobileEmulationForAllTargets(ws, ctx.fingerprint, {
-            formFactor: ctx.mobileFormFactor ?? 'phone',
-            initialScale: deviceFrameGeometry(
-              ctx.fingerprint.screen,
-              ctx.mobileFormFactor ?? 'phone',
-              await resolveDesktopWorkArea(),
-            ).visualScale,
-          });
-        }
+        //
+        // With --restore-last-session the previous tabs start loading as soon as the browser window
+        // exists, so both of these are racing that first navigation: neither may queue behind the
+        // other's round-trips. They use independent CDP sockets and touch different domains.
+        const [cookieImport, emulation] = await Promise.allSettled([
+          applyCookiesToNativeLobium(ws, ctx.cookiesImport),
+          mobileEmulationOptions
+            ? installMobileEmulationForAllTargets(ws, ctx.fingerprint, mobileEmulationOptions)
+            : Promise.resolve(undefined),
+        ]);
+        // Adopt a controller that came up even when the other half failed, so the failure path below
+        // still closes its socket instead of leaking it for the browser's lifetime.
+        if (emulation.status === 'fulfilled') mobileEmulation = emulation.value;
+        if (cookieImport.status === 'rejected') throw cookieImport.reason;
+        if (emulation.status === 'rejected') throw emulation.reason;
+        const cookieImportApplied = cookieImport.value;
         // NTP branding is now NATIVE (chrome://newtab, patched engine resources) — no CDP injection.
         const closeListeners = new Set<(reason?: string) => void>();
         const shutdownAdapter = async () => {

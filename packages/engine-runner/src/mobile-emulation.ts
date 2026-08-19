@@ -117,7 +117,10 @@ export async function installMobileEmulationForAllTargets(
         }
       }
     } finally {
-      // Auto-attach pauses every new target so no page script can observe desktop metrics first.
+      // Every target auto-attach created is paused before its first script, so it only resumes once
+      // the commands above have landed. The startup tab already exists when this controller attaches
+      // and is therefore configured in place — it is not waiting for a debugger, and the call is a
+      // harmless no-op for it.
       await send('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => undefined);
     }
   };
@@ -176,12 +179,14 @@ export async function installMobileEmulationForAllTargets(
 
   try {
     await opened;
-    await send('Target.setDiscoverTargets', { discover: true });
+    // Auto-attach first: a tab opened while discovery is being enabled would otherwise reach its
+    // first script unpaused and unconfigured.
     await send('Target.setAutoAttach', {
       autoAttach: true,
       waitForDebuggerOnStart: true,
       flatten: true,
     });
+    await send('Target.setDiscoverTargets', { discover: true });
 
     const result = (await send('Target.getTargets')) as {
       targetInfos?: Array<{ targetId: string; type: string }>;

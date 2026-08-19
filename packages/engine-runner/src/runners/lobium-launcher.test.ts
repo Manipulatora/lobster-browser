@@ -291,7 +291,9 @@ test('ensureChromiumLaunchPreferences replaces Preferences exactly once, by rena
     await writeFile(
       prefsPath,
       JSON.stringify({
-        profile: { content_settings: { exceptions: { notifications: { 'https://a.test,*': {} } } } },
+        profile: {
+          content_settings: { exceptions: { notifications: { 'https://a.test,*': {} } } },
+        },
         partition: { per_host_zoom_levels: { x: { 'a.test': 1.5 } } },
         extensions: { pinned_extensions: ['aaaabbbbccccddddeeeeffffgggghhhh'] },
       }),

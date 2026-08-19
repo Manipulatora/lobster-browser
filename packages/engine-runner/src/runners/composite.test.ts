@@ -187,3 +187,49 @@ test('default launchers report engine-not-provisioned (no binaries here)', async
   const runner = new CompositeRunner(defaultLaunchers);
   await assert.rejects(() => runner.launch(params('np', 'lobium')), /not provisioned/);
 });
+
+test('a second start of the same profile is refused while the first is still launching', async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let spawned = 0;
+  const runner = new CompositeRunner({
+    lobium: async (ctx: LaunchContext): Promise<LaunchHandle> => {
+      spawned += 1;
+      await held;
+      return {
+        pid: 4242,
+        ws: `ws://127.0.0.1:9222/${ctx.profileId}`,
+        debuggerAddress: '127.0.0.1:9222',
+        close: () => Promise.resolve(),
+      };
+    },
+  });
+
+  const first = runner.launch(params('slow-start'));
+  await assert.rejects(() => runner.launch(params('slow-start')), /already running/);
+  release();
+  await first;
+  assert.equal(spawned, 1, 'one user-data-dir must never get two browsers');
+});
+
+test('a failed launch releases the profile so it can be started again', async () => {
+  let attempt = 0;
+  const runner = new CompositeRunner({
+    lobium: async (ctx: LaunchContext): Promise<LaunchHandle> => {
+      attempt += 1;
+      if (attempt === 1) throw new Error('proxy upstream unreachable');
+      return {
+        pid: 7,
+        ws: `ws://127.0.0.1:9222/${ctx.profileId}`,
+        debuggerAddress: '127.0.0.1:9222',
+        close: () => Promise.resolve(),
+      };
+    },
+  });
+
+  await assert.rejects(() => runner.launch(params('retry')), /unreachable/);
+  const result = await runner.launch(params('retry'));
+  assert.equal(result.pid, 7);
+});

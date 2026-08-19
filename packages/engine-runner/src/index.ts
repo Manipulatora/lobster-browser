@@ -6,6 +6,22 @@ import { AgentBridge } from './agent/bridge.js';
 import { CompositeRunner } from './runners/composite.js';
 import { buildLaunchers } from './runners/default-launchers.js';
 import { buildDevShmArgs } from './dev-shm.js';
+import { createSemaphore } from './semaphore.js';
+
+/** How many profile launches may be in flight at once (spawn + proxy probe + CDP endpoint wait). */
+const DEFAULT_MAX_CONCURRENT_LAUNCHES = 8;
+
+function maxConcurrentLaunches(): number {
+  const configured = Number(process.env.LOBSTER_MAX_CONCURRENT_LAUNCHES);
+  return Number.isInteger(configured) && configured > 0
+    ? configured
+    : DEFAULT_MAX_CONCURRENT_LAUNCHES;
+}
+
+/** Requests that spawn a browser, and are therefore the ones worth rationing. */
+function isLaunchMethod(method: string): boolean {
+  return method === 'startProfile' || method === 'launch';
+}
 
 /**
  * Sidecar entry point. Reads newline-delimited JSON {@link SidecarRequest}s on stdin and
@@ -28,10 +44,17 @@ async function main(): Promise<void> {
   // out-of-band notification lines (no `id`) — the Rust reader routes any line carrying `notify` to a
   // broadcast channel instead of the request/response map. The manager resolves a profile's live CDP
   // endpoint from the runner's status, so an agent only attaches to an already-launched window.
+  // One write call per line. Requests are handled concurrently, so a response that reached stdout in
+  // several writes could be split by another handler's line; a single write of the whole line is what
+  // keeps the newline-delimited framing intact for the Rust reader.
+  const writeLine = (payload: unknown): void => {
+    process.stdout.write(JSON.stringify(payload) + '\n');
+  };
+
   let bridge: AgentBridge | undefined;
   const emitAgentEvent = (event: AgentEvent): void => {
     const line: SidecarNotification<AgentEvent> = { notify: 'agent', event };
-    process.stdout.write(JSON.stringify(line) + '\n');
+    writeLine(line);
     // Also stream to the in-browser Lobee panel (if any) over the loopback bridge.
     bridge?.dispatch(event);
   };
@@ -56,6 +79,20 @@ async function main(): Promise<void> {
 
   const rl = createInterface({ input: process.stdin });
 
+  // Launching a profile takes seconds (proxy reachability, spawn, DevToolsActivePort wait). Handling
+  // requests one at a time made that latency serial across the whole product: starting the second of
+  // a hundred profiles waited for the first browser to be up, and a status poll or agent call issued
+  // meanwhile waited behind both — past the desktop core's 90s per-call deadline on a large fleet.
+  // Responses carry the request id and the Rust reader routes them by id, so out-of-order completion
+  // is already part of the contract; what must stay bounded is how many browsers start at once.
+  const launches = createSemaphore(maxConcurrentLaunches());
+  const inFlight = new Set<Promise<void>>();
+
+  const handle = async (req: SidecarRequest): Promise<void> => {
+    const run = () => dispatch(runner, req, { agents });
+    writeLine(isLaunchMethod(req.method) ? await launches.run(run) : await run());
+  };
+
   for await (const line of rl) {
     const trimmed = line.trim();
     if (trimmed === '') continue;
@@ -64,19 +101,30 @@ async function main(): Promise<void> {
     try {
       req = JSON.parse(trimmed) as SidecarRequest;
     } catch {
-      process.stdout.write(
-        JSON.stringify({
-          id: 'unknown',
-          ok: false,
-          error: { code: 'bad_json', message: 'invalid JSON' },
-        }) + '\n',
-      );
+      writeLine({
+        id: 'unknown',
+        ok: false,
+        error: { code: 'bad_json', message: 'invalid JSON' },
+      });
       continue;
     }
 
-    const res = await dispatch(runner, req, { agents });
-    process.stdout.write(JSON.stringify(res) + '\n');
+    const task = handle(req)
+      .catch((err: unknown) => {
+        // `dispatch` reports its own failures; this only covers a handler that broke before it.
+        writeLine({
+          id: req.id ?? 'unknown',
+          ok: false,
+          error: { code: 'internal', message: err instanceof Error ? err.message : String(err) },
+        });
+      })
+      .finally(() => {
+        inFlight.delete(task);
+      });
+    inFlight.add(task);
   }
+  // stdin closed: give the launches still in flight their chance to answer before the process ends.
+  await Promise.allSettled([...inFlight]);
 }
 
 main().catch((e: unknown) => {

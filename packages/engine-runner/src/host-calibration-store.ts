@@ -17,6 +17,25 @@ import { allowProvisionalSoftwareGpu } from './gpu.js';
  * the default and the catalog path is used (so existing CI/tests are unchanged).
  */
 
+/**
+ * Report what makes a host profile unusable, including "it is not shaped like one at all".
+ *
+ * The validator is written for a fully-formed profile, so a truncated-but-parseable file (an install
+ * interrupted mid-write) makes it throw from deep inside instead of returning an issue. That surfaced
+ * as an unexplained failure on EVERY launch until the user found and deleted the file by hand, when
+ * the honest reading of a malformed capture is simply that it is invalid.
+ */
+export function hostCalibrationIssues(
+  profile: HostCalibrationProfile,
+  opts: { allowSoftwareRenderer: boolean },
+): string[] {
+  try {
+    return validateHostCalibrationProfile(profile, opts);
+  } catch (err) {
+    return [`malformed host calibration: ${err instanceof Error ? err.message : String(err)}`];
+  }
+}
+
 /** Resolve the persisted host-calibration file path from the environment (undefined = feature off). */
 export function resolveHostCalibrationPath(
   env: NodeJS.ProcessEnv = process.env,
@@ -30,7 +49,7 @@ export async function persistHostCalibration(
   path: string,
   profile: HostCalibrationProfile,
 ): Promise<void> {
-  const issues = validateHostCalibrationProfile(profile, {
+  const issues = hostCalibrationIssues(profile, {
     allowSoftwareRenderer: allowProvisionalSoftwareGpu(),
   });
   if (issues.length > 0) {

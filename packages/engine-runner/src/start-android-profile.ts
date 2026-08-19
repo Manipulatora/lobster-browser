@@ -12,7 +12,6 @@ import type {
   LaunchResult,
   MediaDeviceProfile,
   StartProfileParams,
-  WebRtcPolicy,
 } from '@lobster/shared-types';
 import {
   AndroidDeviceBridge,
@@ -22,11 +21,13 @@ import {
 } from './android-bridge.js';
 import { buildAndroidLobiumConfig, writeAndroidLobiumConfig } from './android-config.js';
 import { assertUpstreamReachable } from './proxy-auth-adapter.js';
+import { resolveWebRtcPolicy } from './launch-policy.js';
 import {
   launchAndroidMirror,
   type AndroidMirrorHandle,
   type AndroidMirrorOptions,
 } from './android-mirror.js';
+import { resolveDesktopWorkArea } from './device-frame.js';
 
 const DEFAULT_HARDWARE_NOISE: HardwareNoisePolicy = {
   webgl: true,
@@ -61,6 +62,11 @@ interface RunningAndroidProfile {
 }
 
 const runningAndroidProfiles = new Map<string, RunningAndroidProfile>();
+// Held from the first line of a launch until the profile is either running or failed. The sidecar
+// dispatches requests concurrently, so the map alone cannot keep one device/profile to a single
+// session: two starts would both pass the check, forward the same CDP port twice and strand the
+// first mirror window with no handle left to close it.
+const startingAndroidProfiles = new Set<string>();
 
 export function androidProfileStatus(profileId?: string): LaunchResult[] {
   return [...runningAndroidProfiles.entries()]
@@ -128,18 +134,6 @@ function androidExplicitlyNeedsGeo(params: StartProfileParams): boolean {
   );
 }
 
-function androidWebRtcPolicy(params: StartProfileParams): WebRtcPolicy {
-  const mode = params.fingerprintOverrides?.webrtcMode;
-  if (mode === 'based_ip') {
-    return params.proxy ? 'proxy_only' : 'default_public_interface_only';
-  }
-  if (mode === 'real') return 'default_public_interface_only';
-  return (
-    params.fingerprintOverrides?.webrtc ??
-    (params.proxy ? 'disable_non_proxied_udp' : 'default_public_interface_only')
-  );
-}
-
 /**
  * Launch an Android Lobium profile on a USB-connected device via ADB.
  *
@@ -150,9 +144,24 @@ export async function startAndroidProfile(
   params: StartProfileParams,
   opts: StartAndroidProfileOptions = {},
 ): Promise<LaunchResult> {
-  if (runningAndroidProfiles.has(params.profileId)) {
+  if (
+    runningAndroidProfiles.has(params.profileId) ||
+    startingAndroidProfiles.has(params.profileId)
+  ) {
     throw new Error(`profile ${params.profileId} is already running`);
   }
+  startingAndroidProfiles.add(params.profileId);
+  try {
+    return await launchAndroidProfile(params, opts);
+  } finally {
+    startingAndroidProfiles.delete(params.profileId);
+  }
+}
+
+async function launchAndroidProfile(
+  params: StartProfileParams,
+  opts: StartAndroidProfileOptions,
+): Promise<LaunchResult> {
   if (params.engine !== 'lobium') {
     throw new Error(
       `refusing to launch Android profile ${params.profileId}: Lobium is the only supported engine`,
@@ -227,7 +236,7 @@ export async function startAndroidProfile(
     ...(params.proxy
       ? { proxy: { type: params.proxy.type, host: params.proxy.host, port: params.proxy.port } }
       : {}),
-    webrtcPolicy: androidWebRtcPolicy(params),
+    webrtcPolicy: resolveWebRtcPolicy(params),
     ...(params.fingerprintOverrides?.renderer
       ? { rendererPolicy: params.fingerprintOverrides.renderer }
       : {}),
@@ -260,11 +269,16 @@ export async function startAndroidProfile(
 
   let mirror: AndroidMirrorHandle;
   try {
+    // Measured, never assumed: the mirror window is centered and clamped against the real work area,
+    // which on Windows comes from the display rather than the POSIX-only LOBSTER_DESKTOP_* variables.
+    const workArea = await resolveDesktopWorkArea();
     mirror = await (opts.launchMirror ?? launchAndroidMirror)({
       serial,
       ...(params.profileName ? { profileName: params.profileName } : {}),
       width: fingerprint.screen.width,
       height: fingerprint.screen.height,
+      desktopWidth: workArea.width,
+      desktopHeight: workArea.height,
     });
   } catch (error) {
     await bridge.stop(plan).catch(() => undefined);

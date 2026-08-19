@@ -607,8 +607,21 @@ export async function sendInput(text: string): Promise<void> {
   }
 }
 
-export function stopRun(): void {
-  void bridgeFetch('/stop', { method: 'POST', body: '{}' }).catch(() => {});
+/**
+ * Ask the sidecar to cancel this profile's run.
+ *
+ * The outcome is reported rather than swallowed: a stop that never reached the sidecar leaves the run
+ * burning tokens, and a panel that looks identical either way is the one case where the kill switch
+ * has to be honest.
+ */
+export async function stopRun(): Promise<boolean> {
+  try {
+    const res = await bridgeFetch('/stop', { method: 'POST', body: '{}' });
+    const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+    return res.ok && data.ok !== false;
+  } catch {
+    return false;
+  }
 }
 
 function bridgeKey(config: BridgeConfig): string {

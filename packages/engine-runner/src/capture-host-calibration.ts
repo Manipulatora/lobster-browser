@@ -9,15 +9,11 @@ import { withCdpSession, cdpEvaluate } from './cdp-client.js';
 import { buildGpuArgs } from './gpu.js';
 import { buildDevShmArgs } from './dev-shm.js';
 import { resolveLobiumBinary } from './runners/lobium-launcher.js';
+import { signalProcessTree } from './process-tree.js';
 
 function terminate(child: ChildProcess): void {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
-  try {
-    if (process.platform === 'win32') child.kill('SIGKILL');
-    else process.kill(-child.pid, 'SIGKILL');
-  } catch {
-    child.kill('SIGKILL');
-  }
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  signalProcessTree(child, 'SIGKILL');
 }
 
 /**
