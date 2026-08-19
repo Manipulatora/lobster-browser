@@ -45,6 +45,31 @@ std::string MediaDeviceHmacId(std::string_view origin,
 // `deviceSalt` in the config supersedes this; pass that through directly when present.
 std::string MediaDeviceSaltFromSeed(uint32_t seed);
 
+// The salt to use when the profile asks for NON-stable device ids.
+//
+// Turning stability off is Chrome's non-persistent-id mode, not an id-free mode: when persistent
+// device ids are disallowed Chrome appends a per-document token to the salt so the ids rotate
+// (content/browser/media/media_devices_util.cc, GotSalt), and it still returns them. A profile that
+// answered a permitted enumeration with empty deviceIds would be describing a browser state that
+// does not exist. Random per process, which is where a renderer's documents already live.
+std::string MediaDeviceEphemeralSalt();
+
+// The label Chrome reports for one enumerated device, for a persona on `ua_platform`.
+//
+// Chrome never pairs a populated deviceId with an empty label: the browser process returns both
+// fields or neither (media_devices_util.cc, TranslateMediaDeviceInfo). So once ids are emitted the
+// labels have to be emitted too, and they have to be OS-shaped - the text comes from the platform
+// capture stack, which is why this takes the PERSONA's platform rather than the host's build flags.
+//
+// `kind` is "videoinput" | "audioinput" | "audiooutput", `index` the device's position within its
+// kind, and `pseudo` the Chrome pseudo-device this entry stands for - "" for a real device, else
+// "default" or "communications", which Chrome renders as "Default - <name>"
+// (media/audio/audio_device_description.cc, GetDefaultDeviceName).
+std::string MediaDeviceLabel(std::string_view ua_platform,
+                             std::string_view kind,
+                             int index,
+                             std::string_view pseudo);
+
 }  // namespace lobium
 
 #endif  // COMPONENTS_LOBIUM_FP_LOBIUM_MEDIA_DEVICES_H_

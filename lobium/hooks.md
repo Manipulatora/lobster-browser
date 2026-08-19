@@ -117,12 +117,14 @@ function is the stable anchor.
 | | `modules/canvas/canvas2d/base_rendering_context_2d.cc` · `getImageDataInternal` | farbles the fresh ImageData allocation, using a **one-pixel apron** read from the snapshot so the decision cannot depend on the requested rectangle |
 | `fingerprint/webgl-surfaces.patch` | `modules/webgl/webgl_rendering_context_base.cc` · `getParameter` (×3) | `UNMASKED_VENDOR/RENDERER` as an atomic pair; scalar `MAX_*` caps |
 | | same · `ReadPixelsHelper` | bottom-up pixel farbling, keyed top-down so it agrees with `toDataURL` |
-| `fingerprint/host-gpu-profile.patch` | same file | `VERSION`, `SHADING_LANGUAGE_VERSION`, `getSupportedExtensions`, `getShaderPrecisionFormat` |
+| `fingerprint/host-gpu-profile.patch` | same file | `VERSION`, `SHADING_LANGUAGE_VERSION`, `getSupportedExtensions`, `getExtension`, `getShaderPrecisionFormat` |
+| | same · `getExtension` | refuses names outside the persona list, picking `extensions2` on a WebGL2 context and matching case-insensitively — both because `getSupportedExtensions` and `ExtensionTracker::MatchesName` do, and a disagreement between the two calls is the contradiction the list exists to avoid |
 | `fingerprint/webgl-runtime-safety.patch` | same · `getParameter`, `getShaderPrecisionFormat`, `getSupportedExtensions` | clamps configured values to what the backend can actually execute |
 | `fingerprint/webgl-bypass-closures.patch` | same · `ReadPixelsHelper` | the farble gate keys on **effective geometry**, so a no-op `PACK_ROW_LENGTH` no longer switches farbling off; user framebuffers are now covered too |
 | | same · `getSupportedExtensions` | picks `extensions` or `extensions2` by context type — a WebGL1 list handed to a WebGL2 context collapsed to the few names common to both |
 | `fingerprint/webgl2-surfaces.patch` | `modules/webgl/webgl2_rendering_context_base.cc` · `getParameter` | `MAX_*_UNIFORM_COMPONENTS` / `MAX_VARYING_COMPONENTS` derived as 4× the persona's vector limits, which is how ANGLE's D3D11 backend derives them |
 | `fingerprint/webgpu-adapter.patch` | `modules/webgpu/gpu_adapter.cc` · `GPUAdapter::GPUAdapter` | `adapter.info` vendor/architecture/device/description/driver, and `adapter_type_` because `isFallbackAdapter` is derived from it |
+| | same · `MakeFeatureNameSet`, `limits_` | `adapter.features` and `adapter.limits` brought onto the same device, **downward only** — see the ceiling rule in `lobium_webgpu.h` |
 | `fingerprint/native-timezone.patch` | `core/timezone/timezone_controller.cc` · `OnTimeZoneChange` | the persona timezone, applied where the browser's `TimeZoneMonitor` push lands — an earlier adoption at renderer start is overwritten by that push |
 | `fingerprint/windows-font-isolation.patch` | `components/services/font_data/font_data_service_impl.cc` · `MatchFamilyName` | **the** by-name lookup as of M152 — every `font-family:` resolution and the width-measurement probe |
 | | same · `LegacyMakeTypeface` | the GDI-compatible by-name route to the same thing |
@@ -151,8 +153,8 @@ function is the stable anchor.
 | `fingerprint/locale-geolocation.patch` | `core/frame/navigator_language.cc` | `language`/`languages` in every context including service workers |
 | | `content/renderer/render_thread_impl.cc` · `Init` | applies the ICU locale **before** Blink/V8 init |
 | | `core/geolocation/geolocation.cc` | configured coordinates, only after Chromium's normal secure-context + permission flow succeeds |
-| `fingerprint/client-rects.patch` | `core/dom/element.cc` · `getClientRects`, `GetBoundingClientRect` | sub-pixel noise keyed on the rect's **values**, so coincident geometry stays coincident |
-| `fingerprint/media-devices.patch` | `modules/mediastream/media_devices.cc` · `DevicesEnumerated` | persona camera/mic/speaker counts |
+| `fingerprint/client-rects.patch` | `core/dom/element.cc` · `getClientRects`, `GetBoundingClientRect` | sub-pixel noise keyed on the rect's **values**, so coincident geometry stays coincident. The bounding box is the **union of the farbled rects**, never a separately farbled union, so `getBoundingClientRect() == union(getClientRects())` still holds for a multi-line inline |
+| `fingerprint/media-devices.patch` | `modules/mediastream/media_devices.cc` · `DevicesEnumerated` | persona camera/mic/speaker counts, shaped by the browser's own permission answer: one all-empty entry per kind until the frame holds the capture permission, then hashed ids **with** OS-shaped labels and shared mic/speaker `groupId`s |
 | `fingerprint/mobile-persona.patch` | `modules/plugins/dom_plugin_array.cc` | suppresses the desktop PDF plugin surface when the config declares `uaMobile` |
 | `fingerprint/webrtc-policy.patch` | `modules/peerconnection/rtc_peer_connection.cc` | four observably distinct policies; `disabled` throws `NotSupportedError` |
 
@@ -185,8 +187,13 @@ around. Hooks pass raw buffers in.
 - **`lobium_media_devices.{h,cc}`** — reproduces Chrome's own device-id construction: HMAC-SHA256
   **keyed on the origin**, hex-lowercase, 64 characters, with separate salt domains for `deviceId`
   and `groupId` so one cannot be derived from the other. Keying on the origin is what stops the ids
-  correlating a visitor across sites. Pulls in `//crypto` as a private `deps` — the header exposes
-  only `std::string`, so consumers do not inherit it.
+  correlating a visitor across sites. Also carries the per-OS device labels, because Chrome never
+  returns a populated `deviceId` beside an empty `label`. Pulls in `//crypto` as a private `deps` —
+  the header exposes only `std::string`, so consumers do not inherit it.
+- **`lobium_webgpu.{h,cc}`** — the WebGPU adapter's capability ceilings and its feature allow-rule.
+  Both are one-directional: limits are only lowered and features only removed, because
+  `adapter.limits` is what `requestDevice()` validates `requiredLimits` against and `adapter.features`
+  the set it will accept, so raising either turns a passive tell into a failing call.
 - **`lobium_fonts.{h,cc}`** — the font-set policy: case-insensitive membership (CSS family matching
   is case-insensitive, so a case-sensitive filter is bypassed by lowercasing the probe), Chromium's
   own last-resort families always allowed, and the pack enumeration sorted for launch-to-launch
@@ -198,6 +205,13 @@ from the copy forwarded to renderers. The browser reads the config file directly
 bound; the renderer receives it base64 on a command line Windows caps at 32767 characters. Exceeding
 the engine's 28 KiB guard makes the browser skip the switch entirely, so renderers report the **host**
 platform and hardware concurrency — a total spoofing failure caused by a field no renderer reads.
+
+That command line is also **locally readable**: `/proc/<pid>/cmdline` on Linux, any process-listing
+tool on Windows. A page cannot reach argv, so no site can detect or read the persona this way, but
+anyone else on the machine can — coordinates, timezone, screen, GPU and device counts included. On a
+shared or multi-tenant host, treat the persona as visible to every local user. A shared-memory handle
+or an inherited pipe would close this and remove the size guard at the same time; both are the same
+piece of work, and neither is done.
 
 ---
 
@@ -212,7 +226,7 @@ platform and hardware concurrency — a total spoofing failure caused by a field
 | Canvas 2D readback (`getImageData`, `toDataURL`, `toBlob`, `convertToBlob`) | native, seeded |
 | WebGL 1 vendor/renderer/caps/version/GLSL/extensions/precision, pixel readback | native, seeded |
 | WebGL 2 extension list (its own, not WebGL1's) + the uniform/varying component limits | native |
-| `navigator.gpu` `adapter.info` + `isFallbackAdapter`, derived from the same GPU WebGL names | native |
+| `navigator.gpu` `adapter.info` + `isFallbackAdapter`, plus `adapter.limits`/`features` clamped to that GPU's class | native |
 | Timezone (ICU default, window **and** workers) — the only route that works on Windows | native |
 | Installed font set on Windows: CSS matching, `src: local()`, and Local Font Access | native, browser-process |
 | Web Audio: offline result, analyser float **and** byte paths, offline worklet + SPN taps | native, seeded |
@@ -227,7 +241,7 @@ Read this section before claiming a profile is undetectable.
 
 | Surface | Status |
 | --- | --- |
-| **WebGPU `adapter.limits`** (~31 numeric limits) and `features` | still host values. `adapter.info` is now spoofed (see §2), so the vendor/architecture no longer contradict WebGL, but the limits are the real device's. Dawn derives most of them from the backend's own maxima, so publishing persona values would need per-GPU limit data this project does not have — and inventing it risks combinations no real driver emits |
+| **WebGPU `adapter.limits`/`features` on a backend weaker than the persona** | clamped, not lifted. The limits that separate hardware classes are lowered to the persona's class and the texture-compression families its GPU would not have are dropped (see §2), so a strong host no longer leaks through a modest persona. The reverse cannot be fixed here: a persona claiming a discrete card on a software backend still reports that backend's smaller limits, because raising one is validated by the very next `requestDevice()` |
 | **WebGL2 feature-level constants** (`MAX_3D_TEXTURE_SIZE`, `MAX_ARRAY_TEXTURE_LAYERS`, `MAX_DRAW_BUFFERS`, `MAX_COLOR_ATTACHMENTS`, `MAX_TEXTURE_LOD_BIAS`) | **deliberately** left honest. On D3D11 these are functions of the feature level, not the GPU — `GetMaximum3DTextureSize` and friends switch on `D3D_FEATURE_LEVEL` alone — so every real Windows machine reports the same values and spoofing them could only introduce a difference where none exists |
 | **Fonts the persona claims but the host lacks** | the DirectWrite filter can only *subtract*. Adding requires the font pack to be provisioned and named in `fontPackDir`; without a pack the measurable set is host ∩ persona, which is narrower than claimed. Tracked by the `fonts-persona-families-resolve` oracle |
 | `window.outerWidth/Height`, `screenX/Y` | host values |

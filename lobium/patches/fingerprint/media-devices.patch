@@ -1,8 +1,8 @@
 Lobium — native mediaDevices enumerateDevices spoof (policy.mediaDevices).
 
-Replaces the host device list with persona camera/microphone/speaker counts. Labels stay empty
-(permission-shaped); deviceIds are deterministic when stableDeviceIds is true. Uses StringBuilder
-(no libc buffer APIs) for Chromium -Wunsafe-buffer-usage cleanliness.
+Replaces the host device list with persona camera/microphone/speaker counts, shaped the way the
+browser process shapes the real one: a single blank entry per kind until the frame holds the capture
+permission for it, and hashed deviceIds with OS-shaped labels and groupIds once it does.
 
 diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.cc b/third_party/blink/renderer/modules/mediastream/media_devices.cc
 index 4fe2cb45a0089..7e22e422bd639 100644
@@ -25,16 +25,24 @@ index 4fe2cb45a0089..7e22e422bd639 100644
  #include "media/base/media_permission.h"
  #include "mojo/public/cpp/bindings/remote.h"
  #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
-@@ -1486,6 +1489,95 @@ void MediaDevices::DevicesEnumerated(
+@@ -1486,6 +1489,143 @@ void MediaDevices::DevicesEnumerated(
      }
    }
  
 +  // Lobium: replace host device enumeration with the persona mediaDevices policy counts.
 +  //
-+  // The identifiers are built with the SAME construction Chrome uses
-+  // (content/browser/media/media_devices_util.cc, GetHMACForRawMediaDeviceID): HMAC-SHA256 keyed on
-+  // the requesting ORIGIN over a per-profile salt, hex-encoded lowercase - 64 characters. Three
-+  // properties of that matter, and the previous implementation had none of them:
++  // SHAPE FIRST. The browser process is the permission gate
++  // (content/browser/media/media_devices_util.cc, TranslateMediaDeviceInfo): with the capture
++  // permission for a kind it hands the renderer a hashed deviceId, the real label and a groupId;
++  // without it, ONE entry for that kind with all three empty. There is no third state, so a persona
++  // that returns 64-hex deviceIds beside empty labels advertises the spoof instead of hiding it -
++  // a deviceId without permission cannot happen, and neither can a blank label after a grant. That
++  // already-gated answer is still in `enumeration`, so the persona list is shaped by reading the
++  // grant back out of it rather than by a config flag.
++  //
++  // The identifiers use the SAME construction as Chrome (GetHMACForRawMediaDeviceID): HMAC-SHA256
++  // keyed on the requesting ORIGIN over a per-profile salt, hex-encoded lowercase - 64 characters.
++  // Three properties of that matter, and the first implementation had none of them:
 +  //
 +  //   * LENGTH. Chrome emits 64 hex chars (a full SHA-256). The old id was 32, which is a length no
 +  //     Chrome build produces.
@@ -43,79 +51,119 @@ index 4fe2cb45a0089..7e22e422bd639 100644
 +  //     could compare ids and correlate the visitor - something a real browser never allows.
 +  //   * ENTROPY. The old id XORed one 32-bit value with a per-word constant, so it carried ~16 bits
 +  //     and any two words of it recovered the seed.
-+  //
-+  // The id/label SHAPE is also corrected. Chrome never emits a non-empty deviceId beside an empty
-+  // label: with permission it returns both, and WITHOUT permission it returns a single entry per
-+  // kind with everything empty. Emitting real-looking ids with blank labels - as this hook used to -
-+  // is a combination that cannot occur, so it advertised the spoof rather than hiding it.
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +      cfg && cfg->media_devices.present) {
++    const auto& md = cfg->media_devices;
++
++    // A non-empty device_id anywhere in the browser's answer for a kind IS the grant for that kind,
++    // because the gate above blanks every field when it is missing. Reading it back is the only
++    // route available here: a renderer cannot query permission state synchronously.
++    auto kind_permitted = [&enumeration](mojom::blink::MediaDeviceType type) {
++      for (const WebMediaDeviceInfo& info :
++           enumeration[static_cast<wtf_size_t>(type)]) {
++        if (!info.device_id.empty()) {
++          return true;
++        }
++      }
++      return false;
++    };
++
 +    media_devices.clear();
 +    result_contains_nonempty_input_device_ids = false;
-+    const auto& md = cfg->media_devices;
 +
 +    // The HMAC key. An opaque origin serializes to "null", which is exactly what Chrome keys on for
 +    // a sandboxed frame, so the behaviour matches there too.
 +    ExecutionContext* context = GetExecutionContext();
 +    const std::string origin =
 +        context ? context->GetSecurityOrigin()->ToString().Utf8() : std::string("null");
-+    const std::string salt = lobium::MediaDeviceSaltFromSeed(cfg->seeds.media_devices);
++    const std::string salt =
++        md.stable_device_ids ? lobium::MediaDeviceSaltFromSeed(cfg->seeds.media_devices)
++                             : lobium::MediaDeviceEphemeralSalt();
++    const std::string& platform = cfg->navigator.ua_platform;
 +
-+    // Labels are only populated once the page holds a capture permission, which is the same gate
-+    // Chrome applies. `has_permission` here mirrors the surrounding enumeration's own notion of it.
-+    const bool expose_ids = md.stable_device_ids;
-+
-+    auto push_devices = [&](mojom::blink::MediaDeviceType type, int count,
-+                            std::string_view kind_key) {
-+      for (int i = 0; i < count; ++i) {
-+        String id;
-+        String group;
-+        if (expose_ids) {
-+          id = String::FromUtf8(
-+              lobium::MediaDeviceHmacId(origin, salt, kind_key, i, /*group=*/false));
-+          // One group per kind, matching a machine whose devices share a physical grouping.
-+          group = String::FromUtf8(
-+              lobium::MediaDeviceHmacId(origin, salt, kind_key, 0, /*group=*/true));
-+        }
-+        if (!id.empty() &&
-+            (type == mojom::blink::MediaDeviceType::kMediaAudioInput ||
-+             type == mojom::blink::MediaDeviceType::kMediaVideoInput)) {
-+          result_contains_nonempty_input_device_ids = true;
-+        }
-+        if (type == mojom::blink::MediaDeviceType::kMediaVideoInput ||
-+            type == mojom::blink::MediaDeviceType::kMediaAudioInput) {
-+          media_devices.push_back(
-+              MakeGarbageCollected<InputDeviceInfo>(id, String(), group, type));
-+        } else {
-+          media_devices.push_back(
-+              MakeGarbageCollected<MediaDeviceInfo>(id, String(), group, type));
-+        }
++    auto push_device = [&](mojom::blink::MediaDeviceType type, std::string_view kind_key,
++                           std::string_view group_key, int index, std::string_view pseudo) {
++      // Chrome passes the "default" and "communications" pseudo-devices through unhashed and gives
++      // them the group of the real device they point at, which is why they are pushed at index 0.
++      const String id =
++          pseudo.empty() ? String::FromUtf8(lobium::MediaDeviceHmacId(
++                               origin, salt, kind_key, index, /*group=*/false))
++                         : String::FromUtf8(pseudo);
++      const String group = String::FromUtf8(
++          lobium::MediaDeviceHmacId(origin, salt, group_key, index, /*group=*/true));
++      const String label =
++          String::FromUtf8(lobium::MediaDeviceLabel(platform, kind_key, index, pseudo));
++      if (type == mojom::blink::MediaDeviceType::kMediaAudioInput ||
++          type == mojom::blink::MediaDeviceType::kMediaVideoInput) {
++        result_contains_nonempty_input_device_ids = true;
++        media_devices.push_back(
++            MakeGarbageCollected<InputDeviceInfo>(id, label, group, type));
++      } else {
++        media_devices.push_back(
++            MakeGarbageCollected<MediaDeviceInfo>(id, label, group, type));
 +      }
 +    };
 +
-+    push_devices(mojom::blink::MediaDeviceType::kMediaAudioInput, md.microphones,
-+                 "audioinput");
-+    push_devices(mojom::blink::MediaDeviceType::kMediaVideoInput, md.cameras,
-+                 "videoinput");
-+
-+    // Audio OUTPUT starts with the unhashed pseudo-devices Chrome passes through verbatim:
-+    // "default" always, and on Windows "communications" as well (GetHMACForRawMediaDeviceID
-+    // short-circuits both). A Windows persona whose speaker list lacks them is missing entries every
-+    // real Windows Chrome has.
-+    if (md.speakers > 0 && expose_ids) {
-+      const String out_group = String::FromUtf8(
-+          lobium::MediaDeviceHmacId(origin, salt, "audiooutput", 0, /*group=*/true));
-+      media_devices.push_back(MakeGarbageCollected<MediaDeviceInfo>(
-+          String("default"), String(), out_group,
-+          mojom::blink::MediaDeviceType::kMediaAudioOutput));
-+      if (cfg->navigator.ua_platform == "Windows") {
++    // The no-permission answer: one entry, every field empty. The device COUNT is withheld with the
++    // ids, because the count is only observable after a grant in a real browser too.
++    auto push_blank = [&](mojom::blink::MediaDeviceType type) {
++      if (type == mojom::blink::MediaDeviceType::kMediaAudioInput ||
++          type == mojom::blink::MediaDeviceType::kMediaVideoInput) {
++        media_devices.push_back(MakeGarbageCollected<InputDeviceInfo>(
++            String(), String(), String(), type));
++      } else {
 +        media_devices.push_back(MakeGarbageCollected<MediaDeviceInfo>(
-+            String("communications"), String(), out_group,
-+            mojom::blink::MediaDeviceType::kMediaAudioOutput));
++            String(), String(), String(), type));
++      }
++    };
++
++    // Microphones and speakers share the "audio" group domain because
++    // AudioManagerBase::GetGroupIDInput resolves an input to its ASSOCIATED output's group: on
++    // integrated hardware the mic and the speakers of one machine report the SAME groupId, and a
++    // persona whose kinds never share one is describing a machine with no built-in sound card.
++    auto push_audio_kind = [&](mojom::blink::MediaDeviceType type, std::string_view kind_key,
++                               int count) {
++      if (count <= 0) {
++        return;
++      }
++      if (!kind_permitted(type)) {
++        push_blank(type);
++        return;
++      }
++      // Every desktop AudioManager prepends the virtual "default" device, and Windows also prepends
++      // "communications" (media/audio/win/audio_manager_win.cc). A persona lacking them is missing
++      // entries every real browser on that OS reports.
++      push_device(type, kind_key, "audio", 0, "default");
++      if (platform == "Windows") {
++        push_device(type, kind_key, "audio", 0, "communications");
++      }
++      // Android stops there: AudioManagerAndroid enumerates the default device and nothing else, so
++      // listing the physical ones would list entries Android never reports.
++      if (platform == "Android") {
++        return;
++      }
++      for (int i = 0; i < count; ++i) {
++        push_device(type, kind_key, "audio", i, std::string_view());
++      }
++    };
++
++    // Emitted in MediaDeviceType order, the order the loop above uses, so the persona list arrives
++    // grouped the way every real enumeration is.
++    push_audio_kind(mojom::blink::MediaDeviceType::kMediaAudioInput, "audioinput",
++                    md.microphones);
++    if (md.cameras > 0) {
++      if (kind_permitted(mojom::blink::MediaDeviceType::kMediaVideoInput)) {
++        // A camera is a physical unit of its own, so each one gets its own group.
++        for (int i = 0; i < md.cameras; ++i) {
++          push_device(mojom::blink::MediaDeviceType::kMediaVideoInput, "videoinput",
++                      "videoinput", i, std::string_view());
++        }
++      } else {
++        push_blank(mojom::blink::MediaDeviceType::kMediaVideoInput);
 +      }
 +    }
-+    push_devices(mojom::blink::MediaDeviceType::kMediaAudioOutput, md.speakers,
-+                 "audiooutput");
++    push_audio_kind(mojom::blink::MediaDeviceType::kMediaAudioOutput, "audiooutput",
++                    md.speakers);
 +  }
 +
    ReportCompletedEnumerateDevices(result_contains_nonempty_input_device_ids);

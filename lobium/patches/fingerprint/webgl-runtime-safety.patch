@@ -9,7 +9,7 @@ hardware. Requires core/config-channel.patch and fingerprint/host-gpu-profile.pa
 diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
-@@ -4002,45 +4002,97 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+@@ -4007,45 +4007,97 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
                                                      GLenum pname) {
    if (isContextLost())
      return ScriptValue::CreateNull(script_state->GetIsolate());
@@ -125,7 +125,7 @@ diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_ba
          return WebGLAny(script_state, DOMFloat32Array::Create(base::span(r)));
        }
        default:
-@@ -4622,7 +4674,19 @@ WebGLShaderPrecisionFormat* WebGLRenderingContextBase::getShaderPrecisionFormat(
+@@ -4627,7 +4679,19 @@ WebGLShaderPrecisionFormat* WebGLRenderingContextBase::getShaderPrecisionFormat(
      }
      if (fmt) {
 +      GLint backend_range[2] = {0, 0};
@@ -146,7 +146,7 @@ diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_ba
      }
    }
  
-@@ -4644,13 +4708,23 @@ WebGLRenderingContextBase::getSupportedExtensions() {
+@@ -4649,13 +4713,23 @@ WebGLRenderingContextBase::getSupportedExtensions() {
    if (isContextLost())
      return std::nullopt;
  

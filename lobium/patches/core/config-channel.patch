@@ -9,6 +9,14 @@ lobium::LobiumFpConfig::Current() is populated for dedicated, shared and service
 Every failure path LOG(ERROR)s: a present-but-unparseable config must never silently fall back to
 the host fingerprint without a trace.
 
+LOCAL EXPOSURE, accepted for now. The base64 payload sits on the renderer's argv, so anything on the
+box that can read another process's command line - /proc/<pid>/cmdline on Linux, any process-listing
+tool on Windows - can read the whole persona: geolocation coordinates, timezone, screen, GPU and
+media-device counts. No page can reach argv, so this is not a detection surface; it is a privacy
+leak to co-tenants and to local software that logs command lines. Closing it means a non-argv
+transport (a shared-memory handle or a pipe inherited by the child), which is also what would remove
+the 28 KiB size guard below - the two are the same piece of work.
+
 This patch is ONLY the transport. The parser and all shared kernels live in the added module
 //components/lobium_fp/ (staged by lobium/build.ps1 / build.sh, wired by core/build-gn.patch), and
 each SURFACE that reads Current() is its own patch so an upstream change rejects in exactly one

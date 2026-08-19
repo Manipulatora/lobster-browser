@@ -9,6 +9,7 @@
         powershell -ExecutionPolicy Bypass -File lobium\build.ps1 -Run          # stage + patch + gen + build
         powershell -ExecutionPolicy Bypass -File lobium\build.ps1 -Run -Stop gen    # stop after `gn gen`
         powershell -ExecutionPolicy Bypass -File lobium\build.ps1 -Run -Targets "v8_snapshot skia"
+        powershell -ExecutionPolicy Bypass -File lobium\build.ps1 -Run -Jobs 6   # 16 GB / 8-thread host
 
     PREREQUISITES on the build host (all verified below before anything is touched):
       * depot_tools on PATH, DEPOT_TOOLS_WIN_TOOLCHAIN=0
@@ -32,6 +33,12 @@ param(
     [string] $Stop = 'build',
     # Ninja targets. Default builds the browser. Pass a subset to warm the object cache.
     [string] $Targets = 'chrome',
+    # Parallel compile jobs. 0 lets autoninja choose, which it does from core count alone.
+    #
+    # Core count is the wrong question on a small-memory host: each cl.exe holds 1-2 GB, so eight of
+    # them on a 16 GB laptop pages to disk and finishes SLOWER than six that stay resident. Set this
+    # to about (RAM_GB / 2) when the machine has less than 4 GB per logical core.
+    [int] $Jobs = 0,
     # Re-stage and re-apply even when the tree already looks patched.
     [switch] $Force
 )
@@ -358,7 +365,9 @@ if (ShouldRun 'build') {
         Push-Location $SrcDir
         try {
             $started = Get-Date
-            & autoninja.bat -C $OutDir $Targets.Split(' ')
+            $ninjaArgs = @('-C', $OutDir)
+            if ($Jobs -gt 0) { $ninjaArgs += @('-j', $Jobs) }
+            & autoninja.bat @ninjaArgs $Targets.Split(' ')
             if ($LASTEXITCODE -ne 0) { Die "build failed (exit $LASTEXITCODE)" }
             Ok ("built in {0:hh\:mm\:ss}" -f ((Get-Date) - $started))
         } finally { Pop-Location }
@@ -368,7 +377,7 @@ if (ShouldRun 'build') {
             Write-Host ('  engine: {0}  ({1:N1} MB)' -f $exe, ((Get-Item $exe).Length / 1MB)) -ForegroundColor Green
         }
     } else {
-        Plan "autoninja -C $OutDir $Targets"
+        Plan ("autoninja -C $OutDir" + $(if ($Jobs -gt 0) { " -j $Jobs" } else { '' }) + " $Targets")
     }
 }
 

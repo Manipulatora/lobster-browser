@@ -36,7 +36,7 @@ Hook point: third_party/blink/renderer/modules/webgl/webgl_rendering_context_bas
 diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
-@@ -4723,11 +4723,26 @@ WebGLRenderingContextBase::getSupportedExtensions() {
+@@ -4728,11 +4728,26 @@ WebGLRenderingContextBase::getSupportedExtensions() {
    // Returning unsupported configured names makes getSupportedExtensions() advertise an extension
    // while getExtension() returns null, and 3D engines commonly treat that contradiction as support.
    // Preserve configured ordering so a capable backend still exposes the exact persona sequence.
@@ -67,7 +67,7 @@ diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_ba
        const String name = String::FromUtf8(ext);
        for (ExtensionTracker* tracker : extensions_) {
          if (tracker->MatchesName(name) &&
-@@ -5572,21 +5587,43 @@ void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
+@@ -5577,21 +5592,43 @@ void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
      ContextGL()->ReadPixels(x, y, width, height, format, type, data);
    }
  

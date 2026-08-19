@@ -11,7 +11,7 @@ fingerprints cannot recover one ratio. No BUILD.gn change (kernel lives in the a
 source_set); no config change (seeds.audio already parsed). This is a genuine native-only surface — a JS
 override of getChannelData / analyser reads is itself a detectable tell, so CDP cannot do it cleanly.
 
-Three hook points (all reading LobiumFpConfig::Current(), all guarded on seeds.audio != 0), chosen to
+Five hook points (all reading LobiumFpConfig::Current(), all guarded on seeds.audio != 0), chosen to
 cover the readback surfaces WITHOUT touching playback or internal DSP state:
 
   1. OfflineAudioContext::FireCompletionEvent (offline_audio_context.cc) — THE dominant audio fingerprint
@@ -30,11 +30,16 @@ cover the readback surfaces WITHOUT touching playback or internal DSP state:
      destination span [0,len) AFTER the fill loop; the internal magnitude_buffer_ (FFT + smoothing source)
      is untouched, so smoothingTimeConstant continuity and real visualizers are unaffected.
   3. RealtimeAnalyser::GetFloatTimeDomainData (realtime_analyser.cc) — same, over input_buffer_'s JS copy.
+  4. RealtimeAnalyser::GetByteFrequencyData and 5. GetByteTimeDomainData (realtime_analyser.cc) — the byte
+     paths quantise the same magnitudes to 0..255, so leaving them exact would hand back an unfarbled view
+     of the surface hooks 2 and 3 protect. Each gathers the float values, farbles them with the SAME key,
+     then quantises, so the byte and float readbacks of one analyser stay consistent with each other.
 
 Deliberately NOT hooked (audio_buffer.cc is untouched): getChannelData/copyFromChannel on a user-created
 AudioBuffer (decoded app audio / a playback source) — proven bit-exact under a seed (maxdiff 0), so real
-audio is never corrupted. See hooks.md for the documented KNOWN LIMITATIONS (AudioWorklet /
-ScriptProcessorNode upstream taps, known-input ratio inversion, byte analyser paths) and their rationale.
+audio is never corrupted. The AudioWorklet / ScriptProcessorNode taps that could read the samples upstream
+of the offline result are closed by fingerprint/audio-worklet-tap.patch. See hooks.md for the one KNOWN
+LIMITATION that remains, known-input ratio inversion, and its rationale.
 
 Proven on Chromium 152.0.7928.0 (SwiftShader, headless):
   - Offline: getChannelData == copyFromChannel == re-read, baseline 41c67cf0 -> seedA 235885ed (stable) ->
@@ -46,9 +51,10 @@ Proven on Chromium 152.0.7928.0 (SwiftShader, headless):
   - Playback safety: a user createBuffer()+copyToChannel()+getChannelData/copyFromChannel is bit-exact
     (maxdiff 0) with a seed set.
 
-Two hook points touch existing files (this patch); the kernel + BUILD.gn wiring are added files:
-  1. third_party/blink/renderer/modules/webaudio/offline_audio_context.cc — offline result farble (Hook A).
-  2. third_party/blink/renderer/modules/webaudio/realtime_analyser.cc — analyser float paths (Hooks B, C).
+Two existing files are touched (this patch); the kernel + BUILD.gn wiring are added files:
+  1. third_party/blink/renderer/modules/webaudio/offline_audio_context.cc — offline result farble (hook 1).
+  2. third_party/blink/renderer/modules/webaudio/realtime_analyser.cc — analyser float AND byte paths
+     (hooks 2-5).
 
 diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
 index aed92e0ec46ad..576daeb189deb 100644

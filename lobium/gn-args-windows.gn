@@ -48,3 +48,12 @@ v8_symbol_level = 0
 # No RBE credentials on this host, so everything is local. Left explicit rather than defaulted so
 # a stray environment variable cannot silently enable a remote backend for a private build.
 use_remoteexec = false
+
+# How many link steps ninja may run at once. SCHEDULING ONLY — it changes nothing about the bytes
+# produced, so it is not a deviation from the "match official Chrome" rule above.
+#
+# The ThinLTO link of chrome.dll is the peak memory moment of the whole build, and it is measured in
+# many GB. Two of them at once is what makes a 16 GB host die at the very end, after the hours of
+# compilation that earned the objects. One at a time costs wall clock only on a machine that had the
+# RAM to overlap them anyway.
+concurrent_links = 1

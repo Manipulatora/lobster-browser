@@ -20,6 +20,8 @@ source_set("lobium_fp") {
     "lobium_fp_config.h",
     "lobium_media_devices.cc",
     "lobium_media_devices.h",
+    "lobium_webgpu.cc",
+    "lobium_webgpu.h",
   ]
 
   # public_deps: lobium_fp_config.h exposes base::FilePath (Load()) + includes base/files/file_path.h,

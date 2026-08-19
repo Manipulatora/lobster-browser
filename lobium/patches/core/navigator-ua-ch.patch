@@ -126,7 +126,7 @@ diff --git a/third_party/blink/common/device_memory/approximated_device_memory.c
 index 7fd53ebba0dc5..8efe615459114 100644
 --- a/third_party/blink/common/device_memory/approximated_device_memory.cc
 +++ b/third_party/blink/common/device_memory/approximated_device_memory.cc
-@@ -8,10 +8,48 @@
+@@ -8,10 +8,53 @@
  #include "base/check_op.h"
  #include "base/feature_list.h"
  #include "base/system/sys_info.h"
@@ -139,8 +139,13 @@ index 7fd53ebba0dc5..8efe615459114 100644
 +namespace {
 +
 +// Lobium: round a configured deviceMemory (GB) exactly as CalculateAndSetApproximatedDeviceMemory does
-+// for real RAM - nearest power-of-two GB, then clamp to this build's platform limits - so the value is
-+// always one a genuine Chromium of this version could emit (no off-spec / out-of-range tell).
++// for real RAM - nearest power-of-two GB, then clamp - so the value is always one a genuine Chromium of
++// this version could emit (no off-spec / out-of-range tell).
++//
++// The bounds below are that function's own kMinMemory/kMaxMemory verbatim, and they MOVE WHEN IT MOVES:
++// crbug.com/454354290 widened desktop from the old 0.25..8 ladder to 2..32. Re-tightening this to 8 to
++// match a spec ladder Chrome no longer follows would make the persona report a value this Chromium
++// never emits, which is the tell it was written to avoid.
 +float LobiumRoundDeviceMemoryGb(double configured_gb) {
 +  int64_t mb = static_cast<int64_t>(configured_gb * 1024.0);
 +  if (mb < 1) {

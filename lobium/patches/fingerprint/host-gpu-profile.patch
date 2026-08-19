@@ -11,17 +11,22 @@ parses these fields). Requires a Lobium rebuild on the build VPS to prove in bin
 diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
-@@ -3873,6 +3873,24 @@
+@@ -3873,6 +3873,29 @@
      UseCounter::Count(context, WebFeature::kWebGLDebugRendererInfo);
    }
  
 +  // Lobium HC-4: when the persona lists extensions, refuse names outside that list so
-+  // getExtension() agrees with getSupportedExtensions() (both read cfg->webgl.extensions).
-+  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
-+      cfg && !cfg->webgl.extensions.empty()) {
-+    bool allowed = false;
-+    for (const std::string& ext : cfg->webgl.extensions) {
-+      if (name == String::FromUtf8(ext)) {
++  // getExtension() agrees with getSupportedExtensions(). The list is chosen PER CONTEXT TYPE for
++  // the same reason that function chooses it: WebGL2 folds several WebGL1 extensions into core and
++  // adds its own, so a WebGL2 context filtered against the WebGL1 list refuses names it advertises.
++  // Case is ignored because ExtensionTracker::MatchesName ignores it, so
++  // gl.getExtension('webgl_debug_renderer_info') resolves here exactly as it does in Chrome.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current()) {
++    const std::vector<std::string>& want =
++        IsWebGL2() ? cfg->webgl.extensions2 : cfg->webgl.extensions;
++    bool allowed = want.empty();
++    for (const std::string& ext : want) {
++      if (DeprecatedEqualIgnoringCase(name, String::FromUtf8(ext))) {
 +        allowed = true;
 +        break;
 +      }
@@ -36,7 +41,7 @@ diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_ba
    WebGLExtension* extension = EnableExtensionIfSupported(name, context);
    return ScriptObject(
        script_state->GetIsolate(),
-@@ -4160,6 +4178,12 @@
+@@ -4160,6 +4183,12 @@
      case GL_SCISSOR_TEST:
        return GetBooleanParameter(script_state, pname);
      case GL_SHADING_LANGUAGE_VERSION:
@@ -49,7 +54,7 @@ diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_ba
        return WebGLAny(
            script_state,
            StrCat({"WebGL GLSL ES 1.0 (",
-@@ -4222,6 +4246,11 @@
+@@ -4222,6 +4251,11 @@
      case GL_VENDOR:
        return WebGLAny(script_state, String("WebKit"));
      case GL_VERSION:
@@ -61,7 +66,7 @@ diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_ba
        return WebGLAny(
            script_state,
            StrCat({"WebGL 1.0 (", String(ContextGL()->GetString(GL_VERSION)),
-@@ -4561,6 +4590,41 @@
+@@ -4561,6 +4595,41 @@
        return nullptr;
    }
  
@@ -103,7 +108,7 @@ diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_ba
    GLint range[2] = {0, 0};
    GLint precision = 0;
    ContextGL()->GetShaderPrecisionFormat(shader_type, precision_type, range,
-@@ -4580,6 +4644,17 @@
+@@ -4580,6 +4649,17 @@
    if (isContextLost())
      return std::nullopt;
  

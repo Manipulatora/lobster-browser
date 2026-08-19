@@ -16,12 +16,16 @@
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PATCHES = join(HERE, 'patches');
-const SRC = process.env.LOBIUM_CHROMIUM_SRC || 'E:\\lobium-build\\src';
+// The Windows build host keeps the tree on E: because a Chromium checkout does not fit beside the
+// repo; the Linux one keeps it under $HOME. Either way LOBIUM_CHROMIUM_SRC wins.
+const SRC =
+  process.env.LOBIUM_CHROMIUM_SRC ||
+  (process.platform === 'win32' ? 'E:\\lobium-build\\src' : join(homedir(), 'lobium-build', 'src'));
 const GIT = process.env.LOBIUM_GIT || 'git';
 
 const series = readFileSync(join(PATCHES, 'series'), 'utf8')
@@ -31,7 +35,9 @@ const series = readFileSync(join(PATCHES, 'series'), 'utf8')
 
 const resolved = [];
 for (const name of series) {
-  const p = join(PATCHES, name.split('/').join('\\'));
+  // series entries are always '/'-separated; split them so join() applies the host separator
+  // instead of baking one filename that contains a slash.
+  const p = join(PATCHES, ...name.split('/'));
   if (!existsSync(p)) {
     console.error(`no such patch: ${name}`);
     process.exit(2);

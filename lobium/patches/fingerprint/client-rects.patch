@@ -10,6 +10,9 @@ those independent nudges and broke every such equality, which is a handful of li
 Value keying gives equal inputs equal outputs, so the relations survive; it also makes the two call
 sites below agree by construction rather than by both happening to pass index 0.
 
+The other relation honest Chrome holds exactly is getBoundingClientRect() == union(getClientRects()),
+so the bounding box is computed as the union of the farbled rects instead of being farbled itself.
+
 diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
 index 3ae6d39c4a711..3b2d939a313a3 100644
 --- a/third_party/blink/renderer/core/dom/element.cc
@@ -24,7 +27,7 @@ index 3ae6d39c4a711..3b2d939a313a3 100644
  #include <algorithm>
  #include <bitset>
  #include <limits>
-@@ -3348,6 +3351,38 @@ void Element::ClientQuads(Vector<gfx::QuadF>& quads) const {
+@@ -3348,6 +3351,61 @@ void Element::ClientQuads(Vector<gfx::QuadF>& quads) const {
    }
  }
  
@@ -60,51 +63,83 @@ index 3ae6d39c4a711..3b2d939a313a3 100644
 +  return !(style->Width().IsFixed() && style->Height().IsFixed());
 +}
 +
++// Lobium: farble a whole client-rect list in place.
++//
++// BOTH getClientRects() and getBoundingClientRect() go through this, on the same list, because in
++// honest Chrome the bounding box IS the union of the client rects. Farbling an already-unioned box
++// separately holds that relation only while an element has ONE client rect; an inline that wraps
++// across lines has several, and union(farble(r_i)) is not farble(union(r_i)). Comparing the two is
++// three lines of JS, and the relation is exact in every real browser.
++static void LobiumFarbleClientRects(const Element& element,
++                                    uint32_t seed,
++                                    Vector<gfx::RectF>& rects) {
++  for (auto& rect : rects) {
++    if (!LobiumRectCarriesHostEntropy(element, rect)) {
++      continue;
++    }
++    float x = rect.x();
++    float y = rect.y();
++    float w = rect.width();
++    float h = rect.height();
++    lobium::FarbleClientRect(&x, &y, &w, &h, seed);
++    rect.SetRect(x, y, w, h);
++  }
++}
++
  DOMRectList* Element::getClientRects() {
    Vector<gfx::RectF> rects = GetClientRectsNoAdjustment();
    if (rects.empty()) {
-@@ -3359,6 +3394,22 @@ DOMRectList* Element::getClientRects() {
+@@ -3359,6 +3417,11 @@ DOMRectList* Element::getClientRects() {
      GetDocument().AdjustRectForScrollAndAbsoluteZoom(rect,
                                                       *element_layout_object);
    }
 +  // Lobium: seeded client-rect farbling (unlinkability). Sub-pixel noise only; layout untouched.
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +      cfg && cfg->seeds.client_rects) {
-+    for (wtf_size_t i = 0; i < rects.size(); ++i) {
-+      if (!LobiumRectCarriesHostEntropy(*this, rects[i])) {
-+        continue;
-+      }
-+      float x = rects[i].x();
-+      float y = rects[i].y();
-+      float w = rects[i].width();
-+      float h = rects[i].height();
-+      lobium::FarbleClientRect(&x, &y, &w, &h,
-+                               cfg->seeds.client_rects);
-+      rects[i].SetRect(x, y, w, h);
-+    }
++    LobiumFarbleClientRects(*this, cfg->seeds.client_rects, rects);
 +  }
    return MakeGarbageCollected<DOMRectList>(rects);
  }
  
-@@ -3411,7 +3462,20 @@ gfx::RectF Element::GetBoundingClientRectNoLifecycleUpdate() const {
+@@ -3411,7 +3474,41 @@ gfx::RectF Element::GetBoundingClientRectNoLifecycleUpdate() const {
  DOMRect* Element::GetBoundingClientRect() {
    GetDocument().EnsurePaintLocationDataValidForNode(
        this, DocumentUpdateReason::kJavaScript);
--  return DOMRect::FromRectF(GetBoundingClientRectNoLifecycleUpdate());
-+  gfx::RectF result = GetBoundingClientRectNoLifecycleUpdate();
-+  // Lobium: same client-rect seed AND the same entropy gate as getClientRects, so the bounding box
-+  // agrees with the list on both the value and the decision to leave it alone.
++  // Lobium: the box is built as the UNION of the farbled client rects rather than by farbling the
++  // union, so getBoundingClientRect() == union(getClientRects()) survives farbling the way it holds
++  // in every honest browser. Adjusting each rect and then unioning gives the same geometry as
++  // GetBoundingClientRectNoLifecycleUpdate()'s union-then-adjust, because
++  // AdjustRectForScrollAndAbsoluteZoom is affine; the quads are walked here rather than through
++  // GetClientRectsNoAdjustment() so the scroll-access heuristic is not counted twice for one call.
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
-+      cfg && cfg->seeds.client_rects &&
-+      LobiumRectCarriesHostEntropy(*this, result)) {
-+    float x = result.x();
-+    float y = result.y();
-+    float w = result.width();
-+    float h = result.height();
-+    lobium::FarbleClientRect(&x, &y, &w, &h, cfg->seeds.client_rects);
-+    result.SetRect(x, y, w, h);
++      cfg && cfg->seeds.client_rects) {
++    Vector<gfx::QuadF> quads;
++    ClientQuads(quads);
++    gfx::RectF unadjusted;
++    for (const auto& quad : quads) {
++      unadjusted.Union(quad.BoundingBox());
++    }
++    // An empty box short-circuits upstream before the adjustment, so it must here too.
++    if (unadjusted != gfx::RectF()) {
++      LayoutObject* element_layout_object = GetLayoutObject();
++      DCHECK(element_layout_object);
++      Vector<gfx::RectF> rects;
++      rects.ReserveInitialCapacity(quads.size());
++      for (const auto& quad : quads) {
++        gfx::RectF rect = quad.BoundingBox();
++        GetDocument().AdjustRectForScrollAndAbsoluteZoom(rect,
++                                                         *element_layout_object);
++        rects.push_back(rect);
++      }
++      LobiumFarbleClientRects(*this, cfg->seeds.client_rects, rects);
++      gfx::RectF result;
++      for (const gfx::RectF& rect : rects) {
++        result.Union(rect);
++      }
++      return DOMRect::FromRectF(result);
++    }
 +  }
-+  return DOMRect::FromRectF(result);
+   return DOMRect::FromRectF(GetBoundingClientRectNoLifecycleUpdate());
  }
  
  DOMRect* Element::GetBoundingClientRectForBinding() {

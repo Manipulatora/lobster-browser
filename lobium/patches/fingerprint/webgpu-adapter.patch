@@ -16,20 +16,48 @@ Chrome exposes vendor, architecture, subgroup sizes and isFallbackAdapter by def
 description and driver appear with WebGPU developer features enabled. All are set, because a
 fingerprinter with those features enabled is exactly the caller worth being consistent for.
 
+adapter.limits and adapter.features are part of the same object and are adjusted with it, downward
+only - see lobium_webgpu.h for why a ceiling is the only safe direction and what it cannot fix.
+
 Hook point: third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
 
 diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
 --- a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
 +++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,10 @@
  
  #include "third_party/blink/renderer/modules/webgpu/gpu_adapter.h"
  
++#include <algorithm>
++
 +#include "components/lobium_fp/lobium_fp_config.h"
++#include "components/lobium_fp/lobium_webgpu.h"
  #include "services/metrics/public/cpp/ukm_builders.h"
  #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_object_builder.h"
-@@ -113,6 +114,47 @@ GPUAdapter::GPUAdapter(
+@@ -42,9 +46,19 @@ GPUSupportedFeatures* MakeFeatureNameSet(wgpu::Adapter adapter) {
+   for (const auto& f : features_span) {
+     auto feature_name_enum_optional =
+         GPUSupportedFeatures::ToV8FeatureNameEnum(f);
+     if (feature_name_enum_optional) {
+-      features->AddFeatureName(
+-          V8GPUFeatureName(feature_name_enum_optional.value()));
++      const V8GPUFeatureName name(feature_name_enum_optional.value());
++      // Lobium: adapter.features names the hardware as plainly as adapter.info does - block
++      // compression is a desktop part, ETC2/ASTC a mobile one - so a persona has to drop the
++      // families its claimed GPU would not have. Dropping is the only safe direction: a feature the
++      // real backend lacks cannot be granted, so adding one fails at the first requestDevice().
++      if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++          cfg && cfg->webgpu.present &&
++          !lobium::WebGpuFeatureAllowed(name.AsCStr(), cfg->webgpu.vendor,
++                                        cfg->navigator.ua_platform)) {
++        continue;
++      }
++      features->AddFeatureName(name);
+       }
+   }
+   return features;
+@@ -113,11 +127,93 @@ GPUAdapter::GPUAdapter(
    subgroup_max_size_ = info.subgroupMaxSize;
    power_preference_ = powerProperties.powerPreference;
  
@@ -77,3 +105,49 @@ diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc b/third_pa
    features_ = MakeFeatureNameSet(GetHandle());
  
    GPUSupportedLimits::ComboLimits limits;
+   GetHandle().GetLimits(limits.GetLinked());
++
++  // Lobium: adapter.limits describes the device adapter.info just named, and a page reads both from
++  // one object - so limits left at the host's values are the identity override's own contradiction,
++  // moved one property along. Clamped to the persona's class and NEVER raised: this is the ceiling
++  // requestDevice() validates requiredLimits against and GPUDevice.limits reports back afterwards,
++  // so a raised limit either fails the call or makes device.limits contradict adapter.limits. See
++  // lobium_webgpu.h for the class values and for what a backend weaker than the persona cannot fix.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->webgpu.present) {
++    const lobium::WebGpuCeilings ceilings =
++        lobium::WebGpuCeilingsFor(cfg->webgpu.adapter_type);
++    limits.maxTextureDimension1D =
++        std::min(limits.maxTextureDimension1D, ceilings.max_texture_dimension_1d);
++    limits.maxTextureDimension2D =
++        std::min(limits.maxTextureDimension2D, ceilings.max_texture_dimension_2d);
++    limits.maxTextureDimension3D =
++        std::min(limits.maxTextureDimension3D, ceilings.max_texture_dimension_3d);
++    limits.maxTextureArrayLayers =
++        std::min(limits.maxTextureArrayLayers, ceilings.max_texture_array_layers);
++    limits.maxUniformBufferBindingSize = std::min(
++        limits.maxUniformBufferBindingSize, ceilings.max_uniform_buffer_binding_size);
++    limits.maxStorageBufferBindingSize = std::min(
++        limits.maxStorageBufferBindingSize, ceilings.max_storage_buffer_binding_size);
++    limits.maxBufferSize = std::min(limits.maxBufferSize, ceilings.max_buffer_size);
++    limits.maxComputeWorkgroupStorageSize =
++        std::min(limits.maxComputeWorkgroupStorageSize,
++                 ceilings.max_compute_workgroup_storage_size);
++    limits.maxComputeInvocationsPerWorkgroup =
++        std::min(limits.maxComputeInvocationsPerWorkgroup,
++                 ceilings.max_compute_invocations_per_workgroup);
++    limits.maxComputeWorkgroupSizeX = std::min(limits.maxComputeWorkgroupSizeX,
++                                               ceilings.max_compute_workgroup_size_x);
++    limits.maxComputeWorkgroupSizeY = std::min(limits.maxComputeWorkgroupSizeY,
++                                               ceilings.max_compute_workgroup_size_y);
++    limits.maxComputeWorkgroupSizeZ = std::min(limits.maxComputeWorkgroupSizeZ,
++                                               ceilings.max_compute_workgroup_size_z);
++    limits.maxComputeWorkgroupsPerDimension =
++        std::min(limits.maxComputeWorkgroupsPerDimension,
++                 ceilings.max_compute_workgroups_per_dimension);
++  }
++
+   limits_ = MakeGarbageCollected<GPUSupportedLimits>(limits);
+ 
+   info_ = CreateAdapterInfoForAdapter();
+ }
