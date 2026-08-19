@@ -51,6 +51,9 @@
       <div
         class="pointer-events-none absolute left-1/2 top-1/2 h-[60%] w-[60%] -translate-x-1/2 -translate-y-1/2 rounded-full bg-white"
       ></div>
+      <!-- Deliberately carries no `fetchpriority`: autoplay already starts the fetch at parse time,
+           and this is decoration two sections below the fold — it must not outrank what the hero
+           needs to paint. -->
       <video
         class="absolute left-1/2 top-1/2 w-[30%] -translate-x-1/2 -translate-y-1/2"
         src="/videos/lobster-mark.mp4"
@@ -60,7 +63,6 @@
         playsinline
         disablepictureinpicture
         preload="auto"
-        fetchpriority="high"
         aria-hidden="true"
       ></video>
 

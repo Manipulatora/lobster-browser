@@ -17,9 +17,7 @@ import { AuthModalService, type AuthMode } from './auth-modal.service';
 @Component({
   selector: 'app-auth-route-page',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  template: `
-    <div class="bg-aurora min-h-[70vh]" aria-hidden="true"></div>
-  `,
+  template: ` <div class="bg-aurora min-h-[70vh]" aria-hidden="true"></div> `,
 })
 export class AuthRoutePage {
   /** Bound from route `data` via `withComponentInputBinding()`. */

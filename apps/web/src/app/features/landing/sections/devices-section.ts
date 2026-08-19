@@ -111,12 +111,20 @@ export class DevicesSection {
     scene.setProgress(progress());
     this.loaded.set(true);
 
-    // Render only while on screen — otherwise this competed with the hero's shader for the GPU
-    // even when scrolled far away.
+    // Render only while on screen and in a foreground tab — otherwise this competed with the hero's
+    // shader for the GPU even when scrolled far away. Both conditions live here rather than in the
+    // observers, because each observer sees only one of them: a tab-away while the section is in
+    // view would otherwise leave the scene stopped for good once the tab came back.
+    let onScreen = false;
+    const sync = (): void => {
+      if (onScreen && !this.document.hidden) scene.start();
+      else scene.stop();
+    };
+
     const vis = new IntersectionObserver(
       (entries) => {
-        if (entries.some((e) => e.isIntersecting) && !this.document.hidden) scene.start();
-        else scene.stop();
+        onScreen = entries.some((e) => e.isIntersecting);
+        sync();
       },
       { threshold: 0 },
     );
@@ -126,19 +134,16 @@ export class DevicesSection {
       scene.resize();
       scene.setProgress(progress());
     };
-    const onVisibility = (): void => {
-      if (this.document.hidden) scene.stop();
-    };
 
     view.addEventListener('scroll', onScroll, { passive: true });
     view.addEventListener('resize', onResize, { passive: true });
-    this.document.addEventListener('visibilitychange', onVisibility);
+    this.document.addEventListener('visibilitychange', sync);
 
     this.cleanup = () => {
       vis.disconnect();
       view.removeEventListener('scroll', onScroll);
       view.removeEventListener('resize', onResize);
-      this.document.removeEventListener('visibilitychange', onVisibility);
+      this.document.removeEventListener('visibilitychange', sync);
     };
   }
 

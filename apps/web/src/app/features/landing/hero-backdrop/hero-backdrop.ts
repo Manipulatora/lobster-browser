@@ -165,17 +165,25 @@ export class HeroBackdrop {
       renderer.setAnimationLoop(null);
     };
 
+    // On screen AND the tab in front: both have to hold, and each observer below knows only one of
+    // them. Resuming straight from `visibilitychange` would restart a full-screen fragment shader
+    // for someone who tabbed away from a page they had already scrolled well past the hero on.
+    let onScreen = false;
+    const sync = (): void => {
+      if (onScreen && !this.document.hidden) play();
+      else pause();
+    };
+
     const io = new IntersectionObserver(
-      (entries) => (entries.some((e) => e.isIntersecting) ? play() : pause()),
+      (entries) => {
+        onScreen = entries.some((e) => e.isIntersecting);
+        sync();
+      },
       { threshold: 0.01 },
     );
     io.observe(this.host.nativeElement);
 
-    const onVisibility = (): void => {
-      if (this.document.hidden) pause();
-      else play();
-    };
-    this.document.addEventListener('visibilitychange', onVisibility);
+    this.document.addEventListener('visibilitychange', sync);
     view.addEventListener('resize', resize, { passive: true });
 
     // Draw one frame before revealing, so the fade never exposes an empty canvas.
@@ -186,7 +194,7 @@ export class HeroBackdrop {
       pause();
       io.disconnect();
       view.removeEventListener('resize', resize);
-      this.document.removeEventListener('visibilitychange', onVisibility);
+      this.document.removeEventListener('visibilitychange', sync);
       material.dispose();
       noise.dispose();
       stars.dispose();

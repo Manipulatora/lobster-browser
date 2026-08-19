@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Only the two pages worth ranking. /login and /signup are prerendered too, but they are a modal
+     over a backdrop with no content of their own, and /account and /auth are disallowed outright in
+     robots.txt. Keep this in step with the marketing routes in src/app/app.routes.ts. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://lobrowser.com/</loc>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://lobrowser.com/pricing</loc>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+</urlset>

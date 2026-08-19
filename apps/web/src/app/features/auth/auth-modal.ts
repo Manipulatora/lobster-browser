@@ -41,7 +41,9 @@ const ALLOWED_EMAIL_DOMAINS = [
 
 /** Rejects addresses outside the accepted providers. Only meaningful on the sign-up path. */
 function allowedProviderValidator(control: AbstractControl): ValidationErrors | null {
-  const value = String(control.value ?? '').trim().toLowerCase();
+  const value = String(control.value ?? '')
+    .trim()
+    .toLowerCase();
   if (!value || !value.includes('@')) return null; // shape is `email`'s job, not ours
   const domain = value.slice(value.lastIndexOf('@') + 1);
   return ALLOWED_EMAIL_DOMAINS.includes(domain) ? null : { provider: true };
@@ -178,7 +180,9 @@ export class AuthModal {
   }
 
   /** Errors stay hidden until the field has been visited or the form submitted once. */
-  protected invalid(name: 'fullName' | 'company' | 'email' | 'password' | 'confirmPassword'): boolean {
+  protected invalid(
+    name: 'fullName' | 'company' | 'email' | 'password' | 'confirmPassword',
+  ): boolean {
     const control = this.form.controls[name];
     return control.invalid && (control.touched || this.submitted());
   }

@@ -137,24 +137,32 @@ export class XylophoneHero {
       running = false;
     };
 
+    // On screen AND the tab in front: both have to hold, and each observer below knows only one of
+    // them. Resuming straight from `visibilitychange` would restart the sim for someone who tabbed
+    // away from a page they had already scrolled well past the hero on.
+    let onScreen = false;
+    const sync = (): void => {
+      if (onScreen && !this.document.hidden) play();
+      else pause();
+    };
+
     const io = new IntersectionObserver(
-      (entries) => (entries.some((e) => e.isIntersecting) ? play() : pause()),
+      (entries) => {
+        onScreen = entries.some((e) => e.isIntersecting);
+        sync();
+      },
       { threshold: 0.01 },
     );
     io.observe(this.host.nativeElement);
 
-    const onVisibility = (): void => {
-      if (this.document.hidden) pause();
-      else play();
-    };
-    this.document.addEventListener('visibilitychange', onVisibility);
+    this.document.addEventListener('visibilitychange', sync);
 
     // Draw one frame before revealing, so the fade never exposes an empty canvas. The bars
     // themselves load separately and appear into this already-visible scene once ready, rather
-    // than gating the whole reveal on a network fetch.
+    // than gating the whole reveal on a network fetch. The loop itself starts from the observer's
+    // first callback, which lands on the next frame.
     engine.render(0);
     this.ready.set(true);
-    play();
 
     void engine.load({ modelUrl: '/xylophone/xylophone-bar.glb' });
 
@@ -162,7 +170,7 @@ export class XylophoneHero {
       pause();
       ro.disconnect();
       io.disconnect();
-      this.document.removeEventListener('visibilitychange', onVisibility);
+      this.document.removeEventListener('visibilitychange', sync);
       engine.dispose();
     };
   }

@@ -16,7 +16,6 @@ import { AuthModalService } from '../auth/auth-modal.service';
 import { BillingStore } from './billing.store';
 import type { DepositInstruction, PaidPlanTier, PlanDefinition } from './billing.types';
 
-
 /** How often to re-check a pending deposit while the address is on screen. */
 const POLL_MS = 15_000;
 
@@ -93,8 +92,8 @@ export class BillingPage {
   protected readonly qr = signal<string | null>(null);
 
   /** The selected chain, resolved from the flat list. */
-  protected readonly selectedChain = computed(() =>
-    this.allChains().find((c) => c.code === this.chainCode()) ?? null,
+  protected readonly selectedChain = computed(
+    () => this.allChains().find((c) => c.code === this.chainCode()) ?? null,
   );
 
   /** Every chain in one list, cheapest first — the backend already sorts by send cost. */
@@ -233,7 +232,6 @@ export class BillingPage {
     return Math.max(0, plan.priceCents - this.balanceCents());
   }
 
-
   /**
    * Accepts digits and a single separator, and otherwise leaves the text alone.
    *
@@ -241,9 +239,9 @@ export class BillingPage {
    * the half-finished states ("", "1.") that a parse would reject and overwrite.
    */
   protected onAmountInput(value: string): void {
-    const cleaned = value.replace(/[^0-9.,]/g, '').replace(/[.,]/g, (m, i, whole) =>
-      whole.indexOf(m) === i ? '.' : '',
-    );
+    const cleaned = value
+      .replace(/[^0-9.,]/g, '')
+      .replace(/[.,]/g, (m, i, whole) => (whole.indexOf(m) === i ? '.' : ''));
     this.amountText.set(cleaned);
   }
 
@@ -321,9 +319,7 @@ export class BillingPage {
   private async renderQr(address: string): Promise<void> {
     try {
       const { toDataURL } = await import('qrcode');
-      this.qr.set(
-        await toDataURL(address, { margin: 1, width: 320, errorCorrectionLevel: 'M' }),
-      );
+      this.qr.set(await toDataURL(address, { margin: 1, width: 320, errorCorrectionLevel: 'M' }));
     } catch {
       this.qr.set(null);
     }

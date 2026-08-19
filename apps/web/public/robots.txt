@@ -1,0 +1,8 @@
+# /account and /auth are signed-in or single-use flows: they prerender to an empty shell, so
+# indexing them only ever produces thin duplicates of the pages that matter.
+User-agent: *
+Allow: /
+Disallow: /account/
+Disallow: /auth/
+
+Sitemap: https://lobrowser.com/sitemap.xml

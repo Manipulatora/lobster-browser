@@ -223,7 +223,11 @@ export class XylophoneEngine {
     });
     this.renderer.outputColorSpace = SRGBColorSpace;
     this.renderer.toneMapping = NoToneMapping;
-    this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    // Capped below the display's own density on purpose. This scene is fill-rate bound — the frost
+    // pass blurs the whole backdrop with a 48px kernel and every glass bar samples it again — so
+    // cost scales with the square of this number, and the devices that report 2 or 3 are the phones
+    // least able to pay it. At 1.5 the bar edges still read as crisp on a high-density screen.
+    this.renderer.setPixelRatio(Math.min(1.5, window.devicePixelRatio || 1));
     this.renderer.setSize(this.width, this.height, false);
 
     canvas.addEventListener('webglcontextlost', (event) => {
