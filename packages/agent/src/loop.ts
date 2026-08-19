@@ -1957,8 +1957,12 @@ function settingsActionIntent(action: AgentAction, raw: RawPerception): Array<st
   switch (action.kind) {
     case 'click':
     case 'hover':
-    case 'select':
       values.push(elementName(action.id));
+      break;
+    case 'select':
+      // The chosen option is the whole intent of a select: the control may be named "Language" or
+      // "Time zone" innocuously enough, but it is the value that changes the persona.
+      values.push(elementName(action.id), ...action.values);
       break;
     case 'type':
       values.push(elementName(action.id), action.text);
@@ -1967,7 +1971,9 @@ function settingsActionIntent(action: AgentAction, raw: RawPerception): Array<st
       values.push(action.text);
       break;
     case 'key':
-      values.push(action.key);
+      // Space and Enter activate whatever currently holds focus, so the key alone says nothing
+      // about what is being toggled. Screen the focused control's own name too.
+      values.push(action.key, raw.elements.find((element) => element.focused)?.name);
       break;
     case 'drag':
       values.push(elementName(action.fromId), elementName(action.toId));

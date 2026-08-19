@@ -69,7 +69,6 @@ const SAFE_SETTINGS: ReadonlyMap<string, string> = new Map([
   ['dark', 'appearance'],
   ['light', 'appearance'],
   ['font', 'appearance'],
-  ['zoom', 'appearance'],
   ['privacy', 'privacy'],
   ['privacy and security', 'privacy'],
   ['security', 'security'],
@@ -151,6 +150,9 @@ const FINGERPRINT_TELLS: readonly RegExp[] = [
   /color[\s-]?depth/,
   /pixel[\s-]?ratio/,
   /device[\s-]?pixel/,
+  // Page zoom is not a cosmetic preference: it moves devicePixelRatio and innerWidth/innerHeight
+  // off the values the persona declares, so the page measures a display the profile never claimed.
+  /\bzoom\b/,
   /\bviewport[\s-]?size\b/,
   /\binner(width|height)\b/,
   // GPU / canvas / render fingerprint

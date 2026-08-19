@@ -360,3 +360,15 @@ test('a privileged internal page reached by accident is off limits, not a settin
   assert.equal(isVettedBrowserConfigUrl('chrome://settings/appearance'), true);
   assert.equal(isPrivilegedInternalUrl('chrome://settings/appearance'), true);
 });
+
+test('page zoom is treated as a display-metric change, not an appearance preference', () => {
+  // Zoom moves devicePixelRatio and innerWidth/innerHeight off the persona's declared display, so
+  // it belongs with screen/resolution rather than with theme and font size.
+  assert.equal(assessUiSettingsIntent('set the page zoom to 150%').verdict, 'block');
+  assert.equal(assessUiSettingsIntent('zoom in').verdict, 'block');
+  // The area itself is no longer reachable, so it cannot be opened and changed by hand either.
+  const opened = assessBrowserConfig(cfg({ op: 'open_settings', value: 'zoom' }));
+  assert.equal(opened.verdict, 'block');
+  // Neighbouring appearance settings are unaffected.
+  assert.equal(assessUiSettingsIntent('turn on dark mode').verdict, 'allow');
+});
