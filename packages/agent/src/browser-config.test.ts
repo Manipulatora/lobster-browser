@@ -595,3 +595,54 @@ test('page zoom is treated as a display-metric change, not an appearance prefere
   // Neighbouring appearance settings are unaffected.
   assert.equal(assessUiSettingsIntent('turn on dark mode').verdict, 'allow');
 });
+
+test('a preference URL may not point the browser at the local network', () => {
+  // The browser opens a start page by itself, outside the agent loop, so assessNavigation never sees
+  // it. This guard is the only fence between a preference and the cloud metadata service.
+  for (const host of [
+    'http://169.254.169.254/latest/meta-data/iam/security-credentials/',
+    'http://127.0.0.1:8080/',
+    'http://[::1]/',
+    'http://localhost/admin',
+    'http://10.0.0.5/',
+    'http://192.168.1.1/',
+    'http://metadata.google.internal/computeMetadata/v1/',
+  ]) {
+    assert.equal(
+      assessBrowserConfig(cfg({ op: 'set_pref', pref: 'homepage', value: host })).verdict,
+      'block',
+      `homepage accepted ${host}`,
+    );
+    assert.equal(
+      assessBrowserConfig(cfg({ op: 'set_pref', pref: 'session.startup_urls', values: [host] }))
+        .verdict,
+      'block',
+      `startup_urls accepted ${host}`,
+    );
+  }
+  // A public destination is still allowed, or the setting would be useless.
+  assert.equal(
+    assessBrowserConfig(cfg({ op: 'set_pref', pref: 'homepage', value: 'https://example.com/' }))
+      .verdict,
+    'allow',
+  );
+});
+
+test('the protected-content identity page is not reachable, by URL or by label', () => {
+  // A per-device Widevine identifier is exactly what ADR-0002 hard-blocks, and it lives under the
+  // `content` page the guard otherwise allows.
+  assert.equal(isVettedBrowserConfigUrl('chrome://settings/content/protectedContent'), false);
+  assert.equal(isVettedBrowserConfigUrl('chrome://settings/content/localFonts'), false);
+  assert.equal(isVettedBrowserConfigUrl('chrome://settings/content/zoomLevels'), false);
+  // The pages it does allow keep working, including the base itself.
+  assert.equal(isVettedBrowserConfigUrl('chrome://settings/content'), true);
+  assert.equal(isVettedBrowserConfigUrl('chrome://settings/content/notifications'), true);
+  // Chrome's own wording, which is what a model reads off the page.
+  for (const phrase of [
+    'Sites can play protected content',
+    'To play content protected by copyright, sites may need to use a content protection service',
+    'open protected content settings',
+  ]) {
+    assert.equal(assessUiSettingsIntent(phrase).verdict, 'block', `intent allowed: ${phrase}`);
+  }
+});

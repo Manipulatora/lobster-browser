@@ -2,6 +2,7 @@ import type { AgentAction, BrowserConfigOp } from '@lobster/shared-types';
 import { isIP } from 'node:net';
 import { domainToASCII } from 'node:url';
 import { parse as parseDomain } from 'tldts';
+import { isPrivateHostname } from './private-network.js';
 
 /**
  * The anti-detect gate for deep browser-config control.
@@ -367,6 +368,11 @@ const FINGERPRINT_TELLS: readonly RegExp[] = [
   // A CDM capability probe carries a device identity, and its availability is directly observable.
   /(protected|encrypted)[\s-]?media/,
   /\bwidevine\b/,
+  // Chrome's own words for the same setting. Its UI says "protected content", never "protected
+  // media", so a tell written from the preference name matched nothing the user or the model
+  // actually reads: `Sites can play protected content`, `content protection service`.
+  /protected[\s-]?content/,
+  /content[\s-]?protection/,
   // Hardware
   /hardware[\s-]?concurrency/,
   /\bcpu[\s-]?cores?\b/,
@@ -546,6 +552,15 @@ function normalizePrefUrl(raw: string): string {
   }
   const host = canonicalBrowserHostname(url.hostname);
   if (!host) return '';
+  // A PREFERENCE IS NOT A NAVIGATION, and this is the only fence it ever passes. The browser opens a
+  // start page on its own, outside the agent loop, so `assessNavigation` never sees the request —
+  // which makes `homepage = http://169.254.169.254/...` a way to hand the cloud metadata service, and
+  // the IAM credentials behind it, to whatever renders that page.
+  //
+  // Refused unconditionally rather than under `allowPrivateNetwork`: that flag admits an intranet
+  // host for the duration of a run the operator asked for, while a start page is persisted and
+  // outlives it. The stricter answer is the correct default for the longer-lived thing.
+  if (isPrivateHostname(host)) return '';
   const port = url.port ? `:${url.port}` : '';
   return `${url.protocol}//${originHost(host)}${port}${url.pathname}${url.search}${url.hash}`;
 }
@@ -776,8 +791,12 @@ export function isVettedBrowserConfigUrl(raw: string): boolean {
   // The settings root — with or without a `?search=` query — is the landing page of the search fallback.
   // It carries no control of its own, and every subsection it links to is judged on its own URL.
   if (path === '') return true;
+  // EXACT MATCH, never a prefix. `content` is an allowed page, and a prefix rule therefore admitted
+  // every subsection Chromium files beneath it — including `content/protectedContent`, the per-device
+  // Widevine identifier this guard exists to keep away from. A prefix rule also silently adopts
+  // whatever Google adds under that base in the next release, which is a decision no one made.
   const allowed = new Set([...SAFE_SETTINGS.values()].filter((value) => value !== '@new-tab'));
-  return [...allowed].some((base) => path === base || path.startsWith(`${base}/`));
+  return allowed.has(path);
 }
 
 /**
