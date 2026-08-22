@@ -52,6 +52,23 @@ export interface PersistentLaunchOptions {
  * args/userDataDir/headless fields and converts supported proxy settings to native process flags. The
  * Patchright launcher may still consume this shape in internal compatibility tests.
  */
+/** Default per-profile HTTP cache ceiling. Generous for real browsing, bounded across many profiles. */
+export const DEFAULT_DISK_CACHE_BYTES = 128 * 1024 * 1024;
+
+/**
+ * Resolve the per-profile HTTP cache ceiling in bytes.
+ *
+ * `LOBSTER_DISK_CACHE_MB` overrides it; a non-positive or unparseable value falls back to the default
+ * rather than passing Chromium something it would interpret as "use the automatic size".
+ */
+export function diskCacheBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.LOBSTER_DISK_CACHE_MB ?? '').trim();
+  if (raw === '') return DEFAULT_DISK_CACHE_BYTES;
+  const mb = Number(raw);
+  if (!Number.isFinite(mb) || mb <= 0) return DEFAULT_DISK_CACHE_BYTES;
+  return Math.floor(mb) * 1024 * 1024;
+}
+
 export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOptions {
   const { fingerprint } = params;
   if (params.webrtcPolicy === 'proxy_only' && !params.proxy) {
@@ -78,7 +95,13 @@ export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOption
   const args = [
     '--no-first-run',
     '--no-default-browser-check',
-    '--disable-blink-features=AutomationControlled',
+    // NO --disable-blink-features=AutomationControlled. It used to be here to keep
+    // navigator.webdriver false (measured: true without it, false with it), but it bought that at
+    // the price of Chromium's yellow "You are using an unsupported command-line flag" infobar on
+    // every launch AND a line on chrome://version naming the automation workaround — both tells on
+    // a browser that exists to not look automated. The engine now answers navigator.webdriver
+    // natively whenever a Lobium config is present (Navigator::webdriver), which is where every
+    // other fingerprint surface is answered, so the flag is redundant.
     `--lang=${fingerprint.locale.locale}`,
     // Size the window to the AVAILABLE area (screen minus taskbar/menu bar), i.e. a maximized window —
     // NOT the full screen. Otherwise outerHeight == screen.height > screen.availHeight, an incoherence
@@ -91,11 +114,35 @@ export function buildLaunchOptions(params: LaunchParams): PersistentLaunchOption
     // the proxy, so it can never reach a STUN server directly and the real public IP cannot leak
     // (WebRTC IP == proxy IP — the §6 coherence bar). Without a proxy we still restrict enumeration
     // to the default public interface so multi-homed hosts don't expose extra interfaces.
-    `--force-webrtc-ip-handling-policy=${chromeWebRtcFlagPolicy(params)}`,
+    // --webrtc-ip-handling-policy, NOT --force-webrtc-ip-handling-policy.
+    //
+    // The "force" variant is read by exactly two binaries: content/shell and headless/lib. A chrome/
+    // build - which the engine is - never looks at it. There, the policy lives in a preference, and
+    // chrome/browser/prefs/chrome_command_line_pref_store.cc maps a DIFFERENTLY NAMED switch onto it:
+    //     {switches::kWebRtcIPHandlingPolicy, prefs::kWebRTCIPHandlingPolicy}
+    // with kWebRtcIPHandlingPolicy = "webrtc-ip-handling-policy" (chrome_switches.cc).
+    //
+    // So the flag emitted here was silently discarded on every launch, and the leak protection it is
+    // supposed to buy - disable_non_proxied_udp, which stops WebRTC reaching a STUN server outside
+    // the proxy and exposing the real public IP - was never actually applied. Nothing failed loudly,
+    // because Chrome's default mDNS behaviour still hides the PRIVATE IP, which is what the obvious
+    // check looks at; the public-IP path is the one that was open.
+    `--webrtc-ip-handling-policy=${chromeWebRtcFlagPolicy(params)}`,
     // GPU policy. Default (`auto`, no env) emits nothing and preserves prior behavior; on a GPU host
     // set LOBSTER_GPU=gpu so the deep WebGL surfaces render on the real driver instead of silently
     // degrading to SwiftShader/llvmpipe (a headless tell — see gpu.ts / roadmap RG-0).
     ...buildGpuArgs(),
+    // Bound the HTTP cache. Chromium sizes it from FREE DISK SPACE, not from any fixed budget:
+    // net/disk_cache/cache_util.cc returns `available / 100` once the volume is large, so on a host
+    // with 236 GB free every profile is entitled to a ~2.36 GB cache. Chrome ships one profile per
+    // user and that is fine; this product ships MANY profiles per user, each with its own
+    // --user-data-dir, so the same rule multiplies into tens of gigabytes of pure cache.
+    //
+    // Capping is safe in a way that deleting is not: cache CAPACITY is not web-observable (a page can
+    // probe whether a resource is cached, never how large the store may grow), and Chromium's own
+    // figure already varies by machine, so no single value is anomalous. The cache still works - this
+    // only stops it growing without bound.
+    `--disk-cache-size=${diskCacheBytes()}`,
     // PROX-7/8: when proxied, disable QUIC/AsyncDns so UDP/DoH cannot bypass the tunnel.
     ...proxyHardening.filter((arg) => !arg.startsWith('--disable-features=')),
     `--disable-features=${disabledFeatures.join(',')}`,

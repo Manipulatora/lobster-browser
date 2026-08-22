@@ -20,7 +20,7 @@ import {
   type AndroidLaunchPlan,
 } from './android-bridge.js';
 import { buildAndroidLobiumConfig, writeAndroidLobiumConfig } from './android-config.js';
-import { assertBasedOnIpHasProxy, basedOnIpPersonaKnobs } from './based-on-ip.js';
+import { basedOnIpPersonaKnobs } from './based-on-ip.js';
 import { assertUpstreamReachable } from './proxy-auth-adapter.js';
 import { resolveWebRtcPolicy } from './launch-policy.js';
 import {
@@ -170,7 +170,8 @@ async function launchAndroidProfile(
       `startAndroidProfile requires os=android (got "${String(params.os)}"); use startProfile for desktop`,
     );
   }
-  assertBasedOnIpHasProxy(params, 'Android profile');
+  // No proxy is not a reason to refuse: a direct profile exits from this machine's own IP,
+  // and Based-on-IP resolves against that. Matches the desktop path in start-profile.ts.
 
   const bridge = new AndroidDeviceBridge(opts.adb);
   const devices = await bridge.listDevices();

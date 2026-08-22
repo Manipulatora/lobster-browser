@@ -1,18 +1,49 @@
-Lobium — native WebRTC policy semantics.
+Lobium - native WebRTC policy semantics.
 
-The launcher still applies Chromium's force-webrtc-ip-handling-policy as defense in depth. This hook
-makes the product policies observably distinct in Blink:
+The launcher applies Chromium's --webrtc-ip-handling-policy as defense in depth (NOT the "force"
+variant, which only content/shell and headless/lib read - a chrome/ build ignores it entirely, so
+that flag was doing nothing at all until 2026-08-22). This hook makes the product policies real in
+Blink:
   * default_public_interface_only: Chromium default-public-interface policy.
   * disable_non_proxied_udp: Chromium blocks UDP paths that bypass the configured proxy.
   * proxy_only: forces relay-only ICE and suppresses any non-relay candidate defensively.
-  * disabled: RTCPeerConnection construction throws NotSupportedError.
+  * disabled: the connection constructs normally and never surfaces a candidate.
 
 The sidecar independently rejects proxy_only without a configured proxy before browser spawn.
 
+TWO THINGS THIS PATCH USED TO GET WRONG, both page-observable:
+
+1. "disabled" threw NotSupportedError from RTCPeerConnection::Create with the message
+   "WebRTC is disabled by this browser profile." That message is a product signature readable by one
+   try/catch, and rewording it does not help: real Chrome never throws from that constructor in an
+   attached document, so the throw ITSELF is the tell. The policy is now enforced in
+   DidGenerateICECandidate, where "no candidates" is indistinguishable from a network that produces
+   none - and with no candidates there is no connectivity, so the policy still means what it says.
+
+2. proxy_only assigned configuration.type = kRelay, and getConfiguration() reads that back through
+   peer_handler_->GetConfiguration(). A page constructing with iceTransportPolicy:'all' therefore
+   read back 'relay' - the browser contradicting the page's own dictionary, which no Chrome does.
+   The forced value is still applied to the live configuration, because suppressing candidates later
+   is not equivalent: they also reach script through localDescription.sdp, which a candidate-level
+   filter never sees. Instead the page's requested value is remembered in
+   lobium_requested_ice_transports_ and reported by getConfiguration().
+
+MEASURED, not assumed. A first attempt enforced "disabled" purely in DidGenerateICECandidate, and
+that leaked: the icecandidate event was silent but pc.localDescription.sdp still carried all four
+candidates, host and srflx alike. "disabled" therefore also forces relay-only AND clears
+configuration.servers, so nothing can be gathered even when the PAGE supplies its own TURN server -
+with the original server list echoed back by getConfiguration() for the same reason as the policy.
+Verified on the built engine:
+
+    control     constructs=true  iceTransportPolicy=all  candidates=4 {host:2,srflx:2}  sdpLines=4
+    proxy_only  constructs=true  iceTransportPolicy=all  candidates=0                   sdpLines=0
+    disabled    constructs=true  iceTransportPolicy=all  candidates=0                   sdpLines=0
+
 diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
+index 453ea736a8287..91fad5da780a2 100644
 --- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
 +++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
-@@ -48,7 +48,8 @@
+@@ -48,6 +48,7 @@
  #include "base/task/single_thread_task_runner.h"
  #include "base/task/thread_pool.h"
  #include "build/build_config.h"
@@ -20,51 +51,150 @@ diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connecti
  #include "build/buildflag.h"
  #include "services/metrics/public/cpp/ukm_builders.h"
  #include "services/network/public/cpp/connection_allowlist.h"
- #include "third_party/blink/public/common/features.h"
-@@ -617,6 +618,15 @@
+@@ -642,6 +643,18 @@ RTCPeerConnection* RTCPeerConnection::Create(
      ExecutionContext* context,
      const RTCConfiguration* rtc_configuration,
      ExceptionState& exception_state) {
-+  // Lobium: "disabled" means the API cannot create a transport, not merely that UDP is restricted.
-+  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
-+      cfg && cfg->net.webrtc_policy == "disabled") {
-+    exception_state.ThrowDOMException(
-+        DOMExceptionCode::kNotSupportedError,
-+        "WebRTC is disabled by this browser profile.");
-+    return nullptr;
-+  }
++  // Lobium: "disabled" used to throw NotSupportedError here with the message
++  // "WebRTC is disabled by this browser profile." Two things were wrong with that, and the second
++  // survives any rewording:
++  //   * the message is a product signature - one try/catch around `new RTCPeerConnection()` reads a
++  //     string no Chrome has ever produced;
++  //   * real Chrome does not throw from this constructor AT ALL in an attached document, so the
++  //     throw itself is the tell, whatever the message says.
++  // "disabled" is now enforced where it cannot be observed as a browser difference: the connection
++  // constructs exactly as Chrome's does and simply never surfaces a candidate (see
++  // DidGenerateICECandidate below), which is indistinguishable from a network that yields none.
++  // With no candidates there is no connectivity, so the policy still means what it says.
 +
    if (context->IsContextDestroyed()) {
      exception_state.ThrowDOMException(
          DOMExceptionCode::kNotSupportedError,
-@@ -651,6 +661,14 @@
+@@ -677,6 +690,37 @@ RTCPeerConnection* RTCPeerConnection::Create(
      return nullptr;
    }
  
 +  // Lobium: proxy_only accepts TURN relay candidates only. This prevents host/srflx ICE addresses
 +  // from being gathered or used even if a future Chromium flag regression weakens the browser-level
 +  // disable_non_proxied_udp defense.
-+  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
-+      cfg && cfg->net.webrtc_policy == "proxy_only") {
-+    configuration.type = webrtc::PeerConnectionInterface::kRelay;
++  //
++  // The forced value is remembered so getConfiguration() can keep reporting what the PAGE asked for.
++  // Without that, a page constructing with iceTransportPolicy:'all' read back 'relay' - its own
++  // dictionary contradicted by the browser, which no Chrome does. The restriction still has to be
++  // applied to the real configuration rather than filtered later: candidates also reach script
++  // through localDescription.sdp, which a candidate-level filter never sees.
++  std::optional<webrtc::PeerConnectionInterface::IceTransportsType>
++      lobium_requested_ice_transports;
++  std::optional<std::vector<webrtc::PeerConnectionInterface::IceServer>>
++      lobium_requested_ice_servers;
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current(); cfg) {
++    const bool proxy_only = cfg->net.webrtc_policy == "proxy_only";
++    const bool disabled = cfg->net.webrtc_policy == "disabled";
++    if (proxy_only || disabled) {
++      lobium_requested_ice_transports = configuration.type;
++      configuration.type = webrtc::PeerConnectionInterface::kRelay;
++    }
++    if (disabled) {
++      // Clearing the servers is what actually makes "disabled" mean disabled. Relay-only alone
++      // yields nothing ONLY while no TURN server is configured - and the server list is supplied by
++      // the PAGE, so a detector can hand us its own TURN and harvest the relay candidates. Measured:
++      // suppressing the icecandidate event is not enough on its own, because the candidates still
++      // appear in pc.localDescription.sdp, which no event filter ever sees.
++      lobium_requested_ice_servers = configuration.servers;
++      configuration.servers.clear();
++    }
 +  }
 +
    // Make sure no certificates have expired.
    if (!configuration.certificates.empty()) {
      DOMTimeStamp now = ConvertSecondsToDOMTimeStamp(
-@@ -2566,6 +2584,13 @@
- void RTCPeerConnection::DidGenerateICECandidate(
-     RTCIceCandidatePlatform* platform_candidate) {
+@@ -702,6 +746,8 @@ RTCPeerConnection* RTCPeerConnection::Create(
+   if (exception_state.HadException()) {
+     return nullptr;
+   }
++  peer_connection->lobium_requested_ice_transports_ = lobium_requested_ice_transports;
++  peer_connection->lobium_requested_ice_servers_ = std::move(lobium_requested_ice_servers);
+   return peer_connection;
+ }
+ 
+@@ -1382,7 +1428,11 @@ RTCConfiguration* RTCPeerConnection::getConfiguration(
+   RTCConfiguration* result = RTCConfiguration::Create();
+   const auto& webrtc_configuration = peer_handler_->GetConfiguration();
+ 
+-  switch (webrtc_configuration.type) {
++  // Lobium: report the iceTransportPolicy the page asked for. proxy_only forces the live
++  // configuration to relay-only, but echoing that back would contradict the page's own dictionary.
++  const auto reported_ice_transports = lobium_requested_ice_transports_.value_or(
++      webrtc_configuration.type);
++  switch (reported_ice_transports) {
+     case webrtc::PeerConnectionInterface::kRelay:
+       result->setIceTransportPolicy(V8RTCIceTransportPolicy::Enum::kRelay);
+       break;
+@@ -1433,10 +1483,15 @@ RTCConfiguration* RTCPeerConnection::getConfiguration(
+     }
+   }
+ 
++  // Lobium: echo the ICE servers the PAGE supplied. "disabled" strips them from the live
++  // configuration so nothing can be gathered; reporting the stripped list back would contradict the
++  // page's own dictionary just as the forced iceTransportPolicy did.
++  const auto& reported_servers = lobium_requested_ice_servers_.has_value()
++                                     ? *lobium_requested_ice_servers_
++                                     : webrtc_configuration.servers;
+   HeapVector<Member<RTCIceServer>> ice_servers;
+-  ice_servers.reserve(
+-      base::checked_cast<wtf_size_t>(webrtc_configuration.servers.size()));
+-  for (const auto& webrtc_server : webrtc_configuration.servers) {
++  ice_servers.reserve(base::checked_cast<wtf_size_t>(reported_servers.size()));
++  for (const auto& webrtc_server : reported_servers) {
+     auto* ice_server = RTCIceServer::Create();
+ 
+     Vector<String> url_vector;
+@@ -2582,6 +2637,18 @@ void RTCPeerConnection::DidGenerateICECandidate(
    DCHECK(!closed_);
-+  DCHECK(GetExecutionContext()->IsContextThread());
-+  DCHECK(platform_candidate);
-+  // Defense in depth for proxy_only: never expose a host/srflx/prflx candidate to script. The
-+  // configuration above already asks libwebrtc to gather relay-only.
-+  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
-+      cfg && cfg->net.webrtc_policy == "proxy_only" &&
-+      platform_candidate->Type() != "relay") {
-+    return;
+   DCHECK(GetExecutionContext()->IsContextThread());
+   DCHECK(platform_candidate);
++  // proxy_only: never expose a host/srflx/prflx candidate to script - defense in depth behind the
++  // relay-only configuration set in Create().
++  // disabled: expose nothing at all. This is where "disabled" is enforced, instead of throwing from
++  // the constructor, so the policy costs no observable browser difference.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current(); cfg) {
++    if (cfg->net.webrtc_policy == "disabled") {
++      return;
++    }
++    if (cfg->net.webrtc_policy == "proxy_only" && platform_candidate->Type() != "relay") {
++      return;
++    }
 +  }
--  DCHECK(GetExecutionContext()->IsContextThread());
--  DCHECK(platform_candidate);
    RTCIceCandidate* ice_candidate = RTCIceCandidate::Create(platform_candidate);
+   MaybeDispatchEvent(RTCPeerConnectionIceEvent::Create(ice_candidate));
+ }
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
+index d48bc9905668e..872fd17dd10ca 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
+@@ -34,6 +34,7 @@
+ #include <memory>
+ #include <optional>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/gtest_prod_util.h"
+ #include "base/time/time.h"
+@@ -540,6 +541,17 @@ class MODULES_EXPORT RTCPeerConnection final
+   // peer connection will be unaware of the native layer being closed.
+   bool peer_handler_unregistered_;
+   // Reflects the RTCPeerConnection's [[IsClosed]] internal slot.
++  // Lobium: the iceTransportPolicy the PAGE supplied, kept only when the profile's proxy_only
++  // policy overrode it to relay-only. getConfiguration() reports this instead of the forced value,
++  // so a page that constructed with iceTransportPolicy:'all' does not read back 'relay' - a
++  // contradiction of its own dictionary that no Chrome produces. Empty when nothing was overridden.
++  std::optional<webrtc::PeerConnectionInterface::IceTransportsType>
++      lobium_requested_ice_transports_;
++  // Lobium: the ICE servers the PAGE supplied, kept only when the "disabled" policy stripped them
++  // from the live configuration. getConfiguration() reports these instead of the emptied list.
++  std::optional<std::vector<webrtc::PeerConnectionInterface::IceServer>>
++      lobium_requested_ice_servers_;
++
+   // https://w3c.github.io/webrtc-pc/#dfn-isclosed
+   // TODO(https://crbug.com/1083204): According to spec, the peer connection can
+   // only be closed through the close() API. However, our implementation can

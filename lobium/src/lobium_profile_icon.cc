@@ -16,7 +16,10 @@
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
 #include "cc/paint/paint_flags.h"
+#include "cc/paint/paint_shader.h"
 #include "third_party/skia/include/core/SkColor.h"
+#include "third_party/skia/include/core/SkPoint.h"
+#include "third_party/skia/include/core/SkTileMode.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/font.h"
 #include "ui/gfx/font_list.h"
@@ -39,9 +42,15 @@ constexpr char kProfileTintSwitch[] = "lobium-profile-tint";
 // usable tint, so a malformed colour costs the shade rather than the whole icon.
 constexpr SkColor kFallbackTint = SkColorSetRGB(0x7c, 0x3a, 0xed);
 
-// At and above this size a word is legible; below it, only the initials are. Nothing in between
-// reads as a compromise - a word at 48px is a smear, and initials at 128px are a placeholder.
-constexpr int kWordLabelMinSizeDip = 128;
+// At and above this size the NAME is legible, because it is wrapped over two lines rather than
+// squeezed onto one; below it, only the initials are. 128 was the old floor and it meant every
+// taskbar and alt-tab slot - the places a user actually distinguishes profiles - fell back to two
+// letters. Wrapping buys roughly twice the glyph budget per line, which is what makes 64 readable.
+constexpr int kWordLabelMinSizeDip = 64;
+
+// Rows the name may wrap onto. Two: a third line on a square leaves each line too short to hold a
+// word, so names break mid-word and read worse than the same name on two lines at a smaller size.
+constexpr int kLabelMaxLines = 2;
 
 // Corner radius as a fraction of the side. Enough to read as rounded at 128px, little enough that
 // the shape still reads as a SQUARE at 16px, where a larger radius rounds into a circle.
@@ -49,8 +58,11 @@ constexpr float kCornerRadiusRatio = 0.22f;
 
 // The share of the side the label may occupy, in each axis. The margin is what keeps a two-glyph
 // mark from touching the rounded corners.
-constexpr float kLabelWidthRatio = 0.76f;
+constexpr float kLabelWidthRatio = 0.82f;
 constexpr float kLabelHeightRatio = 0.54f;
+
+// A single line may use the full height ratio; two lines share it, so each starts smaller.
+constexpr float kMultiLineHeightRatio = 0.30f;
 
 // Below this the glyphs are noise, so the label is drawn small rather than shrunk further.
 constexpr int kMinLabelFontSize = 6;
@@ -113,13 +125,18 @@ gfx::FontList LabelFont(int size_px) {
 // The largest font the box holds, found by measuring rather than by assuming a glyph width: two
 // Latin initials, two CJK ideographs and a twelve-letter word are all legal labels and none of them
 // has the advance width of the others.
-gfx::FontList FitLabelFont(const std::u16string& label, int side) {
+gfx::FontList FitLabelFont(const std::u16string& label, int side, bool multi_line) {
   const float max_width = static_cast<float>(side) * kLabelWidthRatio;
+  const float height_ratio = multi_line ? kMultiLineHeightRatio : kLabelHeightRatio;
   int size_px = std::max(
       kMinLabelFontSize,
-      static_cast<int>(std::lround(static_cast<float>(side) * kLabelHeightRatio)));
+      static_cast<int>(std::lround(static_cast<float>(side) * height_ratio)));
   gfx::FontList font = LabelFont(size_px);
-  while (size_px > kMinLabelFontSize && gfx::GetStringWidthF(label, font) > max_width) {
+  // A wrapped label may use the full width kLabelMaxLines times over before it has to shrink; a
+  // single-line one has only the one row. Measuring against that budget is what lets a two-word
+  // name stay large instead of being shrunk as though it had to fit on one line.
+  const float width_budget = max_width * (multi_line ? kLabelMaxLines : 1);
+  while (size_px > kMinLabelFontSize && gfx::GetStringWidthF(label, font) > width_budget) {
     size_px -= 1;
     font = LabelFont(size_px);
   }
@@ -128,7 +145,7 @@ gfx::FontList FitLabelFont(const std::u16string& label, int side) {
 
 class ProfileIconSource : public gfx::CanvasImageSource {
  public:
-  ProfileIconSource(int side, std::u16string label, SkColor tint);
+  ProfileIconSource(int side, std::u16string label, SkColor tint, bool multi_line);
 
   ProfileIconSource(const ProfileIconSource&) = delete;
   ProfileIconSource& operator=(const ProfileIconSource&) = delete;
@@ -141,12 +158,17 @@ class ProfileIconSource : public gfx::CanvasImageSource {
  private:
   const std::u16string label_;
   const SkColor tint_;
+  const bool multi_line_;
 };
 
-ProfileIconSource::ProfileIconSource(int side, std::u16string label, SkColor tint)
+ProfileIconSource::ProfileIconSource(int side,
+                                     std::u16string label,
+                                     SkColor tint,
+                                     bool multi_line)
     : gfx::CanvasImageSource(gfx::Size(side, side)),
       label_(std::move(label)),
-      tint_(tint) {}
+      tint_(tint),
+      multi_line_(multi_line) {}
 
 ProfileIconSource::~ProfileIconSource() = default;
 
@@ -156,7 +178,19 @@ void ProfileIconSource::Draw(gfx::Canvas* canvas) {
   cc::PaintFlags flags;
   flags.setAntiAlias(true);
   flags.setStyle(cc::PaintFlags::kFill_Style);
-  flags.setColor(tint_);
+  // A vertical gradient rather than a flat fill. The mark sits next to real application icons in a
+  // taskbar, all of which have some depth to them; a single flat violet square reads as a
+  // placeholder that failed to load. Two stops of the SAME hue - the tint, and the tint darkened -
+  // so the shade still identifies the profile and the icon does not become a second colour.
+  const SkColor bottom = SkColorSetRGB(static_cast<U8CPU>(SkColorGetR(tint_) * 0.72f),
+                                       static_cast<U8CPU>(SkColorGetG(tint_) * 0.72f),
+                                       static_cast<U8CPU>(SkColorGetB(tint_) * 0.72f));
+  // SkColor4f, not SkColor: MakeLinearGradient takes float colours.
+  const SkColor4f stops[] = {SkColor4f::FromColor(tint_), SkColor4f::FromColor(bottom)};
+  const SkPoint ends[] = {SkPoint::Make(0.0f, 0.0f),
+                          SkPoint::Make(0.0f, static_cast<SkScalar>(side))};
+  flags.setShader(cc::PaintShader::MakeLinearGradient(ends, stops, /*pos=*/nullptr,
+                                                      /*count=*/2, SkTileMode::kClamp));
   canvas->DrawRoundRect(
       gfx::RectF(0.0f, 0.0f, static_cast<float>(side), static_cast<float>(side)),
       static_cast<float>(side) * kCornerRadiusRatio, flags);
@@ -168,10 +202,16 @@ void ProfileIconSource::Draw(gfx::Canvas* canvas) {
   // blended - by the taskbar, by the window manager - against a background this process never sees;
   // subpixel coverage computed against the violet fill would fringe there. NO_ELLIPSIS because the
   // font was already sized to fit, and an ellipsis would spend a glyph slot saying nothing.
+  int text_flags = gfx::Canvas::TEXT_ALIGN_CENTER | gfx::Canvas::NO_ELLIPSIS |
+                   gfx::Canvas::NO_SUBPIXEL_RENDERING;
+  if (multi_line_) {
+    text_flags |= gfx::Canvas::MULTI_LINE;
+  }
+  // Inset so a wrapped line cannot touch the rounded corners.
+  const int inset = static_cast<int>(static_cast<float>(side) * (1.0f - kLabelWidthRatio) / 2.0f);
   canvas->DrawStringRectWithFlags(
-      label_, FitLabelFont(label_, side), SK_ColorWHITE, gfx::Rect(0, 0, side, side),
-      gfx::Canvas::TEXT_ALIGN_CENTER | gfx::Canvas::NO_ELLIPSIS |
-          gfx::Canvas::NO_SUBPIXEL_RENDERING);
+      label_, FitLabelFont(label_, side, multi_line_), SK_ColorWHITE,
+      gfx::Rect(inset, 0, side - inset * 2, side), text_flags);
 }
 
 }  // namespace
@@ -194,11 +234,11 @@ gfx::ImageSkia ProfileWindowIcon(int size_dip) {
   if (existing != cache->end()) {
     return existing->second;
   }
-  const std::u16string& label =
-      (size_dip >= kWordLabelMinSizeDip && !mark.word.empty()) ? mark.word : mark.initials;
+  const bool use_name = size_dip >= kWordLabelMinSizeDip && !mark.word.empty();
+  const std::u16string& label = use_name ? mark.word : mark.initials;
   return cache
       ->emplace(size_dip, gfx::CanvasImageSource::MakeImageSkia<ProfileIconSource>(
-                              size_dip, label, mark.tint))
+                              size_dip, label, mark.tint, use_name))
       .first->second;
 }
 

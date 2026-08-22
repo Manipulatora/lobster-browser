@@ -38,7 +38,9 @@ const preamblePath = take('--preamble');
 const [file, ...patchNames] = argv.filter((a) => !a.startsWith('--'));
 
 if (!file || patchNames.length === 0) {
-  console.error('usage: node lobium/chain-delta.mjs [--emit out.patch --preamble f] <src-file> <patch>...');
+  console.error(
+    'usage: node lobium/chain-delta.mjs [--emit out.patch --preamble f] <src-file> <patch>...',
+  );
   process.exit(2);
 }
 
@@ -79,9 +81,13 @@ for (const { name, path: p } of resolved) {
   try {
     // --batch: never prompt. A prompt here would read EOF and be treated as "skip", turning a real
     // apply failure into a silently wrong replay.
-    execFileSync('patch', ['-p1', '-s', '--batch', '--no-backup-if-mismatch', '-d', scratch, '-i', p], {
-      encoding: 'utf8',
-    });
+    execFileSync(
+      'patch',
+      ['-p1', '-s', '--batch', '--no-backup-if-mismatch', '-d', scratch, '-i', p],
+      {
+        encoding: 'utf8',
+      },
+    );
   } catch (err) {
     console.error(`chain replay FAILED at ${name}:\n${err.stdout || ''}${err.stderr || ''}`);
     console.error(
@@ -106,10 +112,14 @@ if (replayed === actual) {
 // other patch in the series.
 let diff = '';
 try {
-  execFileSync(GIT, ['diff', '--no-index', '--no-color', '-U3', '--', join(scratch, file), join(SRC, file)], {
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  execFileSync(
+    GIT,
+    ['diff', '--no-index', '--no-color', '-U3', '--', join(scratch, file), join(SRC, file)],
+    {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
 } catch (err) {
   // git diff --no-index exits 1 when the files differ, which is the expected case here.
   diff = err.stdout ?? '';
@@ -157,9 +167,13 @@ writeFileSync(outPath, out, 'utf8');
 // Verify: chain + delta must reproduce the checkout byte for byte. Emitting first and checking after
 // is deliberate — the check runs against the file that was actually written, not against an
 // in-memory string that might differ from it.
-execFileSync('patch', ['-p1', '-s', '--batch', '--no-backup-if-mismatch', '-d', scratch, '-i', outPath], {
-  encoding: 'utf8',
-});
+execFileSync(
+  'patch',
+  ['-p1', '-s', '--batch', '--no-backup-if-mismatch', '-d', scratch, '-i', outPath],
+  {
+    encoding: 'utf8',
+  },
+);
 const verified = readFileSync(join(scratch, file), 'utf8');
 rmSync(scratch, { recursive: true, force: true });
 if (verified !== actual) {

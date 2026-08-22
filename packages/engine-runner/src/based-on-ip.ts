@@ -14,21 +14,16 @@ export function basedOnIpPersonaKnobs(params: StartProfileParams): string[] {
   return knobs;
 }
 
-/**
- * Refuse a Based-on-IP persona that has no IP to be based on. Without a proxy there is no exit
- * address to resolve, so the launch would quietly fall back to the seed-derived locale/timezone and
- * to this machine's real geolocation while the editor still shows "Based on IP" — the persona is
- * then bound to the operator's own country instead of the one the profile claims, and nothing in the
- * UI says so. The editor warns about this at save time; the launch is where it becomes a refusal.
+/*
+ * `assertBasedOnIpHasProxy` was removed on 2026-08-21.
+ *
+ * It refused to launch any profile whose language/timezone/geolocation were set to Based on IP
+ * while no proxy was attached. Because the profile editor DEFAULTS all three to Based on IP
+ * (profileDraft.ts createProfileDraft), that made every profile created with the default settings
+ * unlaunchable until a proxy was added — the single most common failure users hit.
+ *
+ * The premise was wrong: a direct profile does have an exit IP, this machine's. Both launch paths
+ * now resolve Based-on-IP against it via `deriveGeoFromDirectIp`, which keeps the persona coherent
+ * (locale/timezone/geolocation all agree with the address traffic actually leaves from) instead of
+ * refusing. `basedOnIpPersonaKnobs` above is still used to decide when proxy geo is mandatory.
  */
-export function assertBasedOnIpHasProxy(params: StartProfileParams, subject: string): void {
-  if (params.proxy) return;
-  const knobs = basedOnIpPersonaKnobs(params);
-  if (knobs.length === 0) return;
-  throw new Error(
-    `refusing to launch ${subject} ${params.profileId}: ${knobs.join(', ')} ` +
-      `${knobs.length === 1 ? 'is' : 'are'} set to Based on IP, but the profile has no proxy — ` +
-      'there is no exit IP to derive them from, so the persona would keep its seed-derived locale ' +
-      "and this machine's real geolocation. Attach a proxy, or set those knobs manually.",
-  );
-}

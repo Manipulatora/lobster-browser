@@ -219,7 +219,14 @@ export function deriveDevicePersona(
   // is at the bottom. (A Mac persona reporting availTop=0 with availHeight<height is a detectable tell —
   // the missing pixels would imply a bottom dock and no menu bar, impossible on default macOS.)
   const menuBarTop = os === 'macos' ? 25 : 0;
-  const bottomBar = os === 'macos' ? 0 : 40;
+  // Windows 11's taskbar is 48 CSS px, not Windows 10's 40 - and this persona announces Windows 11
+  // (pools.ts sets uaPlatformVersion 15.0.0, which is the UniversalApiContract version Chromium
+  // reports for Win11 22H2/23H2). A 1920x1080 Win11 persona was reporting availHeight 1040 where a
+  // real machine reports 1032, next to a platform-version hint that says Windows 11 - two one-line
+  // page reads that disagree. The inset is NOT divided by dpr: Windows scales the taskbar with DPI
+  // and Chromium converts the shell work rect to DIP (ui/display/win/screen_win.cc), so 48 CSS px
+  // holds at 100%, 125% and 150% alike.
+  const bottomBar = os === 'macos' ? 0 : os === 'windows' ? 48 : 40;
   // Apple-Silicon MacBooks ship wide-gamut (P3) displays that report a 30-bit colorDepth; every other
   // catalog device is standard 24-bit sRGB. Reporting 24 on a P3 MacBook is a small but real realism
   // miss (M7), so tie colorDepth to the device like arch.

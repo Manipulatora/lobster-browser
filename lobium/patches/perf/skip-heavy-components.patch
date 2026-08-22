@@ -1,0 +1,137 @@
+Lobium - a fingerprint-config profile does not download the speech, translation and TTS components.
+
+THE COST. Every Lobium profile is its own --user-data-dir, and Chromium installs its components
+underneath it. A single freshly launched profile, left alone with no user interaction, grows to
+824 MB. Measured on 152.0.7977.42, two profiles side by side, the same build:
+
+    component_crx_cache   398 MB     SODALanguagePacks   194 MB
+    SODA                  112 MB     TranslateKit         78 MB
+    WasmTtsEngine          23 MB     everything else      ~32 MB
+
+Four components account for 407 MB installed, and their CRXs are 385 MB of the 398 MB crx cache -
+792 MB of the 824. Because the directory is per profile, it is paid again for every profile the
+customer creates.
+
+WHAT IT BUYS. Nothing that a page can see. Probed over CDP on a profile with all four fully
+installed, against one that never downloaded them:
+
+    speechSynthesis.getVoices()   0            0
+    typeof Translator             undefined    undefined
+    typeof LanguageDetector       undefined    undefined
+    navigator.plugins / mimeTypes 5 / 2        5 / 2
+
+The two profiles are indistinguishable from web content. The 792 MB is pure per-profile disk.
+
+WHY NOT --disable-component-update. That switch is the blunt version of this patch and was measured
+too: it takes the same profile from 824 MB to 3.8 MB. It is rejected because it also stops CRLSet,
+First-Party Sets, Privacy Sandbox attestations, Origin Trials, the subresource filter and the PKI
+metadata - about 32 MB that DOES shape web-visible behaviour, on a browser whose job is to behave
+exactly like Chrome. It is also a command-line switch, so it names itself on chrome://version.
+
+This patch skips only the four heavy ones and leaves every small component registered.
+
+TWO HOOKS, because the four are registered from two places. TranslateKit and WasmTtsEngine come
+from RegisterComponentsForUpdate(); SODA is installed from PostProfileInit and gated by
+ShouldInstallSodaDuringPostProfileInit(), so suppressing it in registration.cc alone would leave
+306 MB of speech models still downloading.
+
+Gated on the presence of --lobium-fp-config rather than on lobium::LobiumFpConfig::Current(), which
+is the usual test everywhere else in this series. The two mean the same thing - the config object is
+built from that switch - but //chrome/browser does not depend on //components/lobium_fp, and adding
+the dependency to reach a boolean would put a build-graph edge in the way of a footprint fix.
+base::CommandLine is already available in both files.
+
+diff --git a/chrome/browser/chrome_browser_main.cc b/chrome/browser/chrome_browser_main.cc
+index 21d499a926280..6944c198576ce 100644
+--- a/chrome/browser/chrome_browser_main.cc
++++ b/chrome/browser/chrome_browser_main.cc
+@@ -625,6 +625,13 @@ bool ShouldInstallSodaDuringPostProfileInit(
+              ash::features::kOnDeviceSpeechRecognition) &&
+          ash::IsUserBrowserContext(const_cast<Profile*>(profile));
+ #else
++  // Lobium: a fingerprint-config profile installs no SODA. The speech models are 306 MB per
++  // profile (SODA 112 MB + SODALanguagePacks 194 MB) and expose nothing - a profile carrying the
++  // full install still reports speechSynthesis.getVoices() as 0. See
++  // LobiumSuppressesHeavyComponents in chrome/browser/component_updater/registration.cc.
++  if (command_line.HasSwitch("lobium-fp-config")) {
++    return false;
++  }
+   return !command_line.HasSwitch(switches::kDisableComponentUpdate);
+ #endif
+ }
+diff --git a/chrome/browser/component_updater/registration.cc b/chrome/browser/component_updater/registration.cc
+index 9fd11c9f722cb..78b38e33a6061 100644
+--- a/chrome/browser/component_updater/registration.cc
++++ b/chrome/browser/component_updater/registration.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/component_updater/registration.h"
+ 
++#include "base/command_line.h"
+ #include "base/feature_list.h"
+ #include "base/files/file_path.h"
+ #include "base/files/file_util.h"
+@@ -134,6 +135,27 @@ void DeleteOldComponents(const base::FilePath& user_data_dir) {
+   }
+ }
+ 
++// Lobium: a profile launched with a fingerprint config registers no speech-recognition,
++// on-device-translation or WASM-TTS component.
++//
++// These four are not small. Measured on 152.0.7977.42, a single freshly launched profile that is
++// left alone downloads 824 MB, of which SODA (112 MB), SODALanguagePacks (194 MB), TranslateKit
++// (78 MB) and WasmTtsEngine (23 MB) account for 407 MB installed plus 385 MB of the
++// component_crx_cache that holds their CRXs - 792 MB of the 824. Every profile is its own
++// --user-data-dir, so that cost is paid again per profile.
++//
++// Nothing is bought with it. Probed over CDP on a profile that had all four fully installed:
++// speechSynthesis.getVoices() is 0, and Translator / LanguageDetector are not even defined - the
++// same values a profile that never downloaded them reports. No web-visible surface changes, so on
++// a product that sells many concurrent profiles this is pure per-profile disk.
++//
++// Deliberately narrower than --disable-component-update, which would also drop CRLSet,
++// First-Party Sets, Privacy Sandbox attestations and Origin Trials. Those total ~32 MB and DO
++// shape web-visible behaviour, so they stay registered and keep tracking real Chrome.
++bool LobiumSuppressesHeavyComponents() {
++  return base::CommandLine::ForCurrentProcess()->HasSwitch("lobium-fp-config");
++}
++
+ }  // namespace
+ 
+ void RegisterComponentsForUpdate() {
+@@ -210,14 +232,16 @@ void RegisterComponentsForUpdate() {
+ 
+ #if BUILDFLAG(ENABLE_ON_DEVICE_TRANSLATION)
+   // TODO(crbug.com/364795294): Support other platforms.
+-  RegisterTranslateKitComponent(cus, g_browser_process->local_state(),
+-                                /*force_install=*/false,
+-                                /*registered_callback=*/base::OnceClosure(),
+-                                /*on_ready_callback=*/base::DoNothing());
+-  RegisterTranslateKitLanguagePackComponentsForUpdate(
+-      cus, g_browser_process->local_state());
+-  RegisterTranslateKitLanguagePackComponentsForAutoDownload(
+-      cus, g_browser_process->local_state());
++  if (!LobiumSuppressesHeavyComponents()) {
++    RegisterTranslateKitComponent(cus, g_browser_process->local_state(),
++                                  /*force_install=*/false,
++                                  /*registered_callback=*/base::OnceClosure(),
++                                  /*on_ready_callback=*/base::DoNothing());
++    RegisterTranslateKitLanguagePackComponentsForUpdate(
++        cus, g_browser_process->local_state());
++    RegisterTranslateKitLanguagePackComponentsForAutoDownload(
++        cus, g_browser_process->local_state());
++  }
+ #endif  // BUILDFLAG(ENABLE_ON_DEVICE_TRANSLATION)
+ 
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX) || \
+@@ -227,7 +251,9 @@ void RegisterComponentsForUpdate() {
+         // BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
+ 
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+-  RegisterWasmTtsEngineComponent(cus, g_browser_process->local_state());
++  if (!LobiumSuppressesHeavyComponents()) {
++    RegisterWasmTtsEngineComponent(cus, g_browser_process->local_state());
++  }
+ #endif  // BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+ 
+   RegisterCaptchaProviderComponent(cus);

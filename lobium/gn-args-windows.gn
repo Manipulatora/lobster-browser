@@ -49,11 +49,16 @@ v8_symbol_level = 0
 # a stray environment variable cannot silently enable a remote backend for a private build.
 use_remoteexec = false
 
-# How many link steps ninja may run at once. SCHEDULING ONLY — it changes nothing about the bytes
-# produced, so it is not a deviation from the "match official Chrome" rule above.
+# Link concurrency is DELIBERATELY NOT SET HERE, and must not be reintroduced.
 #
-# The ThinLTO link of chrome.dll is the peak memory moment of the whole build, and it is measured in
-# many GB. Two of them at once is what makes a 16 GB host die at the very end, after the hours of
-# compilation that earned the objects. One at a time costs wall clock only on a machine that had the
-# RAM to overlap them anyway.
-concurrent_links = 1
+# `concurrent_links = 1` used to live on this line. It is illegal in this configuration:
+# //build/toolchain/concurrent_links.gni asserts
+#     assert(!use_thin_lto, "can't explicitly set concurrent_links with thinlto")
+# so with `use_thin_lto = true` above, setting it fails `gn gen` outright rather than saving any
+# memory. Measured on 152.0.7977.42.
+#
+# It was also unnecessary. Chromium already derives the value from the host when the arg is left at
+# its -1 default: for a ThinLTO build it passes --reserve_mem_gb=10 with --mem_per_link_gb=45 on
+# Windows (30 on Linux), which is exactly the "don't overlap two huge links on a small box"
+# reasoning this line was written for — with the real per-platform numbers rather than a guess.
+# A 16 GB host therefore already gets one link at a time without being told.

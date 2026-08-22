@@ -53,10 +53,15 @@ test('a nameless profile has no mark, so the engine keeps the stock icon', () =>
   assert.equal(profileMark('', 'p1').word, '');
 });
 
-test('the word is the first word, cut to what stays readable at 128px', () => {
-  assert.equal(profileMark('Acme US', 'p1').word, 'Acme');
-  assert.equal(profileMark('extraordinarily-long', 'p1').word, 'extraordinar');
-  // Cut by grapheme, so a 12-glyph cut can never split an emoji sequence in half.
+test('the label is the whole NAME, cut to what a wrapped icon can hold', () => {
+  // The first word alone could not tell "Acme US East" from "Acme US West" - both marked "Acme".
+  assert.equal(profileMark('Acme US', 'p1').word, 'Acme US');
+  assert.equal(profileMark('Acme US East', 'p1').word, 'Acme US East');
+  // Separators normalise to spaces, which is where the renderer is allowed to break the line.
+  assert.equal(profileMark('acme-us-east', 'p1').word, 'acme us east');
+  // Cut at the grapheme budget so a pathological name cannot shrink the type to noise.
+  assert.equal(profileMark('extraordinarily-long-profile-name-here', 'p1').word.length <= 24, true);
+  // Cut by grapheme, so the cut can never split an emoji sequence in half.
   assert.equal(profileMark('\u{1F468}‍\u{1F680}x', 'p1').word, '\u{1F468}‍\u{1F680}x');
 });
 

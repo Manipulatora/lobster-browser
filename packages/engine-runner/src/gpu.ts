@@ -68,13 +68,42 @@ function resolveAngleBackend(
  * - `software`: force SwiftShader explicitly (CI/no-GPU) — deterministic software rendering.
  * - `auto`: no flags (historical default).
  */
+/**
+ * Permit the software GL fallback. This is a SAFETY NET, not a request for software rendering: with
+ * it, ANGLE still prefers the real driver and only falls back when there is nothing to fall back
+ * from.
+ *
+ * Without it, a host with no usable GPU does not get slow WebGL - it gets NONE. Measured on this
+ * build, on a machine with no /dev/dri, with no GPU flags at all:
+ *
+ *     gpu.featureStatus.webgl        disabled_off
+ *     canvas.getContext('webgl')     null
+ *     canvas.getContext('webgl2')    null
+ *     navigator.gpu                  undefined
+ *
+ * Two things follow, and the second is the serious one. Any 3D content simply fails to run. And a
+ * browser that has no WebGL context at all is not a quieter fingerprint - it is a screaming one:
+ * real Chrome on real hardware always has WebGL, so its absence is a headless/VM tell far louder
+ * than any renderer string. It also makes the whole native WebGL moat inert - webgl-surfaces,
+ * host-gpu-profile, webgl2-surfaces and webgpu-adapter all hook a context that never gets created.
+ *
+ * With the flag, on the same host, WebGL 1 and 2 both come back and the persona's renderer is what
+ * the page reads - the software backend underneath stays invisible:
+ *
+ *     renderer  ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)
+ *
+ * It is not on Chromium's bad-flags list (chrome/browser/ui/startup/bad_flags_prompt.cc), so unlike
+ * --no-sandbox or --disable-blink-features it raises no "unsupported command-line flag" infobar.
+ */
+const SOFTWARE_GL_FALLBACK = '--enable-unsafe-swiftshader';
+
 export function buildGpuArgs(opts: GpuArgsOptions = {}): string[] {
   const env = opts.env ?? process.env;
   const mode = opts.mode ?? resolveGpuMode(env);
   if (mode === 'gpu') {
     const backend = resolveAngleBackend(opts.angleBackend, env);
     if (backend === 'swiftshader') {
-      return ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'];
+      return ['--use-gl=angle', '--use-angle=swiftshader', SOFTWARE_GL_FALLBACK];
     }
     return [
       '--use-gl=angle',
@@ -82,12 +111,16 @@ export function buildGpuArgs(opts: GpuArgsOptions = {}): string[] {
       '--enable-gpu',
       '--ignore-gpu-blocklist',
       '--enable-features=Vulkan',
+      // Even when the real driver is the intent, keep the software path PERMITTED. If ANGLE cannot
+      // bring the GPU up - a container without /dev/dri, a blocklisted driver, a headless host - the
+      // alternative is not "slower WebGL", it is NO WebGL at all. See the note on the constant.
+      SOFTWARE_GL_FALLBACK,
     ];
   }
   if (mode === 'software') {
-    return ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'];
+    return ['--use-gl=angle', '--use-angle=swiftshader', SOFTWARE_GL_FALLBACK];
   }
-  return [];
+  return [SOFTWARE_GL_FALLBACK];
 }
 
 /** True when a WebGL renderer/vendor string indicates software rendering (a headless tell). */

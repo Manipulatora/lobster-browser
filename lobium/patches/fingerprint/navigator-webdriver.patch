@@ -1,0 +1,42 @@
+Lobium - navigator.webdriver answered natively, not by a command-line flag.
+
+The launcher used to pass --disable-blink-features=AutomationControlled to keep this false
+(measured: true without it, false with it). That worked, and cost two tells to buy it: Chromium
+raises a yellow "You are using an unsupported command-line flag" infobar for it on every launch,
+and the flag names itself on chrome://version. Both are visible to the person using the browser and
+to anything reading the page, on a product whose whole purpose is not looking automated.
+
+This answers the surface where every other fingerprint surface is answered - inside Blink, gated on
+the profile carrying a Lobium config - so the flag is redundant and has been removed from
+packages/engine-runner/src/launch.ts.
+
+diff --git a/third_party/blink/renderer/core/frame/navigator.cc b/third_party/blink/renderer/core/frame/navigator.cc
+index 583f05f8dd5fb..7034bf4104734 100644
+--- a/third_party/blink/renderer/core/frame/navigator.cc
++++ b/third_party/blink/renderer/core/frame/navigator.cc
+@@ -23,6 +23,8 @@
+ 
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+ 
++#include "components/lobium_fp/lobium_fp_config.h"
++
+ #include "third_party/blink/renderer/bindings/core/v8/script_controller.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/execution_context/navigator_base.h"
+@@ -98,6 +100,16 @@ bool Navigator::cookieEnabled() const {
+ }
+ 
+ bool Navigator::webdriver() const {
++  // Lobium: navigator.webdriver is a fingerprint surface, so it is answered HERE rather than by a
++  // command-line flag. The launcher used to pass --disable-blink-features=AutomationControlled to
++  // get the same false, which cost two things: Chromium showed the user a yellow "unsupported
++  // command-line flag" infobar on every launch, and the flag itself is listed on chrome://version
++  // - an automation tell on a browser whose whole purpose is not looking automated. A profile
++  // running under the Lobium config is a real user's browser and says so.
++  if (lobium::LobiumFpConfig::Current()) {
++    return false;
++  }
++
+   if (RuntimeEnabledFeatures::AutomationControlledEnabled())
+     return true;
+ 

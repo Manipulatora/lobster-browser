@@ -33,7 +33,11 @@ const D3D11_CAPS = {
   maxTextureSize: 16384,
   maxCubeMapTextureSize: 16384,
   maxRenderbufferSize: 16384,
-  maxViewportDims: [16384, 16384],
+  // ANGLE's D3D11 backend sets maxViewportWidth/Height to D3D11_VIEWPORT_BOUNDS_MAX (32767) for
+  // feature level 11_0 and above - renderer11_utils.cpp GetMaximumViewportSize(). It is NOT clamped
+  // to the texture size: that coupling belongs to the Metal and GL backends. 16384 was therefore a
+  // MAX_VIEWPORT_DIMS no Chrome on Windows reports, readable with a single getParameter call.
+  maxViewportDims: [32767, 32767],
   maxVertexAttribs: 16,
   maxVertexUniformVectors: 4096,
   maxFragmentUniformVectors: 1024,
@@ -53,7 +57,11 @@ const METAL_CAPS = {
   maxVertexAttribs: 16,
   maxVertexUniformVectors: 1024,
   maxFragmentUniformVectors: 1024,
-  maxVaryingVectors: 31,
+  // 30, not 31. ANGLE's Metal backend does `maxVaryingVectors = 31 - 1` on macOS, with the comment
+  // "On macOS exclude [[position]] from maxVaryingVectors" (DisplayMtl.mm). The paired component
+  // limit is 124 - 4 = 120, i.e. exactly 4x30, so a persona claiming 31 also contradicted its own
+  // WebGL2 component counts.
+  maxVaryingVectors: 30,
   maxTextureImageUnits: 16,
   maxVertexTextureImageUnits: 16,
   maxCombinedTextureImageUnits: 32,
@@ -68,7 +76,12 @@ const MESA_CAPS = {
   maxRenderbufferSize: 16384,
   maxViewportDims: [16384, 16384],
   maxVertexAttribs: 16,
-  maxVertexUniformVectors: 4096,
+  // 1024, not 4096. ANGLE's OpenGL backend hard-clamps this regardless of what the driver reports:
+  // renderergl_utils.cpp does `caps->maxVertexUniformVectors = std::min(1024, ...)`, with a comment
+  // that the WebGL conformance suite cannot finish otherwise. So no Chrome on Linux has ever
+  // reported more than 1024 here, and 4096 was a single-getParameter tell on every Linux persona.
+  // (4096 IS right on Windows, where the D3D11 backend uses D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT.)
+  maxVertexUniformVectors: 1024,
   maxFragmentUniformVectors: 1024,
   maxVaryingVectors: 30,
   maxTextureImageUnits: 16,
@@ -111,13 +124,49 @@ function uniqueSorted(values) {
   );
 }
 
+/**
+ * Windows font FAMILIES, split into what every install has and what arrives with a language pack.
+ *
+ * THE COLUMN. The MS Learn tables are `Family | Font Name | File Name | Version`, and the Family
+ * cell is populated only on the FIRST row of each family - the continuation rows that list the other
+ * faces leave it empty:
+ *
+ *     Arial | Arial        | Arial.ttf  | 7.00
+ *           | Arial Italic | Ariali.ttf | 7.00
+ *
+ * This used to read `cells[1]`, the Font Name, so it collected every FACE: 506 rows of which 336
+ * ended in a style token. "Arial Bold" is not a family - `font-family: "Arial Bold"` does not
+ * resolve on Windows, because bold is selected with font-weight from the Arial family. A persona
+ * claiming those names claims fonts no Windows has, while the real families they belong to were
+ * absent from the list entirely and so measured as MISSING. Reading `cells[0]` gives the real
+ * families: 141 on Windows 11, 137 on Windows 10.
+ *
+ * THE SECTIONS. Only the first table (under "Introduction") is installed everywhere. Every table
+ * after it sits under a script/language heading - Arabic, Devanagari, Japanese, Thai and so on - and
+ * ships as a Feature-On-Demand package that Windows installs only when that language is added. A
+ * default en-US desktop has the base set and a couple of the CJK ones, not all 141.
+ */
 function extractWindowsFonts(html) {
-  const names = [];
-  for (const row of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)) {
-    const cells = [...row[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((m) => decodeHtml(m[1]));
-    if (cells[1]) names.push(cells[1]);
+  const all = [];
+  const base = [];
+  // Split on headings so each table can be attributed to the section it sits under.
+  const parts = html.split(/(<h[123][^>]*>[\s\S]*?<\/h[123]>)/i);
+  let heading = 'Introduction';
+  for (const part of parts) {
+    const asHeading = /^<h[123][^>]*>([\s\S]*?)<\/h[123]>$/i.exec(part);
+    if (asHeading) {
+      heading = decodeHtml(asHeading[1]);
+      continue;
+    }
+    for (const row of part.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)) {
+      const cells = [...row[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((m) => decodeHtml(m[1]));
+      const family = cells[0];
+      if (!family) continue; // continuation row: another face of the family above
+      all.push(family);
+      if (/^Introduction$/i.test(heading)) base.push(family);
+    }
   }
-  return uniqueSorted(names);
+  return { all: uniqueSorted(all), base: uniqueSorted(base) };
 }
 
 /** Apple Support font pages list typefaces as plain lines / table cells. */
@@ -467,6 +516,7 @@ export interface RendererCatalogEntry {
 }
 
 const D3D11_CAPS = ${JSON.stringify(D3D11_CAPS, null, 2)} satisfies WebGlCaps;
+const D3D11_CAPS_NVIDIA = { ...D3D11_CAPS, maxVertexUniformVectors: 4095 } satisfies WebGlCaps;
 const METAL_CAPS = ${JSON.stringify(METAL_CAPS, null, 2)} satisfies WebGlCaps;
 const MESA_CAPS = ${JSON.stringify(MESA_CAPS, null, 2)} satisfies WebGlCaps;
 
@@ -478,7 +528,15 @@ function winRenderer(
   source: string,
 ): RendererCatalogEntry {
   const webglVendor = \`Google Inc. (\${vendor})\`;
-  const renderer = \`ANGLE (\${vendor}, \${model} (\${deviceId}) Direct3D11 vs_5_0 ps_5_0, D3D11)\`;
+  // ANGLE prints the DXGI adapter's DeviceId through gl::FmtHex, which sizes the field as
+  // sizeof(T) * 2 over a UINT - so real Chrome always emits EIGHT uppercase zero-padded hex
+  // digits, e.g. "(0x00002503)". The PCI id itself is only four wide; emitting it unpadded
+  // produced "(0x2503)", a shape no Chrome on Windows ever reports. The deviceId field below keeps
+  // real four-digit PCI id for provenance; only the rendered ANGLE string is padded.
+  const angleDeviceId = \`0x\${deviceId.replace(/^0x/i, '').toUpperCase().padStart(8, '0')}\`;
+  const renderer = \`ANGLE (\${vendor}, \${model} (\${angleDeviceId}) Direct3D11 vs_5_0 ps_5_0, D3D11)\`;
+  // ANGLE subtracts one vertex uniform vector on NVIDIA only (skipVSConstantRegisterZero).
+  const caps = vendor === 'NVIDIA' ? D3D11_CAPS_NVIDIA : D3D11_CAPS;
   return {
     id,
     os: 'windows',
@@ -492,7 +550,7 @@ function winRenderer(
       renderer,
       unmaskedVendor: webglVendor,
       unmaskedRenderer: renderer,
-      caps: D3D11_CAPS,
+      caps,
     },
   };
 }
@@ -583,6 +641,9 @@ function linuxRenderer(
 }
 
 ${renderStringArray('WINDOWS_FONT_NAMES', windowsFonts)}
+${renderStringArray('WINDOWS_11_FONT_NAMES', win11Fonts.all)}
+${renderStringArray('WINDOWS_10_FONT_NAMES', win10Fonts.all)}
+${renderStringArray('WINDOWS_BASE_FONT_NAMES', win11Fonts.base)}
 ${renderStringArray('MACOS_FONT_NAMES', macFonts)}
 ${renderStringArray('LINUX_FONT_NAMES', linuxFonts)}
 ${renderAndroidArray('ANDROID_PHONE_MODEL_CATALOG', androidPhones)}
@@ -612,10 +673,12 @@ async function main() {
       fetchBytes(SOURCES.googlePlaySupportedDevices),
     ]);
 
-  const windowsFonts = uniqueSorted([
-    ...extractWindowsFonts(win10Html),
-    ...extractWindowsFonts(win11Html),
-  ]);
+  // Per VERSION, not merged. Windows 11 adds four families Windows 10 never had (Cascadia Code,
+  // Cascadia Mono, Segoe Fluent Icons, Segoe UI Variable); merging them handed a Windows 10 persona
+  // fonts that shipped a release later, and a page can measure exactly that.
+  const win10Fonts = extractWindowsFonts(win10Html);
+  const win11Fonts = extractWindowsFonts(win11Html);
+  const windowsFonts = uniqueSorted([...win10Fonts.all, ...win11Fonts.all]);
   let macFonts = uniqueSorted([
     ...extractAppleSupportFonts(venturaHtml),
     ...extractAppleSupportFonts(sonomaHtml),
@@ -624,8 +687,14 @@ async function main() {
   ]);
   const { phones, tablets } = extractAndroidModels(decodeDeviceCsv(devicesBytes));
 
-  if (windowsFonts.length < 300) {
+  // The old floor was 300, which only the buggy face-name extraction could clear - it actively
+  // enforced the defect. The real family counts are 141 (Win11) and 137 (Win10); 120 catches a
+  // genuinely broken parse without demanding a number no correct parse can reach.
+  if (windowsFonts.length < 120) {
     throw new Error(`Windows font catalog too small: ${windowsFonts.length}`);
+  }
+  if (win11Fonts.base.length < 40) {
+    throw new Error(`Windows base font set too small: ${win11Fonts.base.length}`);
   }
   if (macFonts.length < 1000) {
     // Fall back: developer.apple.com system-fonts page if Support pages under-parse

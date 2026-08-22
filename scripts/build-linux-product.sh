@@ -170,7 +170,16 @@ cp -a "$DIST/lobium-runtime/." "$INSTALL_ROOT/lobium/"
     # detector grading still rejects software renderers as release evidence.
     echo "export LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION=\"1\""
   fi
-  echo "export LOBSTER_NO_SANDBOX=\"${LOBSTER_NO_SANDBOX:-1}\""
+  # NOT hard-coded to 1 any more. Forcing it here overrode the runtime check in lib.rs
+  # (`packaged_runtime_needs_no_sandbox`), so the browser launched unsandboxed even on kernels that
+  # can give it the user-namespace sandbox — and Chromium then showed the user a yellow
+  # "unsupported command-line flag: --no-sandbox" infobar on every launch, which is both a security
+  # downgrade and an automation tell. Left unset, the app decides per host and only disables the
+  # sandbox where the kernel genuinely cannot provide one. Export it explicitly to force the old
+  # behaviour on such a host.
+  if [[ -n "${LOBSTER_NO_SANDBOX:-}" ]]; then
+    echo "export LOBSTER_NO_SANDBOX=\"${LOBSTER_NO_SANDBOX}\""
+  fi
   # Inert Google API keys: their presence suppresses the "Google API keys are missing"
   # infobar without enabling any Google service call.
   echo "export GOOGLE_API_KEY=\"no\""

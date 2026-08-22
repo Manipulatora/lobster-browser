@@ -7,7 +7,11 @@ import {
   resolveFingerprintPersonaModes,
   validateFingerprintCoherence,
 } from '@lobster/fingerprint';
-import { deriveGeoFromExitIp, toEnginePlaywrightProxy } from '@lobster/proxy';
+import {
+  deriveGeoFromDirectIp,
+  deriveGeoFromExitIp,
+  toEnginePlaywrightProxy,
+} from '@lobster/proxy';
 import type {
   Fingerprint,
   FingerprintOverrides,
@@ -16,7 +20,7 @@ import type {
   LaunchResult,
   StartProfileParams,
 } from '@lobster/shared-types';
-import { assertBasedOnIpHasProxy, basedOnIpPersonaKnobs } from './based-on-ip.js';
+import { basedOnIpPersonaKnobs } from './based-on-ip.js';
 import { assertUpstreamReachable } from './proxy-auth-adapter.js';
 import { resolveLaunchPolicy } from './launch-policy.js';
 import type { EngineRunner } from './runner.js';
@@ -93,7 +97,6 @@ export async function startProfile(
       )}"`,
     );
   }
-  assertBasedOnIpHasProxy(params, 'profile');
   const launchPolicy = resolveLaunchPolicy(params);
   // HC-3: host-calibrated derivation is the DEFAULT whenever a host profile has been captured. An
   // explicit `params.hostCalibration` (passed by the control plane) wins; otherwise, if a persisted
@@ -147,18 +150,32 @@ export async function startProfile(
   }
 
   const rendererPolicy = launchPolicy.renderer;
+  // Was "host" a deliberate choice, or just the default nobody picked? `resolveLaunchPolicy` falls
+  // back to DEFAULT_RENDERER_POLICY = { mode: 'host' } whenever the profile carries no renderer
+  // override, which is every seed-derived profile. The distinction decides whether a missing
+  // calibration is a refusal or a fallback.
+  const rendererWasChosen = params.fingerprintOverrides?.renderer !== undefined;
   if (
     (rendererPolicy.mode === 'host' || rendererPolicy.mode === 'normalized_host') &&
     !hostCalibration
   ) {
-    // Host policies assert measured evidence. Substituting a catalog renderer for a cross-OS persona
-    // would silently change policy semantics and can create a detectable GPU/OS mismatch, so fail closed.
-    // Any first-run capture attempt that just failed is appended so the root cause is not lost.
-    throw new Error(
-      `refusing to launch profile ${params.profileId}: renderer policy "${rendererPolicy.mode}" ` +
-        'requires a complete compatible host calibration' +
-        (hostCalibrationCaptureFailure ? ` (${hostCalibrationCaptureFailure})` : ''),
-    );
+    if (rendererWasChosen) {
+      // An EXPLICIT host policy asserts measured evidence. Substituting a catalog renderer would
+      // silently change what the user asked for and can create a detectable GPU/OS mismatch, so it
+      // still fails closed. Any first-run capture attempt that just failed is appended so the root
+      // cause is not lost.
+      throw new Error(
+        `refusing to launch profile ${params.profileId}: renderer policy "${rendererPolicy.mode}" ` +
+          'requires a complete compatible host calibration' +
+          (hostCalibrationCaptureFailure ? ` (${hostCalibrationCaptureFailure})` : ''),
+      );
+    }
+    // DEFAULTED policy with no usable calibration — the ordinary case for a cross-OS persona, e.g. a
+    // Windows profile on a Linux machine, where a host capture can never match by construction.
+    // Refusing here made the product's core use case unlaunchable. Fall through to the catalog path
+    // instead: `deriveFingerprint` pairs the seed with a REAL renderer from that OS's own catalog
+    // (deriveCoherentDevice), which is coherent for the persona rather than borrowed from this host.
+    hostCalibration = undefined;
   }
   // Renderer policy owns the complete WebGL surface. Legacy profiles may still contain the old
   // ad-hoc `webgl` object; strip it at the launch boundary so it cannot overwrite host calibration or
@@ -264,6 +281,25 @@ export async function startProfile(
             (err instanceof Error ? err.message : String(err)),
         );
       }
+    }
+  } else if (requiresProxyGeo(params)) {
+    // NO PROXY IS NOT A REASON TO REFUSE. A direct profile still has an exit IP — this machine's —
+    // so "Based on IP" resolves against that instead of being treated as unanswerable. This is what
+    // keeps the persona coherent: locale, timezone and geolocation all agree with the address the
+    // traffic actually leaves from. The launcher previously threw here (`assertBasedOnIpHasProxy`),
+    // which made a profile created with the editor's own defaults unlaunchable until a proxy was
+    // attached.
+    //
+    // Best-effort by design: if the lookup fails there is nothing dishonest about falling back to
+    // the seed-derived locale, because no proxy means no claim about a foreign exit was ever made.
+    try {
+      geo = await deriveGeoFromDirectIp();
+    } catch (err) {
+      console.warn(
+        `[startProfile] direct exit-IP geo derivation failed for profile ${params.profileId}; ` +
+          'launching with the seed-derived locale/timezone — ' +
+          (err instanceof Error ? err.message : String(err)),
+      );
     }
   }
 

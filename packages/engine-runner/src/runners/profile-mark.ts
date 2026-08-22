@@ -40,11 +40,14 @@ const WORD_BOUNDARY = /[\s_\-/\\|]+/u;
 const STARTS_WITH_LETTER_OR_DIGIT = /^[\p{L}\p{N}]/u;
 
 /**
- * Enough of the first word to stay readable at 128px, which is the largest size any window-icon slot
- * asks for. Longer words are cut rather than ellipsised: an ellipsis costs a glyph slot and says
- * nothing the cut does not.
+ * How much of the NAME the large icon carries.
+ *
+ * This used to be the first word only, so "Acme US East" marked as "Acme" and the icon could not be
+ * told apart from "Acme US West". The engine wraps the label over two lines and shrinks it to fit,
+ * so the whole name is worth sending; the cut exists only so a pathological 200-character name
+ * cannot shrink the type to noise. Spaces are PRESERVED - they are where the engine may break.
  */
-const MAX_WORD_GRAPHEMES = 12;
+const MAX_LABEL_GRAPHEMES = 24;
 
 /**
  * Grapheme clusters, not code units: `[...'👩‍🚀'][0]` is half an emoji sequence and `'ñ'[0]` is a bare
@@ -57,7 +60,10 @@ const GRAPHEMES = new Intl.Segmenter('en', { granularity: 'grapheme' });
 export interface ProfileMark {
   /** One or two glyphs. Empty when the name has no glyphs at all, in which case there is no mark. */
   initials: string;
-  /** The first word, cut to {@link MAX_WORD_GRAPHEMES}. Only legible at 128px and above. */
+  /**
+   * The profile NAME, cut to {@link MAX_LABEL_GRAPHEMES}, spaces intact so the renderer can wrap it.
+   * Drawn on the larger icon slots; the small ones fall back to {@link ProfileMark.initials}.
+   */
   word: string;
   /** A `#rrggbb` stop on the brand violet ramp, stable for the lifetime of the profile. */
   tint: string;
@@ -112,7 +118,9 @@ export function profileMark(name: string, profileId: string): ProfileMark {
   const second = source[1] ?? '';
   return {
     initials: first === '' ? '' : initialOf(first) + (second === '' ? '' : initialOf(second)),
-    word: graphemes(first).slice(0, MAX_WORD_GRAPHEMES).join(''),
+    // The whole name, not just its first word: at icon sizes that fit text, "Acme US East" and
+    // "Acme US West" must not both render as "Acme".
+    word: graphemes(words.join(' ')).slice(0, MAX_LABEL_GRAPHEMES).join('').trim(),
     tint: BRAND_TINTS.at(fnv1a32(profileId) % BRAND_TINTS.length) ?? BRAND_TINTS[0],
   };
 }

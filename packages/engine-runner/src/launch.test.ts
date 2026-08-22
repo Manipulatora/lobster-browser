@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Fingerprint, LaunchParams } from '@lobster/shared-types';
 import { setBridgeOrigin } from './agent/bridge-registry.js';
-import { buildCdpEmulation, buildFingerprintInitScript, buildLaunchOptions } from './launch.js';
+import { DEFAULT_DISK_CACHE_BYTES, buildCdpEmulation, buildFingerprintInitScript, buildLaunchOptions, diskCacheBytes } from './launch.js';
 
 function sampleFingerprint(): Fingerprint {
   return {
@@ -54,7 +54,13 @@ test('buildLaunchOptions maps userDataDir, headless default, proxy, and coherent
   assert.equal(o.headless, false);
   assert.deepEqual(o.proxy, { server: 'socks5://h:1080', username: 'u', password: 'p' });
   assert.ok(o.args.includes('--lang=de-DE'));
-  assert.ok(o.args.includes('--disable-blink-features=AutomationControlled'));
+  // The automation workaround must NOT be on the command line: it raises Chromium's
+  // "unsupported command-line flag" infobar and names itself on chrome://version. The engine
+  // answers navigator.webdriver natively instead (Navigator::webdriver).
+  assert.ok(
+    !o.args.some((a) => a.includes('AutomationControlled')),
+    'the automation flag must not be passed',
+  );
 });
 
 test('buildLaunchOptions honors headless flag and omits proxy when absent', () => {
@@ -79,7 +85,7 @@ test('buildLaunchOptions applies a proxy-aware WebRTC IP-handling policy (leak p
     fingerprint: sampleFingerprint(),
     proxy: { id: 'x', type: 'socks5', host: 'h', port: 1080 },
   });
-  assert.ok(withProxy.args.includes('--force-webrtc-ip-handling-policy=disable_non_proxied_udp'));
+  assert.ok(withProxy.args.includes('--webrtc-ip-handling-policy=disable_non_proxied_udp'));
 
   // Without a proxy: still restrict to the default public interface (no multi-interface enumeration).
   const noProxy = buildLaunchOptions({
@@ -89,7 +95,7 @@ test('buildLaunchOptions applies a proxy-aware WebRTC IP-handling policy (leak p
     fingerprint: sampleFingerprint(),
   });
   assert.ok(
-    noProxy.args.includes('--force-webrtc-ip-handling-policy=default_public_interface_only'),
+    noProxy.args.includes('--webrtc-ip-handling-policy=default_public_interface_only'),
   );
 });
 
@@ -103,7 +109,7 @@ test('buildLaunchOptions honors an explicit WebRTC launch policy', () => {
     proxy: { id: 'x', type: 'http', host: 'h', port: 8080 },
   });
   assert.ok(
-    explicitProxyOnly.args.includes('--force-webrtc-ip-handling-policy=disable_non_proxied_udp'),
+    explicitProxyOnly.args.includes('--webrtc-ip-handling-policy=disable_non_proxied_udp'),
   );
   assert.throws(
     () =>
@@ -126,7 +132,7 @@ test('buildLaunchOptions honors an explicit WebRTC launch policy', () => {
   });
   assert.ok(
     explicitDefault.args.includes(
-      '--force-webrtc-ip-handling-policy=default_public_interface_only',
+      '--webrtc-ip-handling-policy=default_public_interface_only',
     ),
   );
   assert.throws(
@@ -177,7 +183,7 @@ test('a proxied launch still lets the browser reach the sidecar agent bridge on 
   }
 });
 
-test('buildLaunchOptions omits GPU flags by default and adds ANGLE flags when LOBSTER_GPU=gpu', () => {
+test('buildLaunchOptions pins no ANGLE backend by default and adds ANGLE flags when LOBSTER_GPU=gpu', () => {
   const base = {
     profileId: 'p',
     engine: 'lobium' as const,
@@ -190,11 +196,15 @@ test('buildLaunchOptions omits GPU flags by default and adds ANGLE flags when LO
     const off = buildLaunchOptions(base);
     assert.ok(!off.args.some((a) => a.startsWith('--use-angle=')));
 
+    // The software fallback is permitted in every mode so a GPU-less host still HAS WebGL.
+    assert.ok(off.args.includes('--enable-unsafe-swiftshader'));
+
     process.env.LOBSTER_GPU = 'gpu';
     const on = buildLaunchOptions(base);
     assert.ok(on.args.includes('--use-gl=angle'));
     assert.ok(on.args.includes('--use-angle=vulkan'));
-    assert.ok(!on.args.some((a) => a.includes('swiftshader')));
+    // Never SELECTED as the backend, but still permitted as a last resort.
+    assert.ok(!on.args.includes('--use-angle=swiftshader'));
   } finally {
     if (prev === undefined) delete process.env.LOBSTER_GPU;
     else process.env.LOBSTER_GPU = prev;
@@ -269,4 +279,29 @@ test('init script isolates each override: a throwing def cannot abort the rest',
     0,
     'the second override must still apply despite the first throwing',
   );
+});
+
+test('the per-profile HTTP cache is bounded rather than sized from free disk space', () => {
+  // Chromium's net/disk_cache/cache_util.cc sizes the cache as `available / 100` on a large volume,
+  // so on a 236 GB-free host every profile is entitled to ~2.36 GB. One profile per user is fine;
+  // this product runs many profiles per user, each with its own --user-data-dir.
+  const args = buildLaunchOptions({
+    profileId: 'p',
+    engine: 'lobium' as const,
+    userDataDir: '/d',
+    fingerprint: sampleFingerprint(),
+  }).args;
+  const flag = args.find((a) => a.startsWith('--disk-cache-size='));
+  assert.ok(flag, 'the launcher must bound the disk cache');
+  assert.equal(Number(flag.split('=')[1]), DEFAULT_DISK_CACHE_BYTES);
+});
+
+test('diskCacheBytes honours an override and refuses a nonsensical one', () => {
+  assert.equal(diskCacheBytes({ LOBSTER_DISK_CACHE_MB: '64' }), 64 * 1024 * 1024);
+  assert.equal(diskCacheBytes({}), DEFAULT_DISK_CACHE_BYTES);
+  // A zero/negative/garbage value must not reach Chromium, where it would read as "size it yourself"
+  // and silently restore the unbounded behaviour this exists to prevent.
+  for (const bad of ['0', '-5', 'banana', '']) {
+    assert.equal(diskCacheBytes({ LOBSTER_DISK_CACHE_MB: bad }), DEFAULT_DISK_CACHE_BYTES, bad);
+  }
 });

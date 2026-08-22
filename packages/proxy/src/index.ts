@@ -20,6 +20,7 @@ export type { GeoProvider, DeriveGeoOptions } from './geo.js';
 export {
   StaticGeoProvider,
   HttpGeoProvider,
+  deriveGeoFromDirectIp,
   deriveGeoFromExitIp,
   parseGeoResponse,
   testProxy,

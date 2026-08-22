@@ -228,9 +228,133 @@ function baseLanguage(locale: string): string {
   return locale.split('-')[0] ?? locale;
 }
 
+/**
+ * Chromium's OWN default Accept-Language list, per UI locale.
+ *
+ * Extracted from components/strings/components_locale_settings_*.xtb (message
+ * IDS_ACCEPT_LANGUAGES), which is what components/language/core/browser/language_prefs.cc seeds the
+ * accept-languages preference with - and navigator.languages IS that preference.
+ *
+ * This exists because the previous derivation returned at most TWO entries, always: the locale and
+ * its base language. Real Chrome almost never looks like that. Of the 52 locales Chromium
+ * ships a default for, the counts run 2-6 and the commonest is FOUR ("de-DE,de,en-US,en"): most of
+ * the world's Chrome installs carry English after their own language. A profile reporting exactly
+ * two entries for de/fr/ja/ru is therefore distinguishable from a default install of the browser it
+ * claims to be, on a value every page can read.
+ *
+ * Note also the HEAD tags: ja, ar, fa, lt, am, sw and fil are BARE here, not region-qualified.
+ * Chromium does not emit "ja-JP".
+ */
+const CHROME_DEFAULT_LANGUAGES: Readonly<Record<string, readonly string[]>> = {
+  'am': ['am', 'en-GB', 'en'],
+  'ar': ['ar', 'en-US', 'en'],
+  'bg': ['bg-BG', 'bg'],
+  'bn': ['bn-IN', 'bn', 'en-US', 'en'],
+  'ca': ['ca-ES', 'ca'],
+  'cs': ['cs-CZ', 'cs'],
+  'da': ['da-DK', 'da', 'en-US', 'en'],
+  'de': ['de-DE', 'de', 'en-US', 'en'],
+  'el': ['el-GR', 'el'],
+  'en-GB': ['en-GB', 'en-US', 'en'],
+  'en-US': ['en-US', 'en'],
+  'es': ['es-ES', 'es'],
+  'es-419': ['es-419', 'es'],
+  'et': ['et-EE', 'et', 'en-US', 'en'],
+  'fa': ['fa', 'en-US', 'en'],
+  'fi': ['fi-FI', 'fi', 'en-US', 'en'],
+  'fil': ['fil', 'fil-PH', 'tl', 'en-US', 'en'],
+  'fr': ['fr-FR', 'fr', 'en-US', 'en'],
+  'gu': ['gu-IN', 'gu', 'hi-IN', 'hi', 'en-US', 'en'],
+  'he': ['he-IL', 'he', 'en-US', 'en'],
+  'hi': ['hi-IN', 'hi', 'en-US', 'en'],
+  'hr': ['hr-HR', 'hr', 'en-US', 'en'],
+  'hu': ['hu-HU', 'hu', 'en-US', 'en'],
+  'id': ['id-ID', 'id', 'en-US', 'en'],
+  'it': ['it-IT', 'it', 'en-US', 'en'],
+  'ja': ['ja', 'en-US', 'en'],
+  'kn': ['kn-IN', 'kn', 'en-US', 'en'],
+  'ko': ['ko-KR', 'ko', 'en-US', 'en'],
+  'lt': ['lt', 'en-US', 'en', 'ru', 'pl'],
+  'lv': ['lv-LV', 'lv', 'en-US', 'en'],
+  'ml': ['ml-IN', 'ml', 'en-US', 'en'],
+  'mr': ['mr-IN', 'mr', 'hi-IN', 'hi', 'en-US', 'en'],
+  'nb': ['nb-NO', 'nb', 'no', 'nn', 'en-US', 'en'],
+  'nl': ['nl-NL', 'nl', 'en-US', 'en'],
+  'pl': ['pl-PL', 'pl', 'en-US', 'en'],
+  'pt-BR': ['pt-BR', 'pt', 'en-US', 'en'],
+  'pt-PT': ['pt-PT', 'pt', 'en-US', 'en'],
+  'ro': ['ro-RO', 'ro', 'en-US', 'en'],
+  'ru': ['ru-RU', 'ru', 'en-US', 'en'],
+  'sk': ['sk-SK', 'sk', 'cs', 'en-US', 'en'],
+  'sl': ['sl-SI', 'sl', 'en-GB', 'en'],
+  'sr': ['sr-RS', 'sr', 'en-US', 'en'],
+  'sv': ['sv-SE', 'sv', 'en-US', 'en'],
+  'sw': ['sw', 'en-GB', 'en'],
+  'ta': ['ta-IN', 'ta', 'en-US', 'en'],
+  'te': ['te-IN', 'te', 'hi-IN', 'hi', 'en-US', 'en'],
+  'th': ['th-TH', 'th'],
+  'tr': ['tr-TR', 'tr', 'en-US', 'en'],
+  'uk': ['uk-UA', 'uk', 'en-US', 'en'],
+  'vi': ['vi-VN', 'vi', 'fr-FR', 'fr', 'en-US', 'en'],
+  'zh-CN': ['zh-CN', 'zh'],
+  'zh-TW': ['zh-TW', 'zh', 'en-US', 'en'],
+};
+
+/**
+ * Map a persona locale onto the Chromium UI locale whose default list applies.
+ *
+ * Chromium has no per-region entry for most languages: an Austrian install resolves to the `de`
+ * bundle, an Australian one to `en-GB`. Returning undefined means "Chromium ships no default for
+ * this language", and the caller keeps its own conservative derivation rather than inventing one.
+ */
+function chromeUiLocaleFor(locale: string): string | undefined {
+  if (CHROME_DEFAULT_LANGUAGES[locale]) return locale;
+  const base = baseLanguage(locale);
+  // English has no bare bundle: US is its own, everything else resolves to the en-GB bundle.
+  if (base === 'en') return locale === 'en-US' ? 'en-US' : 'en-GB';
+  // Portuguese and Chinese ship only regional bundles; Brazil/Taiwan match exactly above.
+  if (base === 'pt') return 'pt-PT';
+  if (base === 'zh') return 'zh-CN';
+  return CHROME_DEFAULT_LANGUAGES[base] ? base : undefined;
+}
+
+/**
+ * Canonicalise a persona locale to the tag Chromium itself would lead with.
+ *
+ * For most languages Chromium's default is region-qualified ("de-DE", "fr-FR", "ru-RU") and a
+ * regional variant is a shape a real user can produce ("de-AT"). But for several languages its
+ * default head carries NO region at all - ja, ar, fa, lt, am, sw, fil - and Chrome has never emitted
+ * "ja-JP" as navigator.language. Region-qualifying those is a value no Chrome produces, readable
+ * directly from navigator.language, so the country map's "ja-JP"/"lt-LT" are normalised back here
+ * rather than in a hand-maintained list that would drift from the table above.
+ */
+function chromeCanonicalLocale(locale: string): string {
+  const key = chromeUiLocaleFor(locale);
+  const head = key ? CHROME_DEFAULT_LANGUAGES[key]?.[0] : undefined;
+  if (!head) return locale;
+  const base = baseLanguage(locale);
+  // Only collapse when Chromium's own head for this language is itself region-free.
+  return baseLanguage(head) === base && head === base ? head : locale;
+}
+
 function localeToLanguages(locale: string): string[] {
   const base = baseLanguage(locale);
-  return locale === base ? [locale] : [locale, base];
+  const key = chromeUiLocaleFor(locale);
+  const table = key ? CHROME_DEFAULT_LANGUAGES[key] : undefined;
+  if (!table || table.length === 0) {
+    // No Chromium default for this language: keep the old conservative pair rather than inventing
+    // a list. Being short is a smaller lie than being confidently wrong.
+    return locale === base ? [locale] : [locale, base];
+  }
+  const head = table[0]!;
+  // The persona already names exactly what Chromium leads with.
+  if (head === locale) return [...table];
+  // A regional variant of the same language (persona de-AT vs Chromium's de-DE head): lead with the
+  // persona's own tag and keep the tail. That is the shape Chrome produces when a user adds that
+  // regional variant in language settings.
+  if (baseLanguage(head) === base) return [locale, ...table.slice(1)];
+  // Different language entirely (should not happen via chromeUiLocaleFor, but stay total).
+  return [locale, ...table];
 }
 
 /**
@@ -258,10 +382,11 @@ export function applyGeoToFingerprint<T extends Fingerprint | AndroidFingerprint
   // exit timezone (e.g. an unmapped country reporting `Europe/Stockholm` still gets Swedish) so we
   // never leave the seed-default en-US next to a foreign timezone. Only when both are unknown (e.g.
   // `Etc/UTC`, which implies no language) do we keep the seed default.
-  const locale =
+  const locale = chromeCanonicalLocale(
     COUNTRY_LOCALE[geo.countryCode.toUpperCase()] ??
-    TIMEZONE_LOCALE[geo.timezone] ??
-    fp.locale.locale;
+      TIMEZONE_LOCALE[geo.timezone] ??
+      fp.locale.locale,
+  );
   const languages = localeToLanguages(locale);
 
   const localeFp: LocaleFingerprint = {

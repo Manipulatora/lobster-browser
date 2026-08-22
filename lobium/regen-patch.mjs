@@ -19,11 +19,15 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, dirname, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PATCHES = join(HERE, 'patches');
-const SRC = process.env.LOBIUM_CHROMIUM_SRC || process.env.CHROMIUM_SRC || 'E:\\lobium-build\\src';
+const SRC =
+  process.env.LOBIUM_CHROMIUM_SRC ||
+  process.env.CHROMIUM_SRC ||
+  join(homedir(), 'lobium-build', 'src');
 const GIT = process.env.LOBIUM_GIT || 'git';
 
 const argv = process.argv.slice(2);
@@ -34,7 +38,7 @@ if (!target) {
   process.exit(2);
 }
 
-const patchPath = join(PATCHES, target.split('/').join('\\'));
+const patchPath = join(PATCHES, ...target.split('/'));
 if (!existsSync(patchPath)) {
   console.error(`no such patch: ${patchPath}`);
   process.exit(2);
@@ -53,12 +57,14 @@ function filesOf(p) {
 }
 
 const series = readFileSync(join(PATCHES, 'series'), 'utf8')
-  .split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  .split('\n')
+  .map((l) => l.trim())
+  .filter((l) => l && !l.startsWith('#'));
 
 // --- exclusivity check ---------------------------------------------------------------------------
 const owners = new Map();
 for (const rel of series) {
-  for (const f of filesOf(join(PATCHES, rel.split('/').join('\\')))) {
+  for (const f of filesOf(join(PATCHES, ...rel.split('/')))) {
     if (!owners.has(f)) owners.set(f, []);
     owners.get(f).push(rel);
   }
@@ -68,7 +74,13 @@ const shared = mine.filter((f) => owners.get(f)?.length > 1);
 if (shared.length) {
   console.error(`REFUSING to regenerate ${target}: it shares files with other patches, so a`);
   console.error('`git diff` of those files would absorb their hunks too.\n');
-  for (const f of shared) console.error(`  ${f}\n      also in: ${owners.get(f).filter((p) => p !== target).join(', ')}`);
+  for (const f of shared)
+    console.error(
+      `  ${f}\n      also in: ${owners
+        .get(f)
+        .filter((p) => p !== target)
+        .join(', ')}`,
+    );
   console.error('\nSplit the concern into its own patch first (see patches/series).');
   process.exit(1);
 }
@@ -81,7 +93,9 @@ const preamble = firstDiff === -1 ? '' : original.slice(0, firstDiff + 1);
 let diff;
 try {
   diff = execFileSync(GIT, ['--no-optional-locks', 'diff', '--', ...mine], {
-    cwd: SRC, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+    cwd: SRC,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
   });
 } catch (err) {
   console.error(`git diff failed: ${err.message}`);
@@ -89,7 +103,9 @@ try {
 }
 
 if (!diff.trim()) {
-  console.error(`git diff is EMPTY for ${target}. Is the series applied? (lobium/build.ps1 -Run -Stop patch)`);
+  console.error(
+    `git diff is EMPTY for ${target}. Is the series applied? (lobium/build.ps1 -Run -Stop patch)`,
+  );
   process.exit(1);
 }
 
@@ -107,10 +123,14 @@ console.log(`  added lines${String(oldAdds).padStart(5)} ->${String(newAdds).pad
 console.log(`  bytes      ${original.length} -> ${next.length}`);
 
 // eslint-disable-next-line no-control-regex
-const nonAscii = next.slice(preamble.length).split('\n')
+const nonAscii = next
+  .slice(preamble.length)
+  .split('\n')
   .filter((l) => l.startsWith('+') && !l.startsWith('+++') && /[^\x00-\x7F]/.test(l));
 if (nonAscii.length) {
-  console.error(`\n  ${nonAscii.length} added line(s) contain non-ASCII; ci/validation/patch-series.test.mjs will fail:`);
+  console.error(
+    `\n  ${nonAscii.length} added line(s) contain non-ASCII; ci/validation/patch-series.test.mjs will fail:`,
+  );
   for (const l of nonAscii.slice(0, 5)) console.error(`    ${l.slice(0, 100)}`);
 }
 

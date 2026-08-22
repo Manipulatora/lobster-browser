@@ -60,7 +60,11 @@ const D3D11_CAPS: WebGlCaps = {
   maxTextureSize: 16384,
   maxCubeMapTextureSize: 16384,
   maxRenderbufferSize: 16384,
-  maxViewportDims: [16384, 16384],
+  // ANGLE's D3D11 backend sets maxViewportWidth/Height to D3D11_VIEWPORT_BOUNDS_MAX (32767) for
+  // feature level 11_0 and above - renderer11_utils.cpp GetMaximumViewportSize(). It is NOT clamped
+  // to the texture size: that coupling belongs to the Metal and GL backends. 16384 was therefore a
+  // MAX_VIEWPORT_DIMS no Chrome on Windows reports, readable with a single getParameter call.
+  maxViewportDims: [32767, 32767],
   maxVertexAttribs: 16,
   maxVertexUniformVectors: 4096,
   maxFragmentUniformVectors: 1024,
@@ -71,6 +75,18 @@ const D3D11_CAPS: WebGlCaps = {
   aliasedLineWidthRange: [1, 1],
   aliasedPointSizeRange: [1, 1024],
 };
+/**
+ * D3D11 caps as ANGLE reports them ON NVIDIA.
+ *
+ * renderer11_utils.cpp takes maxVertexUniformVectors from D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT
+ * (4096) and then does `if (features.skipVSConstantRegisterZero.enabled) caps->maxVertexUniformVectors -= 1;`
+ * - and that feature is switched on for NVIDIA and nothing else
+ * (`ANGLE_FEATURE_CONDITION(features, skipVSConstantRegisterZero, isNvidia)`). So an NVIDIA card on
+ * Windows reports 4095 where Intel and AMD report 4096. A persona naming a GeForce and reporting
+ * 4096 contradicts itself in one getParameter call.
+ */
+const D3D11_CAPS_NVIDIA: WebGlCaps = { ...D3D11_CAPS, maxVertexUniformVectors: 4095 };
+
 const METAL_CAPS: WebGlCaps = {
   maxTextureSize: 16384,
   maxCubeMapTextureSize: 16384,
@@ -79,7 +95,11 @@ const METAL_CAPS: WebGlCaps = {
   maxVertexAttribs: 16,
   maxVertexUniformVectors: 1024,
   maxFragmentUniformVectors: 1024,
-  maxVaryingVectors: 31,
+  // 30, not 31. ANGLE's Metal backend does `maxVaryingVectors = 31 - 1` on macOS, with the comment
+  // "On macOS exclude [[position]] from maxVaryingVectors" (DisplayMtl.mm). The paired component
+  // limit is 124 - 4 = 120, i.e. exactly 4x30, so a persona claiming 31 also contradicted its own
+  // WebGL2 component counts.
+  maxVaryingVectors: 30,
   maxTextureImageUnits: 16,
   maxVertexTextureImageUnits: 16,
   maxCombinedTextureImageUnits: 32,
@@ -92,9 +112,17 @@ const GL_CAPS: WebGlCaps = {
   maxRenderbufferSize: 16384,
   maxViewportDims: [16384, 16384],
   maxVertexAttribs: 16,
-  maxVertexUniformVectors: 4096,
+  // 1024, not 4096. ANGLE's OpenGL backend hard-clamps this regardless of what the driver reports:
+  // renderergl_utils.cpp does `caps->maxVertexUniformVectors = std::min(1024, ...)`, with a comment
+  // that the WebGL conformance suite cannot finish otherwise. So no Chrome on Linux has ever
+  // reported more than 1024 here, and 4096 was a single-getParameter tell on every Linux persona.
+  // (4096 IS right on Windows, where the D3D11 backend uses D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT.)
+  maxVertexUniformVectors: 1024,
   maxFragmentUniformVectors: 1024,
-  maxVaryingVectors: 31,
+  // 30, matching MESA_CAPS in the generated catalog. Two Linux capability profiles used to ship
+  // in the same product disagreeing on this value, so which number a Linux persona reported
+  // depended on whether its GPU came from the curated pool or the generated preset list.
+  maxVaryingVectors: 30,
   maxTextureImageUnits: 16,
   maxVertexTextureImageUnits: 16,
   maxCombinedTextureImageUnits: 32,
@@ -122,7 +150,8 @@ const MOBILE_GLES_CAPS: WebGlCaps = {
 function winGpu(vendor: 'NVIDIA' | 'Intel' | 'AMD', model: string): DeviceProfile['webgl'] {
   const v = `Google Inc. (${vendor})`;
   const r = `ANGLE (${vendor}, ${model} Direct3D11 vs_5_0 ps_5_0, D3D11)`;
-  return { vendor: v, renderer: r, unmaskedVendor: v, unmaskedRenderer: r, caps: D3D11_CAPS };
+  const caps = vendor === 'NVIDIA' ? D3D11_CAPS_NVIDIA : D3D11_CAPS;
+  return { vendor: v, renderer: r, unmaskedVendor: v, unmaskedRenderer: r, caps };
 }
 
 const WINDOWS: OsTemplate = {
@@ -237,21 +266,30 @@ const MACOS: OsTemplate = {
     {
       id: 'mac-m1',
       webgl: macGpu('M1'),
-      screen: { width: 1512, height: 982, dpr: 2 },
+      // MacBook Air 13" (M1, 2020): 2560x1600 panel, Retina default "looks like" 1440x900.
+      // NOT 1512x982 - that is the 14" MacBook Pro, which never shipped with a base M1 (only M1 Pro
+      // and M1 Max). A base-M1 machine reporting a 14" panel is a pairing Apple never sold, and both
+      // halves are readable together from screen.* and the WebGL renderer.
+      screen: { width: 1440, height: 900, dpr: 2 },
       hardwareConcurrency: 8,
       deviceMemory: 8,
     },
     {
       id: 'mac-m2',
       webgl: macGpu('M2'),
-      screen: { width: 1512, height: 982, dpr: 2 },
+      // MacBook Air 13.6" (M2, 2022): 2560x1664 panel, Retina default "looks like" 1470x956.
+      // Same error as mac-m1 above: the 14" MacBook Pro took M2 Pro / M2 Max, never a base M2.
+      screen: { width: 1470, height: 956, dpr: 2 },
       hardwareConcurrency: 8,
       deviceMemory: 8,
     },
     {
       id: 'mac-m3',
       webgl: macGpu('M3'),
-      screen: { width: 1728, height: 1117, dpr: 2 },
+      // MacBook Pro 14" (M3, Oct 2023): 3024x1964 panel, Retina default "looks like" 1512x982. The
+      // base M3 genuinely did ship in the 14" - unlike M1/M2 above - so this pairing is real. What
+      // it must NOT be is 1728x1117: that is the 16", which only ever took M3 Pro / M3 Max.
+      screen: { width: 1512, height: 982, dpr: 2 },
       hardwareConcurrency: 8,
       deviceMemory: 8,
     },
@@ -506,7 +544,11 @@ export const ANDROID_TEMPLATE: AndroidTemplate = {
       buildId: 'AD1A.240530.047',
       buildFingerprint: 'google/tokay/tokay:14/AD1A.240530.047/12150698:user/release-keys',
       webgl: androidGpu('ARM', 'Mali-G715'),
-      screen: { width: 412, height: 915, dpr: 2.625 },
+      // 412x924 is the Pixel 9's own panel. This carried 412x915 - the Pixel 8's - so a persona
+      // naming a Pixel 9 in Sec-CH-UA-Model reported the previous generation's screen beside it.
+      // Chromium's device list has both: EmulatedDevices.ts 'Pixel 9' is 412x924 and 'Pixel 8' is
+      // 412x915, each at deviceScaleFactor 2.625.
+      screen: { width: 412, height: 924, dpr: 2.625 },
       hardwareConcurrency: 8,
       deviceMemory: 8,
       maxTouchPoints: 5,

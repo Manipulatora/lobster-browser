@@ -54,10 +54,15 @@ test('Android fingerprints carry the complete mobile identity chain', () => {
   assert.equal(fp.navigator.uaModel, fp.android.model);
   assert.equal(fp.navigator.uaMobile, true);
   assert.ok(fp.navigator.maxTouchPoints > 0);
-  assert.match(fp.navigator.userAgent, new RegExp(`Android ${fp.android.androidVersion}`));
-  assert.match(
+  // Chrome's UA reduction freezes the Android platform token on EVERY device, so the persona's real
+  // version and model must NOT appear here - they travel in Sec-CH-UA-Platform-Version and
+  // Sec-CH-UA-Model, asserted above. Chromium pins this exact string in
+  // components/embedder_support/user_agent_utils_unittest.cc.
+  assert.match(fp.navigator.userAgent, /\(Linux; Android 10; K\)/);
+  assert.doesNotMatch(
     fp.navigator.userAgent,
     new RegExp(fp.android.model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    'the device model must not leak into the User-Agent',
   );
   assert.match(fp.navigator.userAgent, /Mobile Safari\/537\.36/);
   assert.equal(fp.navigator.uaFullVersion, '140.0.1234.56');
@@ -84,7 +89,10 @@ test('selected Google Play phone/tablet models own the complete Android identity
   assert.equal(selectedPhone.android.device, phone.device);
   assert.equal(selectedPhone.android.androidVersion, '15');
   assert.equal(selectedPhone.navigator.uaModel, phone.model);
-  assert.match(
+  // The model reaches Sec-CH-UA-Model (above) and NOT the User-Agent: Chrome's reduced UA carries the
+  // frozen "Linux; Android 10; K" platform on every device.
+  assert.match(selectedPhone.navigator.userAgent, /\(Linux; Android 10; K\)/);
+  assert.doesNotMatch(
     selectedPhone.navigator.userAgent,
     new RegExp(phone.model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
   );
@@ -162,10 +170,10 @@ test('Android catalog is exhaustive-coherent, not just sampled-coherent', () => 
       },
       navigator: {
         ...fp.navigator,
-        userAgent: fp.navigator.userAgent.replace(
-          /Android \d+; [^)]+/,
-          `Android ${device.androidVersion}; ${device.model}`,
-        ),
+        // Left as derived. This fixture used to rewrite the platform token to the device's real
+        // version and model; that is precisely the leak the gate now rejects, and the UA is
+        // identical across devices anyway.
+        userAgent: fp.navigator.userAgent,
         hardwareConcurrency: device.hardwareConcurrency,
         deviceMemory: device.deviceMemory,
         maxTouchPoints: device.maxTouchPoints,
@@ -222,8 +230,11 @@ test('proxy geo overlay works for Android without changing device identity', () 
   });
 
   assert.equal(out.locale.timezone, 'Asia/Tokyo');
-  assert.equal(out.locale.locale, 'ja-JP');
-  assert.equal(out.navigator.languages[0], 'ja-JP');
+  // 'ja', not 'ja-JP'. Chromium's own default for Japanese is "ja,en-US,en"
+  // (components/strings/components_locale_settings_ja.xtb), with a region-free head - Chrome has
+  // never emitted "ja-JP" as navigator.language.
+  assert.equal(out.locale.locale, 'ja');
+  assert.equal(out.navigator.languages[0], 'ja');
   assert.deepEqual(out.android, base.android, 'geo must not mutate the Android device identity');
   assert.deepEqual(out.webgl, base.webgl, 'geo must not mutate Android GPU identity');
   assert.deepEqual(validateAndroidFingerprintCoherence(out), []);

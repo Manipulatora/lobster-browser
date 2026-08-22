@@ -300,3 +300,70 @@ test('a metric clone that the pack does not carry falls back to its class face',
   );
   assert.match(xml, /<alias><family>Calibri<\/family><prefer><family>Liberation Sans<\/family>/);
 });
+
+test('a reinstalled pack with identical contents still re-links the profile', async () => {
+  // The provision key is derived from the pack CONTENTS, so an installer that lays down the same
+  // font pack again reproduces it byte for byte - while giving every pack file a brand new inode.
+  // The hard links in the profile then reference inodes the pack no longer shares, and the profile
+  // is silently holding a private copy of the whole pack. A key check alone calls that a cache hit
+  // and never reclaims it, so this asserts on the inode rather than on the key.
+  const udd = await mkdtemp(join(tmpdir(), 'fonts-relink-'));
+  try {
+    const pack = await fixturePack(udd);
+    const packFile = join(pack, 'files', 'LiberationSans-Regular.ttf');
+    await writeFontConfig(udd, 'windows', pack, ['Arial']);
+
+    const provisioned = async (): Promise<{ ino: number; nlink: number }> => {
+      const dir = join(udd, 'font-files');
+      const [name] = (await readdir(dir)).sort();
+      assert.ok(name, 'the provision must produce at least one font file');
+      const s = await stat(join(dir, name));
+      return { ino: s.ino, nlink: s.nlink };
+    };
+
+    const linkedFirst = await provisioned();
+    assert.equal(linkedFirst.ino, (await stat(packFile)).ino, 'first provision must hard-link');
+
+    // Reinstall: identical bytes, new inode. rm+write is exactly what an installer does.
+    await rm(packFile);
+    await writeFile(packFile, 'font');
+    const reinstalled = await stat(packFile);
+    assert.notEqual(reinstalled.ino, linkedFirst.ino, 'the fixture must model a replaced inode');
+    assert.equal(linkedFirst.nlink, 2, 'the profile copy was the only other reference');
+
+    await writeFontConfig(udd, 'windows', pack, ['Arial']);
+    const after = await provisioned();
+    assert.equal(after.ino, reinstalled.ino, 'the profile must re-link to the reinstalled pack');
+  } finally {
+    await rm(udd, { recursive: true, force: true });
+  }
+});
+
+test('a provision that had to copy is not rebuilt on every launch', async () => {
+  // On a filesystem where link() cannot work the fallback copy is correct and permanent: its inode
+  // will never match the pack, so re-verifying the link would rebuild the whole directory on every
+  // single launch. The stamp records which of the two happened; only a linked provision is checked.
+  const udd = await mkdtemp(join(tmpdir(), 'fonts-copied-'));
+  try {
+    const pack = await fixturePack(udd);
+    const conf = await writeFontConfig(udd, 'windows', pack, ['Arial']);
+    const stamp = JSON.parse(await readFile(join(udd, '.lobium-fonts-ready'), 'utf8')) as {
+      key: string;
+      linked: boolean;
+    };
+    assert.equal(stamp.linked, true, 'the fixture filesystem does support hard links');
+
+    // Restamp as a copied provision, leaving the files exactly as they are.
+    await writeFile(
+      join(udd, '.lobium-fonts-ready'),
+      `${JSON.stringify({ key: stamp.key, linked: false })}\n`,
+    );
+    const before = await stat(conf);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await writeFontConfig(udd, 'windows', pack, ['Arial']);
+    const after = await stat(conf);
+    assert.equal(after.mtimeMs, before.mtimeMs, 'a copied provision must still be a cache hit');
+  } finally {
+    await rm(udd, { recursive: true, force: true });
+  }
+});

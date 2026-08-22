@@ -133,15 +133,16 @@ export const WEBGL2_REGISTRATION_ORDER = [
   'WEBGL_stencil_texturing',
 ] as const;
 
-/** Block-compression formats a desktop PC GPU exposes and a mobile-derived one does not. */
-const DESKTOP_BLOCK_FORMATS = new Set([
-  'EXT_texture_compression_bptc',
-  'EXT_texture_compression_rgtc',
-  'WEBGL_compressed_texture_s3tc',
-  'WEBGL_compressed_texture_s3tc_srgb',
-]);
-
-/** Compression formats from the mobile lineage. Apple Silicon has these; a PC GPU does not. */
+/**
+ * Compression formats from the mobile lineage. Apple Silicon has these; a PC GPU does not.
+ *
+ * There is deliberately no DESKTOP-only counterpart. Apple Silicon Macs expose the BC/S3TC family
+ * TOO - ANGLE's Metal format table guards BC1..BC7 with `#if TARGET_OS_OSX || TARGET_OS_MACCATALYST`
+ * (mtl_format_table_autogen.mm), which is every Mac regardless of architecture. Treating those as
+ * mutually exclusive stripped s3tc/s3tc_srgb/bptc/rgtc from every M-series persona, so an
+ * Apple-Silicon profile advertised a smaller extension set than any real M-series Mac: one
+ * getSupportedExtensions() call away from a contradiction with its own renderer string.
+ */
 const MOBILE_BLOCK_FORMATS = new Set([
   'WEBGL_compressed_texture_astc',
   'WEBGL_compressed_texture_etc',
@@ -151,33 +152,39 @@ const MOBILE_BLOCK_FORMATS = new Set([
 /** PowerVR only — iOS and some older Android parts. Never a desktop persona. */
 const PVRTC = 'WEBGL_compressed_texture_pvrtc';
 
-/** Not implemented on the Metal backend, so absent on every Mac. */
-const METAL_UNSUPPORTED = new Set(['EXT_disjoint_timer_query', 'EXT_disjoint_timer_query_webgl2']);
-
 export interface WebGlExtensionOptions {
   /** True when the renderer string names an Apple M-series GPU. */
   appleSilicon?: boolean;
 }
 
-function select(order: readonly string[], os: OsFamily, opts: WebGlExtensionOptions): string[] {
+function select(order: readonly string[], opts: WebGlExtensionOptions): string[] {
   const apple = Boolean(opts.appleSilicon);
   return order.filter((name) => {
     if (name === PVRTC) return false;
     if (MOBILE_BLOCK_FORMATS.has(name)) return apple;
-    if (DESKTOP_BLOCK_FORMATS.has(name)) return !apple;
-    if (os === 'macos' && METAL_UNSUPPORTED.has(name)) return false;
+    // EXT_disjoint_timer_query is NOT withheld on macOS. ANGLE's Metal backend sets
+    // `mNativeExtensions.disjointTimerQueryEXT = true` unconditionally in initializeExtensions()
+    // (DisplayMtl.mm), and QueryMtl.mm implements TimeElapsed end to end - so every Mac exposes it
+    // and a persona that omitted it was advertising an extension set no Mac reports.
     return true;
   });
 }
 
-/** The WebGL1 extension list a persona on `os` should present, in Chrome's registration order. */
-export function webgl1ExtensionsFor(os: OsFamily, opts: WebGlExtensionOptions = {}): string[] {
-  return select(WEBGL1_REGISTRATION_ORDER, os, opts);
+/**
+ * The WebGL1 extension list a persona should present, in Chrome's registration order.
+ *
+ * `_os` is kept in the signature because every caller has it and the set may well become
+ * OS-dependent again, but nothing currently branches on it: the one rule that did was withholding
+ * EXT_disjoint_timer_query on macOS, and ANGLE's Metal backend enables that unconditionally. What
+ * still varies is the GPU LINEAGE, which arrives through `opts.appleSilicon`.
+ */
+export function webgl1ExtensionsFor(_os: OsFamily, opts: WebGlExtensionOptions = {}): string[] {
+  return select(WEBGL1_REGISTRATION_ORDER, opts);
 }
 
 /** The WebGL2 extension list for the same persona. */
-export function webgl2ExtensionsFor(os: OsFamily, opts: WebGlExtensionOptions = {}): string[] {
-  return select(WEBGL2_REGISTRATION_ORDER, os, opts);
+export function webgl2ExtensionsFor(_os: OsFamily, opts: WebGlExtensionOptions = {}): string[] {
+  return select(WEBGL2_REGISTRATION_ORDER, opts);
 }
 
 /** True when a renderer string names an Apple M-series GPU (which changes the compression set). */

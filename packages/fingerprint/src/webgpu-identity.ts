@@ -34,7 +34,8 @@ export interface WebGpuIdentity {
  */
 const ARCHITECTURES: ReadonlyArray<readonly [RegExp, string]> = [
   // NVIDIA
-  [/RTX\s*40\d\d/i, 'ada-lovelace'],
+  // 'lovelace', not 'ada-lovelace': Dawn's name for the Ada generation is the bare codename.
+  [/RTX\s*40\d\d/i, 'lovelace'],
   [/RTX\s*30\d\d/i, 'ampere'],
   [/RTX\s*20\d\d|GTX\s*16\d\d/i, 'turing'],
   [/GTX\s*10\d\d/i, 'pascal'],
@@ -44,22 +45,34 @@ const ARCHITECTURES: ReadonlyArray<readonly [RegExp, string]> = [
   [/RX\s*6\d\d\d/i, 'rdna-2'],
   [/RX\s*5\d\d\d/i, 'rdna-1'],
   [/Vega/i, 'gcn-5'],
-  // Intel
-  [/Arc\s|Iris\s+Xe/i, 'xe'],
+  // Intel. There is no 'xe' architecture in Dawn's vocabulary, and the two parts that were folded
+  // under it are different generations: Iris Xe is Tiger Lake (Gen 12 LP), Arc is DG2 (Gen 12 HP).
+  [/Arc\s/i, 'gen-12hp'],
+  [/Iris\s+Xe/i, 'gen-12lp'],
   [/UHD\s+Graphics|HD\s+Graphics/i, 'gen-9'],
-  // Apple
-  [/Apple\s+M[123]\d*/i, 'apple-silicon'],
+  // Apple. Apple GPUs report no Metal deviceID, so Dawn cannot pattern-match them and instead
+  // reports the highest supported family: on macOS 13+ - which is every Mac that runs Chrome 152 -
+  // that is 'metal-3'. There is no 'apple-silicon' anywhere in Dawn.
+  [/Apple\s+M\d+/i, 'metal-3'],
 ];
 
 /** Vendor slug plus the architecture used when no family pattern matches. */
 const VENDORS: ReadonlyArray<readonly [RegExp, string, string]> = [
-  [/NVIDIA/i, 'nvidia', 'unknown'],
-  [/AMD|ATI\s+Technologies|Radeon/i, 'amd', 'unknown'],
+  // The fallback is the EMPTY STRING, not 'unknown'. Dawn's generated GetArchitectureName returns
+  // "" for an architecture it cannot resolve (and GetVendorName likewise for an unknown vendor), so
+  // a literal 'unknown' is a value no WebGPU adapter has ever reported - it identifies the product
+  // rather than hiding it. An empty architecture is both truthful and common on real hardware.
+  [/NVIDIA/i, 'nvidia', ''],
+  [/AMD|ATI\s+Technologies|Radeon/i, 'amd', ''],
   [/Intel/i, 'intel', 'gen-9'],
-  [/Apple/i, 'apple', 'apple-silicon'],
-  [/Qualcomm|Adreno/i, 'qualcomm', 'adreno'],
-  [/ARM|Mali/i, 'arm', 'mali'],
-  [/Microsoft|WARP/i, 'microsoft', 'swiftshader'],
+  [/Apple/i, 'apple', 'metal-3'],
+  // Dawn's vendor name_override collapses QualcommPCI/QualcommACPI to 'qualcomm'; its architecture
+  // names are adreno-4xx..adreno-8xx, never a bare 'adreno'.
+  [/Qualcomm|Adreno/i, 'qualcomm', ''],
+  // ARM's architectures are midgard/bifrost/valhall - 'mali' is the product family, not an arch.
+  [/ARM|Mali/i, 'arm', ''],
+  // Microsoft's software adapter is WARP; 'swiftshader' is Google's, a different vendor entirely.
+  [/Microsoft|WARP/i, 'microsoft', 'warp'],
 ];
 
 /** Pull the human-readable device name out of an ANGLE renderer string. */

@@ -180,6 +180,32 @@ export async function deriveGeoFromExitIp(
 }
 
 /**
+ * Derive geo from THIS machine's own exit IP, with no proxy in the path.
+ *
+ * A profile with no proxy still has an exit IP — the host's. "Based on IP" is therefore just as
+ * meaningful there as it is behind a proxy, and resolving it keeps the persona COHERENT: the
+ * locale, timezone and geolocation the page sees all match the address the traffic actually
+ * arrives from. The alternative the launcher used to take — refuse, or fall back to a
+ * seed-derived locale while keeping the host's real geolocation — produced a profile whose
+ * claimed country contradicted its own IP, which is a stronger tell than either value alone.
+ */
+export async function deriveGeoFromDirectIp(opts: DeriveGeoOptions = {}): Promise<GeoInfo> {
+  const endpoint = opts.endpoint ?? DEFAULT_GEO_ENDPOINT;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_GEO_TIMEOUT_MS;
+
+  const res = await request(endpoint, {
+    method: 'GET',
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (res.statusCode < 200 || res.statusCode >= 300) {
+    await res.body.dump();
+    throw new Error(`deriveGeoFromDirectIp: geo endpoint returned HTTP ${res.statusCode}`);
+  }
+  const body: unknown = await res.body.json();
+  return parseGeoResponse(body);
+}
+
+/**
  * Networked {@link GeoProvider} — the production counterpart to {@link StaticGeoProvider}.
  * Delegates to {@link deriveGeoFromExitIp} with the configured options.
  */

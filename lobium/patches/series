@@ -24,13 +24,6 @@
 # =================================================================================================
 # Native product shell
 # =================================================================================================
-# Android phone/tablet workspace behind the real WebContents.
-# KNOWN INCOMPLETE, LINUX-ONLY: every hook is #if BUILDFLAG(IS_LINUX), so this is inert on the
-# Windows build; the created lobium_device_frame_view.cc is in no GN target so it is never compiled;
-# and it calls content::SetLobiumDeviceEmulationScale() from a header that does not exist yet. It
-# applies cleanly and changes nothing. See ../hooks.md "device frame" before enabling it.
-branding/device-frame.patch
-
 # =================================================================================================
 # Core: build wiring, capability contract, config transport
 # =================================================================================================
@@ -88,6 +81,10 @@ fingerprint/screen-dpr.patch
 # matchMedia('(device-width/height)') must agree with screen.width/height (CreepJS Screen lie).
 # CHAIN: after screen-dpr; both hook media_values.cc.
 fingerprint/media-values-device-size.patch
+# navigator.webdriver, answered in Blink rather than by --disable-blink-features. The flag kept it
+# false but raised Chromium's "unsupported command-line flag" infobar and named itself on
+# chrome://version - two tells bought to hide one.
+fingerprint/navigator-webdriver.patch
 # navigator.language(s) in all contexts + configured geolocation after a normal permission grant +
 # ICU locale applied before Blink/V8 init.
 fingerprint/locale-geolocation.patch
@@ -114,6 +111,18 @@ fingerprint/windows-font-isolation.patch
 # net/http2-settings-order.patch     HTTP/2 SETTINGS + pseudo-header order.
 
 # =================================================================================================
+# Footprint
+# =================================================================================================
+# Skips the speech (SODA), on-device-translation (TranslateKit) and WASM-TTS components for any
+# profile launched with --lobium-fp-config. Measured on 152.0.7977.42: they are 792 MB of the 824 MB
+# a fresh profile downloads, and a profile carrying all of them is indistinguishable from one that
+# never did (getVoices() 0, Translator undefined, in both). Every profile is its own
+# --user-data-dir, so the saving is per profile. Deliberately narrower than
+# --disable-component-update, which also drops the ~32 MB of CRLSet / First-Party Sets / Privacy
+# Sandbox / Origin Trials that DO change web-visible behaviour.
+perf/skip-heavy-components.patch
+
+# =================================================================================================
 # Branding
 # =================================================================================================
 branding/account-menu-trim.patch
@@ -127,8 +136,9 @@ branding/product-icon-lobster.patch
 # and the alt-tab entry get a rounded violet square with the profile's initials, the window title
 # carries the full name, and Linux WM_CLASS stops naming the --user-data-dir path. Drawn natively
 # from --lobium-profile-initials / -word / -tint by the added components/lobium_fp module.
-# CHAIN: after device-frame.patch; both hook browser_view.cc, and the hunks below are cut against
-# the tree with that one already applied.
+# Was CHAINED after device-frame.patch (both hook browser_view.cc). That patch left the series on
+# 2026-08-21 — see the note at the end of this file — so this one is now cut against pristine
+# browser_view.cc and stands alone.
 branding/profile-window-icon.patch
 branding/signin-disable.patch
 # REQUIRES scripts/apply-lobium-branding.mjs to have staged the NTP icon PNGs into
@@ -139,3 +149,15 @@ branding/profile-lockdown.patch
 
 # Present on disk but deliberately NOT in the series:
 #   branding/suppress-sandbox-infobar.patch - only needed for --no-sandbox dev runs.
+#   branding/device-frame.patch - the Android phone/tablet workspace behind the real WebContents.
+#     REMOVED FROM THE SERIES 2026-08-21 because it does not link on Linux, which is the only
+#     platform it targets. Its own note claimed it "applies cleanly and changes nothing"; that is
+#     true only on Windows, where every hook is excluded by #if BUILDFLAG(IS_LINUX). On Linux the
+#     hooks DO compile, they reference LobiumDeviceFrameView, and its implementation file is in no
+#     GN target - so `chrome` fails at the final link with seven undefined symbols:
+#         ld.lld: error: undefined symbol: LobiumDeviceFrameView::IsEnabled()   (+6 more)
+#     Measured on 152.0.7977.42 after a full 8h21m compile: 56069 of 56070 steps succeeded and the
+#     link was the single failure. Finishing the feature needs lobium_device_frame_view.cc added to
+#     a GN target AND content/{public/browser,browser/devtools}/lobium_device_emulation.* carried in
+#     lobium/src/ (they exist only as untracked files on one build host today). Until then it must
+#     stay out, or no Linux engine can be produced. See ../hooks.md "device frame".

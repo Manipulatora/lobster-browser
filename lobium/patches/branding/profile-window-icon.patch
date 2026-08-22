@@ -46,7 +46,48 @@ null and the window keeps the stock Chromium icon.
 
 CHAIN: after branding/device-frame.patch, which also hooks browser_view.cc.
 
+diff --git a/chrome/browser/shell_integration_linux.cc b/chrome/browser/shell_integration_linux.cc
+index 2c071e6ba810a..6c574bd2e7486 100644
+--- a/chrome/browser/shell_integration_linux.cc
++++ b/chrome/browser/shell_integration_linux.cc
+@@ -426,6 +426,16 @@ base::FilePath GetChromeExePath() {
+ std::string GetProgramClassName(const base::CommandLine& command_line,
+                                 const std::string& desktop_file_name) {
+   std::string class_name = GetDesktopBaseName(desktop_file_name);
++  // Lobium: every profile is launched with its own --user-data-dir, so the fallback below would put
++  // a raw filesystem path in WM_CLASS and gnome-shell's window switcher would label the window
++  // "Lobium (/home/.../profiles/<uuid>)". The profile NAME disambiguates exactly as well and is what
++  // the operator recognises. Read as the native value rather than as ASCII: a name outside ASCII
++  // would otherwise come back empty and fall through to the path this exists to replace.
++  const std::string lobium_profile_name =
++      command_line.GetSwitchValueNative("lobium-profile-name");
++  if (!lobium_profile_name.empty()) {
++    return class_name + " (" + lobium_profile_name + ")";
++  }
+   std::string user_data_dir =
+       command_line.GetSwitchValueNative(switches::kUserDataDir);
+   // If the user launches with e.g. --user-data-dir=/tmp/my-user-data, set the
+@@ -441,6 +451,18 @@ std::string GetProgramClassClass(const base::CommandLine& command_line,
+                                  const std::string& desktop_file_name) {
+   if (command_line.HasSwitch(switches::kWmClass))
+     return command_line.GetSwitchValueASCII(switches::kWmClass);
++  // Lobium: the CLASS half of WM_CLASS decides which icon a shell shows. GNOME looks the class up
++  // against installed .desktop files and, on a match, uses THAT file's icon - so a class of
++  // "Chromium-browser" made every profile window show the system Chromium icon and the per-profile
++  // _NET_WM_ICON this build publishes was never displayed. Giving each profile its own class means
++  // no .desktop entry matches, and the shell falls back to the icon on the window, which is the one
++  // that identifies the profile. The instance half (GetProgramClassName) still carries the readable
++  // "Lobium (name)" the window switcher labels with.
++  const std::string lobium_profile_name =
++      command_line.GetSwitchValueNative("lobium-profile-name");
++  if (!lobium_profile_name.empty()) {
++    return "Lobium-" + lobium_profile_name;
++  }
+   std::string desktop_base_name = GetDesktopBaseName(desktop_file_name);
+   if (auto* platform_utils =
+           ui::OzonePlatform::GetInstance()->GetPlatformUtils()) {
 diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/views/frame/browser_view.cc
+index 141a168f48356..f8fcd0465f457 100644
 --- a/chrome/browser/ui/views/frame/browser_view.cc
 +++ b/chrome/browser/ui/views/frame/browser_view.cc
 @@ -32,6 +32,7 @@
@@ -57,7 +98,7 @@ diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/v
  #include "base/strings/string_number_conversions.h"
  #include "base/strings/stringprintf.h"
  #include "base/task/sequenced_task_runner.h"
-@@ -256,6 +257,7 @@
+@@ -255,6 +256,7 @@
  #include "components/javascript_dialogs/app_modal_dialog_controller.h"
  #include "components/javascript_dialogs/app_modal_dialog_queue.h"
  #include "components/javascript_dialogs/app_modal_dialog_view.h"
@@ -65,7 +106,7 @@ diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/v
  #include "components/performance_manager/public/features.h"
  #include "components/permissions/permission_request_manager.h"
  #include "components/prefs/pref_service.h"
-@@ -3584,9 +3586,21 @@ bool BrowserView::CanActivate() const {
+@@ -3590,9 +3592,21 @@ bool BrowserView::CanActivate() const {
  }
  
  std::u16string BrowserView::GetWindowTitle() const {
@@ -88,7 +129,7 @@ diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/v
  #if BUILDFLAG(IS_MAC)
    bool any_tab_playing_audio = false;
    bool any_tab_playing_muted_audio = false;
-@@ -3856,7 +3870,21 @@ bool BrowserView::ShouldShowWindowIcon() const {
+@@ -3862,7 +3876,21 @@ bool BrowserView::ShouldShowWindowIcon() const {
  ui::ImageModel BrowserView::GetWindowAppIcon() {
    web_app::AppBrowserController* app_controller =
        web_app::AppBrowserController::From(browser());
@@ -111,7 +152,7 @@ diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/v
  }
  
  ui::ImageModel BrowserView::GetWindowIcon() {
-@@ -3891,6 +3919,15 @@ ui::ImageModel BrowserView::GetWindowIcon() {
+@@ -3897,6 +3925,15 @@ ui::ImageModel BrowserView::GetWindowIcon() {
          WindowMetadataController::From(browser_.get())->GetCurrentPageIcon());
    }
  
@@ -127,23 +168,3 @@ diff --git a/chrome/browser/ui/views/frame/browser_view.cc b/chrome/browser/ui/v
    return ui::ImageModel();
  }
  
-diff --git a/chrome/browser/shell_integration_linux.cc b/chrome/browser/shell_integration_linux.cc
---- a/chrome/browser/shell_integration_linux.cc
-+++ b/chrome/browser/shell_integration_linux.cc
-@@ -426,6 +426,16 @@ base::FilePath GetChromeExePath() {
- std::string GetProgramClassName(const base::CommandLine& command_line,
-                                 const std::string& desktop_file_name) {
-   std::string class_name = GetDesktopBaseName(desktop_file_name);
-+  // Lobium: every profile is launched with its own --user-data-dir, so the fallback below would put
-+  // a raw filesystem path in WM_CLASS and gnome-shell's window switcher would label the window
-+  // "Lobium (/home/.../profiles/<uuid>)". The profile NAME disambiguates exactly as well and is what
-+  // the operator recognises. Read as the native value rather than as ASCII: a name outside ASCII
-+  // would otherwise come back empty and fall through to the path this exists to replace.
-+  const std::string lobium_profile_name =
-+      command_line.GetSwitchValueNative("lobium-profile-name");
-+  if (!lobium_profile_name.empty()) {
-+    return class_name + " (" + lobium_profile_name + ")";
-+  }
-   std::string user_data_dir =
-       command_line.GetSwitchValueNative(switches::kUserDataDir);
-   // If the user launches with e.g. --user-data-dir=/tmp/my-user-data, set the

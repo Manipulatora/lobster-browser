@@ -44,14 +44,49 @@ test('AMD is recognised under its ATI Technologies ANGLE vendor field', () => {
   assert.equal(id.architecture, 'rdna-2');
 });
 
-test('Apple Silicon is integrated with a unified-memory architecture slug', () => {
+test('Apple Silicon reports the Metal family Dawn actually emits', () => {
+  // Apple GPUs expose no deviceID through Metal, so Dawn cannot pattern-match them the way it does
+  // PCI parts. PhysicalDeviceMTL.mm reports the highest supported family instead, which on macOS 13+
+  // is "metal-3". "apple-silicon" appears nowhere in Dawn - it was a value no adapter could report.
   const id = webgpuIdentityFor(
     gl('ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)'),
   );
   assert.equal(id.vendor, 'apple');
-  assert.equal(id.architecture, 'apple-silicon');
+  assert.equal(id.architecture, 'metal-3');
   assert.equal(id.adapterType, 'integrated');
   assert.equal(id.description, 'Apple M2');
+});
+
+test('every architecture we can emit is a name that exists in Dawn gpu_info.json', () => {
+  // The defect class this closes: a plausible-sounding slug ('ada-lovelace', 'xe', 'apple-silicon')
+  // that Dawn has no way of producing. Any such value identifies the product on the first
+  // adapter.info read, so the whole emitted vocabulary is pinned here.
+  const DAWN_ARCHITECTURES = new Set([
+    '',
+    // Nvidia
+    'fermi', 'kepler', 'maxwell', 'pascal', 'volta', 'turing', 'ampere', 'lovelace', 'blackwell',
+    // AMD / Samsung
+    'terascale-2', 'gcn-1', 'gcn-2', 'gcn-3', 'gcn-4', 'gcn-5', 'cdna-1',
+    'rdna-1', 'rdna-2', 'rdna-3', 'rdna-4',
+    // Intel
+    'gen-7', 'gen-8', 'gen-9', 'gen-11', 'gen-12lp', 'gen-12hp',
+    'xe-lpg', 'xe-2lpg', 'xe-2hpg', 'xe-3lpg', 'xe-3lpg-xs',
+    // Apple (Metal families), ARM, Qualcomm, Img Tec, software adapters
+    'common-1', 'common-2', 'common-3', 'metal-3',
+    'midgard', 'bifrost', 'valhall', 'gen-5',
+    'adreno-4xx', 'adreno-5xx', 'adreno-6xx', 'adreno-7xx', 'adreno-8xx',
+    'rogue', 'furian', 'b-series', 'd-series', 'videocore', 'maleoon',
+    'swiftshader', 'warp', 'software',
+  ]);
+  for (const tpl of Object.values(DEVICE_TEMPLATES)) {
+    for (const device of tpl.devices) {
+      const id = webgpuIdentityFor(device.webgl);
+      assert.ok(
+        DAWN_ARCHITECTURES.has(id.architecture),
+        `${device.id}: architecture "${id.architecture}" is not a name Dawn can emit`,
+      );
+    }
+  }
 });
 
 test('no catalog device is ever a CPU adapter, so isFallbackAdapter stays false', () => {

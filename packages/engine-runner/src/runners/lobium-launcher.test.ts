@@ -394,7 +394,8 @@ test('buildNativeLobiumProcessArgs hands the engine a per-profile window mark', 
 
     assert.ok(args.includes('--lobium-profile-name=Acme US'));
     assert.ok(args.includes('--lobium-profile-initials=AU'));
-    assert.ok(args.includes('--lobium-profile-word=Acme'));
+    // The whole name now, not just its first word: the icon wraps it over two lines.
+    assert.ok(args.includes('--lobium-profile-word=Acme US'));
     assert.ok(args.includes(`--lobium-profile-tint=${profileMark('Acme US', ctx.profileId).tint}`));
 
     // A profile with no name at all leaves every mark switch off, so the engine keeps the stock

@@ -7,9 +7,15 @@ import {
   resolveGpuMode,
 } from './gpu.js';
 
-test('resolveGpuMode defaults to auto with no env and preserves prior behavior (no flags)', () => {
+test('auto mode permits the software GL fallback so WebGL is never simply absent', () => {
   assert.equal(resolveGpuMode({}), 'auto');
-  assert.deepEqual(buildGpuArgs({ env: {} }), []);
+  // Auto used to emit nothing at all. On a host with no usable GPU that produced a browser whose
+  // canvas.getContext('webgl') returned null - no 3D content, and a louder headless tell than any
+  // renderer string, since real Chrome always has WebGL. The fallback is a permission, not a
+  // preference: a real driver is still used wherever one exists.
+  assert.deepEqual(buildGpuArgs({ env: {} }), ['--enable-unsafe-swiftshader']);
+  // It must not *force* software: no backend is pinned in auto mode.
+  assert.ok(!buildGpuArgs({ env: {} }).some((a) => a.startsWith('--use-angle=')));
 });
 
 test('resolveGpuMode reads truthy/software aliases from LOBSTER_GPU', () => {
@@ -23,12 +29,16 @@ test('resolveGpuMode reads truthy/software aliases from LOBSTER_GPU', () => {
   assert.equal(resolveGpuMode({ LOBSTER_GPU: 'banana' }), 'auto');
 });
 
-test('gpu mode forces ANGLE onto the physical driver (default Vulkan) and never SwiftShader', () => {
+test('gpu mode targets the physical driver and never SELECTS SwiftShader as the backend', () => {
   const args = buildGpuArgs({ mode: 'gpu', env: {} });
   assert.ok(args.includes('--use-gl=angle'));
   assert.ok(args.includes('--use-angle=vulkan'));
   assert.ok(args.includes('--ignore-gpu-blocklist'));
-  assert.ok(!args.some((a) => a.includes('swiftshader')));
+  // The backend must never be swiftshader here - that is what "forces the physical driver" means.
+  assert.ok(!args.includes('--use-angle=swiftshader'));
+  // But the software path stays PERMITTED: if the driver cannot come up, the alternative to a slow
+  // context is no context, which breaks 3D and advertises a headless host.
+  assert.ok(args.includes('--enable-unsafe-swiftshader'));
 });
 
 test('gpu mode honors an explicit ANGLE backend override', () => {

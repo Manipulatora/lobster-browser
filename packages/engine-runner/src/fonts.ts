@@ -405,6 +405,49 @@ export async function availableFontFamilies(
  * Validate the pack and write the exact per-profile family allowlist. Missing packs, files, or requested
  * families fail closed: a configured launch can never silently fall back to host `/etc/fonts`.
  */
+interface FontProvisionRecord {
+  key: string;
+  /** Whether the previous provision hard-linked to the pack rather than copying out of it. */
+  linked: boolean;
+}
+
+/**
+ * Reads the readiness stamp. Anything that is not the current JSON shape - including the bare hex
+ * key written before this file recorded link state - returns null, so the directory is rebuilt once
+ * and stamped in the new form.
+ */
+function parseProvisionRecord(raw: string): FontProvisionRecord | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const { key, linked } = parsed as Record<string, unknown>;
+    if (typeof key !== 'string' || typeof linked !== 'boolean') return null;
+    return { key, linked };
+  } catch {
+    return null;
+  }
+}
+
+/** True only if every provisioned file is still the same inode as the pack file it was linked from. */
+async function stillLinkedToPack(
+  requiredFiles: readonly FontPackFile[],
+  fontsBaseDir: string,
+  destinationFor: (index: number, sha256: string) => string,
+): Promise<boolean> {
+  try {
+    for (const [index, file] of requiredFiles.entries()) {
+      const [source, destination] = await Promise.all([
+        stat(safePackPath(fontsBaseDir, file.path)),
+        stat(destinationFor(index, file.sha256)),
+      ]);
+      if (source.ino !== destination.ino || source.dev !== destination.dev) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function writeFontConfig(
   userDataDir: string,
   os: FontPersona,
@@ -444,14 +487,30 @@ export async function writeFontConfig(
       }),
     )
     .digest('hex');
+  const destinationFor = (index: number, sha256: string): string =>
+    join(fontDir, `${String(index).padStart(4, '0')}-${sha256.slice(0, 12)}`);
   try {
     const [ready, fontDirStat, confStat] = await Promise.all([
       readFile(readyPath, 'utf8'),
       stat(fontDir),
       stat(confPath),
     ]);
-    if (ready.trim() === provisionKey && fontDirStat.isDirectory() && confStat.isFile()) {
-      return confPath;
+    const record = parseProvisionRecord(ready);
+    if (record?.key === provisionKey && fontDirStat.isDirectory() && confStat.isFile()) {
+      // A matching key is NOT on its own proof that the provision is still cheap. The key is derived
+      // from the pack contents, so reinstalling the SAME pack reproduces it exactly - while the
+      // installer has replaced every file in the pack with a fresh inode. The hard links this
+      // directory was built from then point at inodes nothing else references, and each profile is
+      // silently carrying a private ~119 MB copy of the font pack that no later launch would ever
+      // reclaim, because the key still matches.
+      //
+      // So when the last provision managed to link, re-verify that it is still linked: same inode as
+      // the pack file it came from. A provision that had to fall back to copying is exempt - on a
+      // filesystem without usable hard links the inodes never match and re-checking would rebuild
+      // the directory on every single launch.
+      if (!record.linked || (await stillLinkedToPack(requiredFiles, fontsBaseDir, destinationFor))) {
+        return confPath;
+      }
     }
   } catch {
     // First launch or an incomplete prior provision: validate and rebuild below.
@@ -480,23 +539,24 @@ export async function writeFontConfig(
   // giving it a directory containing only selected files is unambiguous and independently probeable.
   await rm(fontDir, { recursive: true, force: true });
   await mkdir(fontDir, { recursive: true, mode: 0o700 });
+  let linked = true;
   for (const [index, file] of requiredFiles.entries()) {
     const source = safePackPath(fontsBaseDir, file.path);
-    const destination = join(
-      fontDir,
-      `${String(index).padStart(4, '0')}-${file.sha256.slice(0, 12)}`,
-    );
+    const destination = destinationFor(index, file.sha256);
     try {
       await link(source, destination);
     } catch {
       await copyFile(source, destination);
+      linked = false;
     }
   }
   await mkdir(cacheDir, { recursive: true });
   await writeFile(confPath, buildFontConfig(os, fontDir, cacheDir, physicalFamilies, claimed), {
     mode: 0o600,
   });
-  await writeFile(readyPath, `${provisionKey}\n`, { mode: 0o600 });
+  await writeFile(readyPath, `${JSON.stringify({ key: provisionKey, linked })}\n`, {
+    mode: 0o600,
+  });
   return confPath;
 }
 

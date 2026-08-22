@@ -121,12 +121,19 @@ test('screen availTop is coherent with the OS chrome (macOS menu bar vs Windows/
       25,
       `macOS deficit must be the menu bar seed=${seed}`,
     );
-    // Windows/Linux: bottom taskbar => availTop=0, deficit at the bottom.
-    for (const os of ['windows', 'linux'] as const) {
+    // Windows/Linux: bottom taskbar => availTop=0, deficit at the bottom. The height differs by OS:
+    // Windows 11's taskbar is 48 CSS px (and this persona announces Windows 11 through
+    // Sec-CH-UA-Platform-Version 15.0.0), where the common Linux panel is 40. It is not divided by
+    // dpr - Windows scales the taskbar with DPI and Chromium reports the work area already in DIP.
+    for (const [os, taskbar] of [['windows', 48], ['linux', 40]] as const) {
       const s = deriveFingerprint(seed, { os, engine: 'lobium' }).screen;
       assert.equal(s.availTop, 0, `${os} availTop seed=${seed}`);
       assert.equal(s.availLeft, 0, `${os} availLeft seed=${seed}`);
-      assert.equal(s.height - s.availHeight, 40, `${os} deficit must be the taskbar seed=${seed}`);
+      assert.equal(
+        s.height - s.availHeight,
+        taskbar,
+        `${os} deficit must be the taskbar seed=${seed}`,
+      );
     }
   }
 });
@@ -310,7 +317,13 @@ test('two seeds describe two different MACHINES, not one machine with two noise 
     const screens = new Set<string>();
     const ratios = new Set<number>();
     for (let i = 0; i < 200; i++) {
-      const persona = deriveDevicePersona(generateSeed(), { os });
+      // FIXED seeds, not generateSeed(). Measured over 8 runs this metric lands anywhere in
+      // 153..168 for macOS against a floor of 150, so with random seeds the assertion fails
+      // occasionally for no reason anyone can reproduce - which is worse than no assertion, because
+      // the next person to see it red assumes their change caused it. Fixed seeds keep the property
+      // being tested (one seed, one machine; different seeds, different machines) and make the
+      // number reproducible.
+      const persona = deriveDevicePersona(`diversity-${os}-${i}`, { os });
       devices.add(
         [
           persona.webgl.renderer,
@@ -443,7 +456,20 @@ test('every claimed font is a name a page could actually match', () => {
   const unqueryable = /\d+\.\d|\bVersion\b|\d+\.d\d|\(\d|:\d/;
   for (const os of ['windows', 'macos', 'linux'] as const) {
     const fonts = deriveFingerprint(`fonts-${os}`, { os, engine: 'lobium' }).fonts ?? [];
-    assert.ok(fonts.length >= 300, `${os} advertises only ${fonts.length} fonts`);
+    // Bounds per OS, from what the SOURCE catalogs actually contain. A single ">= 300" floor was a
+    // fabricated "depth requirement": Windows ships 141 font FAMILIES (the old 506 was the face
+    // list, and 336 of those were style faces like "Arial Bold" that no font-family lookup
+    // resolves), so the floor could only ever be met by claiming fonts that do not exist.
+    const BOUNDS: Record<string, readonly [number, number]> = {
+      windows: [60, 141], // 63 base + language packs, capped by the MS Learn family list
+      macos: [200, 369], // Apple's installed-or-downloadable families, document-support excluded
+      linux: [100, 314], // the verified Ubuntu package families
+    };
+    const [lo, hi] = BOUNDS[os]!;
+    assert.ok(
+      fonts.length >= lo && fonts.length <= hi,
+      `${os} advertises ${fonts.length} fonts, outside the sourced range ${lo}..${hi}`,
+    );
     const bad = fonts.filter((name) => unqueryable.test(name));
     assert.deepEqual(bad, [], `${os} claims font names no machine exposes`);
     assert.equal(fonts.includes('Accessories'), false, `${os} claims a catalog section as a font`);

@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Fingerprint, FingerprintOverrides, GeoInfo } from '@lobster/shared-types';
 import {
-  applyGeoToFingerprint,
   DESKTOP_DEVICE_MEMORY_VALUES,
   DEVICE_MEMORY_VALUES,
+  applyGeoToFingerprint,
+  languagesToAcceptLanguage,
   normalizeColorDepth,
   normalizeDeviceMemory,
   resolveFingerprintPersonaModes,
@@ -504,4 +505,42 @@ test('normalizeColorDepth keeps 24/30 and snaps oddities to 24', () => {
   assert.equal(normalizeColorDepth(30), 30);
   assert.equal(normalizeColorDepth(32), 24);
   assert.equal(normalizeColorDepth(16), 24);
+});
+
+test('navigator.languages matches Chromium own per-locale default, not a two-entry stub', () => {
+  // navigator.languages IS the accept-languages preference, and Chromium seeds that preference from
+  // IDS_ACCEPT_LANGUAGES in components/strings/components_locale_settings_<locale>.xtb. The
+  // derivation used to return at most two entries for every locale on earth; of the 52 locales
+  // Chromium ships a default for, the counts run 2-6 and FOUR is the commonest. Two entries for
+  // de/fr/ru is distinguishable from a default install of the browser the profile claims to be.
+  const base = deriveFingerprint('lang-fixture', { os: 'windows', engine: 'lobium' });
+  const CHROMIUM_DEFAULTS: ReadonlyArray<readonly [string, string, readonly string[]]> = [
+    ['DE', 'Europe/Berlin', ['de-DE', 'de', 'en-US', 'en']],
+    ['FR', 'Europe/Paris', ['fr-FR', 'fr', 'en-US', 'en']],
+    ['RU', 'Europe/Moscow', ['ru-RU', 'ru', 'en-US', 'en']],
+    ['BR', 'America/Sao_Paulo', ['pt-BR', 'pt', 'en-US', 'en']],
+    ['NL', 'Europe/Amsterdam', ['nl-NL', 'nl', 'en-US', 'en']],
+    ['GB', 'Europe/London', ['en-GB', 'en-US', 'en']],
+    // Region-free heads: Chromium's own defaults carry no region for these, so neither may we.
+    ['JP', 'Asia/Tokyo', ['ja', 'en-US', 'en']],
+    ['LT', 'Europe/Vilnius', ['lt', 'en-US', 'en', 'ru', 'pl']],
+  ];
+  for (const [countryCode, timezone, expected] of CHROMIUM_DEFAULTS) {
+    const fp = applyGeoToFingerprint(base, { ip: '203.0.113.7', countryCode, timezone });
+    assert.deepEqual(
+      fp.navigator.languages,
+      [...expected],
+      `${countryCode}: navigator.languages must equal Chromium's default for this locale`,
+    );
+    assert.equal(
+      fp.locale.locale,
+      expected[0],
+      `${countryCode}: navigator.language is the head of that list`,
+    );
+    assert.equal(
+      fp.locale.acceptLanguage,
+      languagesToAcceptLanguage(expected),
+      `${countryCode}: the Accept-Language header must agree with navigator.languages`,
+    );
+  }
 });

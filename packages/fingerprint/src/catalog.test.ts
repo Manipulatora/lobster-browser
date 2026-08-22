@@ -6,6 +6,9 @@ import {
   MACOS_ARM_RENDERER_PRESETS,
   MACOS_FONT_NAMES,
   MACOS_INTEL_RENDERER_PRESETS,
+  WINDOWS_10_FONT_NAMES,
+  WINDOWS_11_FONT_NAMES,
+  WINDOWS_BASE_FONT_NAMES,
   WINDOWS_FONT_NAMES,
   WINDOWS_RENDERER_PRESETS,
 } from './catalog.generated.js';
@@ -21,11 +24,50 @@ function labels(items: ReadonlyArray<{ label: string }>): string[] {
   return items.map((item) => item.label);
 }
 
-test('source-generated font catalogs meet the product depth requirement', () => {
-  assert.ok(WINDOWS_FONT_NAMES.length >= 300, `Windows fonts: ${WINDOWS_FONT_NAMES.length}`);
-  assert.ok(MACOS_FONT_NAMES.length >= 1000, `macOS fonts: ${MACOS_FONT_NAMES.length}`);
+test('the Windows font catalog is FAMILIES, the thing a page can actually match', () => {
+  // This used to demand >= 300 Windows names, a floor only the old face-name extraction could clear
+  // - so the assertion actively protected the defect. The MS Learn tables are
+  // `Family | Font Name | File Name | Version` and the generator read column 1, collecting every
+  // FACE: 506 rows, 336 ending in a style token. "Arial Bold" is not a family and
+  // `font-family: "Arial Bold"` does not resolve on Windows; bold is a weight of Arial. Column 0 is
+  // the family, and it is blank on the continuation rows that list a family's other faces.
+  assert.equal(WINDOWS_11_FONT_NAMES.length, 141, 'Windows 11 ships 141 font families');
+  assert.equal(WINDOWS_10_FONT_NAMES.length, 137, 'Windows 10 ships 137 font families');
   assert.ok(WINDOWS_FONT_NAMES.includes('Segoe UI'));
   assert.ok(MACOS_FONT_NAMES.some((font) => /Helvetica/i.test(font)));
+
+  // No entry may be a style face. This is the regression that mattered.
+  const STYLE =
+    /\s(Bold|Italic|Oblique|Light|Semilight|Semibold|Demibold|Black|Heavy|Thin|Regular)(\s(Bold|Italic|Oblique))*$/;
+  const faces = WINDOWS_FONT_NAMES.filter((f) => STYLE.test(f));
+  // Microsoft genuinely names a few families with a weight - "Aharoni Bold" and
+  // "BIZ UDMincho Medium" ship in one weight only - so the bar is "almost none", not "none".
+  assert.ok(faces.length <= 6, `style faces leaked into the family list: ${faces.join(', ')}`);
+
+  // Windows 11 really does add four families Windows 10 never had; merging the lists handed a
+  // Windows 10 persona fonts from a later release.
+  const onlyIn11 = WINDOWS_11_FONT_NAMES.filter((f) => !WINDOWS_10_FONT_NAMES.includes(f));
+  assert.deepEqual(onlyIn11.slice().sort(), [
+    'Cascadia Code',
+    'Cascadia Mono',
+    'Segoe Fluent Icons',
+    'Segoe UI Variable',
+  ]);
+
+  // Only the first table is installed everywhere; every later table is a language Feature-On-Demand
+  // pack that Windows adds with the language, not with the OS.
+  assert.equal(WINDOWS_BASE_FONT_NAMES.length, 63, 'the always-present Windows base set');
+  assert.ok(WINDOWS_BASE_FONT_NAMES.every((f) => WINDOWS_11_FONT_NAMES.includes(f)));
+  assert.ok(WINDOWS_BASE_FONT_NAMES.includes('Segoe UI'));
+  // Nirmala UI genuinely ships by default, so it is NOT a good negative. These are: Angsana New
+  // arrives with the Thai pack, Arabic Typesetting with the Arabic pack.
+  for (const packFont of ['Angsana New', 'Arabic Typesetting', 'DengXian']) {
+    assert.ok(WINDOWS_11_FONT_NAMES.includes(packFont), `${packFont} should be in the full list`);
+    assert.ok(
+      !WINDOWS_BASE_FONT_NAMES.includes(packFont),
+      `${packFont} arrives with a language pack, not with the OS`,
+    );
+  }
 });
 
 test('core desktop pools consume the large OS font catalogs', () => {
@@ -139,4 +181,119 @@ test('the Mac catalog contains only GPUs Apple actually shipped', () => {
       `not a GPU any Mac shipped: ${preset.label}`,
     );
   }
+});
+
+test('Windows ANGLE strings carry an 8-digit zero-padded device id, as gl::FmtHex emits', () => {
+  // ANGLE builds the D3D11 renderer string with gl::FmtHex(DXGI_ADAPTER_DESC::DeviceId). FmtHexAutoSized
+  // sizes the field as sizeof(T) * 2, and DeviceId is a UINT, so the field is always EIGHT uppercase
+  // zero-padded hex digits. A four-digit "(0x2503)" is a shape no Chrome on Windows ever reports, and
+  // it was what every one of these presets emitted. The real capture in host-calibration for this very
+  // machine shows the same eight-wide field: "(0x0000C0DE)".
+  assert.ok(WINDOWS_RENDERER_PRESETS.length > 0);
+  for (const preset of WINDOWS_RENDERER_PRESETS) {
+    const found = preset.webgl.unmaskedRenderer.match(/\((0x[0-9A-Fa-f]+)\)/);
+    const hex = found?.[1];
+    assert.ok(hex, `no device id in ${preset.webgl.unmaskedRenderer}`);
+    assert.match(hex, /^0x[0-9A-F]{8}$/, `${preset.id}: ${hex} is not an 8-digit uppercase field`);
+    // The raw PCI id stays four wide - the padding belongs to the rendered string, not the provenance.
+    assert.equal(
+      hex.slice(2).replace(/^0+/, '').toUpperCase(),
+      preset.deviceId.replace(/^0x/i, '').replace(/^0+/, '').toUpperCase(),
+      `${preset.id}: padded id must be the same device as deviceId`,
+    );
+  }
+});
+
+test('per-backend WebGL limits match what ANGLE computes for that backend', () => {
+  // These are not style preferences; each is a number ANGLE derives in code, so a persona that
+  // reports anything else is caught by one getParameter call. Sources, all in
+  // third_party/angle/src/libANGLE/renderer:
+  //
+  //   d3d11/renderer11_utils.cpp  maxViewportWidth = D3D11_VIEWPORT_BOUNDS_MAX (32767), NOT the
+  //                               texture size; maxVertexUniformVectors =
+  //                               D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT (4096).
+  //   metal/DisplayMtl.mm         maxViewportWidth = max2DTextureSize (16384);
+  //                               maxVaryingVectors = 31 - 1 ("exclude [[position]]" on macOS).
+  //   gl/renderergl_utils.cpp     maxVertexUniformVectors = std::min(1024, driver value) - a hard
+  //                               clamp, so >1024 is unreachable on Linux however capable the GPU.
+  const expectations = [
+    // vertexUniforms is vendor-dependent on D3D11, so it is asserted per preset below rather than here.
+    { presets: PRODUCT_WINDOWS_RENDERERS, backend: 'D3D11', viewport: 32767 },
+    { presets: PRODUCT_MAC_ARM_RENDERERS, backend: 'Metal', viewport: 16384, varying: 30 },
+    { presets: PRODUCT_MAC_INTEL_RENDERERS, backend: 'Metal', viewport: 16384, varying: 30 },
+    { presets: PRODUCT_LINUX_RENDERERS, backend: 'GL', viewport: 16384, vertexUniforms: 1024 },
+  ];
+  for (const e of expectations) {
+    assert.ok(e.presets.length > 0, `${e.backend} presets must not be empty`);
+    for (const preset of e.presets) {
+      const caps = preset.webgl.caps;
+      assert.ok(caps, `${preset.id} has no caps`);
+      assert.deepEqual(
+        caps.maxViewportDims,
+        [e.viewport, e.viewport],
+        `${preset.id} (${e.backend}): MAX_VIEWPORT_DIMS`,
+      );
+      if (e.vertexUniforms !== undefined) {
+        assert.equal(
+          caps.maxVertexUniformVectors,
+          e.vertexUniforms,
+          `${preset.id} (${e.backend}): MAX_VERTEX_UNIFORM_VECTORS`,
+        );
+      }
+      if (e.varying !== undefined) {
+        assert.equal(
+          caps.maxVaryingVectors,
+          e.varying,
+          `${preset.id} (${e.backend}): MAX_VARYING_VECTORS`,
+        );
+      }
+    }
+  }
+
+  // D3D11 splits by vendor: ANGLE enables skipVSConstantRegisterZero on NVIDIA and only NVIDIA,
+  // which subtracts one from D3D11_REQ_CONSTANT_BUFFER_ELEMENT_COUNT. A GeForce persona reporting
+  // 4096 contradicts its own renderer string.
+  for (const preset of PRODUCT_WINDOWS_RENDERERS) {
+    const expected = preset.vendorFamily === 'NVIDIA' ? 4095 : 4096;
+    assert.equal(
+      preset.webgl.caps?.maxVertexUniformVectors,
+      expected,
+      `${preset.id} (${preset.vendorFamily}): MAX_VERTEX_UNIFORM_VECTORS`,
+    );
+  }
+});
+
+test('every Apple Silicon persona pairs a chip with a panel Apple actually sold together', () => {
+  // The defect class: a coherent-looking Mac that Apple never made. A base M1 with a 14" MacBook Pro
+  // panel is two individually-plausible values whose COMBINATION is impossible - and a page reads
+  // both at once, from screen.* and the WebGL/WebGPU renderer. The 14" and 16" Pro chassis only ever
+  // took Pro/Max chips; the base chips shipped in the Air and the 13" Pro (and, from M3, the 14").
+  const RETINA_DEFAULTS: Record<string, ReadonlyArray<readonly [number, number]>> = {
+    // chip -> the "looks like" CSS sizes Apple ships it in
+    M1: [[1440, 900], [1280, 800], [2048, 1152]], // Air 13", Pro 13", iMac 24"
+    M2: [[1470, 956], [1280, 800]], //               Air 13.6", Pro 13"
+    M3: [[1470, 956], [1710, 1107], [1512, 982], [2048, 1152]], // Air 13.6"/15.3", Pro 14", iMac 24"
+    'M1 Pro': [[1512, 982], [1728, 1117]],
+    'M1 Max': [[1512, 982], [1728, 1117]],
+    'M2 Pro': [[1512, 982], [1728, 1117]],
+    'M2 Max': [[1512, 982], [1728, 1117]],
+    'M3 Pro': [[1512, 982], [1728, 1117]],
+    'M3 Max': [[1512, 982], [1728, 1117]],
+  };
+  let checked = 0;
+  for (const device of DEVICE_TEMPLATES.macos.devices) {
+    const chip = /Apple\s+(M\d(?:\s+(?:Pro|Max|Ultra))?)/.exec(device.webgl.renderer)?.[1];
+    if (!chip) continue; // Intel Macs are covered by their own rows
+    const allowed = RETINA_DEFAULTS[chip];
+    if (!allowed) continue; // a chip this test does not yet model rather than a silent pass
+    checked += 1;
+    const got: readonly [number, number] = [device.screen.width, device.screen.height];
+    assert.ok(
+      allowed.some(([w, h]) => w === got[0] && h === got[1]),
+      `${device.id}: Apple never sold ${chip} with a ${got[0]}x${got[1]} panel ` +
+        `(valid: ${allowed.map(([w, h]) => `${w}x${h}`).join(', ')})`,
+    );
+    assert.equal(device.screen.dpr, 2, `${device.id}: every Retina Mac reports devicePixelRatio 2`);
+  }
+  assert.ok(checked >= 3, `expected several Apple Silicon personas, checked ${checked}`);
 });

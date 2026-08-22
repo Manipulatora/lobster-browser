@@ -31,13 +31,29 @@ function buildBrands(major: string): NavigatorFingerprint['uaBrands'] {
   return buildChromeBrands(major);
 }
 
-function buildAndroidUserAgent(
-  androidVersion: string,
-  model: string,
-  reducedVersion: string,
-  mobile: boolean,
-): string {
-  return `Mozilla/5.0 (Linux; Android ${androidVersion}; ${model}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${reducedVersion} ${mobile ? 'Mobile ' : ''}Safari/537.36`;
+/**
+ * The Android platform token, FROZEN - exactly what every real Chrome on Android sends.
+ *
+ * Chrome's User-Agent reduction replaced the OS version and the device model with constants years
+ * ago. `GetUnifiedPlatform()` returns the literal "Linux; Android 10; K" for every non-desktop,
+ * non-XR Android device, whatever it actually is, and Chromium's own tests pin that string
+ * (user_agent_utils_unittest.cc asserts it for both the mobile and non-mobile switch states).
+ *
+ * Emitting the REAL version and model here - "Linux; Android 14; Pixel 8" - was therefore a
+ * one-regex unmask on every request the persona ever made: no Chrome 152 anywhere emits a UA of that
+ * shape. The device identity is not lost, it simply travels where Chrome puts it: the model in
+ * Sec-CH-UA-Model and the version in Sec-CH-UA-Platform-Version, both of which this module already
+ * sets and the coherence gate below already checks.
+ *
+ * Kept byte-identical to the modal's preview (apps/desktop/src/features/profiles/fingerprintCatalog.ts
+ * `androidUserAgent`), which was already correct - so the UI and the engine now agree.
+ */
+const ANDROID_FROZEN_PLATFORM = 'Linux; Android 10; K';
+
+function buildAndroidUserAgent(reducedVersion: string, mobile: boolean): string {
+  // The `Mobile` token is appended to the PRODUCT, not the platform: Chromium adds it to
+  // `product` in GetUserAgentInternal() before building the unified-platform string.
+  return `Mozilla/5.0 (${ANDROID_FROZEN_PLATFORM}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${reducedVersion} ${mobile ? 'Mobile ' : ''}Safari/537.36`;
 }
 
 function androidMetadata(
@@ -62,6 +78,34 @@ function androidMetadata(
  * `deriveFingerprint`: desktop profiles remain Windows/macOS/Linux-only, while Android can be tested
  * and persisted for the future APK/device runner without becoming a fake desktop launch target.
  */
+/**
+ * Retail sub-brand -> the manufacturer whose hardware templates actually apply.
+ *
+ * The catalog's `brand` is the Google Play supported-devices "Retail Branding" column verbatim, and
+ * Play lists Redmi and POCO as brands distinct from Xiaomi. The hardware templates are keyed by
+ * manufacturer, so a Redmi or POCO selection matched nothing and fell through to `rng.pick(...)` -
+ * handing the persona some other vendor's GPU and panel. A page reads the model from
+ * Sec-CH-UA-Model and the GPU from WEBGL_debug_renderer_info and cross-checks them, which is exactly
+ * the pairing this module exists to keep coherent.
+ *
+ * Android's own ro.product.manufacturer for these devices is Xiaomi, not the retail brand.
+ */
+const MANUFACTURER_OF_BRAND: Readonly<Record<string, string>> = {
+  redmi: 'xiaomi',
+  poco: 'xiaomi',
+};
+
+/** Display-cased manufacturer for a retail brand ("Redmi" -> "Xiaomi"); unchanged when not a sub-brand. */
+function manufacturerLabel(brand: string): string {
+  const mapped = MANUFACTURER_OF_BRAND[brand.toLowerCase()];
+  return mapped ? mapped.charAt(0).toUpperCase() + mapped.slice(1) : brand;
+}
+
+function manufacturerOfBrand(brand: string): string {
+  const key = brand.toLowerCase();
+  return MANUFACTURER_OF_BRAND[key] ?? key;
+}
+
 export function deriveAndroidFingerprint(
   seed: FingerprintSeed,
   opts: DeriveAndroidOptions,
@@ -84,7 +128,9 @@ export function deriveAndroidFingerprint(
     ? ANDROID_TEMPLATE.devices.find((d) => d.model === selected.model)
     : undefined;
   const brandTemplate = selected
-    ? ANDROID_TEMPLATE.devices.find((d) => d.brand.toLowerCase() === selected.brand.toLowerCase())
+    ? ANDROID_TEMPLATE.devices.find(
+        (d) => d.brand.toLowerCase() === manufacturerOfBrand(selected.brand),
+      )
     : undefined;
   const device = exactTemplate ?? brandTemplate ?? rng.pick(ANDROID_TEMPLATE.devices);
   const androidVersion =
@@ -108,7 +154,10 @@ export function deriveAndroidFingerprint(
       ? {
           ...androidMetadata(device),
           brand: selected.brand,
-          manufacturer: selected.brand,
+          // Build.MANUFACTURER, not the retail brand. Android reports ro.product.manufacturer as
+          // "Xiaomi" on a Redmi or a POCO - the sub-brand lives in Build.BRAND, which is the line
+          // above. Reporting "POCO" as the manufacturer is a value no device sets.
+          manufacturer: manufacturerLabel(selected.brand),
           model,
           device: selected.device,
           androidVersion,
@@ -117,7 +166,7 @@ export function deriveAndroidFingerprint(
         }
       : { ...androidMetadata(device), androidVersion, formFactor: mobile ? 'phone' : 'tablet' },
     navigator: {
-      userAgent: buildAndroidUserAgent(androidVersion, model, ver.reduced, mobile),
+      userAgent: buildAndroidUserAgent(ver.reduced, mobile),
       platform: ANDROID_TEMPLATE.platform,
       languages,
       hardwareConcurrency: device.hardwareConcurrency,
@@ -184,11 +233,20 @@ export function validateAndroidFingerprintCoherence(fp: AndroidFingerprint): str
   if (fp.android.cpuAbi !== 'arm64-v8a') {
     issues.push(`Android CPU ABI must be arm64-v8a, got "${fp.android.cpuAbi}"`);
   }
-  if (!ua.includes(`Android ${fp.android.androidVersion}`)) {
-    issues.push(`User-Agent does not include Android version ${fp.android.androidVersion}: ${ua}`);
+  // These two used to assert the OPPOSITE - that the UA contains the real Android version and the
+  // real model. That made the gate enforce a User-Agent no Chrome has emitted since the UA reduction
+  // shipped, and it would have rejected the correct one. The persona's real version and model are
+  // still checked, further down, on the two hints that actually carry them.
+  if (!ua.includes(ANDROID_FROZEN_PLATFORM)) {
+    issues.push(`Android User-Agent must carry the frozen platform "${ANDROID_FROZEN_PLATFORM}": ${ua}`);
   }
-  if (!ua.includes(fp.android.model)) {
-    issues.push(`User-Agent does not include Android model "${fp.android.model}": ${ua}`);
+  if (ua.includes(fp.android.model)) {
+    issues.push(`User-Agent leaks the device model "${fp.android.model}" - it belongs in Sec-CH-UA-Model: ${ua}`);
+  }
+  if (fp.android.androidVersion !== '10' && ua.includes(`Android ${fp.android.androidVersion}`)) {
+    issues.push(
+      `User-Agent leaks Android ${fp.android.androidVersion} - it belongs in Sec-CH-UA-Platform-Version: ${ua}`,
+    );
   }
   if (fp.android.formFactor === 'phone' && !/Mobile Safari\/537\.36/.test(ua)) {
     issues.push(`Android phone UA must include Mobile Safari/537.36: ${ua}`);

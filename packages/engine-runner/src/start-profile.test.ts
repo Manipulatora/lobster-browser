@@ -228,9 +228,14 @@ test('startProfile rejects host-leaking default WebRTC policy on a proxied profi
 });
 
 test('renderer policies fail closed without complete evidence', async () => {
+  // An EXPLICIT host policy is an assertion of measured evidence, so a missing calibration is still
+  // a refusal. (The DEFAULTED policy no longer refuses — see the test below.)
   const hostRunner = new RecordingRunner();
   await assert.rejects(
-    startProfile(hostRunner, withoutHostCalibration()),
+    startProfile(hostRunner, {
+      ...withoutHostCalibration(),
+      fingerprintOverrides: { renderer: { mode: 'host' } },
+    }),
     /renderer policy "host" requires a complete compatible host calibration/,
   );
 
@@ -243,6 +248,26 @@ test('renderer policies fail closed without complete evidence', async () => {
       },
     }),
     /is not present in the sourced GPU catalog/,
+  );
+});
+
+test('a DEFAULTED host policy falls back to the catalog instead of refusing', async () => {
+  // The product's core case: a Windows persona on a Linux machine, where a host capture can never
+  // match by construction. Refusing here made every seed-derived cross-OS profile unlaunchable,
+  // which is what users hit as "I cannot open any created profiles".
+  const runner = new RecordingRunner();
+  const params = withoutHostCalibration();
+  assert.equal(
+    params.fingerprintOverrides?.renderer,
+    undefined,
+    'this test is only meaningful while the renderer policy is defaulted, not chosen',
+  );
+  await startProfile(runner, params);
+  const launched = runner.launched.at(-1);
+  assert.ok(launched, 'the launch must proceed');
+  assert.ok(
+    launched.fingerprint.webgl.renderer.length > 0,
+    'it must carry a real catalog renderer for the persona OS, not an empty surface',
   );
 });
 
@@ -402,11 +427,18 @@ test('startProfile refuses host renderer mode when persisted calibration is inco
   process.env.LOBSTER_HOST_CALIBRATION_FILE = file;
   try {
     const runner = new RecordingRunner();
-    await assert.rejects(
-      startProfile(runner, withoutHostCalibration()),
-      /renderer policy "host" requires a complete compatible host calibration/,
+    // The invariant is that an incompatible host profile is never USED — a Linux capture must not
+    // dress a Windows persona. It used to be expressed as a refusal; with a defaulted policy the
+    // launch now proceeds on the catalog instead, so assert the property rather than the throw.
+    await startProfile(runner, withoutHostCalibration());
+    const launched = runner.launched.at(-1);
+    assert.ok(launched, 'a defaulted policy launches rather than refusing');
+    assert.notEqual(
+      launched.fingerprint.webgl.renderer,
+      host.webgl.renderer,
+      'the incompatible Linux host renderer must never reach a Windows persona',
     );
-    assert.equal(runner.launched.length, 0);
+    assert.equal(launched.fingerprint.os, 'windows');
   } finally {
     if (prev === undefined) delete process.env.LOBSTER_HOST_CALIBRATION_FILE;
     else process.env.LOBSTER_HOST_CALIBRATION_FILE = prev;
@@ -468,27 +500,27 @@ test('startProfile fail-closes when the proxy TCP endpoint is unreachable', asyn
   assert.equal(runner.launched.length, 0, 'unreachable proxy must never reach the engine');
 });
 
-test('startProfile REFUSES a Based on IP persona that has no proxy to be based on', async () => {
+test('a Based on IP persona with no proxy resolves against the DIRECT exit IP', async () => {
+  // Replaces a refusal. The editor defaults language/timezone/geolocation to Based on IP, so the old
+  // gate made a profile created with default settings unlaunchable until a proxy was attached — the
+  // single most common failure users hit. A direct profile does have an exit IP: this machine's.
+  //
+  // The lookup is networked, so this asserts the LAUNCH is no longer blocked rather than asserting a
+  // particular country; whether geo resolves is environment-dependent and best-effort by design.
   const runner = new RecordingRunner();
-  await assert.rejects(
-    startProfile(runner, {
-      ...base,
-      fingerprintOverrides: {
-        languageMode: 'based_ip',
-        timezoneMode: 'based_ip',
-        geolocationMode: 'manual',
-      },
-    }),
-    /languages, timezone are set to Based on IP, but the profile has no proxy/,
-  );
-  assert.equal(runner.launched.length, 0);
+  await startProfile(runner, {
+    ...base,
+    fingerprintOverrides: {
+      languageMode: 'based_ip',
+      timezoneMode: 'based_ip',
+      geolocationMode: 'manual',
+    },
+  });
+  assert.equal(runner.launched.length, 1, 'no proxy must no longer prevent a launch');
 
-  // Only the knobs actually bound to the exit IP are named, so the message says what to change.
   const one = new RecordingRunner();
-  await assert.rejects(
-    startProfile(one, { ...base, fingerprintOverrides: { geolocationMode: 'based_ip' } }),
-    /geolocation is set to Based on IP/,
-  );
+  await startProfile(one, { ...base, fingerprintOverrides: { geolocationMode: 'based_ip' } });
+  assert.equal(one.launched.length, 1);
 });
 
 test('startProfile still launches a fully manual persona without a proxy', async () => {

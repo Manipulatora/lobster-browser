@@ -74,9 +74,13 @@ console.log(`staged ${staged} pristine file(s) from HEAD`);
 const failures = [];
 for (const { name, path: p } of resolved) {
   try {
-    execFileSync('patch', ['-p1', '-s', '--batch', '--no-backup-if-mismatch', '-d', scratch, '-i', p], {
-      encoding: 'utf8',
-    });
+    execFileSync(
+      'patch',
+      ['-p1', '-s', '--batch', '--no-backup-if-mismatch', '-d', scratch, '-i', p],
+      {
+        encoding: 'utf8',
+      },
+    );
   } catch (err) {
     failures.push({ name, output: `${err.stdout ?? ''}${err.stderr ?? ''}`.trim() });
   }

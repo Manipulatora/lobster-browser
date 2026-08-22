@@ -55,22 +55,28 @@ test('a PC GPU gets the desktop block-compression formats and no mobile ones', (
   }
 });
 
-test('Apple Silicon flips the compression family, because its GPU is mobile-derived', () => {
-  // Getting this backwards is a hard contradiction: an M-series Mac exposing S3TC/BPTC, or lacking
-  // ASTC/ETC, is a combination no real machine produces.
+test('Apple Silicon ADDS the mobile compression family without losing the desktop one', () => {
+  // This used to assert the opposite - that an M-series Mac trades S3TC/BPTC for ASTC/ETC. It does
+  // not. ANGLE's Metal format table guards BC1..BC7 with `#if TARGET_OS_OSX || TARGET_OS_MACCATALYST`
+  // (mtl_format_table_autogen.mm), which every Mac satisfies whatever the architecture, so an
+  // M-series Mac exposes BOTH families. Stripping the desktop half gave Apple Silicon personas a
+  // smaller extension set than any Mac reports.
   const list = new Set(webgl1ExtensionsFor('macos', { appleSilicon: true }));
   for (const n of ['WEBGL_compressed_texture_astc', 'WEBGL_compressed_texture_etc']) {
     assert.ok(list.has(n), `Apple Silicon should expose ${n}`);
   }
   for (const n of ['WEBGL_compressed_texture_s3tc', 'EXT_texture_compression_bptc']) {
-    assert.ok(!list.has(n), `Apple Silicon must not expose ${n}`);
+    assert.ok(list.has(n), `Apple Silicon exposes ${n} too - the BC formats are OSX-wide`);
   }
   assert.ok(!list.has('WEBGL_compressed_texture_pvrtc'), 'PVRTC is PowerVR-only, never a Mac');
 });
 
-test('macOS omits the timer query, which the Metal backend does not implement', () => {
-  assert.ok(!webgl1ExtensionsFor('macos').includes('EXT_disjoint_timer_query'));
-  assert.ok(!webgl2ExtensionsFor('macos').includes('EXT_disjoint_timer_query_webgl2'));
+test('macOS exposes the timer query, because the Metal backend implements it', () => {
+  // DisplayMtl::initializeExtensions() sets `mNativeExtensions.disjointTimerQueryEXT = true`
+  // unconditionally, and QueryMtl.mm implements TimeElapsed end to end. Withholding it made every
+  // macOS persona advertise an extension set no Mac reports.
+  assert.ok(webgl1ExtensionsFor('macos').includes('EXT_disjoint_timer_query'));
+  assert.ok(webgl2ExtensionsFor('macos').includes('EXT_disjoint_timer_query_webgl2'));
   assert.ok(webgl1ExtensionsFor('windows').includes('EXT_disjoint_timer_query'));
 });
 
