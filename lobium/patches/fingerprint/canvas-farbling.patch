@@ -29,6 +29,7 @@ The seed is chosen by context type: seeds.canvas for a 2D context, seeds.webgl f
 fingerprint/webgl-surfaces.patch for why the WebGL readback must stay Y-flip-coherent).
 
 diff --git a/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h b/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
+index f90e7492361e3..7f5a969d09517 100644
 --- a/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
 +++ b/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
 @@ -125,6 +125,18 @@ class CORE_EXPORT CanvasRenderingContext
@@ -51,6 +52,7 @@ diff --git a/third_party/blink/renderer/core/html/canvas/canvas_rendering_contex
      return canvas_rendering_type_ == CanvasRenderingAPI::kBitmaprenderer;
    }
 diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+index d1193b68f5051..0c068e0a67d5b 100644
 --- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 +++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 @@ -45,6 +45,8 @@
@@ -81,7 +83,7 @@ diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc 
  #include "ui/accessibility/accessibility_features.h"
  #include "ui/base/resource/resource_scale_factor.h"
  #include "ui/gfx/geometry/rect_conversions.h"
-@@ -1243,6 +1250,59 @@ const AtomicString HTMLCanvasElement::ImageSourceURL() const {
+@@ -1243,6 +1250,71 @@ const AtomicString HTMLCanvasElement::ImageSourceURL() const {
        ImageEncoderUtils::kDefaultRequestedMimeType, 0, kFrontBuffer));
  }
  
@@ -99,8 +101,20 @@ diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc 
 +    return image;
 +  }
 +  const gfx::Size sz = image->Size();
++  // Read back in the SOURCE canvas's colour space, not sRGB. Upstream carries the paint image's own
++  // colorType and colour space into the encoded pixmap (platform/graphics/image_data_buffer.cc), so
++  // forcing sRGB here re-encoded a display-p3 or rec2020 canvas as sRGB - every pixel shifted, on a
++  // path getImageData does not take. That makes toDataURL and getImageData disagree about the same
++  // canvas for a reason farbling cannot explain.
++  const SkImageInfo src_info = image->PaintImageForCurrentFrame().GetSkImageInfo();
++  // The same guard getImageData already applies: an F16/F32 canvas must not be pushed through the
++  // RGBA8888 kernel, and must not be silently truncated to 8 bits either. Leave it untouched.
++  if (src_info.colorType() != kRGBA_8888_SkColorType &&
++      src_info.colorType() != kBGRA_8888_SkColorType) {
++    return image;
++  }
 +  const SkImageInfo info = SkImageInfo::Make(sz.width(), sz.height(), kRGBA_8888_SkColorType,
-+                                             kUnpremul_SkAlphaType, SkColorSpace::MakeSRGB());
++                                             kUnpremul_SkAlphaType, src_info.refColorSpace());
 +  SkBitmap bm;
 +  if (bm.tryAllocPixels(info) &&
 +      image->PaintImageForCurrentFrame().readPixels(info, bm.getPixels(), bm.rowBytes(), 0, 0)) {
@@ -141,7 +155,7 @@ diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc 
  scoped_refptr<StaticBitmapImage> HTMLCanvasElement::Snapshot(
      SourceDrawingBuffer source_buffer) const {
    if (Size().IsEmpty()) {
-@@ -1270,6 +1330,10 @@ scoped_refptr<StaticBitmapImage> HTMLCanvasElement::Snapshot(
+@@ -1270,6 +1342,10 @@ scoped_refptr<StaticBitmapImage> HTMLCanvasElement::Snapshot(
      image_bitmap = CreateTransparentImage();
    }
  
@@ -152,7 +166,7 @@ diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc 
    return image_bitmap;
  }
  
-@@ -1286,6 +1350,9 @@ String HTMLCanvasElement::ToDataURLInternal(
+@@ -1286,6 +1362,9 @@ String HTMLCanvasElement::ToDataURLInternal(
            mime_type, ImageEncoderUtils::kEncodeReasonToDataURL);
  
    scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(source_buffer);
@@ -162,7 +176,7 @@ diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc 
    if (image_bitmap) {
      std::unique_ptr<ImageDataBuffer> data_buffer =
          ImageDataBuffer::Create(image_bitmap);
-@@ -1391,6 +1458,8 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
+@@ -1391,6 +1470,8 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
  
    CanvasAsyncBlobCreator* async_creator = nullptr;
    scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(kBackBuffer);
@@ -172,6 +186,7 @@ diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc 
      auto* options = ImageEncodeOptions::Create();
      options->setType(ImageEncoderUtils::MimeTypeName(encoding_mime_type));
 diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+index 97e94a4aa123d..ab7a6d97c83e5 100644
 --- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
 +++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
 @@ -11,6 +11,8 @@
@@ -193,7 +208,7 @@ diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
  #include "third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.h"
  #include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
  #include "third_party/blink/renderer/platform/heap/thread_state.h"
-@@ -473,6 +478,40 @@ ScriptPromise<Blob> OffscreenCanvas::convertToBlob(
+@@ -473,6 +478,48 @@ ScriptPromise<Blob> OffscreenCanvas::convertToBlob(
  
    base::TimeTicks start_time = base::TimeTicks::Now();
    scoped_refptr<StaticBitmapImage> image_bitmap = context_->GetImage();
@@ -218,10 +233,18 @@ diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
 +  }
 +  if (readback_seed && image_bitmap) {
 +    const gfx::Size sz = image_bitmap->Size();
++    // Same rule as HTMLCanvasElement's readback: keep the SOURCE colour space rather than forcing
++    // sRGB, and leave a non-8888 canvas alone instead of truncating it. See the note there.
++    const SkImageInfo src_info = image_bitmap->PaintImageForCurrentFrame().GetSkImageInfo();
++    // A non-8888 canvas (F16/F32) is left ALONE rather than farbled: the kernel is an 8-bit one, and
++    // truncating a float canvas to 8 bits to farble it would corrupt it far more visibly than any
++    // fingerprint it hides. getImageData applies the same guard.
++    const bool farbleable = src_info.colorType() == kRGBA_8888_SkColorType ||
++                            src_info.colorType() == kBGRA_8888_SkColorType;
 +    const SkImageInfo info = SkImageInfo::Make(sz.width(), sz.height(), kRGBA_8888_SkColorType,
-+                                               kUnpremul_SkAlphaType, SkColorSpace::MakeSRGB());
++                                               kUnpremul_SkAlphaType, src_info.refColorSpace());
 +    SkBitmap bm;
-+    if (bm.tryAllocPixels(info) &&
++    if (farbleable && bm.tryAllocPixels(info) &&
 +        image_bitmap->PaintImageForCurrentFrame().readPixels(info, bm.getPixels(), bm.rowBytes(), 0,
 +                                                             0)) {
 +      lobium::FarbleCanvasRgba(static_cast<uint8_t*>(bm.getPixels()), sz.width(), sz.height(),
@@ -235,6 +258,7 @@ diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
      auto* resolver = MakeGarbageCollected<ScriptPromiseResolver<Blob>>(
          script_state, exception_state.GetContext());
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+index 1ab234ddb6343..0b9614b6c7fe4 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
 @@ -27,6 +27,8 @@
@@ -310,6 +334,7 @@ diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_c
    }
  
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
+index e0d1a56e9b5cf..28d36795da9cc 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
 @@ -75,6 +75,13 @@ enum class PredefinedColorSpace;
@@ -327,6 +352,7 @@ diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_c
  
    // Try to restore context 4 times in the event that the context is lost. If
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+index f5fe40684ff29..972440b79bfc0 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
 @@ -831,6 +831,9 @@ void Canvas2DRecorderContext::ResetInternal() {
@@ -340,6 +366,7 @@ diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_record
  
    CanvasPath::Clear();
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h
+index 7113ac2516782..a02bab9866d95 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h
 @@ -459,6 +459,9 @@ class MODULES_EXPORT Canvas2DRecorderContext : public CanvasPath {

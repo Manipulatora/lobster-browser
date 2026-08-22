@@ -495,10 +495,26 @@ const OS_UA_PLATFORM: Record<OsFamily, string> = {
  * **caps it at 8** (a machine with 32 GB still reports 8), so anything above 8 — or off this ladder —
  * is an instant tell. {@link normalizeDeviceMemory} snaps generator data onto this ladder.
  */
-export const DEVICE_MEMORY_VALUES: readonly number[] = [0.25, 0.5, 1, 2, 4, 8];
+/**
+ * The `navigator.deviceMemory` rungs Chrome 152 can actually emit.
+ *
+ * The spec ladder is powers of two, but Chromium CLAMPS the result before reporting it, and the
+ * bounds moved (crbug.com/454354290). ApproximatedDeviceMemory::CalculateAndSetApproximatedDeviceMemory
+ * now uses [2, 32] on desktop and [1, 8] on Android, so:
+ *   - 0.25 and 0.5 are unreachable ANYWHERE - no Chrome 152 reports them;
+ *   - 16 and 32 are reachable on desktop, and were missing from this list entirely, which is why a
+ *     32-thread workstation with an RTX 5090 could only ever claim 8 GB.
+ */
+export const DEVICE_MEMORY_VALUES: readonly number[] = [1, 2, 4, 8, 16, 32];
 
-/** A real desktop reports ≥ 4 GB via `navigator.deviceMemory`; 0.25/0.5/1/2 on a desktop UA is a tell. */
-export const DESKTOP_MIN_DEVICE_MEMORY = 4;
+/** Android's clamp floor. A 1 GB phone is ordinary; a 1 GB desktop is not a value Chrome emits. */
+export const MOBILE_MIN_DEVICE_MEMORY = 1;
+/** Android's clamp ceiling: Chromium caps Android at 8 even on a 12 GB phone. */
+export const MOBILE_MAX_DEVICE_MEMORY = 8;
+/** Desktop's clamp floor, straight from Chromium's kMinMemory. */
+export const DESKTOP_MIN_DEVICE_MEMORY = 2;
+/** Desktop's clamp ceiling, straight from Chromium's kMaxMemory. */
+export const DESKTOP_MAX_DEVICE_MEMORY = 32;
 
 /**
  * The `navigator.deviceMemory` values a desktop profile may carry — the spec ladder above the desktop
@@ -507,7 +523,12 @@ export const DESKTOP_MIN_DEVICE_MEMORY = 4;
  * remain legal on Android, where 2 GB phones are ordinary.
  */
 export const DESKTOP_DEVICE_MEMORY_VALUES: readonly number[] = DEVICE_MEMORY_VALUES.filter(
-  (value) => value >= DESKTOP_MIN_DEVICE_MEMORY,
+  (value) => value >= DESKTOP_MIN_DEVICE_MEMORY && value <= DESKTOP_MAX_DEVICE_MEMORY,
+);
+
+/** The rungs an Android profile may carry, from Chromium's Android clamp. */
+export const MOBILE_DEVICE_MEMORY_VALUES: readonly number[] = DEVICE_MEMORY_VALUES.filter(
+  (value) => value >= MOBILE_MIN_DEVICE_MEMORY && value <= MOBILE_MAX_DEVICE_MEMORY,
 );
 
 /** Highest plausible logical-core count per OS. macOS tops out at the 28-core/56-thread Mac Pro. */
@@ -857,15 +878,23 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
   }
 
   // --- Hardware realism ----------------------------------------------------------------------------
-  // navigator.deviceMemory is a spec-quantized value capped at 8 — 16/32 is an instant tell, and a
-  // desktop reporting < 4 GB (e.g. the 0.25 GB a raw generator 0 would snap to) is equally implausible.
+  // navigator.deviceMemory is a spec-quantized value that Chromium then CLAMPS, and the bounds are
+  // not the ones this check used to assume. ApproximatedDeviceMemory uses [2, 32] on desktop and
+  // [1, 8] on Android (crbug.com/454354290), so 16 and 32 are ordinary desktop values rather than
+  // "an instant tell", while 0.25 and 0.5 are unreachable on any platform.
+  const memoryFloor = nav.uaMobile ? MOBILE_MIN_DEVICE_MEMORY : DESKTOP_MIN_DEVICE_MEMORY;
+  const memoryCeiling = nav.uaMobile ? MOBILE_MAX_DEVICE_MEMORY : DESKTOP_MAX_DEVICE_MEMORY;
   if (!DEVICE_MEMORY_VALUES.includes(nav.deviceMemory)) {
     issues.push(
       `navigator.deviceMemory (${nav.deviceMemory}) is not a spec value (one of ${DEVICE_MEMORY_VALUES.join('/')})`,
     );
-  } else if (!nav.uaMobile && nav.deviceMemory < DESKTOP_MIN_DEVICE_MEMORY) {
+  } else if (nav.deviceMemory < memoryFloor) {
     issues.push(
-      `navigator.deviceMemory (${nav.deviceMemory}) is implausibly low for a desktop (min ${DESKTOP_MIN_DEVICE_MEMORY})`,
+      `navigator.deviceMemory (${nav.deviceMemory}) is below the ${nav.uaMobile ? 'Android' : 'desktop'} clamp (min ${memoryFloor})`,
+    );
+  } else if (nav.deviceMemory > memoryCeiling) {
+    issues.push(
+      `navigator.deviceMemory (${nav.deviceMemory}) is above the ${nav.uaMobile ? 'Android' : 'desktop'} clamp (max ${memoryCeiling})`,
     );
   }
   const maxHw = MAX_HW_CONCURRENCY[fp.os];

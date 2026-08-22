@@ -118,6 +118,56 @@ function decodeHtml(raw) {
     .trim();
 }
 
+/** Intel marketing codename -> the abbreviation Mesa actually prints, e.g. "TigerLake-LP GT2" -> "TGL GT2". */
+const INTEL_ARCH_ABBREV = {
+  TigerLake: 'TGL', KabyLake: 'KBL', CoffeeLake: 'CFL', CometLake: 'CML', IceLake: 'ICL',
+  AlderLake: 'ADL', RaptorLake: 'RPL', Skylake: 'SKL', Broadwell: 'BDW', Haswell: 'HSW',
+  MeteorLake: 'MTL', RocketLake: 'RKL', JasperLake: 'JSL', ElkhartLake: 'EHL',
+  GeminiLake: 'GLK', AmberLake: 'AML', WhiskeyLake: 'WHL', DG2: 'DG2',
+};
+
+/**
+ * The GL_RENDERER a Linux driver really reports, which is driver-shaped and NOT uniform:
+ *
+ *   NVIDIA proprietary   NVIDIA GeForce RTX 3060/PCIe/SSE2                      OpenGL 4.6.0
+ *   Mesa radeonsi        AMD Radeon RX 6600 (radeonsi, navi23, LLVM ..., DRM ..., <kernel>)
+ *   Mesa iris/i965       Mesa Intel(R) UHD Graphics 620 (KBL GT2)               OpenGL 4.6
+ *
+ * The previous template put a bare PCI id where each driver puts its own detail - a position no
+ * Linux GL_RENDERER has ever contained a hex device id in. The chip codename comes from the
+ * `codename` field recorded on each verified row (from pci.ids), which is what Mesa derives its
+ * gfx-family token from.
+ */
+function linuxRendererString(entry) {
+  const vendor = entry.vendorFamily;
+  const model = entry.label;
+  if (vendor === 'NVIDIA') {
+    return `ANGLE (NVIDIA, ${model}/PCIe/SSE2, OpenGL 4.6.0)`;
+  }
+  if (vendor === 'AMD') {
+    // Mesa names ONE gfx family, lowercase and unseparated; pci.ids sometimes lists two.
+    const chip = String(entry.codename ?? '').split(/[/,]/)[0].replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+    return `ANGLE (AMD, ${model} (radeonsi, ${chip}, LLVM 15.0.7, DRM 3.49, 6.5.0), OpenGL 4.6)`;
+  }
+  // Mesa spells Intel's brand with the trademark marks: "Intel(R) UHD Graphics 620",
+  // "Intel(R) Arc(tm) Graphics". A pci.ids marketing name that already begins with a bare "Intel"
+  // must be normalised, or the string differs from the driver's in the brand itself.
+  const codename = String(entry.codename ?? '');
+  const key = codename.replace(/\s+/g, '');
+  const abbrev = Object.entries(INTEL_ARCH_ABBREV).find(([p]) =>
+    key.toLowerCase().startsWith(p.toLowerCase()),
+  )?.[1];
+  const gt = /(GT\d(?:\.\d)?)/.exec(codename);
+  const arch = abbrev ? (gt ? `${abbrev} ${gt[1]}` : abbrev) : null;
+  const intelModel = /^Intel\(R\)/.test(model)
+    ? model
+    : model.replace(/^Intel\s+/, 'Intel(R) ').replace(/^(?!Intel)/, 'Intel(R) ');
+  const branded = intelModel.replace(/\bArc\b(?!\(tm\))/, 'Arc(tm)');
+  return arch
+    ? `ANGLE (Intel, Mesa ${branded} (${arch}), OpenGL 4.6)`
+    : `ANGLE (Intel, Mesa ${branded}, OpenGL 4.6)`;
+}
+
 function uniqueSorted(values) {
   return [...new Set(values.map((v) => v.trim()).filter(Boolean))].sort((a, b) =>
     a.localeCompare(b, 'en'),
@@ -454,7 +504,7 @@ function renderMacArmRenderers(entries) {
 function renderLinuxRenderers(entries) {
   const lines = entries.map((entry) => {
     const id = `linux-${slug(entry.vendorFamily)}-${slug(entry.label)}-${entry.deviceId.replace(/^0x/i, '').toLowerCase()}`;
-    return `  linuxRenderer(${literal(id)}, ${literal(entry.vendorFamily)}, ${literal(entry.label)}, ${literal(entry.deviceId)}, ${literal(entry.source)}),`;
+    return `  linuxRenderer(${literal(id)}, ${literal(entry.vendorFamily)}, ${literal(entry.label)}, ${literal(entry.deviceId)}, ${literal(linuxRendererString(entry))}, ${literal(entry.source)}),`;
   });
   return `export const LINUX_RENDERER_PRESETS: RendererCatalogEntry[] = [\n${lines.join('\n')}\n];\n`;
 }
@@ -615,13 +665,12 @@ function linuxRenderer(
   vendor: 'NVIDIA' | 'Intel' | 'AMD',
   model: string,
   deviceId: string,
+  renderer: string,
   source: string,
 ): RendererCatalogEntry {
+  // The renderer string is passed in rather than templated here: its shape belongs to the DRIVER,
+  // and the three Linux drivers do not agree. See the note in the generated catalog.
   const webglVendor = \`Google Inc. (\${vendor})\`;
-  const renderer =
-    vendor === 'Intel'
-      ? \`ANGLE (Intel, Mesa \${model} (\${deviceId}), OpenGL 4.6)\`
-      : \`ANGLE (\${vendor}, \${model} (\${deviceId}), OpenGL 4.5)\`;
   return {
     id,
     os: 'linux',

@@ -347,7 +347,11 @@ test('startProfile derives from host calibration when one is supplied', async ()
     'ANGLE_instanced_arrays',
   ]);
   assert.equal(launched.fingerprint.navigator.hardwareConcurrency, 12);
-  assert.equal(launched.fingerprint.navigator.deviceMemory, 8, 'host RAM is spec-capped');
+  assert.equal(
+      launched.fingerprint.navigator.deviceMemory,
+      32,
+      'a large host clamps to the DESKTOP maximum of 32, not the retired cap of 8',
+    );
   assert.equal(launched.fingerprint.navigator.uaFullVersion, '152.0.7977.42');
 });
 

@@ -208,6 +208,20 @@ void FarbleCanvasRgbaSubRect(uint8_t* dst,
              dst_x_in_ctx, dst_y_in_ctx, ctx_origin_x, ctx_origin_y, /*y_step=*/1, seed);
 }
 
+bool ClientRectCarriesHostEntropy(float width,
+                                  float height,
+                                  bool css_width_is_fixed,
+                                  bool css_height_is_fixed) {
+  // A zero-area box says nothing about the host, and noise here is what produced CreepJS's
+  // "unknown ghost dimensions". Checked first because it holds however the box was sized.
+  if (width == 0.0f && height == 0.0f) {
+    return false;
+  }
+  // Both axes fixed => fully specified by CSS. Either axis auto/percentage/content-driven means
+  // layout decided it, and layout is where the machine shows through.
+  return !(css_width_is_fixed && css_height_is_fixed);
+}
+
 void FarbleClientRect(float* x,
                       float* y,
                       float* width,

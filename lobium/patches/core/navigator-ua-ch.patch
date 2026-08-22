@@ -123,10 +123,10 @@ index 3f87ec84fb32a..8411dec984ab6 100644
  
    // Low entropy client hints.
 diff --git a/third_party/blink/common/device_memory/approximated_device_memory.cc b/third_party/blink/common/device_memory/approximated_device_memory.cc
-index 7fd53ebba0dc5..8efe615459114 100644
+index 7fd53ebba0dc5..1c35f54dc9602 100644
 --- a/third_party/blink/common/device_memory/approximated_device_memory.cc
 +++ b/third_party/blink/common/device_memory/approximated_device_memory.cc
-@@ -8,10 +8,53 @@
+@@ -8,10 +8,55 @@
  #include "base/check_op.h"
  #include "base/feature_list.h"
  #include "base/system/sys_info.h"
@@ -146,7 +146,7 @@ index 7fd53ebba0dc5..8efe615459114 100644
 +// crbug.com/454354290 widened desktop from the old 0.25..8 ladder to 2..32. Re-tightening this to 8 to
 +// match a spec ladder Chrome no longer follows would make the persona report a value this Chromium
 +// never emits, which is the tell it was written to avoid.
-+float LobiumRoundDeviceMemoryGb(double configured_gb) {
++float LobiumRoundDeviceMemoryGb(double configured_gb, bool mobile_persona) {
 +  int64_t mb = static_cast<int64_t>(configured_gb * 1024.0);
 +  if (mb < 1) {
 +    mb = 1;
@@ -161,12 +161,14 @@ index 7fd53ebba0dc5..8efe615459114 100644
 +  lower = lower << power;
 +  float gb = (mb - lower <= upper - mb) ? static_cast<float>(lower) / 1024.0f
 +                                        : static_cast<float>(upper) / 1024.0f;
-+  float min_memory = 2.0f;
-+  float max_memory = 32.0f;
-+#if BUILDFLAG(IS_ANDROID)
-+  min_memory = 1.0f;
-+  max_memory = 8.0f;
-+#endif
++  // Clamp by the PERSONA's platform, not the build's. Chromium picks these bounds with
++  // `#if BUILDFLAG(IS_ANDROID)`, which is correct for a real Android build but wrong here: the
++  // engine emulating an Android device is a desktop binary, so the desktop floor of 2 GB was
++  // applied to Android personas and a phone claiming 1 GB silently reported 2. The persona's own
++  // uaMobile is what a page is being told, so it is what the bounds must follow.
++  const bool persona_is_mobile = mobile_persona;
++  float min_memory = persona_is_mobile ? 1.0f : 2.0f;
++  float max_memory = persona_is_mobile ? 8.0f : 32.0f;
 +  if (gb < min_memory) {
 +    gb = min_memory;
 +  } else if (gb > max_memory) {
@@ -180,7 +182,7 @@ index 7fd53ebba0dc5..8efe615459114 100644
  // static
  float ApproximatedDeviceMemory::approximated_device_memory_gb_ = 0.0;
  int64_t ApproximatedDeviceMemory::physical_memory_mb_ = 0;
-@@ -27,6 +65,13 @@ void ApproximatedDeviceMemory::Initialize() {
+@@ -27,6 +72,14 @@ void ApproximatedDeviceMemory::Initialize() {
  
  // static
  float ApproximatedDeviceMemory::GetApproximatedDeviceMemory() {
@@ -189,7 +191,8 @@ index 7fd53ebba0dc5..8efe615459114 100644
 +  // all read this function - report the identical, coherent, spec-valid value.
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
 +      cfg && cfg->navigator.device_memory > 0) {
-+    return LobiumRoundDeviceMemoryGb(cfg->navigator.device_memory);
++    return LobiumRoundDeviceMemoryGb(cfg->navigator.device_memory,
++                                     cfg->navigator.ua_mobile);
 +  }
    return approximated_device_memory_gb_;
  }

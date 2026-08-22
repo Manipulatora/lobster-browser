@@ -97,7 +97,10 @@ test('deriveFingerprintFromHost inherits captured host hardware while keeping Ch
   assert.equal(fp.locale.timezone, 'Europe/Berlin');
   assert.equal(fp.locale.acceptLanguage, 'de-DE,de;q=0.9,en-US;q=0.8');
   assert.equal(fp.navigator.hardwareConcurrency, 12);
-  assert.equal(fp.navigator.deviceMemory, 8, 'navigator.deviceMemory is spec-capped at 8');
+  // A 64 GB host clamps to 32, not 8. Chromium's ApproximatedDeviceMemory uses kMaxMemory = 32 on
+  // desktop (crbug.com/454354290); the old 8 was the pre-change cap, and asserting it forced every
+  // captured host down to a value real Chrome stopped reporting.
+  assert.equal(fp.navigator.deviceMemory, 32, 'a 64 GB host clamps to the desktop maximum of 32');
   assert.equal(fp.webgl.renderer, host().webgl.renderer);
   assert.deepEqual(fp.webgl.extensions, host().webgl.extensions);
   assert.deepEqual(fp.webgl.shaderPrecision, precision);

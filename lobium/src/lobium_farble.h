@@ -106,6 +106,24 @@ void FarbleCanvasRgbaSubRect(uint8_t* dst,
 //
 // The delta is one LayoutUnit (1/64 CSS px), the quantum Blink itself lays out on, so the values
 // stay plausible and Math.round(bcr.width) still matches offsetWidth. No-op when `seed` is 0.
+// Does a client rect actually carry HOST entropy worth hiding?
+//
+// clientRects fingerprinting reads sub-pixel geometry that varies by machine, and that variation
+// comes from TEXT METRICS - a content-sized box is as wide as the font rasteriser made its glyphs.
+// A box whose width and height are explicit CSS lengths is pure arithmetic: 100px is 100px on every
+// machine, and stays exactly reproducible under a transform. Perturbing it hides nothing and is
+// trivially detectable, because the detector can compute what the value must have been (CreepJS
+// does exactly that with .rect-known and .rect-ghost).
+//
+// The POLICY lives here rather than at the call sites because two separate Blink paths produce the
+// same rect - Element::GetBoundingClientRect and IntersectionGeometry - and if they answer this
+// question differently the two contradict each other, which is the defect this shared helper
+// exists to prevent. Each caller does its own ComputedStyle lookup and passes the two booleans in.
+bool ClientRectCarriesHostEntropy(float width,
+                                  float height,
+                                  bool css_width_is_fixed,
+                                  bool css_height_is_fixed);
+
 void FarbleClientRect(float* x,
                       float* y,
                       float* width,

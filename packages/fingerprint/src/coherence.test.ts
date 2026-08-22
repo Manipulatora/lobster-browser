@@ -238,19 +238,37 @@ test('accepts a greased "Not A;Brand" placeholder in any punctuation', () => {
   );
 });
 
-test('flags deviceMemory above the spec cap of 8 (a hard tell)', () => {
-  const fp = coherentBase();
-  fp.navigator.deviceMemory = 16;
-  assertFlags(fp, /deviceMemory/);
+test('flags deviceMemory above the platform clamp, which is 32 on desktop and 8 on Android', () => {
+  // This used to flag 16 as "above the spec cap of 8". Chromium clamps to [2, 32] on desktop
+  // (crbug.com/454354290), so 16 and 32 are ordinary desktop values; 64 is not.
+  const ok = coherentBase();
+  ok.navigator.deviceMemory = 16;
+  assert.deepEqual(validateFingerprintCoherence(ok), []);
+  const tooMuch = coherentBase();
+  tooMuch.navigator.deviceMemory = 64;
+  assertFlags(tooMuch, /deviceMemory/);
 });
 
-test('flags an implausibly low desktop deviceMemory (0.25 GB / 256 MB)', () => {
-  const low = coherentBase();
-  low.navigator.deviceMemory = 0.25; // on the spec ladder, but impossible on a desktop
-  assertFlags(low, /implausibly low for a desktop/);
-  const two = coherentBase();
-  two.navigator.deviceMemory = 2;
-  assertFlags(two, /implausibly low for a desktop/);
+test('flags a desktop deviceMemory below Chromium own floor of 2', () => {
+  // 0.25 and 0.5 are not "low" - Chromium cannot emit them at all, on any platform, so they are
+  // rejected as off-ladder rather than as implausible. 1 is legal on Android and below the desktop
+  // floor. 2 IS a desktop value now: it is exactly kMinMemory.
+  const offLadder = coherentBase();
+  offLadder.navigator.deviceMemory = 0.25;
+  assertFlags(offLadder, /deviceMemory/);
+  const androidOnly = coherentBase();
+  androidOnly.navigator.deviceMemory = 1;
+  assertFlags(androidOnly, /below the desktop clamp/);
+  // 2 is Chromium's own kMinMemory, so the CLAMP must not object to it. The GPU-tier envelope may
+  // still reject it as unrealistic for a given card - that is a separate, deliberate rule - so this
+  // asserts only that the clamp check stays quiet.
+  const atFloor = coherentBase();
+  atFloor.navigator.deviceMemory = 2;
+  assert.equal(
+    validateFingerprintCoherence(atFloor).some((i) => /clamp/.test(i)),
+    false,
+    'deviceMemory 2 is exactly the desktop floor and must not trip the clamp check',
+  );
 });
 
 test('flags an implausible hardwareConcurrency, OS-aware (96 cores ok on Windows, not on macOS)', () => {
@@ -407,7 +425,7 @@ test('an M-series Mac never reports fewer cores than Apple has ever shipped', ()
 });
 
 test('the desktop deviceMemory choices are exactly the spec rungs a desktop may report', () => {
-  assert.deepEqual([...DESKTOP_DEVICE_MEMORY_VALUES], [4, 8]);
+  assert.deepEqual([...DESKTOP_DEVICE_MEMORY_VALUES], [2, 4, 8, 16, 32]);
   for (const value of DEVICE_MEMORY_VALUES) {
     const fp = coherentBase();
     // An integrated-GPU laptop: the tier with the lowest memory floor there is, so what remains is
@@ -419,11 +437,24 @@ test('the desktop deviceMemory choices are exactly the spec rungs a desktop may 
     };
     fp.navigator.deviceMemory = value;
     fp.navigator.hardwareConcurrency = 8;
-    const flagged = validateFingerprintCoherence(fp).some((issue) => /deviceMemory/.test(issue));
+    // Only the LADDER/CLAMP rule is under test here. A GPU tier may additionally refuse a value it
+    // considers unrealistic for that card - an integrated part with 2 GB, say - and that is a
+    // separate, deliberate rule with its own tests; folding the two together is what made this
+    // assertion wrong when the clamp floor moved from 4 to 2.
+    const clampIssue = validateFingerprintCoherence(fp).some((issue) => /clamp|not a spec value/.test(issue));
     assert.equal(
-      flagged,
+      clampIssue,
       !DESKTOP_DEVICE_MEMORY_VALUES.includes(value),
-      `deviceMemory ${value} must be ${DESKTOP_DEVICE_MEMORY_VALUES.includes(value) ? 'accepted' : 'rejected'} on a desktop`,
+      `deviceMemory ${value} must be ${DESKTOP_DEVICE_MEMORY_VALUES.includes(value) ? 'on' : 'off'} the desktop ladder`,
+    );
+  }
+  // Values Chromium cannot emit at all must be rejected whatever the GPU.
+  for (const bad of [0.25, 0.5, 64]) {
+    const fp = coherentBase();
+    fp.navigator.deviceMemory = bad;
+    assert.ok(
+      validateFingerprintCoherence(fp).some((i) => /deviceMemory/.test(i)),
+      `deviceMemory ${bad} is not a value Chrome 152 reports`,
     );
   }
 });
@@ -489,13 +520,16 @@ test('flags a Windows profile carrying a legacy "OpenGL Engine" (macOS) renderer
   assertFlags(fp, /macOS\/Apple-format GPU string/);
 });
 
-test('normalizeDeviceMemory snaps onto the spec ladder and caps at 8', () => {
-  assert.equal(normalizeDeviceMemory(16), 8);
+test('normalizeDeviceMemory snaps onto the rungs Chromium can emit', () => {
+  assert.equal(normalizeDeviceMemory(64), 32); // above the desktop clamp -> the clamp
+  assert.equal(normalizeDeviceMemory(32), 32);
+  assert.equal(normalizeDeviceMemory(24), 16);
+  assert.equal(normalizeDeviceMemory(16), 16); // was 8: 16 is a value real desktop Chrome reports
   assert.equal(normalizeDeviceMemory(8), 8);
   assert.equal(normalizeDeviceMemory(6), 4);
   assert.equal(normalizeDeviceMemory(3), 2);
-  assert.equal(normalizeDeviceMemory(0.1), 0.25);
-  for (const v of [16, 8, 6, 3, 1, 0.1]) {
+  assert.equal(normalizeDeviceMemory(0.1), 1); // 0.25/0.5 are off the ladder entirely now
+  for (const v of [64, 32, 16, 8, 6, 3, 1, 0.1]) {
     assert.ok(DEVICE_MEMORY_VALUES.includes(normalizeDeviceMemory(v)));
   }
 });

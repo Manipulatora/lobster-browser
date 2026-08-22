@@ -5,7 +5,7 @@ browser process shapes the real one: a single blank entry per kind until the fra
 permission for it, and hashed deviceIds with OS-shaped labels and groupIds once it does.
 
 diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.cc b/third_party/blink/renderer/modules/mediastream/media_devices.cc
-index 4fe2cb45a0089..7e22e422bd639 100644
+index 4fe2cb45a0089..d3c24a21eee74 100644
 --- a/third_party/blink/renderer/modules/mediastream/media_devices.cc
 +++ b/third_party/blink/renderer/modules/mediastream/media_devices.cc
 @@ -5,6 +5,7 @@
@@ -25,7 +25,7 @@ index 4fe2cb45a0089..7e22e422bd639 100644
  #include "media/base/media_permission.h"
  #include "mojo/public/cpp/bindings/remote.h"
  #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
-@@ -1486,6 +1489,143 @@ void MediaDevices::DevicesEnumerated(
+@@ -1486,6 +1489,156 @@ void MediaDevices::DevicesEnumerated(
      }
    }
  
@@ -79,6 +79,19 @@ index 4fe2cb45a0089..7e22e422bd639 100644
 +    const std::string salt =
 +        md.stable_device_ids ? lobium::MediaDeviceSaltFromSeed(cfg->seeds.media_devices)
 +                             : lobium::MediaDeviceEphemeralSalt();
++    // The GROUP id gets its own salt, and never the seed-derived one.
++    //
++    // Chrome rotates group ids far more often than device ids: a device id is stable for the origin
++    // until storage is cleared, but the group id is regenerated as the media-device salt is renewed,
++    // so a page cannot use it to link a visitor across sessions. Deriving both from the same
++    // per-profile seed made the group id permanent - a stable cross-origin, cross-session
++    // identifier that is strictly stronger than the device id it sits beside, and one the
++    // stableDeviceIds setting silently made worse rather than better.
++    //
++    // MediaDeviceEphemeralSalt() is a process-lifetime token, so this rotates per renderer process
++    // rather than per document commit. That is short of Chrome exactly, and it is the difference
++    // between "rotates" and "never rotates".
++    const std::string group_salt = lobium::MediaDeviceEphemeralSalt();
 +    const std::string& platform = cfg->navigator.ua_platform;
 +
 +    auto push_device = [&](mojom::blink::MediaDeviceType type, std::string_view kind_key,
@@ -90,7 +103,7 @@ index 4fe2cb45a0089..7e22e422bd639 100644
 +                               origin, salt, kind_key, index, /*group=*/false))
 +                         : String::FromUtf8(pseudo);
 +      const String group = String::FromUtf8(
-+          lobium::MediaDeviceHmacId(origin, salt, group_key, index, /*group=*/true));
++          lobium::MediaDeviceHmacId(origin, group_salt, group_key, index, /*group=*/true));
 +      const String label =
 +          String::FromUtf8(lobium::MediaDeviceLabel(platform, kind_key, index, pseudo));
 +      if (type == mojom::blink::MediaDeviceType::kMediaAudioInput ||

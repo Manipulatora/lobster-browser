@@ -297,3 +297,23 @@ test('every Apple Silicon persona pairs a chip with a panel Apple actually sold 
   }
   assert.ok(checked >= 3, `expected several Apple Silicon personas, checked ${checked}`);
 });
+
+test('Linux renderer strings are driver-shaped, never a bare PCI id', () => {
+  // Each Linux driver reports its own thing, and none of them puts a hex device id where this
+  // catalog used to: NVIDIA appends "/PCIe/SSE2", Mesa radeonsi appends
+  // "(radeonsi, <gfx>, LLVM ..., DRM ..., <kernel>)", Mesa iris appends "(<ARCH> GTn)". The old
+  // template emitted "<model> (0x1B01)" for all three - a shape no Linux GL_RENDERER contains.
+  assert.ok(PRODUCT_LINUX_RENDERERS.length > 0);
+  for (const preset of PRODUCT_LINUX_RENDERERS) {
+    const r = preset.webgl.unmaskedRenderer;
+    assert.ok(!/\(0x[0-9A-Fa-f]+\)/.test(r), `${preset.id}: bare PCI id in a Linux renderer: ${r}`);
+    if (preset.vendorFamily === 'NVIDIA') {
+      assert.match(r, /\/PCIe\/SSE2, OpenGL 4\.6\.0\)$/, `${preset.id}: NVIDIA proprietary shape`);
+    } else if (preset.vendorFamily === 'AMD') {
+      assert.match(r, /\(radeonsi, [a-z0-9]+, LLVM [\d.]+, DRM [\d.]+, [\d.]+\), OpenGL 4\.6\)$/,
+        `${preset.id}: Mesa radeonsi shape`);
+    } else {
+      assert.match(r, /^ANGLE \(Intel, Mesa Intel\(R\) .+, OpenGL 4\.6\)$/, `${preset.id}: Mesa iris shape`);
+    }
+  }
+});

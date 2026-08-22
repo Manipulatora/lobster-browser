@@ -35,20 +35,30 @@ std::string_view HardwareName(std::string_view platform,
                               std::string_view kind,
                               int index) {
   const bool integrated = index <= 0;
+  // CAMERA LABELS CARRY " (vid:pid)". A video device's label is built by
+  // WebMediaDeviceInfo(label(descriptor.GetNameAndModel())), and GetNameAndModel() appends
+  // " (" + model_id + ")" whenever the model id is non-empty - which it is on all three desktop
+  // platforms (media/capture/video/video_capture_device_descriptor.cc). A camera label with no
+  // suffix is a shape desktop Chrome does not produce. Android is the exception and stays bare.
+  //
+  // USB AUDIO endpoints carry it too, from GetDeviceSuffixWin()
+  // (media/audio/win/device_enumeration_win.cc), whose unit test pins the exact " (0403:6010)"
+  // form. Onboard HDAUDIO endpoints correctly get NO suffix, which is why the Realtek entries
+  // below are unchanged.
   if (platform == "Windows") {
     if (kind == "videoinput") {
-      return integrated ? "Integrated Camera" : "USB Video Device";
+      return integrated ? "Integrated Camera (04f2:b6d9)" : "USB Video Device (046d:0825)";
     }
     if (kind == "audioinput") {
       return integrated ? "Microphone (Realtek(R) Audio)"
-                        : "Microphone (USB Audio Device)";
+                        : "Microphone (USB Audio Device) (0d8c:0014)";
     }
     return integrated ? "Speakers (Realtek(R) Audio)"
-                      : "Speakers (USB Audio Device)";
+                      : "Speakers (USB Audio Device) (0d8c:0014)";
   }
   if (platform == "macOS") {
     if (kind == "videoinput") {
-      return integrated ? "FaceTime HD Camera" : "USB Camera";
+      return integrated ? "FaceTime HD Camera (05ac:8514)" : "USB Camera (046d:0825)";
     }
     if (kind == "audioinput") {
       return integrated ? "MacBook Pro Microphone" : "External Microphone";
@@ -56,15 +66,18 @@ std::string_view HardwareName(std::string_view platform,
     return integrated ? "MacBook Pro Speakers" : "External Headphones";
   }
   if (platform == "Android") {
-    // Android names a camera by its camera2 id and the lens it faces; id 1 is the front lens.
+    // "camera N, facing X" - VideoCaptureCamera2.java builds it as
+    // "camera " + index + ", facing " + displayFacing. There is no "camera2" in the label; that is
+    // the name of the Android API, not of the device, and emitting it was a string no Chrome sends.
     if (kind == "videoinput") {
-      return integrated ? "camera2 0, facing back" : "camera2 1, facing front";
+      return integrated ? "camera 0, facing back" : "camera 1, facing front";
     }
     return "";
   }
   // Linux, where V4L2 supplies the camera name and PulseAudio the card profile name.
   if (kind == "videoinput") {
-    return integrated ? "Integrated Camera: Integrated C" : "USB Camera: USB Camera";
+    return integrated ? "Integrated Camera: Integrated C (04f2:b6d9)"
+                      : "USB Camera: USB Camera (046d:0825)";
   }
   return integrated ? "Built-in Audio Analog Stereo" : "USB Audio Analog Stereo";
 }

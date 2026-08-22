@@ -13,8 +13,18 @@ sites below agree by construction rather than by both happening to pass index 0.
 The other relation honest Chrome holds exactly is getBoundingClientRect() == union(getClientRects()),
 so the bounding box is computed as the union of the farbled rects instead of being farbled itself.
 
+INTERSECTION OBSERVER TOO. entry.boundingClientRect IS getBoundingClientRect() to a page - the spec
+defines it that way - but IntersectionGeometry computes it from layout rather than calling that
+method, so it bypassed this hook entirely. One observer callback beside one getBoundingClientRect()
+call returned two different numbers for the same box: a contradiction no honest browser produces,
+and a cheaper tell than the sub-pixel noise the farbling hides. Both paths now farble with the same
+kernel, the same seed and the same policy.
+
+The policy - "does this box carry HOST entropy, or is it pure CSS arithmetic?" - moved into
+components/lobium_fp (lobium::ClientRectCarriesHostEntropy) precisely so the two callers cannot
+drift apart again. Each caller still does its own ComputedStyle lookup and passes the two booleans.
 diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
-index 3ae6d39c4a711..3b2d939a313a3 100644
+index 3ae6d39c4a711..fc8d7cba59985 100644
 --- a/third_party/blink/renderer/core/dom/element.cc
 +++ b/third_party/blink/renderer/core/dom/element.cc
 @@ -26,6 +26,9 @@
@@ -27,7 +37,7 @@ index 3ae6d39c4a711..3b2d939a313a3 100644
  #include <algorithm>
  #include <bitset>
  #include <limits>
-@@ -3348,6 +3351,61 @@ void Element::ClientQuads(Vector<gfx::QuadF>& quads) const {
+@@ -3348,6 +3351,59 @@ void Element::ClientQuads(Vector<gfx::QuadF>& quads) const {
    }
  }
  
@@ -49,18 +59,16 @@ index 3ae6d39c4a711..3b2d939a313a3 100644
 +// where the entropy actually is; it does not weaken it.
 +static bool LobiumRectCarriesHostEntropy(const Element& element,
 +                                         const gfx::RectF& rect) {
-+  // A zero-area box says nothing about the host, and noise here is what produced "unknown ghost
-+  // dimensions". Checked before the style lookup because it holds however the box was sized.
-+  if (rect.width() == 0.0f && rect.height() == 0.0f) {
-+    return false;
-+  }
 +  const ComputedStyle* style = element.GetComputedStyle();
 +  if (!style) {
 +    return false;
 +  }
-+  // Both axes fixed => fully specified by CSS. Either axis auto/percentage/content-driven means
-+  // layout decided it, and layout is where the machine shows through.
-+  return !(style->Width().IsFixed() && style->Height().IsFixed());
++  // The policy itself lives in components/lobium_fp so IntersectionGeometry answers this question
++  // identically - entry.boundingClientRect IS getBoundingClientRect() to a page, and the two
++  // contradicting each other is exactly the tell this guard exists to avoid.
++  return lobium::ClientRectCarriesHostEntropy(rect.width(), rect.height(),
++                                              style->Width().IsFixed(),
++                                              style->Height().IsFixed());
 +}
 +
 +// Lobium: farble a whole client-rect list in place.
@@ -89,7 +97,7 @@ index 3ae6d39c4a711..3b2d939a313a3 100644
  DOMRectList* Element::getClientRects() {
    Vector<gfx::RectF> rects = GetClientRectsNoAdjustment();
    if (rects.empty()) {
-@@ -3359,6 +3417,11 @@ DOMRectList* Element::getClientRects() {
+@@ -3359,6 +3415,11 @@ DOMRectList* Element::getClientRects() {
      GetDocument().AdjustRectForScrollAndAbsoluteZoom(rect,
                                                       *element_layout_object);
    }
@@ -101,7 +109,7 @@ index 3ae6d39c4a711..3b2d939a313a3 100644
    return MakeGarbageCollected<DOMRectList>(rects);
  }
  
-@@ -3411,7 +3474,41 @@ gfx::RectF Element::GetBoundingClientRectNoLifecycleUpdate() const {
+@@ -3411,6 +3472,40 @@ gfx::RectF Element::GetBoundingClientRectNoLifecycleUpdate() const {
  DOMRect* Element::GetBoundingClientRect() {
    GetDocument().EnsurePaintLocationDataValidForNode(
        this, DocumentUpdateReason::kJavaScript);
@@ -142,4 +150,53 @@ index 3ae6d39c4a711..3b2d939a313a3 100644
    return DOMRect::FromRectF(GetBoundingClientRectNoLifecycleUpdate());
  }
  
- DOMRect* Element::GetBoundingClientRectForBinding() {
+diff --git a/third_party/blink/renderer/core/intersection_observer/intersection_geometry.cc b/third_party/blink/renderer/core/intersection_observer/intersection_geometry.cc
+index 059682036f50d..cd0c1da2a8dec 100644
+--- a/third_party/blink/renderer/core/intersection_observer/intersection_geometry.cc
++++ b/third_party/blink/renderer/core/intersection_observer/intersection_geometry.cc
+@@ -6,6 +6,8 @@
+ 
+ #include "base/numerics/safe_conversions.h"
+ #include "third_party/blink/renderer/core/display_lock/display_lock_utilities.h"
++#include "components/lobium_fp/lobium_farble.h"
++#include "components/lobium_fp/lobium_fp_config.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/local_frame_view.h"
+ #include "third_party/blink/renderer/core/frame/settings.h"
+@@ -703,6 +705,36 @@ void IntersectionGeometry::ComputeGeometry(const RootGeometry& root_geometry,
+                                                            *target);
+     AdjustForAbsoluteZoom::AdjustRectMaybeExcludingCSSZoom(root_rect_, *root);
+   }
++
++  // Lobium: farble the observer's rects with the SAME kernel, seed and policy that farble
++  // Element::GetBoundingClientRect.
++  //
++  // To a page, entry.boundingClientRect IS getBoundingClientRect() - the spec defines it that way -
++  // but IntersectionObserver computes it from layout instead of calling that method, so it bypassed
++  // the client-rect hook entirely. One observer callback next to one getBoundingClientRect() call
++  // therefore returned two different numbers for the same box, which is a contradiction no honest
++  // browser produces and a cheaper tell than the sub-pixel noise the farbling hides.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->seeds.client_rects && target && target->GetNode()) {
++    if (const auto* element = DynamicTo<Element>(target->GetNode())) {
++      if (const ComputedStyle* style = element->GetComputedStyle()) {
++        const bool w_fixed = style->Width().IsFixed();
++        const bool h_fixed = style->Height().IsFixed();
++        const uint32_t seed = cfg->seeds.client_rects;
++        // Each rect is judged on its own geometry, exactly as the client-rect list is.
++        auto farble = [&](gfx::RectF& r) {
++          if (!lobium::ClientRectCarriesHostEntropy(r.width(), r.height(), w_fixed, h_fixed)) {
++            return;
++          }
++          float x = r.x(), y = r.y(), w = r.width(), h = r.height();
++          lobium::FarbleClientRect(&x, &y, &w, &h, seed);
++          r.SetRect(x, y, w, h);
++        };
++        farble(target_rect_);
++        farble(intersection_rect_);
++      }
++    }
++  }
+ }
+ 
+ bool IntersectionGeometry::ClipToRoot(const RootAndTarget& root_and_target,
