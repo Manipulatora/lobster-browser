@@ -476,3 +476,18 @@ test('every claimed font is a name a page could actually match', () => {
     assert.equal(new Set(fonts).size, fonts.length, `${os} repeats a font family`);
   }
 });
+
+test('every Windows persona reports an 8-digit ANGLE device id, curated or generated alike', () => {
+  // The two halves of the catalog drifted: the generated presets carried a device id and the
+  // hand-curated pool did not, so three in fifty personas reported a Windows renderer with no
+  // "(0x…)" at all. ANGLE's Renderer11 always emits one, sized by gl::FmtHex over a UINT.
+  for (let i = 0; i < 60; i += 1) {
+    const fp = deriveFingerprint(`win-devid-${i}`, { os: 'windows', engine: 'lobium' });
+    const renderer = fp.webgl.unmaskedRenderer;
+    assert.match(
+      renderer,
+      /\(0x[0-9A-F]{8}\) Direct3D11 vs_5_0 ps_5_0/,
+      `no 8-digit device id in ${renderer}`,
+    );
+  }
+});

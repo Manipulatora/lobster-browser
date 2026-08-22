@@ -147,9 +147,23 @@ const MOBILE_GLES_CAPS: WebGlCaps = {
 };
 
 /** Windows GPU renderer string in ANGLE Direct3D11 form (the only backend real Windows Chrome uses). */
-function winGpu(vendor: 'NVIDIA' | 'Intel' | 'AMD', model: string): DeviceProfile['webgl'] {
+/**
+ * A curated Windows GPU. `deviceId` is the real PCI id from pci.ids.
+ *
+ * ANGLE's D3D11 renderer string ALWAYS carries it: Renderer11 builds the description as
+ * `<desc> (<FmtHex(DeviceId)>) Direct3D11 vs_5_0 ps_5_0`, and FmtHex sizes the field as
+ * sizeof(UINT) * 2 - eight uppercase zero-padded hex digits. These curated entries omitted the
+ * parenthesis entirely, so three of every fifty personas reported a Windows renderer with no device
+ * id at all while the generated presets carried one. Both halves of the catalog now match Chrome.
+ */
+function winGpu(
+  vendor: 'NVIDIA' | 'Intel' | 'AMD',
+  model: string,
+  deviceId: string,
+): DeviceProfile['webgl'] {
   const v = `Google Inc. (${vendor})`;
-  const r = `ANGLE (${vendor}, ${model} Direct3D11 vs_5_0 ps_5_0, D3D11)`;
+  const angleDeviceId = `0x${deviceId.replace(/^0x/i, '').toUpperCase().padStart(8, '0')}`;
+  const r = `ANGLE (${vendor}, ${model} (${angleDeviceId}) Direct3D11 vs_5_0 ps_5_0, D3D11)`;
   const caps = vendor === 'NVIDIA' ? D3D11_CAPS_NVIDIA : D3D11_CAPS;
   return { vendor: v, renderer: r, unmaskedVendor: v, unmaskedRenderer: r, caps };
 }
@@ -163,56 +177,56 @@ const WINDOWS: OsTemplate = {
   devices: [
     {
       id: 'win-nvidia-rtx3060',
-      webgl: winGpu('NVIDIA', 'NVIDIA GeForce RTX 3060'),
+      webgl: winGpu('NVIDIA', 'NVIDIA GeForce RTX 3060', '0x2487'),
       screen: { width: 2560, height: 1440, dpr: 1 },
       hardwareConcurrency: 16,
       deviceMemory: 8,
     },
     {
       id: 'win-nvidia-rtx4060',
-      webgl: winGpu('NVIDIA', 'NVIDIA GeForce RTX 4060'),
+      webgl: winGpu('NVIDIA', 'NVIDIA GeForce RTX 4060', '0x2808'),
       screen: { width: 1920, height: 1080, dpr: 1 },
       hardwareConcurrency: 16,
       deviceMemory: 8,
     },
     {
       id: 'win-nvidia-gtx1660ti',
-      webgl: winGpu('NVIDIA', 'NVIDIA GeForce GTX 1660 Ti'),
+      webgl: winGpu('NVIDIA', 'NVIDIA GeForce GTX 1660 Ti', '0x2182'),
       screen: { width: 1920, height: 1080, dpr: 1 },
       hardwareConcurrency: 12,
       deviceMemory: 8,
     },
     {
       id: 'win-amd-rx6600',
-      webgl: winGpu('AMD', 'AMD Radeon RX 6600'),
+      webgl: winGpu('AMD', 'AMD Radeon RX 6600', '0x73FF'),
       screen: { width: 2560, height: 1440, dpr: 1 },
       hardwareConcurrency: 12,
       deviceMemory: 8,
     },
     {
       id: 'win-amd-rx580',
-      webgl: winGpu('AMD', 'AMD Radeon RX 580'),
+      webgl: winGpu('AMD', 'AMD Radeon RX 580', '0x6FDF'),
       screen: { width: 1920, height: 1080, dpr: 1 },
       hardwareConcurrency: 8,
       deviceMemory: 8,
     },
     {
       id: 'win-intel-irisxe',
-      webgl: winGpu('Intel', 'Intel(R) Iris(R) Xe Graphics'),
+      webgl: winGpu('Intel', 'Intel(R) Iris(R) Xe Graphics', '0x46A6'),
       screen: { width: 1920, height: 1080, dpr: 1 },
       hardwareConcurrency: 8,
       deviceMemory: 8,
     },
     {
       id: 'win-intel-uhd620',
-      webgl: winGpu('Intel', 'Intel(R) UHD Graphics 620'),
+      webgl: winGpu('Intel', 'Intel(R) UHD Graphics 620', '0x3EA0'),
       screen: { width: 1920, height: 1080, dpr: 1 },
       hardwareConcurrency: 8,
       deviceMemory: 8,
     },
     {
       id: 'win-intel-uhd630',
-      webgl: winGpu('Intel', 'Intel(R) UHD Graphics 630'),
+      webgl: winGpu('Intel', 'Intel(R) UHD Graphics 630', '0x3E91'),
       screen: { width: 1536, height: 864, dpr: 1.25 },
       hardwareConcurrency: 6,
       deviceMemory: 8,
