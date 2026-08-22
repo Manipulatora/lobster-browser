@@ -143,7 +143,7 @@ async function runPolicy(policy, origin) {
     `--user-data-dir=${userDataDir}`,
     '--remote-debugging-port=0',
     `--lang=${fp.locale.locale}`,
-    `--force-webrtc-ip-handling-policy=${forcedPolicy}`,
+    `--webrtc-ip-handling-policy=${forcedPolicy}`,
     '--disable-features=ReduceAcceptLanguage',
     lobiumConfigArg(configPath),
     ...buildGpuArgs({ mode: 'software' }),

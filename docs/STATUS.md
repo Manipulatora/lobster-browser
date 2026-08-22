@@ -1,18 +1,28 @@
 # Project Status — What Exists, What Runs Where
 
-Status date: 2026-08-19. This is the orientation document for an engineer or agent picking this
+Status date: 2026-08-21. This is the orientation document for an engineer or agent picking this
 repository up on a new machine. It records what is true today, not what is planned; the plans live in
 [`ENGINEERING.md`](ENGINEERING.md) §5 and [`LOBEE_AGENT_ROADMAP.md`](subsystems/agent.md).
 
-> **No anti-detect claim in this repository has been measured against the current patch series.**
+> **The series has now been measured in a browser — on Linux, once, on 2026-08-21.**
 >
-> The series closes several critical findings from [`ENGINE_AUDIT.md`](subsystems/engine-audit.md) — see §5.1 —
-> but "closed in the series" is not "measured in a browser". The only published engine artifact is
-> `linux-x64` at `152.0.7928.0`, which predates those patches, and **the product's own launcher
-> refuses it**: it advertises 12 native capabilities and the launcher requires 5 it does not have.
-> So the in-browser gates cannot run against anything shippable, and `gate:oracles` exits `BLOCKED`
-> rather than scoring it. Until a rebuilt binary is published, treat every closure in §5.1 as
-> *compiled and reviewed*, not *verified*.
+> A `linux-x64` engine was built from the current series at `152.0.7977.42` on the Linux host and
+> `gate:oracles` scored it: **37 of 43 oracles pass, 10 of 15 aspects green, one real regression**
+> (`canvas-getpixelmods-toblob` — `toBlob` and `getImageData` disagree on ~65-72 of 256 bytes, and
+> the count varies per run, so the two paths are drawing different noise rather than the same
+> seeded farble). The gate therefore exits `FAIL`, not `BLOCKED` — it is now describing the engine
+> instead of the environment, which is the distinction that matters.
+>
+> What that does NOT cover: `webgpu` (this host has no real GPU, `requestAdapter()` returns null),
+> `fonts` (Windows-only by nature), and `networkTls`/`networkHttp2` (no stock Chrome 152 is pinned
+> or installed to compare a ClientHello against). Those four aspects remain unmeasured, and no
+> real-GPU run has happened. Treat §5.1 closures on Windows-only surfaces as *compiled and
+> reviewed*; the rest now have one Linux datapoint behind them.
+>
+> **The published artifact is still the old one.** `engine-manifest.json` names `152.0.7928.0`,
+> which advertises 12 capabilities against the launcher's required set and is refused. The new
+> build advertises **18** and the launcher accepts it, but it has not been uploaded, so a fresh
+> install on another machine still provisions the refused binary.
 >
 > The audit itself (2026-08-14) returned **79 findings — 10 critical, 19 high**. Most remain open.
 > This is a solid native foundation with real, documented gaps, not a finished anti-detect product.
@@ -138,16 +148,24 @@ printing nothing; `build-lobee.mjs` ran `node node_modules/.bin/vite`, which is 
 
 ## 3. Build hosts — where the engine can actually be built
 
-**The engine cannot be built on the Linux dev host today, and the owner builds it on their own Windows
-PC.** Two things make that concrete rather than a preference:
+**The engine CAN be built on the Linux dev host, and was, on 2026-08-21.** This section previously
+said it could not; that was a statement about the checkout being stale, not about the hardware. The
+box is 12 cores / 47 GB / ~300 GB free, which is enough.
 
-- The Linux Chromium checkout at `~/lobium-build/src` is at `152.0.7928.0` while the series is cut
-  against `152.0.7977.42`. Building the current series there means a full `gclient sync` to the new tag
-  first, which is a fetch of tens of gigabytes before a compile that takes most of a day.
-- `npm run gate:series` consequently **fails on this host**: six patches do not apply to the pristine
-  tree, because the tree is a different Chromium. That is the gate working correctly — it is a
-  reproducibility check against the checkout, and the checkout is stale — but it means the Linux host
-  cannot certify a series it also cannot build. See §5.
+What the sync actually costs is worth recording, because the obvious command is a trap:
+
+- `gclient sync` runs a bare `git fetch origin --no-tags`, which makes Chromium's server enumerate
+  every release branch. It ran **1h55m**, moved almost nothing, tripped gclient's own
+  `STALL DETECTED` warnings and timed out. So did `git fetch --tags`.
+- Fetching the single ref instead — `git fetch origin +refs/tags/<ref>:refs/tags/<ref>` — completed
+  in ~13 minutes at ~5 MB/s. After that, `git rev-list --objects <ref> --not --all` returned **0**,
+  proving nothing further was needed, and `git checkout --force --detach <ref>` took **17 seconds**.
+  A `gclient sync` pinned to the resolved SHA then synced all 270 DEPS submodules in ~15 minutes.
+- Budget the compile at ~8.5 h for a cold official build on this host. A rebuild after a one-patch
+  change is ~45 min, because siso hashes content and reuses the object cache.
+
+`npm run gate:series` still fails on a host whose checkout has moved on from the patch bases; that is
+the gate working correctly. It is a reproducibility check, not a build prerequisite.
 
 The last engine actually produced on this host is from July and lacks five of the capabilities the
 launcher now requires; it is a development artifact, not a candidate.
@@ -158,8 +176,12 @@ Chromium's own requirements, checked against `lobium/gn-args.gn.example`:
   checkout (~50–70 GB on Windows) + `out/` (~30–60 GB without symbols) + VS/SDK (~20–30 GB) lands near the
   ~150 GB the `lobium/build.sh` header quotes.
 - **RAM:** `is_official_build` + `use_thin_lto` makes the `chrome.dll` link the peak. 16 GB is the
-  documented minimum, 32 GB the comfortable figure. On less, set `concurrent_links = 1` or the link can
-  OOM. `build.ps1` also takes `-Jobs`, because `autoninja` picks parallelism from core count alone and
+  documented minimum, 32 GB the comfortable figure. **Do not set `concurrent_links`** — with ThinLTO it
+  is illegal, not merely redundant: `//build/toolchain/concurrent_links.gni` asserts
+  `!use_thin_lto`, so `gn gen` fails outright (measured on 152.0.7977.42). Left at its default,
+  Chromium derives the limit itself from the host — `--reserve_mem_gb=10` with `--mem_per_link_gb=45`
+  on Windows and `30` on Linux — which already yields one link at a time on a small box.
+  `build.ps1` also takes `-Jobs`, because `autoninja` picks parallelism from core count alone and
   each `cl.exe` holds 1–2 GB: eight of them on a 16 GB machine page to disk and finish slower than six.
 - **CPU:** 8 cores is fine but slow. Budget 6–8 h wall clock for a clean official build, plus the ThinLTO
   link.

@@ -38,6 +38,8 @@
     "gate:migrations": "node ci/validation/migration-gate.mjs",
     "gate:oracles": "node ci/validation/audit-oracles.mjs",
     "gate:fonts": "node ci/validation/font-isolation-gate.mjs",
+    "gate:webgl": "node ci/validation/webgl-availability-gate.mjs",
+    "gate:webrtc": "node ci/validation/webrtc-leak-gate.mjs",
     "e2e:desktop": "playwright test --config ci/playwright.desktop.config.ts"
   },
   "devDependencies": {

@@ -27,6 +27,12 @@ const PATCHES = join(HERE, '..', '..', 'lobium', 'patches');
 /** Patches that live on disk but are deliberately absent from `series`. Keep the reason with it. */
 const NOT_IN_SERIES = new Map([
   ['branding/suppress-sandbox-infobar.patch', 'only needed for --no-sandbox dev runs'],
+  [
+    'branding/device-frame.patch',
+    'does not link on Linux, the only platform it targets: its hooks compile there and reference ' +
+      'LobiumDeviceFrameView, whose implementation is in no GN target (7 undefined symbols at the ' +
+      'final link of chrome, measured on 152.0.7977.42)',
+  ],
 ]);
 
 function walk(dir) {
