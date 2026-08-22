@@ -18,7 +18,7 @@ import {
   type ProfilePatch,
 } from '../../api/tauri';
 import { LaunchPanel } from '../automation/LaunchPanel';
-import { ActionDialog, Button, EmptyState, Modal, Skeleton, useToast } from '../../ui';
+import { ActionDialog, Button, EmptyState, Modal, Skeleton, useErrorModal } from '../../ui';
 import { EditProfileForm } from './EditProfileForm';
 import { ExportProfileDialog } from './ExportProfileDialog';
 import { ImportProfileDialog } from './ImportProfileDialog';
@@ -100,7 +100,7 @@ export function ProfilesView({
   /** Called whenever the profile set changes, so the shell's allowance meter can keep up. */
   onProfileCountChange?: (count: number) => void;
 } = {}): JSX.Element {
-  const toast = useToast();
+  const { showError } = useErrorModal();
   const {
     profiles,
     loading,
@@ -245,7 +245,6 @@ export function ProfilesView({
       /* non-fatal */
     }
     setShowForm(false);
-    toast.success(`Created profile “${input.name}”.`);
   }
 
   async function handleCreateProxyFromProfile(
@@ -262,17 +261,15 @@ export function ProfilesView({
    * operation once instead. The boolean is what lets it count.
    */
   async function launchProfile(id: string, password?: string, quiet = false): Promise<boolean> {
-    const target = profiles.find((profile) => profile.id === id);
     setBusy(id, true);
     try {
       const info = await launch(id, password);
       setLaunchInfo((prev) => new Map(prev).set(id, info));
       // Go straight to Lobium; connection details remain an explicit advanced action.
       // Connection details remain available via the profile ⋮ menu while running.
-      if (!quiet) toast.success(`Launched ${target?.name ?? 'profile'}.`);
       return true;
     } catch (e: unknown) {
-      if (!quiet) toast.error(`Launch failed: ${errMessage(e)}`);
+      if (!quiet) showError('Launch failed to start', e);
       return false;
     } finally {
       setBusy(id, false);
@@ -293,7 +290,7 @@ export function ProfilesView({
     const info = launchInfo.get(id);
     const target = profiles.find((profile) => profile.id === id);
     if (!info) {
-      toast.error('Profile is not running.');
+      showError('Stop failed to run');
       return;
     }
     setLaunchPanel({ profileName: target?.name ?? 'Profile', info });
@@ -309,9 +306,8 @@ export function ProfilesView({
       anchor.download = `${(target?.name ?? id).replace(/[^a-z0-9._-]+/gi, '_')}-cookies.json`;
       anchor.click();
       URL.revokeObjectURL(url);
-      toast.success('Cookies exported locally.');
     } catch (e: unknown) {
-      toast.error(`Cookie export failed: ${errMessage(e)}`);
+      showError('Cookie export failed to complete', e);
     }
   }
 
@@ -327,10 +323,9 @@ export function ProfilesView({
       if (launchPanel && profiles.find((p) => p.id === id)?.name === launchPanel.profileName) {
         setLaunchPanel(null);
       }
-      if (!quiet) toast.success('Profile stopped.');
       return true;
     } catch (e: unknown) {
-      if (!quiet) toast.error(`Stop failed: ${errMessage(e)}`);
+      if (!quiet) showError('Stop failed to complete', e);
       return false;
     } finally {
       setBusy(id, false);
@@ -340,9 +335,8 @@ export function ProfilesView({
   async function handleClone(id: string): Promise<void> {
     try {
       await clone(id);
-      toast.success('Profile cloned with a fresh fingerprint seed.');
     } catch (e: unknown) {
-      toast.error(`Clone failed: ${errMessage(e)}`);
+      showError('Clone failed to create', e);
     }
   }
 
@@ -367,9 +361,8 @@ export function ProfilesView({
         for (const id of ids) next.delete(id);
         return next;
       });
-      toast.success(ids.length === 1 ? 'Profile moved to trash.' : 'Profiles moved to trash.');
     } catch (e: unknown) {
-      toast.error(`Move to trash failed: ${errMessage(e)}`);
+      showError('Move to trash failed to complete', e);
     }
   }
 
@@ -379,7 +372,6 @@ export function ProfilesView({
     try {
       await restore(id);
       setTrashProfiles((prev) => prev.filter((profile) => profile.id !== id));
-      toast.success('Profile restored.');
     } catch (e: unknown) {
       setTrashError(`Restore failed: ${errMessage(e)}`);
     } finally {
@@ -399,7 +391,6 @@ export function ProfilesView({
     try {
       await permanentlyDelete(id);
       setTrashProfiles((prev) => prev.filter((profile) => profile.id !== id));
-      toast.success('Profile permanently deleted.');
     } catch (e: unknown) {
       setTrashError(`Permanent delete failed: ${errMessage(e)}`);
     } finally {
@@ -418,9 +409,8 @@ export function ProfilesView({
     try {
       const password = value.trim().length > 0 ? value : null;
       await setPassword(id, password);
-      toast.success(password ? 'Password protection enabled.' : 'Password protection removed.');
     } catch (e: unknown) {
-      toast.error(`Password update failed: ${errMessage(e)}`);
+      showError('Password failed to update', e);
     }
   }
 
@@ -436,7 +426,6 @@ export function ProfilesView({
         await setPassword(editingProfile.id, options.password ?? null);
       }
       setEditingProfile(null);
-      toast.success('Profile saved.');
     } finally {
       setSaving(false);
     }
@@ -447,7 +436,7 @@ export function ProfilesView({
       .map((id) => profiles.find((profile) => profile.id === id))
       .filter((profile): profile is Profile => Boolean(profile) && !isLive(profile!.status));
     if (targets.length === 0) {
-      toast.error('No selected desktop Lobium profiles can be launched.');
+      showError('Launch failed to start');
       return;
     }
 
@@ -463,11 +452,9 @@ export function ProfilesView({
       if (await launchProfile(profile.id, undefined, true)) launched += 1;
     }
 
-    if (launched > 0) toast.success(`Launched ${profileCount(launched)}.`);
     const failed = unlocked.length - launched;
-    if (failed > 0) toast.error(`${profileCount(failed)} failed to launch.`);
+    if (failed > 0) showError('Launch failed to start');
     if (locked.length > 0) {
-      toast.info(`${profileCount(locked.length)} need a password. Launch those from the row.`);
     }
   }
 
@@ -480,9 +467,8 @@ export function ProfilesView({
     for (const id of ids) {
       if (await handleStop(id, true)) stopped += 1;
     }
-    if (stopped > 0) toast.success(`Stopped ${profileCount(stopped)}.`);
     const failed = ids.length - stopped;
-    if (failed > 0) toast.error(`${profileCount(failed)} failed to stop.`);
+    if (failed > 0) showError('Stop failed to complete');
   }
 
   async function handleBulkTrash(): Promise<void> {
@@ -491,7 +477,6 @@ export function ProfilesView({
       return p && !isLive(p.status);
     });
     if (ids.length === 0) {
-      toast.info('Stop running profiles before moving them to trash.');
       return;
     }
     setPendingAction({
@@ -956,16 +941,8 @@ export function ProfilesView({
         <ExportProfileDialog
           profile={exportingProfile}
           onClose={() => setExportingProfile(null)}
-          onDone={(report) => {
+          onDone={() => {
             setExportingProfile(null);
-            // The omissions matter more than the success: a file the user believes is complete but
-            // that silently left out the proxy login is a support ticket a week later.
-            const omitted = report.omitted.length
-              ? ` Not included: ${report.omitted.join(', ')}.`
-              : '';
-            toast.success(
-              `Exported “${report.profileName}” (${(report.bytes / (1024 * 1024)).toFixed(1)} MB).${omitted}`,
-            );
           }}
         />
       ) : null}
@@ -973,11 +950,9 @@ export function ProfilesView({
       {showImport ? (
         <ImportProfileDialog
           onClose={() => setShowImport(false)}
-          onImported={(report) => {
+          onImported={() => {
             setShowImport(false);
             void refresh();
-            const warned = report.warnings.length ? ` ${report.warnings.join(' ')}` : '';
-            toast.success(`Imported “${report.profile.name}”.${warned}`);
           }}
         />
       ) : null}

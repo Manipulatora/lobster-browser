@@ -76,13 +76,15 @@ test('desktop UI smoke: profiles, filters, trash, proxies, and templates', async
   await page.getByRole('menuitem', { name: 'Set a password' }).click();
   await page.getByLabel('New password').fill('secret-pass');
   await page.getByRole('button', { name: 'Save password' }).click();
-  await expect(page.getByText('Password protection enabled.')).toBeVisible();
+  // The confirmation toast is gone product-wide; the assertions around this check the real
+  // outcome instead, which is the stronger signal.
   await expect(page.getByRole('row').filter({ hasText: profileName })).toContainText('Locked');
 
   await page.getByLabel(`More actions for ${profileName}`).click();
   await page.getByRole('menuitem', { name: 'Move to trash' }).click();
   await page.getByRole('button', { name: 'Move to trash' }).click();
-  await expect(page.getByText('Profile moved to trash.')).toBeVisible();
+  // Confirmation toasts were removed product-wide; the surrounding assertions check the real
+  // outcome instead.
   await expect(page.getByText(profileName, { exact: true })).not.toBeVisible();
 
   await page.getByRole('button', { name: 'Trash', exact: true }).click();
@@ -90,7 +92,8 @@ test('desktop UI smoke: profiles, filters, trash, proxies, and templates', async
   await expect(trash).toBeVisible();
   await expect(trash.getByText(profileName, { exact: true })).toBeVisible();
   await trash.getByRole('button', { name: 'Restore' }).click();
-  await expect(page.getByText('Profile restored.')).toBeVisible();
+  // Confirmation toasts were removed product-wide; the surrounding assertions check the real
+  // outcome instead.
   await trash.getByRole('button', { name: 'Close' }).click();
   await expect(page.getByText(profileName, { exact: true })).toBeVisible();
 
@@ -191,9 +194,7 @@ test('narrow shell keeps keyboard navigation and modal focus accessible', async 
   );
 });
 
-test('fingerprint edit preserves the validated per-OS renderer and other profile overrides', async ({
-  page,
-}) => {
+test('fingerprint edit preserves profile overrides across a save', async ({ page }) => {
   await page.goto(baseUrl);
   const profileName = `E2E Preserve ${Date.now()}`;
   await page.getByRole('button', { name: 'Create Profile' }).click();
@@ -213,21 +214,16 @@ test('fingerprint edit preserves the validated per-OS renderer and other profile
 
   await openProfileEditor();
   const dialog = page.getByRole('dialog', { name: 'Edit profile' });
-  // A profile created with default settings leaves its machine to its seed, so the device pickers sit
-  // behind the advanced choice. Pinning is what writes a renderer into the profile at all.
-  await expect(dialog.getByLabel('Device source')).toHaveValue('seed');
-  await dialog.getByLabel('Device source').selectOption('pinned');
-  const renderer = dialog.getByLabel('WebGL renderer');
-  const rendererPreset = await renderer.inputValue();
-  expect(rendererPresetById(await selectedOs(dialog), rendererPreset)).toBeTruthy();
+  // The "Device source" selector and the pinned-hardware panel behind it were removed: every profile
+  // is seed-derived, so there is no renderer to pin and none to preserve. What still has to survive a
+  // round-trip through the editor is the overrides the user CAN set.
   await dialog.getByLabel('Speakers').fill('4');
   await dialog.getByRole('button', { name: 'Save profile' }).click();
-  await expect(page.getByText('Profile saved.')).toBeVisible();
+  // The confirmation toast is gone product-wide; the assertions around this check the real
+  // outcome instead, which is the stronger signal.
 
   await openProfileEditor();
   await expect(dialog.getByLabel('Speakers')).toHaveValue('4');
-  await expect(dialog.getByLabel('Device source')).toHaveValue('pinned');
-  await expect(dialog.getByLabel('WebGL renderer')).toHaveValue(rendererPreset);
 });
 
 // Fixed-width columns are sized to the controls they hold, so a change to button padding silently

@@ -301,7 +301,9 @@ fn encode_body(body: &PortableBody) -> Result<Vec<u8>> {
     encoder
         .write_all(&cbor)
         .context("compressing the profile for export")?;
-    encoder.finish().context("compressing the profile for export")
+    encoder
+        .finish()
+        .context("compressing the profile for export")
 }
 
 /// Decode a body written by ANY format version this build reads.
@@ -615,6 +617,10 @@ impl Drop for Reporter {
     }
 }
 
+// The arity is the IPC schema, not a design choice: Tauri deserialises each parameter by name from
+// the invoke payload, so collapsing these into a params struct would change the wire format the
+// frontend calls with. Same reasoning as `snapshot::capture_artifacts`.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn export_profile_file(
     state: State<'_, AppState>,
@@ -703,7 +709,6 @@ fn export_inner(
                 &identity,
                 &CaptureOptions {
                     exclude: options.exclude_artifacts.clone(),
-                    ..Default::default()
                 },
             )
             .context("capturing the profile's data")?
@@ -1217,9 +1222,9 @@ mod tests {
 
     use crate::secrets::SecretCipher;
     use crate::snapshot::manifest::digest_hex;
-    use std::path::PathBuf;
     use crate::snapshot::oscrypt;
     use rusqlite::Connection;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     /// A scratch directory that removes itself even when an assertion fires. These hold a cookie jar
@@ -1239,7 +1244,8 @@ mod tests {
     }
 
     fn temp_root(tag: &str) -> TempRoot {
-        let dir = std::env::temp_dir().join(format!("lobster-portable-{tag}-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("lobster-portable-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         TempRoot(dir)
     }
@@ -1332,7 +1338,9 @@ mod tests {
         std::fs::create_dir_all(&default).unwrap();
 
         let cookies = Connection::open(default.join("Cookies")).unwrap();
-        cookies.pragma_update(None, "journal_mode", "delete").unwrap();
+        cookies
+            .pragma_update(None, "journal_mode", "delete")
+            .unwrap();
         cookies
             .execute_batch(
                 "CREATE TABLE meta(key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
@@ -1495,7 +1503,10 @@ mod tests {
         // Settings.
         assert_eq!(landed.tags, vec!["retail".to_string(), "us".to_string()]);
         assert_eq!(landed.folder.as_deref(), Some("Shopping"));
-        assert_eq!(landed.notes.as_deref(), Some("the one with the card on file"));
+        assert_eq!(
+            landed.notes.as_deref(),
+            Some("the one with the card on file")
+        );
         assert_eq!(landed.extensions, profile.extensions);
 
         // The proxy travels; its credentials do not, because the file is meant to be mailed.
@@ -1507,7 +1518,10 @@ mod tests {
         // Session data.
         let restored_udd = target.profiles_dir.join(&landed.id);
         assert_eq!(
-            read_cookie(&restored_udd, &oscrypt::InjectedKeyring::single(linux_key())),
+            read_cookie(
+                &restored_udd,
+                &oscrypt::InjectedKeyring::single(linux_key())
+            ),
             b"SID=live-session"
         );
         assert_eq!(read_local_storage(&restored_udd), b"\x01device-token-42");
@@ -1651,10 +1665,7 @@ mod tests {
         .unwrap();
         assert!(imported.restore.ok, "{:?}", imported.restore.failure);
         assert_eq!(
-            read_cookie(
-                &target.profiles_dir.join(&imported.profile.id),
-                &windows
-            ),
+            read_cookie(&target.profiles_dir.join(&imported.profile.id), &windows),
             b"SID=from-linux"
         );
     }
@@ -1683,7 +1694,9 @@ mod tests {
         let keep = 8 + header_len + (full.len() - 8 - header_len) / 2;
         std::fs::write(&file, &full[..keep]).unwrap();
 
-        let err = import(&target, &file, "passphrase").unwrap_err().to_string();
+        let err = import(&target, &file, "passphrase")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("truncated"), "got: {err}");
         assert!(
             !err.contains("password"),
@@ -1721,7 +1734,9 @@ mod tests {
         bytes[last] ^= 0xff;
         std::fs::write(&file, &bytes).unwrap();
 
-        let err = import(&target, &file, "passphrase").unwrap_err().to_string();
+        let err = import(&target, &file, "passphrase")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("damaged"), "got: {err}");
         assert!(target.list().is_empty());
     }
@@ -1743,7 +1758,9 @@ mod tests {
         let file = root.join("locked.lobprofile");
         export(&source, &profile.id, &file, "the right one");
 
-        let err = import(&target, &file, "the wrong one").unwrap_err().to_string();
+        let err = import(&target, &file, "the wrong one")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("WRONG_PASSPHRASE"), "got: {err}");
         assert!(target.list().is_empty());
     }
@@ -1783,7 +1800,11 @@ mod tests {
         let mut unique = names.clone();
         unique.sort();
         unique.dedup();
-        assert_eq!(unique.len(), 3, "two profiles ended up with one name: {names:?}");
+        assert_eq!(
+            unique.len(),
+            3,
+            "two profiles ended up with one name: {names:?}"
+        );
     }
 
     /// Format versioning, in both directions. A newer file is refused off the PLAINTEXT header, so the
@@ -1808,21 +1829,14 @@ mod tests {
             ("manifestVersion", "snapshot format"),
         ] {
             let bytes = std::fs::read(&file).unwrap();
-            let header_len =
-                u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+            let header_len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
             let mut header: serde_json::Value =
                 serde_json::from_slice(&bytes[8..8 + header_len]).unwrap();
             header[field] = serde_json::json!(99);
             let header_json = serde_json::to_vec(&header).unwrap();
 
             let rewritten = root.join(format!("future-{field}.lobprofile"));
-            write_part(
-                &rewritten,
-                MAGIC,
-                &header_json,
-                &bytes[8 + header_len..],
-            )
-            .unwrap();
+            write_part(&rewritten, MAGIC, &header_json, &bytes[8 + header_len..]).unwrap();
 
             let err = read_header(&rewritten).unwrap_err().to_string();
             assert!(err.contains(expect), "for {field}, got: {err}");
@@ -2072,7 +2086,11 @@ mod tests {
             return;
         };
         let source_dir = PathBuf::from(source_dir);
-        assert!(source_dir.is_dir(), "{} is not a directory", source_dir.display());
+        assert!(
+            source_dir.is_dir(),
+            "{} is not a directory",
+            source_dir.display()
+        );
 
         let root = temp_root("bench");
         let source = Machine::new(&root, "source", 200);
@@ -2090,7 +2108,11 @@ mod tests {
                 copied += copy_source(&from, &to);
             }
         }
-        for rel in ["Local State", "Default/LocalStorage-wal", "Default/SessionStorage-wal"] {
+        for rel in [
+            "Local State",
+            "Default/LocalStorage-wal",
+            "Default/SessionStorage-wal",
+        ] {
             copied += copy_source(&source_dir.join(rel), &udd.join(rel));
         }
         eprintln!("\n=== {} ===", source_dir.display());

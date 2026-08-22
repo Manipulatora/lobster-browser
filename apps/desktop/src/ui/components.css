@@ -305,7 +305,12 @@
 .lb-modal {
   width: 100%;
   max-width: 560px;
-  max-height: calc(100vh - var(--space-12));
+  /* The cap has to reserve the OVERLAY's own padding (7vh top + --space-5 bottom), not a flat
+     --space-12. A 48px allowance is smaller than 7vh on any normal desktop height, so the modal
+     could be taller than the space it sits in and the overlay scrolled instead — which is how the
+     create-profile form ran off the bottom of the screen once a section like Proxy expanded.
+     min(90vh, …) also keeps a visible gutter so it never looks welded to the viewport edges. */
+  max-height: min(90vh, calc(100vh - 7vh - var(--space-5)));
   display: flex;
   flex-direction: column;
   background: var(--surface);
@@ -679,12 +684,7 @@
 /* --- Skeleton ----------------------------------------------------------------------------------- */
 .lb-skeleton {
   border-radius: var(--radius-sm);
-  background: linear-gradient(
-    90deg,
-    var(--n-100) 25%,
-    var(--n-150) 37%,
-    var(--n-100) 63%
-  );
+  background: linear-gradient(90deg, var(--n-100) 25%, var(--n-150) 37%, var(--n-100) 63%);
   background-size: 400% 100%;
   animation: lb-shimmer 1.3s ease infinite;
 }
@@ -884,7 +884,6 @@
     display: none;
   }
 }
-
 
 /* --- Account panel, at the foot of the sidebar -------------------------------------------------- */
 
@@ -1135,13 +1134,27 @@
    76px around a "Not tested" that renders at 86 — both silently clipped by the truncation rule
    below. Actions is a single button plus the row menu now, so it costs 108px instead of the 284px
    five text buttons wanted, and the difference paid for the two columns that were short. */
-.proxies-table th:nth-child(1) { width: auto;  }  /* Proxy — takes the remainder */
-.proxies-table th:nth-child(2) { width: 76px;  }  /* Type: SOCKS5      */
-.proxies-table th:nth-child(3) { width: 180px; }  /* Endpoint          */
-.proxies-table th:nth-child(4) { width: 172px; }  /* Location + tz     */
-.proxies-table th:nth-child(5) { width: 92px;  }  /* Latency           */
-.proxies-table th:nth-child(6) { width: 124px; }  /* Status: Datacenter */
-.proxies-table th:nth-child(7) { width: 116px; }  /* Actions           */
+.proxies-table th:nth-child(1) {
+  width: auto;
+} /* Proxy — takes the remainder */
+.proxies-table th:nth-child(2) {
+  width: 76px;
+} /* Type: SOCKS5      */
+.proxies-table th:nth-child(3) {
+  width: 180px;
+} /* Endpoint          */
+.proxies-table th:nth-child(4) {
+  width: 172px;
+} /* Location + tz     */
+.proxies-table th:nth-child(5) {
+  width: 92px;
+} /* Latency           */
+.proxies-table th:nth-child(6) {
+  width: 124px;
+} /* Status: Datacenter */
+.proxies-table th:nth-child(7) {
+  width: 116px;
+} /* Actions           */
 
 /* Truncate rather than wrap: a wrapped cell changes the row height and knocks the table out of
    alignment. The Location cell is exempt because it deliberately stacks two lines. */
@@ -1163,4 +1176,10 @@
   overflow: visible;
 }
 
-
+/* The single error sentence. Red, centred, and the only failure text the product shows. */
+.error-modal__message {
+  margin: 0;
+  color: var(--danger);
+  text-align: center;
+  font-weight: var(--fw-medium);
+}

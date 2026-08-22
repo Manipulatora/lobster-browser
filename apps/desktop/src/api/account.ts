@@ -38,6 +38,8 @@ export type AccountState =
 export interface AccountClient {
   /** Open the account's billing page in the system browser. Top-ups happen there, not in the app. */
   openBilling(): Promise<void>;
+  /** The price list, for the Upgrade control. Distinct from billing, which is the wallet. */
+  openPricing(): Promise<void>;
 
   /**
    * The account summary, or null when it cannot be fetched.
@@ -52,6 +54,7 @@ export interface AccountClient {
 const tauriAccount: AccountClient = {
   summary: () => invoke<AccountSummary | null>('account_summary'),
   openBilling: () => invoke<void>('open_billing'),
+  openPricing: () => invoke<void>('open_pricing'),
 };
 
 /** In-browser development: plausible numbers so the shell can be worked on without the Rust core. */
@@ -59,6 +62,9 @@ const mockAccount: AccountClient = {
   summary: async () => ({ balanceCents: 12_00, tier: 'pro', profileLimit: 200 }),
   openBilling: async () => {
     window.open('https://lobrowser.com/account/billing', '_blank', 'noopener');
+  },
+  openPricing: async () => {
+    window.open('https://lobrowser.com/pricing', '_blank', 'noopener');
   },
 };
 

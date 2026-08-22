@@ -4,7 +4,7 @@ import ReactDOM from 'react-dom/client';
 import { App } from './App';
 import { EngineGate } from './features/engine/EngineGate';
 import { ErrorBoundary } from './ui/ErrorBoundary';
-import { ToastProvider } from './ui/Toast';
+import { ErrorModalProvider } from './ui/ErrorModal';
 // Before the tokens, so the @font-face declarations exist by the time --font references the family.
 import './assets/inter.css';
 import './ui/tokens.css';
@@ -34,11 +34,11 @@ window.addEventListener('unhandledrejection', (e) => {
 ReactDOM.createRoot(rootEl).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <ToastProvider>
+      <ErrorModalProvider>
         <EngineGate>
           <App />
         </EngineGate>
-      </ToastProvider>
+      </ErrorModalProvider>
     </ErrorBoundary>
   </React.StrictMode>,
 );

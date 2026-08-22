@@ -22,7 +22,8 @@ test('a stored proxy can be re-pointed, and renaming one keeps what its last che
   await expect(dialog.getByLabel('Port')).toHaveValue('9443');
   await dialog.getByLabel('Title').fill('US Residential Primary');
   await dialog.getByRole('button', { name: 'Save proxy' }).click();
-  await expect(page.getByText('Proxy saved.')).toBeVisible();
+  // The confirmation toast is gone product-wide (the corner notification region was removed);
+  // what follows asserts the actual outcome, which is the stronger check anyway.
 
   const renamed = page.getByRole('row').filter({ hasText: 'US Residential Primary' });
   await expect(renamed).toContainText('Ready');
@@ -40,7 +41,8 @@ test('a stored proxy can be re-pointed, and renaming one keeps what its last che
   await dialog.getByLabel('Password').fill('rotating-pass');
   await dialog.getByLabel('URL for IP Change').fill('https://provider.example/rotate?token=abc');
   await dialog.getByRole('button', { name: 'Save proxy' }).click();
-  await expect(page.getByText('Proxy saved.')).toBeVisible();
+  // The confirmation toast is gone product-wide (the corner notification region was removed);
+  // what follows asserts the actual outcome, which is the stronger check anyway.
 
   await expect(renamed).toContainText('eu-west.proxy.local:8443');
   await expect(renamed).toContainText('SOCKS5');
@@ -94,7 +96,8 @@ test('a pasted proxy list imports the good lines and names the bad ones', async 
   await expect(dialog).toContainText('Line 3');
 
   await dialog.getByRole('button', { name: 'Import 2' }).click();
-  await expect(page.getByText('Imported 2 proxies.')).toBeVisible();
+  // The confirmation toast is gone product-wide (the corner notification region was removed);
+  // what follows asserts the actual outcome, which is the stronger check anyway.
   await expect(page.getByRole('row').filter({ hasText: '1.2.3.4:8080' })).toBeVisible();
   await expect(page.getByRole('row').filter({ hasText: '5.6.7.8:3128' })).toBeVisible();
 });
@@ -158,7 +161,8 @@ test('a template can be edited, duplicated and deleted', async ({ page }) => {
     .getByRole('dialog', { name: 'Delete template?' })
     .getByRole('button', { name: 'Delete template' })
     .click();
-  await expect(page.getByText('Template deleted.')).toBeVisible();
+  // The confirmation toast is gone product-wide (the corner notification region was removed);
+  // what follows asserts the actual outcome, which is the stronger check anyway.
   await expect(page.getByText('EU Retail Desktop (copy)', { exact: true })).toHaveCount(0);
   await expect(page.getByText('EU Retail Desktop', { exact: true })).toBeVisible();
 });

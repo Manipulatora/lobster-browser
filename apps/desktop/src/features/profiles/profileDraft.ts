@@ -653,30 +653,19 @@ export function validateProfileDraft(draft: ProfileDraft): ProfileDraftIssue[] {
 }
 
 /**
- * Settings that will save and launch, but not do what their label says.
+ * Draft warnings.
  *
- * "Based on IP" reads the locale, timezone and coordinates off the proxy's exit address. With no proxy
- * attached there is no exit address to read, so the launch keeps the base persona — en-US, New York,
- * and the host's own position — while the modal still reads "Based on IP". That contradiction is
- * exactly what a detector compares, so it is surfaced before the profile is saved rather than after a
- * benchmark reports the mismatch.
+ * There are none. This used to warn that Based-on-IP knobs with no proxy attached would silently
+ * fall back to the base persona — true when the launcher refused to resolve them, and false since
+ * a proxy-less profile began deriving locale/timezone/geolocation from its own direct exit IP
+ * (`deriveGeoFromDirectIp`). Keeping the banner would have described behaviour the product no
+ * longer has.
+ *
+ * The function is kept, rather than deleted, so the warning CHANNEL stays wired to the review step:
+ * a future setting that really is misleading has somewhere to say so without re-plumbing the form.
  */
-export function profileDraftWarnings(draft: ProfileDraft): ProfileDraftIssue[] {
-  if (draft.proxyId) return [];
-  const basedOnIp = [
-    ['Language', draft.languageMode],
-    ['Timezone', draft.timezoneMode],
-    ['Geolocation', draft.geolocationMode],
-    ['WebRTC', draft.webrtcMode],
-  ] as const;
-  const affected = basedOnIp.filter(([, mode]) => mode === 'based_ip').map(([label]) => label);
-  if (!affected.length) return [];
-  return [
-    {
-      step: 'fingerprint',
-      message: `${affected.join(', ')} ${affected.length === 1 ? 'is' : 'are'} set to Based on IP, but this profile has no proxy — the launch keeps the base persona instead.`,
-    },
-  ];
+export function profileDraftWarnings(_draft: ProfileDraft): ProfileDraftIssue[] {
+  return [];
 }
 
 function rendererPolicy(draft: ProfileDraft): RendererPolicy {
@@ -748,7 +737,9 @@ export function serializeFingerprintOverrides(
   const screen = pinsDevice ? parseScreenOption(draft.screenResolution) : undefined;
   if (screen) {
     const top = isMac(draft.os) ? 25 : 0;
-    const bottom = isMac(draft.os) ? 0 : 40;
+    // 48 on Windows 11 (the OS this persona announces), 40 elsewhere - see the note in
+    // packages/fingerprint/src/derive.ts. This is the pinned-device editor's copy of that rule.
+    const bottom = isMac(draft.os) ? 0 : draft.os === 'windows' ? 48 : 40;
     overrides.screen = {
       width: screen.width,
       height: screen.height,

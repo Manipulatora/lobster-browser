@@ -213,3 +213,93 @@ mod tests {
         );
     }
 }
+
+// ── Entitlement cache ────────────────────────────────────────────────────────────────────────────
+//
+// `fetch()` needs the network, but profile creation must be gated even when the app is offline or
+// signed out — otherwise the cap is trivially bypassed by pulling the plug. The last limit the
+// server reported is therefore persisted beside the profile database and read back on create.
+
+use std::path::{Path, PathBuf};
+
+/// The allowance a team gets before it has bought anything. Mirrors `FREE_PLAN_PROFILE_LIMIT` in
+/// `packages/shared-types/src/account.ts`; both must move together.
+pub const FREE_PLAN_PROFILE_LIMIT: i64 = 3;
+
+fn cache_path(profiles_dir: &Path) -> PathBuf {
+    profiles_dir.join("entitlement.json")
+}
+
+/// Record what the server last said this account is entitled to.
+pub fn cache_entitlement(profiles_dir: &Path, tier: &str, profile_limit: i64) {
+    let body = serde_json::json!({ "tier": tier, "profileLimit": profile_limit });
+    if let Some(parent) = cache_path(profiles_dir).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(cache_path(profiles_dir), body.to_string());
+}
+
+/// The allowance to enforce right now.
+///
+/// FAILS CLOSED to the free cap: an account we have never successfully read is treated as free
+/// rather than unlimited, because the opposite turns "offline" into an unlimited licence.
+pub fn cached_profile_limit(profiles_dir: &Path) -> i64 {
+    let Ok(raw) = std::fs::read_to_string(cache_path(profiles_dir)) else {
+        return FREE_PLAN_PROFILE_LIMIT;
+    };
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("profileLimit").and_then(serde_json::Value::as_i64))
+        .filter(|limit| *limit > 0)
+        .unwrap_or(FREE_PLAN_PROFILE_LIMIT)
+}
+
+#[cfg(test)]
+mod entitlement_tests {
+    use super::*;
+
+    fn tmp() -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("lobster-ent-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_account_never_read_is_capped_at_the_free_allowance() {
+        // The bypass this exists to close: no cache must mean "free", never "unlimited".
+        let dir = tmp();
+        assert_eq!(cached_profile_limit(&dir), FREE_PLAN_PROFILE_LIMIT);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_paid_allowance_survives_going_offline() {
+        let dir = tmp();
+        cache_entitlement(&dir, "pro", 200);
+        assert_eq!(cached_profile_limit(&dir), 200);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_corrupt_or_nonsensical_cache_falls_back_to_free() {
+        // A truncated write, or a tampered file claiming 0/negative, must not unlock creation.
+        let dir = tmp();
+        std::fs::write(cache_path(&dir), "{not json").unwrap();
+        assert_eq!(cached_profile_limit(&dir), FREE_PLAN_PROFILE_LIMIT);
+        std::fs::write(cache_path(&dir), r#"{"profileLimit":0}"#).unwrap();
+        assert_eq!(cached_profile_limit(&dir), FREE_PLAN_PROFILE_LIMIT);
+        std::fs::write(cache_path(&dir), r#"{"profileLimit":-5}"#).unwrap();
+        assert_eq!(cached_profile_limit(&dir), FREE_PLAN_PROFILE_LIMIT);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn downgrading_lowers_the_cap_on_the_next_successful_read() {
+        let dir = tmp();
+        cache_entitlement(&dir, "pro", 200);
+        cache_entitlement(&dir, "free", FREE_PLAN_PROFILE_LIMIT);
+        assert_eq!(cached_profile_limit(&dir), FREE_PLAN_PROFILE_LIMIT);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

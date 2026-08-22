@@ -3,13 +3,13 @@ import type { Profile } from '@lobster/shared-types';
 import { useId, useState } from 'react';
 import { save } from '@tauri-apps/plugin-dialog';
 
-import { profilesClient, type ProfileExportReport } from '../../api/tauri';
+import { profilesClient } from '../../api/tauri';
 import { Button, Modal } from '../../ui';
 
 interface ExportProfileDialogProps {
   profile: Profile;
   onClose: () => void;
-  onDone: (report: ProfileExportReport) => void;
+  onDone: () => void;
 }
 
 /** A filename the user can find again, without characters Windows refuses. */
@@ -38,6 +38,11 @@ export function ExportProfileDialog({
   const [includeProxyCredentials, setIncludeProxyCredentials] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The finished export stays ON SCREEN rather than closing silently. A file the user cannot find
+  // is indistinguishable from an export that never ran, and the omissions matter more than the
+  // success — a file believed complete that quietly left out the proxy login is a support ticket a
+  // week later.
+  const [done, setDone] = useState<{ path: string; omitted: string[] } | null>(null);
 
   const passId = useId();
   const confirmId = useId();
@@ -66,7 +71,9 @@ export function ExportProfileDialog({
       setError(err instanceof Error ? err.message : String(err));
       return;
     }
-    // Cancelling the file picker is a normal outcome, not an error to report.
+    // Cancelling the file picker is a normal outcome, not an error to report. It is also how a
+    // picker that failed to OPEN reports itself, which is why the failure above is surfaced rather
+    // than folded in here.
     if (!destination) return;
 
     setBusy(true);
@@ -83,12 +90,42 @@ export function ExportProfileDialog({
           capture: running ? 'live' : 'quiesced',
         },
       );
-      onDone(report);
+      setDone({ path: destination, omitted: report.omitted ?? [] });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
+  }
+
+  // Finished: show WHERE the file went and anything it could not carry, then let the user dismiss.
+  if (done) {
+    return (
+      <Modal
+        open
+        onClose={() => onDone()}
+        title="Profile exported"
+        size="md"
+        ariaDescribedBy={descriptionId}
+        footer={
+          <Button variant="primary" onClick={() => onDone()}>
+            Done
+          </Button>
+        }
+      >
+        <div className="action-dialog">
+          <p id={descriptionId} className="action-dialog__description">
+            Saved to
+          </p>
+          <p className="export-done__path">{done.path}</p>
+          {done.omitted.length > 0 ? (
+            <p className="notice notice--warn" role="status">
+              Not included: {done.omitted.join(', ')}.
+            </p>
+          ) : null}
+        </div>
+      </Modal>
+    );
   }
 
   return (

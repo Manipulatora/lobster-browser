@@ -48,9 +48,13 @@ CREATE TABLE IF NOT EXISTS profiles (
     created_at             TEXT NOT NULL,          -- ISO-8601
     updated_at             TEXT NOT NULL           -- ISO-8601
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_remote_id ON profiles(remote_id)
-    WHERE remote_id IS NOT NULL;
 ";
+
+// NOTE: idx_profiles_remote_id is deliberately NOT part of SCHEMA. SCHEMA executes as a single
+// batch BEFORE `migrate`, and on a profiles.sqlite created before `remote_id` existed the
+// CREATE TABLE is a no-op — so an index over that column fails the whole batch with
+// "no such column: remote_id" and the app panics at startup. Every existing install hit this on
+// upgrade. The index is created in `migrate`, after the ALTER that adds the column.
 
 /// Profile OS targets accepted by the control plane. Android launches through the ADB/APK runner.
 const PROFILE_OS_TARGETS: &[&str] = &[
@@ -438,6 +442,19 @@ pub fn get(conn: &Connection, cipher: &SecretCipher, id: &str) -> Result<Option<
     }
 }
 
+/// Profiles that count against the plan allowance: everything not in the trash.
+///
+/// Matches the server's own rule (`apps/backend/src/profiles/profiles.service.ts` counts
+/// non-tombstoned rows), so the desktop cap and the cloud cap can never disagree about what "3
+/// profiles" means.
+pub fn count_active(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM profiles WHERE trashed_at IS NULL",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
 pub fn create(
     conn: &Connection,
     cipher: &SecretCipher,
@@ -754,7 +771,9 @@ pub fn sync_link(conn: &Connection, id: &str) -> Result<Option<SyncLink>> {
     Ok(Some(SyncLink {
         remote_id: row.get(0)?,
         remote_version: row.get::<_, i64>(1)?.max(0) as u64,
-        dirty: synced_at.as_deref().is_none_or(|at| updated_at.as_str() > at),
+        dirty: synced_at
+            .as_deref()
+            .is_none_or(|at| updated_at.as_str() > at),
         synced_at,
     }))
 }
@@ -837,7 +856,11 @@ mod tests {
 
     fn mem() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
+        // SCHEMA *and* migrate, in the same order `init` uses. SCHEMA alone is a shape that never
+        // exists on a real machine — it omits everything `migrate` adds, including the
+        // idx_profiles_remote_id uniqueness constraint that several tests below assert on.
         conn.execute_batch(SCHEMA).unwrap();
+        migrate(&conn).unwrap();
         conn
     }
 
@@ -999,6 +1022,69 @@ mod tests {
         assert!(!delete(&conn, "missing").unwrap());
     }
 
+    /// The whole point of the cap, exercised as `create_profile` composes it: read the cached
+    /// allowance, count live profiles, refuse at the boundary. A free account gets three and is
+    /// stopped on the fourth.
+    #[test]
+    fn the_free_allowance_stops_the_fourth_profile() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let dir =
+            std::env::temp_dir().join(format!("lobster-cap-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Nothing cached: an unread account is treated as free, never unlimited.
+        let limit = crate::account::cached_profile_limit(&dir);
+        assert_eq!(limit, 3);
+
+        for n in 0..3 {
+            assert!(
+                count_active(&conn).unwrap() < limit,
+                "profile {n} must be within the allowance"
+            );
+            create(&conn, &cipher, input(&format!("p{n}"))).unwrap();
+        }
+        assert_eq!(
+            count_active(&conn).unwrap(),
+            limit,
+            "the allowance is now exactly consumed"
+        );
+        assert!(
+            count_active(&conn).unwrap() >= limit,
+            "the fourth create must be refused"
+        );
+
+        // Buying a bigger package lifts it without touching any profile.
+        crate::account::cache_entitlement(&dir, "pro", 200);
+        assert!(count_active(&conn).unwrap() < crate::account::cached_profile_limit(&dir));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn count_active_counts_what_the_plan_cap_counts() {
+        // The cap compares against THIS number, so it has to mean the same thing the server means:
+        // live profiles only. Counting tombstones would let a user who deleted three profiles be
+        // locked out of creating a fourth.
+        let conn = mem();
+        let cipher = test_cipher();
+        assert_eq!(count_active(&conn).unwrap(), 0);
+
+        for name in ["one", "two", "three"] {
+            create(&conn, &cipher, input(name)).unwrap();
+        }
+        assert_eq!(count_active(&conn).unwrap(), 3);
+
+        let listed = list(&conn, &cipher).unwrap();
+        let victim = listed.first().expect("a profile to trash");
+        delete(&conn, &victim.id).unwrap();
+        assert_eq!(
+            count_active(&conn).unwrap(),
+            2,
+            "a trashed profile must free its slot"
+        );
+    }
+
     #[test]
     fn set_password_hashes_and_removes_profile_password() {
         let conn = mem();
@@ -1079,9 +1165,21 @@ mod tests {
         let db_path = dir.join("profiles.sqlite");
         let cipher = test_cipher();
         {
+            // Every column added after the first release, not just one. Filtering a single
+            // column left `remote_id` present in the "legacy" database, so the ordering bug that
+            // panicked every real upgrade could not reproduce here.
             let legacy_schema = SCHEMA
                 .lines()
-                .filter(|line| !line.contains("cookies_import_applied_at"))
+                .filter(|line| {
+                    ![
+                        "cookies_import_applied_at",
+                        "remote_id",
+                        "remote_version",
+                        "synced_at",
+                    ]
+                    .iter()
+                    .any(|c| line.contains(c))
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             let legacy = Connection::open(&db_path).unwrap();
@@ -1405,6 +1503,10 @@ mod tests {
         assert!(set_remote_id(&conn, &first.id, "srv-shared").unwrap());
         assert!(set_remote_id(&conn, &second.id, "srv-shared").is_err());
         // Unlinked rows are all NULL and must not collide with each other.
-        assert!(sync_link(&conn, &second.id).unwrap().unwrap().remote_id.is_none());
+        assert!(sync_link(&conn, &second.id)
+            .unwrap()
+            .unwrap()
+            .remote_id
+            .is_none());
     }
 }

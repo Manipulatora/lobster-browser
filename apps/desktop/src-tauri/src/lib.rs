@@ -108,13 +108,32 @@ fn open_billing() -> Result<(), String> {
         .map_err(|e| format!("could not open the billing page: {e}"))
 }
 
+/// Upgrade goes to the PRICE LIST, not the wallet.
+///
+/// These are different questions: /account/billing answers "what am I on and what do I owe", while
+/// /pricing answers "what could I move to and what does it cost". Upgrade was wired to the former
+/// only because billing was the single page the launcher already knew how to open.
 #[tauri::command]
-async fn account_summary() -> Option<account::AccountSummary> {
+fn open_pricing() -> Result<(), String> {
+    open_in_browser(&format!("{}/pricing", cloud_auth::web_origin()))
+        .map_err(|e| format!("could not open the pricing page: {e}"))
+}
+
+#[tauri::command]
+async fn account_summary(
+    state: State<'_, AppState>,
+) -> Result<Option<account::AccountSummary>, String> {
     match account::fetch().await {
-        Ok(summary) => Some(summary),
+        Ok(summary) => {
+            // Persist the allowance so `create_profile` can enforce it offline and after a restart.
+            account::cache_entitlement(&state.profiles_dir, &summary.tier, summary.profile_limit);
+            Ok(Some(summary))
+        }
         Err(err) => {
+            // Unreachable-server is not an error to the shell: it renders the signed-out state.
+            // The cached allowance stays in force, so the cap survives the outage.
             tracing::debug!(error = %format!("{err:#}"), "account summary unavailable");
-            None
+            Ok(None)
         }
     }
 }
@@ -591,6 +610,21 @@ fn create_profile(
     input: CreateProfileInput,
 ) -> Result<Profile, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    // PLAN CAP, ENFORCED HERE AND NOT IN THE UI.
+    //
+    // The desktop is local-first: creation never round-trips through the backend, so the cap the
+    // server enforces on the cloud store (`profiles.service.ts`) never applied to it and the free
+    // allowance was unlimited in practice. The guard lives at this funnel because every route to a
+    // new profile — the create form, duplicate, template instantiation, import — comes through it,
+    // and because a check in the React layer is bypassed by anyone driving the local automation API.
+    let limit = account::cached_profile_limit(&state.profiles_dir);
+    let active = profile_store::count_active(&conn).map_err(|e| e.to_string())?;
+    if active >= limit {
+        return Err(format!(
+            "PROFILE_LIMIT_REACHED: this plan allows {limit} profile{}. Upgrade to create more.",
+            if limit == 1 { "" } else { "s" }
+        ));
+    }
     profile_store::create(&conn, &state.cipher, input).map_err(|e| e.to_string())
 }
 
@@ -1024,7 +1058,53 @@ fn first_font_pack_dir(candidates: impl IntoIterator<Item = PathBuf>) -> Option<
 }
 
 #[cfg(target_os = "linux")]
+/// Whether the kernel can give Chromium its USER-NAMESPACE sandbox.
+///
+/// Chromium has two Linux sandboxes. The old one needs a root-owned setuid `chrome_sandbox` helper;
+/// the modern one needs only unprivileged user namespaces, and Chromium picks it automatically when
+/// the helper is absent. So "no setuid helper" does NOT mean "no sandbox" on any current kernel.
+fn kernel_supports_userns_sandbox() -> bool {
+    // Present and 0 on kernels (mainly older Debian/Ubuntu) that gate the feature off. Absent
+    // entirely on kernels where it is unconditionally available, which is the common case.
+    let gate_open = match std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone") {
+        Ok(value) => value.trim() != "0",
+        Err(_) => true,
+    };
+    // A hard cap of 0 disables namespaces regardless of the gate above.
+    let has_budget = std::fs::read_to_string("/proc/sys/user/max_user_namespaces")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .is_none_or(|max| max > 0);
+    gate_open && has_budget
+}
+
+/// Whether this packaged runtime has to be launched with `--no-sandbox`.
+///
+/// It almost never does. The packaged runtime cannot carry a root-owned setuid `chrome_sandbox`
+/// through a normal user copy, and the old logic concluded from that alone that sandboxing had to be
+/// switched off. That cost three things at once: the browser ran unsandboxed, Chromium showed the
+/// user a yellow "unsupported command-line flag: --no-sandbox" infobar on every launch, and that
+/// infobar is itself an automation tell on a product whose whole purpose is not looking automated.
+///
+/// The setuid helper is only one of two sandboxes. Where the kernel permits unprivileged user
+/// namespaces — measured, not assumed — Chromium sandboxes itself without any helper, so the flag is
+/// dropped and all three problems go away together.
+#[cfg(target_os = "linux")]
 fn packaged_runtime_needs_no_sandbox(chrome: &std::path::Path) -> bool {
+    packaged_runtime_needs_no_sandbox_with(chrome, kernel_supports_userns_sandbox())
+}
+
+/// The decision, with the kernel capability passed in so BOTH branches are testable. Reading /proc
+/// directly would make the outcome depend on whichever machine runs the suite, which is how a
+/// security-relevant branch ends up permanently unexercised.
+#[cfg(target_os = "linux")]
+fn packaged_runtime_needs_no_sandbox_with(
+    chrome: &std::path::Path,
+    kernel_can_userns_sandbox: bool,
+) -> bool {
+    if kernel_can_userns_sandbox {
+        return false;
+    }
     chrome.parent().is_some_and(|runtime| {
         runtime.join("LOBSTER_ENGINE.json").is_file() && !runtime.join("chrome_sandbox").is_file()
     })
@@ -1716,6 +1796,7 @@ pub fn run() {
             profile_sync::sync_status,
             account_summary,
             open_billing,
+            open_pricing,
             auth_status_cached,
             vault_status,
             app_version,
@@ -1775,7 +1856,7 @@ mod lifecycle_tests {
     use super::{first_font_pack_dir, remove_profile_data_dir};
 
     #[cfg(target_os = "linux")]
-    use super::{packaged_runtime_needs_no_sandbox, packaged_runtime_needs_software_gpu};
+    use super::packaged_runtime_needs_software_gpu;
 
     #[test]
     fn packaged_font_pack_resolution_ignores_empty_candidates() {
@@ -1792,17 +1873,35 @@ mod lifecycle_tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn only_marked_runtime_without_helper_disables_setuid_sandbox() {
+    fn the_sandbox_is_only_disabled_where_the_kernel_cannot_provide_one() {
+        use super::packaged_runtime_needs_no_sandbox_with as needs;
         let root = std::env::temp_dir().join(format!("lobster-runtime-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let chrome = root.join("chrome");
         std::fs::write(&chrome, b"").unwrap();
 
-        assert!(!packaged_runtime_needs_no_sandbox(&chrome));
+        // A kernel that CAN do the user-namespace sandbox never needs the flag, whatever the
+        // runtime looks like. This is the case on any current kernel, and it is what removes both
+        // the security downgrade and Chromium's yellow --no-sandbox infobar.
         std::fs::write(root.join("LOBSTER_ENGINE.json"), b"{}").unwrap();
-        assert!(packaged_runtime_needs_no_sandbox(&chrome));
+        assert!(!needs(&chrome, true), "userns kernel must keep the sandbox");
+
+        // Only where the kernel cannot does the old shape of the runtime decide.
+        assert!(
+            needs(&chrome, false),
+            "marked runtime, no setuid helper, no userns -> must disable"
+        );
         std::fs::write(root.join("chrome_sandbox"), b"").unwrap();
-        assert!(!packaged_runtime_needs_no_sandbox(&chrome));
+        assert!(
+            !needs(&chrome, false),
+            "a setuid helper is a sandbox, so the flag is not needed"
+        );
+        std::fs::remove_file(root.join("chrome_sandbox")).unwrap();
+        std::fs::remove_file(root.join("LOBSTER_ENGINE.json")).unwrap();
+        assert!(
+            !needs(&chrome, false),
+            "an unmarked/system Chromium is never relaxed"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -423,7 +423,7 @@ function Dashboard({
               <button
                 type="button"
                 className="lb-btn lb-btn--primary lb-btn--block sidebar__upgrade"
-                onClick={() => void accountClient.openBilling()}
+                onClick={() => void accountClient.openPricing()}
               >
                 Upgrade
               </button>

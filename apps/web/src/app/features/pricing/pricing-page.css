@@ -180,3 +180,12 @@
   background-color: #f3efff;
   color: var(--primary);
 }
+
+/* A package at or below the one being paid for. Dimmed rather than hidden: the visitor should still
+   see what their plan already covers, just not be invited to buy it again. */
+.card--unavailable {
+  opacity: 0.55;
+}
+.card--unavailable .button {
+  cursor: not-allowed;
+}

@@ -8,14 +8,18 @@
   aria-labelledby="plan-confirm-title"
   (click)="onBackdrop($event)"
 >
-  <div class="w-full max-w-sm rounded-panel border-[0.5px] border-hairline bg-surface p-6 shadow-lift">
+  <div
+    class="w-full max-w-sm rounded-panel border-[0.5px] border-hairline bg-surface p-6 shadow-lift"
+  >
     @if (loading()) {
       <p class="text-[0.9375rem] text-muted">Checking your balance…</p>
     } @else if (done()) {
       <!-- ── Paid ────────────────────────────────────────────────────────────
            The balance and the package here are the reloaded ones, not a guess: the store refetched
            the overview as part of the purchase. -->
-      <span class="flex size-11 items-center justify-center rounded-full bg-emerald-50 text-emerald-700">
+      <span
+        class="flex size-11 items-center justify-center rounded-full bg-emerald-50 text-emerald-700"
+      >
         <span class="icon text-[24px]" aria-hidden="true">check</span>
       </span>
       <h2 id="plan-confirm-title" class="mt-4 text-lg text-ink">{{ title() }}</h2>
@@ -26,7 +30,9 @@
         </p>
       }
       <p class="mt-3 text-[0.8125rem] text-muted">Balance: {{ formatCredit(balanceCents()) }}</p>
-      <button type="button" class="btn btn-md btn-primary mt-6 w-full" (click)="close()">Done</button>
+      <button type="button" class="btn btn-md btn-primary mt-6 w-full" (click)="close()">
+        Done
+      </button>
     } @else if (quote(); as q) {
       <h2 id="plan-confirm-title" class="text-lg text-ink">{{ title() }}</h2>
 
@@ -70,7 +76,9 @@
             </div>
             <div class="flex items-baseline justify-between gap-4 py-3">
               <dt class="text-[0.875rem] text-muted">Credit for your unused time</dt>
-              <dd class="text-[0.9375rem] text-emerald-700">−{{ formatCredit(q.unusedCreditCents) }}</dd>
+              <dd class="text-[0.9375rem] text-emerald-700">
+                −{{ formatCredit(q.unusedCreditCents) }}
+              </dd>
             </div>
           }
           <div class="flex items-baseline justify-between gap-4 py-3">
@@ -96,7 +104,9 @@
         @if (q.shortfallCents > 0) {
           <!-- Not an error: the package is available, the wallet is short. So the way forward is
                the top-up, not a retry of something that cannot succeed. -->
-          <p class="mt-4 rounded-xl bg-amber-50 p-3 text-[0.8125rem] leading-relaxed text-amber-900">
+          <p
+            class="mt-4 rounded-xl bg-amber-50 p-3 text-[0.8125rem] leading-relaxed text-amber-900"
+          >
             You need {{ formatCredit(q.shortfallCents) }} more to buy this. Add Credit with crypto
             and come back — nothing has been charged.
           </p>

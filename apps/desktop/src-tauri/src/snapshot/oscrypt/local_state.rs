@@ -184,7 +184,8 @@ mod tests {
     }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("lobster-localstate-{tag}-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("lobster-localstate-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -211,13 +212,9 @@ mod tests {
         // It is persisted in the shape Chromium reads, so the engine launched afterwards uses OUR key
         // rather than making a second one and razing everything sealed under the first.
         assert!(local_state.is_file());
-        let reread = resolve_key(
-            &local_state,
-            false,
-            fake_protect,
-            fake_unprotect,
-            || panic!("must not generate a second key"),
-        )
+        let reread = resolve_key(&local_state, false, fake_protect, fake_unprotect, || {
+            panic!("must not generate a second key")
+        })
         .unwrap();
         assert_eq!(reread, key);
 
@@ -271,11 +268,11 @@ mod tests {
 
         let root: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&local_state).unwrap()).unwrap();
+        assert_eq!(root["profile"]["info_cache"]["Default"]["name"], "Person 1");
         assert_eq!(
-            root["profile"]["info_cache"]["Default"]["name"],
-            "Person 1"
+            root["user_experience_metrics"]["stability"]["exited_cleanly"],
+            true
         );
-        assert_eq!(root["user_experience_metrics"]["stability"]["exited_cleanly"], true);
         assert!(key_pref(&root).is_some());
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -330,10 +327,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(resolve_key(&local_state, true, fake_protect, fake_unprotect, || {
-            panic!("must not replace it")
-        })
-        .is_err());
+        assert!(
+            resolve_key(&local_state, true, fake_protect, fake_unprotect, || {
+                panic!("must not replace it")
+            })
+            .is_err()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -350,8 +349,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(key, [0x22u8; AES256_KEY_LEN]);
-        assert!(key_pref(&serde_json::from_slice(&std::fs::read(&local_state).unwrap()).unwrap())
-            .is_some());
+        assert!(
+            key_pref(&serde_json::from_slice(&std::fs::read(&local_state).unwrap()).unwrap())
+                .is_some()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

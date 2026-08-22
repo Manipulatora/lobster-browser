@@ -50,8 +50,11 @@
           Yearly
           <span
             class="rounded-full px-2 py-0.5 text-[0.6875rem]"
-            [class]="period() === 'yearly' ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-700'"
-          >−{{ discountPercent }}%</span>
+            [class]="
+              period() === 'yearly' ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-700'
+            "
+            >−{{ discountPercent }}%</span
+          >
         </button>
       </div>
     </div>
@@ -60,12 +63,17 @@
          the card's own max-width. -->
     <div class="mt-12 grid justify-items-center gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
       @for (plan of plans; track plan.tier) {
-        <div class="card" [class.card--current]="isCurrent(plan)">
+        <div
+          class="card"
+          [class.card--current]="isCurrent(plan)"
+          [class.card--unavailable]="isUnavailable(plan) && !isCurrent(plan)"
+        >
           <div class="card_title__container">
             <span class="card_title">{{ plan.name }}</span>
 
             <p class="card_price">
-              {{ money(priceCents(plan)) }}@if (periodSuffix(plan)) {
+              {{ money(priceCents(plan)) }}
+              @if (periodSuffix(plan)) {
                 <span class="card_period">{{ periodSuffix(plan) }}</span>
               }
             </p>
@@ -100,7 +108,7 @@
             type="button"
             class="button"
             [class.button--current]="isCurrent(plan)"
-            [disabled]="isCurrent(plan)"
+            [disabled]="isUnavailable(plan)"
             (click)="choose(plan)"
           >
             {{ cta(plan) }}

@@ -10,7 +10,7 @@ import type {
 
 import { profilesClient, proxiesClient, templatesClient } from '../../api/tauri';
 import appIcon from '../../assets/brand/icon.png';
-import { ActionDialog, Button, EmptyState, Skeleton, useToast } from '../../ui';
+import { ActionDialog, Button, EmptyState, Skeleton, useErrorModal } from '../../ui';
 import { OS_OPTIONS } from '../profiles/options';
 import { Icon } from '../../ui/Icon';
 import { RowMenu } from '../../ui/RowMenu';
@@ -35,7 +35,7 @@ function proxyDetail(template: ProfileTemplate): string {
 }
 
 export function TemplatesView(): JSX.Element {
-  const toast = useToast();
+  const { showError } = useErrorModal();
   const [query, setQuery] = useState('');
   const [templates, setTemplates] = useState<ProfileTemplate[]>([]);
   const [proxies, setProxies] = useState<StoredProxy[]>([]);
@@ -86,7 +86,6 @@ export function TemplatesView(): JSX.Element {
   async function handleCreate(input: CreateProfileTemplateInput): Promise<void> {
     const created = await templatesClient.create_template(input);
     setTemplates((prev) => [created, ...prev]);
-    toast.success(`Created template “${created.name}”.`);
   }
 
   async function handleSave(
@@ -95,16 +94,14 @@ export function TemplatesView(): JSX.Element {
   ): Promise<void> {
     const saved = await templatesClient.update_template(template.id, input);
     setTemplates((prev) => prev.map((item) => (item.id === template.id ? saved : item)));
-    toast.success(`Saved template “${saved.name}”.`);
   }
 
   async function handleDuplicate(template: ProfileTemplate): Promise<void> {
     try {
       const copy = await templatesClient.duplicate_template(template.id);
       setTemplates((prev) => [copy, ...prev]);
-      toast.success(`Created “${copy.name}”.`);
     } catch (e: unknown) {
-      toast.error(`Could not duplicate template: ${e instanceof Error ? e.message : String(e)}`);
+      showError('Template failed to duplicate', e);
     }
   }
 
@@ -114,9 +111,8 @@ export function TemplatesView(): JSX.Element {
       await templatesClient.delete_template(template.id);
       setTemplates((prev) => prev.filter((item) => item.id !== template.id));
       setPendingDelete(null);
-      toast.success('Template deleted.');
     } catch (e: unknown) {
-      toast.error(`Could not delete template: ${e instanceof Error ? e.message : String(e)}`);
+      showError('Template failed to delete', e);
     } finally {
       setDeleting(false);
     }
@@ -146,9 +142,8 @@ export function TemplatesView(): JSX.Element {
     if (template.extensions) input.extensions = template.extensions;
     try {
       await profilesClient.create_profile(input);
-      toast.success(`Created profile from “${template.name}”.`);
     } catch (e: unknown) {
-      toast.error(`Could not create profile: ${e instanceof Error ? e.message : String(e)}`);
+      showError('Profile failed to create', e);
     }
   }
 

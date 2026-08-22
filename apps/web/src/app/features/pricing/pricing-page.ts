@@ -206,8 +206,27 @@ export class PricingPage {
     return rank(plan.tier) > rank(current);
   }
 
+  /**
+   * Whether this card is unreachable from where the account already is.
+   *
+   * Disabling only the exact current tier left every LOWER package clickable, so a Pro account
+   * could start a purchase for Light — a downgrade the purchase endpoint refuses anyway, after the
+   * user has picked a period and opened a confirmation dialog. Anything at or below the current
+   * rank is presented as unavailable instead.
+   *
+   * Signed-out visitors see nothing disabled: with no current tier there is no downgrade.
+   */
+  protected isUnavailable(plan: Plan): boolean {
+    const current = this.currentTier();
+    if (!current) return false;
+    return rank(plan.tier) <= rank(current);
+  }
+
   protected cta(plan: Plan): string {
     if (this.isCurrent(plan)) return 'Current plan';
+    // A package below the one being paid for is not on offer; say so rather than inviting a click
+    // the server will refuse.
+    if (this.isUnavailable(plan)) return 'Included in your plan';
     if (plan.tier === 'free') return 'Start free';
     // "Upgrade" rather than "Get" when that is what it is: the card is offering to replace a
     // package the visitor is paying for, and the button is the only place that says so.

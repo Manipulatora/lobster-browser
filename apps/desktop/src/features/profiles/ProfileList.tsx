@@ -604,7 +604,7 @@ export function ProfileList({
                   is precisely the one that will not launch — but the fix is an offline reader for
                   the profile's own cookie jar, with per-platform OSCrypt handling, which is Phase 3
                   of docs/PROFILE_DATA_SYNC.md. Until that exists, offering the item on a stopped
-                  profile only produces a guaranteed error toast. */}
+                  profile only produces a guaranteed error. */}
               {openProfile.status === 'running' ? (
                 <button
                   type="button"

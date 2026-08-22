@@ -48,8 +48,8 @@ use crate::cloud_auth;
 use crate::profile_portable::{ArtifactBytes, PortableRow};
 use crate::snapshot::manifest::{CaptureMode, SnapshotManifest};
 use crate::snapshot::vault::SnapshotVault;
-use tauri::Manager as _;
 use crate::AppState;
+use tauri::Manager as _;
 
 /// A stalled request must not wedge a capture, but a 25 MiB upload over a poor link is legitimately
 /// slow, so this is generous rather than snappy.
@@ -150,7 +150,9 @@ fn encode_payload(payload: &SyncPayload) -> Result<Vec<u8>> {
     encoder
         .write_all(&cbor)
         .context("compressing the snapshot for upload")?;
-    encoder.finish().context("compressing the snapshot for upload")
+    encoder
+        .finish()
+        .context("compressing the snapshot for upload")
 }
 
 fn decode_payload(bytes: &[u8]) -> Result<SyncPayload> {
@@ -595,7 +597,10 @@ async fn ensure_remote_id(
         let link = crate::profile_store::sync_link(&conn, profile_id)
             .map_err(|e| anyhow!("{e}"))?
             .and_then(|l| l.remote_id);
-        (crate::profile_portable::portable_row(&conn, &profile)?, link)
+        (
+            crate::profile_portable::portable_row(&conn, &profile)?,
+            link,
+        )
     };
 
     if let Some(remote_id) = existing {
@@ -683,10 +688,7 @@ pub async fn push_profile(
 /// has been using is a data-loss event dressed as a sync, so the restore is a separate, deliberate
 /// step — the exception is a profile that has no user-data-dir at all, which [`reconcile`] handles
 /// because there is nothing there to lose.
-pub async fn pull_profile(
-    state: &AppState,
-    profile_id: &str,
-) -> Result<PullOutcome> {
+pub async fn pull_profile(state: &AppState, profile_id: &str) -> Result<PullOutcome> {
     ensure_account_key(state).await?;
     let remote_id = {
         let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
@@ -808,10 +810,7 @@ pub async fn reconcile(state: &AppState) -> Result<SyncSummary> {
 /// credentials, the notes and the cookie import, none of which the server row holds. Falling back to
 /// the server row is what makes a profile created on the website — which has never pushed a
 /// snapshot — arrive here as a usable profile rather than not at all.
-async fn materialise(
-    state: &AppState,
-    remote: &RemoteProfile,
-) -> Result<String> {
+async fn materialise(state: &AppState, remote: &RemoteProfile) -> Result<String> {
     let (key, _) = content_key(state, &remote.id)?;
     let vault = open_vault(state)?;
 
@@ -850,7 +849,8 @@ async fn materialise(
 
     let created = {
         let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
-        let existing = crate::profile_store::list(&conn, &state.cipher).map_err(|e| anyhow!("{e}"))?;
+        let existing =
+            crate::profile_store::list(&conn, &state.cipher).map_err(|e| anyhow!("{e}"))?;
         let name = crate::profile_portable::free_name(&existing, &row.name);
         let created =
             crate::profile_portable::create_from_portable_row(&conn, &state.cipher, &row, name)?;
@@ -1063,7 +1063,8 @@ pub fn sync_status(state: tauri::State<'_, AppState>) -> Result<Vec<serde_json::
     let profiles = crate::profile_store::list(&conn, &state.cipher).map_err(|e| e.to_string())?;
     let mut out = Vec::with_capacity(profiles.len());
     for profile in profiles {
-        let link = crate::profile_store::sync_link(&conn, &profile.id).map_err(|e| e.to_string())?;
+        let link =
+            crate::profile_store::sync_link(&conn, &profile.id).map_err(|e| e.to_string())?;
         out.push(serde_json::json!({
             "profileId": profile.id,
             "linked": link.as_ref().is_some_and(|l| l.remote_id.is_some()),
@@ -1243,7 +1244,9 @@ mod tests {
     #[test]
     fn the_payload_encoding_does_not_inflate_artifact_bytes() {
         // Incompressible, so the win measured here is the encoding rather than the deflate.
-        let artifact: Vec<u8> = (0..64_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let artifact: Vec<u8> = (0..64_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
         let payload = payload_fixture(artifact.clone());
 
         let framed = encode_payload(&payload).unwrap();
@@ -1288,7 +1291,10 @@ mod tests {
     fn an_unframed_payload_still_reads_and_an_unknown_codec_is_named() {
         let payload = payload_fixture(b"legacy".to_vec());
         let legacy = serde_json::to_vec(&payload).unwrap();
-        assert_eq!(decode_payload(&legacy).unwrap().artifacts[0].1 .0, b"legacy");
+        assert_eq!(
+            decode_payload(&legacy).unwrap().artifacts[0].1 .0,
+            b"legacy"
+        );
 
         let mut future = PAYLOAD_MAGIC.to_vec();
         future.push(200);
@@ -1312,11 +1318,21 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            vec!["engine", "fingerprintSeed", "folder", "name", "os", "osVersion", "tags"],
+            vec![
+                "engine",
+                "fingerprintSeed",
+                "folder",
+                "name",
+                "os",
+                "osVersion",
+                "tags"
+            ],
             "the plaintext server row grew a field"
         );
 
         // The seed is immutable and the server's update DTO refuses it outright.
-        assert!(remote_row_body(&row, false).get("fingerprintSeed").is_none());
+        assert!(remote_row_body(&row, false)
+            .get("fingerprintSeed")
+            .is_none());
     }
 }

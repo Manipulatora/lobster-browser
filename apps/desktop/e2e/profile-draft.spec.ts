@@ -276,7 +276,7 @@ test('the desktop editor offers only values the launch gate accepts', () => {
   expect(scaled).toContain('Choose a scaling factor this screen size is actually presented at.');
 });
 
-test('WebRTC Real is refused next to a proxy, and Based on IP without one is a warning', () => {
+test('WebRTC Real is refused next to a proxy, and a proxy-less profile is NOT warned about', () => {
   const draft = { ...createProfileDraft('windows'), name: 'WebRTC', proxyId: 'proxy-1' };
   const messages = validateProfileDraft({ ...draft, webrtcMode: 'real' }).map(
     (issue) => issue.message,
@@ -289,9 +289,11 @@ test('WebRTC Real is refused next to a proxy, and Based on IP without one is a w
   );
   expect(profileDraftWarnings(draft)).toEqual([]);
 
-  const proxyless = profileDraftWarnings({ ...draft, proxyId: '' });
-  expect(proxyless).toHaveLength(1);
-  expect(proxyless[0]?.message).toContain('no proxy');
+  // A proxy-less profile is no longer warned about. The banner said Based-on-IP knobs would "keep
+  // the base persona instead", which stopped being true when a direct profile began resolving them
+  // against its own exit IP (deriveGeoFromDirectIp) rather than the launcher refusing outright.
+  // Warning about behaviour the product does not have is worse than saying nothing.
+  expect(profileDraftWarnings({ ...draft, proxyId: '' })).toEqual([]);
 });
 
 test('the previewed User-Agent is the one the engine derives', () => {

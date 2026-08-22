@@ -1519,11 +1519,13 @@ select.lb-select:disabled {
   font-size: var(--fs-sm);
 }
 
+/* Anchor for the floating panel. `overflow: clip` is gone deliberately — it would clip the
+   absolutely-positioned dropdown that now escapes this box. */
 .font-multiselect {
+  position: relative;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--surface);
-  overflow: clip;
 }
 
 .font-multiselect__summary {
@@ -1531,15 +1533,19 @@ select.lb-select:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  width: 100%;
   min-height: 38px;
   padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  font: inherit;
+  text-align: left;
   color: var(--text-muted);
   cursor: pointer;
-  list-style: none;
 }
-
-.font-multiselect__summary::-webkit-details-marker {
-  display: none;
+.font-multiselect__summary[aria-expanded='true'] {
+  color: var(--text);
 }
 
 .font-multiselect__summary-action {
@@ -1547,16 +1553,23 @@ select.lb-select:disabled {
   font-weight: var(--fw-medium);
 }
 
-.font-multiselect[open] .font-multiselect__summary {
-  border-bottom: 1px solid var(--border);
-  color: var(--text);
-}
-
+/* FLOATS over the form instead of expanding inside it. Growing inline pushed every following
+   field down and was a main reason the create-profile modal outgrew the viewport. */
 .font-multiselect__content {
+  position: absolute;
+  max-width: 340px;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
 }
 
 .font-multiselect__toolbar {
@@ -1584,37 +1597,50 @@ select.lb-select:disabled {
   white-space: nowrap;
 }
 
+/* ONE FONT PER ROW. This was a wrapping horizontal grid of chips, which turned 300+ families into
+   a dense block that had to be read left-to-right AND top-to-bottom to find a name — the scan
+   pattern of a word search, not a list. A single column reads down the left edge, which is how
+   every other picker in the product behaves. */
 .font-multiselect__list {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-height: 220px;
-  overflow: auto;
-  padding: 10px;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface-muted);
 }
 
 .font-chip {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  max-width: 100%;
-  min-height: 28px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
+  width: 100%;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--text);
-  font-size: var(--fs-sm);
   text-align: left;
+  font-size: var(--fs-sm);
   cursor: pointer;
 }
 
+.font-chip:hover {
+  background: var(--active-muted);
+}
+
 .font-chip--selected {
-  border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--brand-700);
+  font-weight: var(--fw-medium);
+}
+.font-chip--selected::after {
+  content: '\2713';
+  margin-left: auto;
+  color: var(--accent);
 }
 
 .extension-list {
@@ -1687,8 +1713,6 @@ select.lb-select:disabled {
     transform: translateY(-1px);
   }
 }
-
-
 
 .support-grid {
   display: grid;
@@ -1927,8 +1951,6 @@ select.lb-select:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-
 
 .fp-editor {
   display: flex;
@@ -2414,8 +2436,12 @@ code {
   animation: engine-gate-indet 1.1s ease-in-out infinite;
 }
 @keyframes engine-gate-indet {
-  0% { margin-left: -40%; }
-  100% { margin-left: 100%; }
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
 }
 .engine-gate__error {
   width: 100%;
@@ -2515,8 +2541,6 @@ code {
   margin: 0 auto 36px;
 }
 
-
-
 /* Stacked, full width, equal weight: the two paths are equally likely on a first
    run, so neither is visually demoted. */
 .auth-screen__actions {
@@ -2609,4 +2633,18 @@ code {
 
 .auth-screen__link:hover {
   color: var(--text);
+}
+
+/* The path an export was written to. Selectable and monospaced: it is meant to be read and copied,
+   not just acknowledged. */
+.export-done__path {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--fs-sm);
+  word-break: break-all;
+  user-select: text;
 }

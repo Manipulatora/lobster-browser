@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import type { ProxyConfig, ProxyTestResult, ProxyType, StoredProxy } from '@lobster/shared-types';
 
 import { proxiesClient } from '../../api/tauri';
-import { ActionDialog, Button, EmptyState, Skeleton, useToast } from '../../ui';
+import { ActionDialog, Button, EmptyState, Skeleton, useErrorModal } from '../../ui';
 import { Icon } from '../../ui/Icon';
 import { RowMenu } from '../../ui/RowMenu';
 import type { RowMenuItem } from '../../ui/RowMenu';
@@ -84,7 +84,7 @@ function resultLocation(result: ProxyTestResult): string | undefined {
 }
 
 export function ProxiesView(): JSX.Element {
-  const toast = useToast();
+  const { showError } = useErrorModal();
   const [showAddProxy, setShowAddProxy] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [editing, setEditing] = useState<StoredProxy | null>(null);
@@ -131,7 +131,6 @@ export function ProxiesView(): JSX.Element {
       ...(draft.rotateUrl ? { rotateUrl: draft.rotateUrl } : {}),
     });
     setRows((prev) => [created, ...prev]);
-    toast.success('Proxy added.');
   }
 
   async function handleSaveProxy(proxy: StoredProxy, draft: ProxyDraft): Promise<void> {
@@ -142,7 +141,6 @@ export function ProxiesView(): JSX.Element {
       rotateUrl: draft.rotateUrl,
     });
     setRows((prev) => prev.map((item) => (item.id === proxy.id ? updated : item)));
-    toast.success('Proxy saved.');
   }
 
   async function handleImportProxies(
@@ -166,10 +164,9 @@ export function ProxiesView(): JSX.Element {
     }
     if (created.length > 0) {
       setRows((prev) => [...[...created].reverse(), ...prev]);
-      toast.success(`Imported ${created.length} ${created.length === 1 ? 'proxy' : 'proxies'}.`);
     }
     if (failures.length > 0) {
-      toast.error(`${failures.length} could not be added.`);
+      showError('Proxy import failed to complete');
     }
     return failures;
   }
@@ -203,9 +200,8 @@ export function ProxiesView(): JSX.Element {
         }),
       );
       if (result.ok) {
-        toast.success(`Proxy OK · ${result.latencyMs ?? 0} ms`);
       } else {
-        toast.error(`Proxy failed: ${result.error ?? 'Unknown error'}`);
+        showError('Proxy failed to connect', result.error);
       }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
@@ -214,7 +210,7 @@ export function ProxiesView(): JSX.Element {
           item.id === proxy.id ? { ...item, status: 'error', lastError: message } : item,
         ),
       );
-      toast.error(`Proxy failed: ${message}`);
+      showError('Proxy failed to connect', message);
     } finally {
       setChecking(proxy.id, false);
     }
@@ -223,10 +219,9 @@ export function ProxiesView(): JSX.Element {
   async function rotateProxy(proxy: StoredProxy): Promise<void> {
     try {
       await proxiesClient.rotate_proxy(proxy.id);
-      toast.success('Proxy rotation requested.');
       await handleCheckProxy(proxy);
     } catch (e: unknown) {
-      toast.error(`Proxy rotation failed: ${e instanceof Error ? e.message : String(e)}`);
+      showError('Proxy failed to rotate', e);
     }
   }
 
@@ -234,9 +229,8 @@ export function ProxiesView(): JSX.Element {
     try {
       await proxiesClient.delete_proxy(proxy.id);
       setRows((previous) => previous.filter((item) => item.id !== proxy.id));
-      toast.success('Proxy deleted.');
     } catch (e: unknown) {
-      toast.error(`Proxy delete failed: ${e instanceof Error ? e.message : String(e)}`);
+      showError('Proxy failed to delete', e);
     }
   }
 

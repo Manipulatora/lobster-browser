@@ -28,16 +28,11 @@ import {
 import { OsIcon } from './OsIcon';
 import {
   ANDROID_DEVICE_TYPE_OPTIONS,
-  CPU_CORE_OPTIONS,
-  DEVICE_MEMORY_OPTIONS,
   PERSONA_MODE_OPTIONS,
   WEBRTC_MODE_OPTIONS,
   androidModelsForSelection,
   defaultSelectedFontsForTarget,
-  devicePixelRatioOptionsFor,
   findAndroidCatalogEntry,
-  rendererPresetsForTarget,
-  screenChoicesFor,
   uaPlatformVersionForSelection,
   type AndroidDeviceType,
   type PersonaMode,
@@ -51,11 +46,9 @@ import {
   draftUserAgent,
   hydrateProfileDraft,
   hydrateTemplateDraft,
-  pinDerivedDevice,
   profileDraftWarnings,
   serializeProfileDraft,
   validateProfileDraft,
-  type DeviceSource,
   type ProfileDraft,
 } from './profileDraft';
 import { Icon } from '../../ui/Icon';
@@ -136,11 +129,6 @@ function initialDraft(): FormState {
     androidDeviceModel: androidModelsForSelection('mobile', OS_VERSION_OPTIONS.android[0])[0] ?? '',
   };
 }
-
-const DEVICE_SOURCE_OPTIONS: ReadonlyArray<{ value: DeviceSource; label: string }> = [
-  { value: 'seed', label: 'From profile seed' },
-  { value: 'pinned', label: 'Pinned (advanced)' },
-];
 
 const emptyCustomProxy: CustomProxyDraft = {
   title: '',
@@ -321,54 +309,90 @@ function FontMultiSelect({
     return options.filter((font) => font.toLowerCase().includes(q));
   }, [options, query]);
 
+  // A FLOATING panel, not the old <details>: expanding inline pushed the rest of the form down and
+  // was a main reason the create-profile modal outgrew the screen. Also closes on click-outside and
+  // Escape.
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
   function toggle(font: string): void {
     if (selectedSet.has(font)) onChange(selected.filter((item) => item !== font));
     else onChange([...selected, font]);
+    // Closes on pick, like every other dropdown in this form. Bulk changes are what "Select all"
+    // and "Clear" are for; picking families one at a time reopens the panel each time by design.
+    setOpen(false);
   }
 
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: MouseEvent): void {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key === 'Escape') setOpen(false);
+    }
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
   return (
-    <details className="font-multiselect">
-      <summary className="font-multiselect__summary">
+    <div className="font-multiselect" ref={rootRef}>
+      <button
+        type="button"
+        className="font-multiselect__summary"
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        onClick={() => setOpen((prev) => !prev)}
+      >
         <span>{selected.length.toLocaleString()} OS-compatible fonts selected</span>
-        <span className="font-multiselect__summary-action">Review</span>
-      </summary>
-      <div className="font-multiselect__content">
-        <div className="font-multiselect__toolbar">
-          <input
-            className="lb-input"
-            type="search"
-            value={query}
-            aria-label="Search available fonts"
-            placeholder="Search fonts"
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          <span className="font-multiselect__tag">{selected.length} selected</span>
-          <Button size="sm" onClick={() => onChange([...options])}>
-            Select all
-          </Button>
-          <Button size="sm" onClick={() => onChange([])}>
-            Clear
-          </Button>
+        <span className="font-multiselect__summary-action">{open ? 'Close' : 'Review'}</span>
+      </button>
+      {open ? (
+        <div className="font-multiselect__content">
+          <div className="font-multiselect__toolbar">
+            <input
+              className="lb-input"
+              type="search"
+              value={query}
+              aria-label="Search available fonts"
+              placeholder="Search fonts"
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <span className="font-multiselect__tag">{selected.length} selected</span>
+            <Button size="sm" onClick={() => onChange([...options])}>
+              Select all
+            </Button>
+            <Button size="sm" onClick={() => onChange([])}>
+              Clear
+            </Button>
+            <Button size="sm" variant="primary" onClick={() => setOpen(false)}>
+              Done
+            </Button>
+          </div>
+          <div className="font-multiselect__list" role="listbox" aria-multiselectable="true">
+            {filtered.slice(0, 800).map((font) => {
+              const active = selectedSet.has(font);
+              return (
+                <button
+                  key={font}
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  className={active ? 'font-chip font-chip--selected' : 'font-chip'}
+                  onClick={() => toggle(font)}
+                >
+                  {font}
+                </button>
+              );
+            })}
+          </div>
         </div>
-        <div className="font-multiselect__list" role="listbox" aria-multiselectable="true">
-          {filtered.slice(0, 800).map((font) => {
-            const active = selectedSet.has(font);
-            return (
-              <button
-                key={font}
-                type="button"
-                role="option"
-                aria-selected={active}
-                className={active ? 'font-chip font-chip--selected' : 'font-chip'}
-                onClick={() => toggle(font)}
-              >
-                {font}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </details>
+      ) : null}
+    </div>
   );
 }
 
@@ -654,9 +678,6 @@ export function NewProfileForm({
   }, [form.os, loadFontFamilies]);
 
   const versionOptions = OS_VERSION_OPTIONS[form.os];
-  const screenOptions = screenChoicesFor(form.os, form.screenResolution);
-  const dprOptions = devicePixelRatioOptionsFor(form.os, form.screenResolution);
-  const rendererOptions = rendererPresetsForTarget(form.os);
   const androidModels = androidModelsForSelection(form.androidDeviceType, form.osVersion);
   const selectedProxy = proxies.find((proxy) => proxy.id === form.proxyId);
   const selectedTemplate = templates.find((template) => template.id === form.templateId);
@@ -694,54 +715,20 @@ export function NewProfileForm({
     [form],
   );
 
+  // Only things that are actually WRONG. This used to also restate choices the user had just made
+  // one step earlier — that the cookie jar they set to empty would be empty, that the extensions
+  // they enabled would be installed — which turned the review step into a wall of amber that said
+  // nothing and trained the eye to skip it. A warning the reader cannot act on is noise.
   const warnings = useMemo(() => {
     const items: string[] = [...personaWarnings];
     if (form.proxyId && !isCustomProxy && !selectedProxy) {
       items.push('Selected proxy is no longer available.');
     }
-    if (form.cookiesMode === 'empty') {
-      items.push('Cookie jar will start empty for this profile.');
-    } else if (form.cookiesText.trim()) {
-      items.push(
-        form.cookiesMode === 'replace'
-          ? 'Imported cookies will replace the profile cookie jar at launch.'
-          : 'Imported cookies will merge into the profile cookie jar at launch.',
-      );
-    }
-    if (form.extensions.some((extension) => extension.enabled)) {
-      items.push('Enabled extensions are verified and installed before Lobium starts.');
-    }
     return items;
-  }, [form, personaWarnings, selectedProxy, isCustomProxy]);
+  }, [form.proxyId, personaWarnings, selectedProxy, isCustomProxy]);
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]): void {
     setForm((prev) => ({ ...prev, [key]: value }));
-    setError(null);
-  }
-
-  function setDeviceSource(deviceSource: DeviceSource): void {
-    // Pinning opens on the machine the seed produced, so switching to the advanced controls never
-    // silently swaps the device the user was just shown for the first entry of every list.
-    setForm((prev) =>
-      deviceSource === 'pinned' ? pinDerivedDevice(prev) : { ...prev, deviceSource },
-    );
-    setError(null);
-  }
-
-  function setScreenResolution(screenResolution: string): void {
-    // The scale factor belongs to the panel: 1536x864 exists only at 125%, 1920x1080 never does. A
-    // ratio kept across a size change would state a display that has never been built.
-    setForm((prev) => ({
-      ...prev,
-      screenResolution,
-      devicePixelRatio: String(
-        devicePixelRatioOptionsFor(prev.os, screenResolution).includes(
-          Number(prev.devicePixelRatio),
-        )
-          ? Number(prev.devicePixelRatio)
-          : (devicePixelRatioOptionsFor(prev.os, screenResolution)[0] ?? 1),
-      ),
-    }));
     setError(null);
   }
 
@@ -1407,75 +1394,6 @@ export function NewProfileForm({
                 </>
               ) : (
                 <>
-                  <div className="fp-row">
-                    <label className="lb-field">
-                      <span className="lb-field__label">Device</span>
-                      <select
-                        className="lb-select"
-                        aria-label="Device source"
-                        value={form.deviceSource}
-                        onChange={(e) => setDeviceSource(e.target.value as DeviceSource)}
-                      >
-                        {DEVICE_SOURCE_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      {derivedDevice ? (
-                        <span className="lb-field__hint">
-                          {derivedDevice.gpuLabel} · {derivedDevice.screen.width} ×{' '}
-                          {derivedDevice.screen.height} @ {derivedDevice.screen.devicePixelRatio}× ·{' '}
-                          {derivedDevice.hardwareConcurrency} cores · {derivedDevice.deviceMemory}{' '}
-                          GB
-                        </span>
-                      ) : null}
-                    </label>
-                    {form.deviceSource === 'seed' ? (
-                      <p className="lb-field__hint fp-row__grow">
-                        Each profile’s seed picks its own machine, so two profiles created with
-                        these settings are two different computers. Pinning replaces that with the
-                        exact values below — every profile pinned alike reports one machine.
-                      </p>
-                    ) : null}
-                  </div>
-
-                  {form.deviceSource === 'pinned' ? (
-                    <div className="fp-row">
-                      <label className="lb-field">
-                        <span className="lb-field__label">Screen resolution</span>
-                        <select
-                          className="lb-select"
-                          value={form.screenResolution}
-                          onChange={(e) => setScreenResolution(e.target.value)}
-                        >
-                          {screenOptions.map((screen) => (
-                            <option key={screen} value={screen}>
-                              {screen.replace('x', ' × ')}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="lb-field">
-                        <span className="lb-field__label">Scaling</span>
-                        <select
-                          className="lb-select"
-                          value={form.devicePixelRatio}
-                          onChange={(e) => set('devicePixelRatio', e.target.value)}
-                        >
-                          {dprOptions.map((dpr) => (
-                            <option key={dpr} value={String(dpr)}>
-                              {Math.round(dpr * 100)}% · dpr {dpr}
-                            </option>
-                          ))}
-                        </select>
-                        <span className="lb-field__hint">
-                          devicePixelRatio — only the steps this panel is presented at
-                        </span>
-                      </label>
-                    </div>
-                  ) : null}
-
                   <div className="lb-field lb-field--wide">
                     <span className="lb-field__label">Fonts</span>
                     {fontCatalogLoading ? (
@@ -1656,72 +1574,6 @@ export function NewProfileForm({
                   </span>
                 ) : null}
               </label>
-
-              {personaWarnings.length > 0 ? (
-                <div className="notice notice--warn lb-field--wide" role="status">
-                  {personaWarnings.map((warning) => (
-                    <p key={warning}>{warning}</p>
-                  ))}
-                </div>
-              ) : null}
-
-              {!isAndroid && form.deviceSource === 'pinned' ? (
-                <>
-                  <div className="fp-row">
-                    <label className="lb-field">
-                      <span className="lb-field__label">CPU cores</span>
-                      <select
-                        className="lb-select"
-                        value={form.cpuCores}
-                        onChange={(e) => set('cpuCores', e.target.value)}
-                      >
-                        {CPU_CORE_OPTIONS.map((cores) => (
-                          <option key={cores} value={String(cores)}>
-                            {cores}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="lb-field">
-                      <span className="lb-field__label">Reported memory</span>
-                      <select
-                        className="lb-select"
-                        value={form.ramSize}
-                        onChange={(e) => set('ramSize', e.target.value)}
-                      >
-                        {DEVICE_MEMORY_OPTIONS.map((ram) => (
-                          <option key={ram} value={String(ram)}>
-                            {ram} GB
-                          </option>
-                        ))}
-                      </select>
-                      <span className="lb-field__hint">navigator.deviceMemory (Lobium values)</span>
-                    </label>
-                  </div>
-
-                  <label className="lb-field">
-                    <span className="lb-field__label">WebGL renderer</span>
-                    <select
-                      className="lb-select"
-                      value={form.rendererPresetId}
-                      onChange={(e) => set('rendererPresetId', e.target.value)}
-                    >
-                      <option value="host">Host GPU</option>
-                      <option value="normalized_host">Normalized host GPU</option>
-                      {rendererOptions.map((renderer) => (
-                        <option key={renderer.id} value={renderer.id}>
-                          {renderer.label}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="lb-field__hint">
-                      Host calibration is recommended. {rendererOptions.length.toLocaleString()}{' '}
-                      sourced {form.os} GPU presets available.
-                    </span>
-                  </label>
-                </>
-              ) : null}
             </fieldset>
 
             <fieldset className="fp-inline-group" disabled={legacyAndroid}>
