@@ -4,8 +4,8 @@
         powershell -ExecutionPolicy Bypass -File scripts\build-windows-product.ps1
 
     This is the Windows counterpart to build-linux-product.sh. It stages the Tauri `bundle.resources`
-    that a fresh clone does not contain, then builds. Idempotent: re-running skips completed steps
-    unless -Force is passed.
+    that a fresh clone does not contain, then builds. Re-running always rebuilds source-derived
+    resources; -Force also refreshes cached platform dependencies such as the Node runtime.
 
     WHAT THIS PRODUCES, AND WHAT IT DOES NOT
     The installer contains the UI, the Rust core, the local automation API, the profile/proxy/template
@@ -67,14 +67,13 @@ if (Test-Path $vswhere) {
 
 # ---------------------------------------------------------------------------------------------------
 Step '[1/4] Bundle the self-contained sidecar'
-if ((Test-Path (Join-Path $Resources 'sidecar\index.js')) -and -not $Force) {
-    Ok 'resources\sidecar already staged (use -Force to rebuild)'
-} else {
-    Push-Location $Root
-    try { node scripts\bundle-sidecar.mjs; if ($LASTEXITCODE -ne 0) { Die 'bundle-sidecar.mjs failed' } }
-    finally { Pop-Location }
-    Ok 'resources\sidecar'
-}
+# A staged file proves only that some bundle once succeeded, not that it contains the current
+# workspace sources. bundle-sidecar.mjs rebuilds every input package and smoke-tests the artifact,
+# so it must run on every product build rather than relying on an existence check.
+Push-Location $Root
+try { node scripts\bundle-sidecar.mjs; if ($LASTEXITCODE -ne 0) { Die 'bundle-sidecar.mjs failed' } }
+finally { Pop-Location }
+Ok 'resources\sidecar'
 
 # ---------------------------------------------------------------------------------------------------
 Step "[2/4] Vendor the Windows Node runtime ($NodeVersion)"

@@ -3,10 +3,10 @@
  * Bundle a self-contained engine-runner sidecar for packaged desktop installs (DSK-5/11).
  *
  * Output: apps/desktop/src-tauri/resources/sidecar/
- *   index.js          â€” entry (copies dist/index.js)
- *   lib/â€¦             â€” engine-runner dist
- *   node_modules/     â€” @lobster/* + proxy-chain/undici (no patchright: CDP is first-party)
- *   package.json      â€” marks the bundle as ESM
+ *   index.js          — entry (copies dist/index.js)
+ *   lib/…             — engine-runner dist
+ *   node_modules/     — @lobster/* + proxy-chain/undici (no patchright: CDP is first-party)
+ *   package.json      — marks the bundle as ESM
  *
  * The Rust core spawns: `$LOBSTER_NODE_BIN <resources>/sidecar/index.js`
  */
@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repo = join(here, '..'); // scripts/ â†’ lobster-browser/
+const repo = join(here, '..'); // scripts/ → lobster-browser/
 const outDir = join(repo, 'apps/desktop/src-tauri/resources/sidecar');
 const require = createRequire(import.meta.url);
 
@@ -27,7 +27,7 @@ const require = createRequire(import.meta.url);
  *
  * Spawning the `npm` wrapper is a portability trap. On Windows `npm` is npm.cmd, and since the
  * CVE-2024-27980 hardening (Node >= 18.20.2 / 20.12.2) spawnSync REFUSES to execute a .cmd/.bat
- * unless shell:true â€” it fails with EINVAL and a null status, which the old
+ * unless shell:true — it fails with EINVAL and a null status, which the old
  * `process.exit(r.status ?? 1)` turned into a silent exit-1 on the very first workspace. Using
  * shell:true instead fixes that but trips DEP0190 (args are concatenated, not escaped).
  * Running npm-cli.js under the current interpreter avoids both, on every platform.
@@ -45,7 +45,7 @@ function resolveNpmCli() {
 const npmCli = resolveNpmCli();
 
 function mustBuild(workspace) {
-  console.log(`[bundle-sidecar] building ${workspace}â€¦`);
+  console.log(`[bundle-sidecar] building ${workspace}…`);
   const args = ['run', 'build', '--workspace', workspace];
   const r = npmCli
     ? spawnSync(process.execPath, [npmCli, ...args], {
@@ -60,7 +60,7 @@ function mustBuild(workspace) {
         env: process.env,
         shell: process.platform === 'win32',
       });
-  // spawn failures (ENOENT, EACCES) surface on r.error with a null status â€” report them instead of
+  // spawn failures (ENOENT, EACCES) surface on r.error with a null status — report them instead of
   // exiting with a bare code.
   if (r.error) {
     console.error(`[bundle-sidecar] cannot run npm: ${r.error.message}`);
@@ -91,7 +91,7 @@ function copyPkg(name, destName = name) {
   const dest = join(outDir, 'node_modules', destName);
   mkdirSync(dirname(dest), { recursive: true });
   cpSync(src, dest, { recursive: true, filter: (p) => !p.includes('/.git') });
-  console.log(`[bundle-sidecar] copied ${name} â†’ node_modules/${destName}`);
+  console.log(`[bundle-sidecar] copied ${name} → node_modules/${destName}`);
 }
 
 // 1. Build workspace packages the sidecar imports.
@@ -216,12 +216,12 @@ writeFileSync(
     .find((m) => m && m.id === 1);
 
   if (!pong || pong.ok !== true || pong.result?.pong !== true) {
-    console.error('[bundle-sidecar] SMOKE TEST FAILED â€” the bundle does not start.');
+    console.error('[bundle-sidecar] SMOKE TEST FAILED — the bundle does not start.');
     if (res.error) console.error(`  spawn error: ${res.error.message}`);
     if (res.stderr) console.error(res.stderr.split('\n').slice(0, 15).join('\n'));
     if (stdout) console.error(`  stdout: ${stdout.slice(0, 400)}`);
     console.error(
-      '\n  A missing runtime dependency is the usual cause. Add it to the third-party list above â€”\n' +
+      '\n  A missing runtime dependency is the usual cause. Add it to the third-party list above —\n' +
         '  copyPkg only warns when a package is absent, so the bundle is produced either way.',
     );
     process.exit(1);
@@ -229,4 +229,4 @@ writeFileSync(
   console.log('[bundle-sidecar] smoke test OK (ping/pong)');
 }
 
-console.log(`[bundle-sidecar] done â†’ ${outDir}`);
+console.log(`[bundle-sidecar] done → ${outDir}`);

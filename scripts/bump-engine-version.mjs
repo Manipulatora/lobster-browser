@@ -8,17 +8,18 @@
 //   node scripts/bump-engine-version.mjs --latest-stable               # resolve the target from the API
 //
 // WHY THIS EXISTS
-// The version lives in three places that must never disagree:
+// The version lives in four places that must never disagree:
 //
 //   1. lobium/build.sh          CHROMIUM_REF   — which Chromium source gets built
-//   2. packages/fingerprint     ENGINE_CHROME  — what every persona's UA claims
-//   3. engine-manifest.json     version/url/sha256 — which tarball first-run provisioning installs
+//   2. lobium/build.ps1         ChromiumRef    — the same build on Windows
+//   3. packages/fingerprint     ENGINE_CHROME  — what every persona's UA claims
+//   4. engine-manifest.json     version/url/sha256 — which tarball first-run provisioning installs
 //
-// (2) is a lie the moment it disagrees with the binary produced by (1) and shipped by (3): a detector
+// (3) is a lie the moment it disagrees with the binaries produced by (1)/(2) and shipped by (4): a detector
 // that feature-probes the engine, or simply reads getHighEntropyValues(['fullVersionList']), sees the
-// contradiction directly. Bumping them by hand is three chances to get that wrong, so it is one command.
+// contradiction directly. Bumping them by hand is four chances to get that wrong, so it is one command.
 //
-// (3) IS GATED ON A REAL ARTIFACT. Pointing the manifest at a version whose tarball has not been built
+// (4) IS GATED ON A REAL ARTIFACT. Pointing the manifest at a version whose tarball has not been built
 // and uploaded does not "prepare" anything — it breaks first-run provisioning for every user, because
 // the URL 404s or the SHA-256 mismatches. So the manifest only moves when --tarball/--sha256 supplies a
 // digest that exists. Between the source bump and the rebuild, `scripts/track-upstream.mjs` reports the
@@ -43,6 +44,7 @@ const VERSION_RE = /^\d+\.\d+\.\d+\.\d+$/;
 const TIMEOUT_MS = Number(process.env.LOBSTER_TRACK_TIMEOUT_MS || 20_000);
 
 const BUILD_SH = 'lobium/build.sh';
+const BUILD_PS1 = 'lobium/build.ps1';
 const POOLS_TS = 'packages/fingerprint/src/pools.ts';
 const MANIFEST = 'apps/desktop/src-tauri/resources/engine-manifest.json';
 
@@ -269,6 +271,9 @@ async function main() {
       /CHROMIUM_REF="\$\{CHROMIUM_REF:-[0-9.]+\}"/,
       `CHROMIUM_REF="\${CHROMIUM_REF:-${target}}"`,
     ],
+  ]);
+  await patch(BUILD_PS1, [
+    ['ChromiumRef', /\$ChromiumRef = '[0-9.]+'/, `$ChromiumRef = '${target}'`],
   ]);
   await patch(POOLS_TS, [
     ['ENGINE_CHROME.major', /(ENGINE_CHROME[\s\S]*?major:\s*')[0-9]+(')/, `$1${major}$2`],

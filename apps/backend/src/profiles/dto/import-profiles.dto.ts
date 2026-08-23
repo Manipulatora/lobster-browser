@@ -5,6 +5,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   ValidateNested,
 } from 'class-validator';
@@ -42,7 +43,9 @@ export class ProfileImportItemDto {
   osVersion?: string;
 
   @IsString()
-  @MaxLength(256)
+  @Matches(/^[0-9a-f]{8,256}$/, {
+    message: 'fingerprintSeed must be 8 to 256 lowercase hexadecimal characters',
+  })
   fingerprintSeed!: string;
 
   @IsOptional()

@@ -5,9 +5,11 @@ import {
   applyGeoToFingerprint,
   ANDROID_PHONE_MODEL_CATALOG,
   ANDROID_TABLET_MODEL_CATALOG,
+  coherentGpuIdentity,
   deriveAndroidFingerprint,
   validateAndroidFingerprintCoherence,
   validateFingerprintCoherence,
+  webgpuIdentityFor,
 } from './index.js';
 import { ANDROID_TEMPLATE } from './pools.js';
 import { generateSeed } from './seed.js';
@@ -72,6 +74,7 @@ test('Android fingerprints carry the complete mobile identity chain', () => {
   );
   assert.ok(fp.fonts.includes('Roboto'));
   assert.ok(fp.webgl.renderer.includes('OpenGL ES') || fp.webgl.renderer.includes('Vulkan'));
+  assert.deepEqual(fp.webgpu, webgpuIdentityFor(fp.webgl));
 });
 
 test('selected Google Play phone/tablet models own the complete Android identity chain', () => {
@@ -190,7 +193,7 @@ test('Android catalog is exhaustive-coherent, not just sampled-coherent', () => 
         colorDepth: 24,
         devicePixelRatio: device.screen.dpr,
       },
-      webgl: { ...device.webgl },
+      ...coherentGpuIdentity({ ...device.webgl }),
       fonts: [...ANDROID_TEMPLATE.fonts],
     };
 
@@ -265,6 +268,17 @@ test('Android coherence flags desktop-shaped and internally mixed profiles', () 
   const desktopFonts = coherentAndroid();
   desktopFonts.fonts = ['Segoe UI', 'Calibri', 'Arial'];
   assertAndroidFlags(desktopFonts, /Roboto\/Noto Sans|desktop-only/);
+
+  const mismatchedWebgpu = coherentAndroid();
+  mismatchedWebgpu.webgpu = { ...mismatchedWebgpu.webgpu, vendor: 'nvidia' };
+  assertAndroidFlags(mismatchedWebgpu, /WebGPU adapter identity does not match/);
+});
+
+test('Android coherence rejects a missing WebGPU block instead of leaking the host adapter', () => {
+  const fp = coherentAndroid() as Omit<AndroidFingerprint, 'webgpu'> &
+    Partial<Pick<AndroidFingerprint, 'webgpu'>>;
+  delete fp.webgpu;
+  assertAndroidFlags(fp as AndroidFingerprint, /WebGPU adapter identity is missing/);
 });
 
 test('desktop coherence validator rejects Android instead of treating it as launchable desktop', () => {

@@ -640,7 +640,6 @@ async function fetchWithTimeout(
     timedOut = true;
     controller.abort();
   }, timeoutMs);
-  timer.unref();
 
   try {
     return await fetch(url, { ...init, signal: controller.signal });

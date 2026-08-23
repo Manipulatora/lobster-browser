@@ -23,6 +23,11 @@ WorkingDirectory=/opt/lobster/backend
 # Secrets live in /etc, owned by root and readable only by the service user — never in the repo
 # tree, where a `git add -f` or a directory backup carries JWT_SECRET and DATABASE_URL with it.
 EnvironmentFile=/etc/lobster/backend.env
+# `main.ts` trusts exactly one reverse-proxy hop. Keep the app reachable only by the nginx instance
+# on this machine; exposing :8080 directly would let a client supply a forged X-Forwarded-For value
+# and choose the address used by the application rate limiter. A systemd drop-in can replace this
+# for an intentionally different topology, but the shipped single-host layout must fail closed.
+Environment=HOST=127.0.0.1
 ExecStart=/usr/bin/node dist/main.js
 
 # `/health` is unconditional liveness; `/health/ready` additionally proves Postgres answers, which

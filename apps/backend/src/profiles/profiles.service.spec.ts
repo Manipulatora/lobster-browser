@@ -1,15 +1,21 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import type { Profile } from '@lobster/shared-types';
 
-import type { AuditService } from '../audit/audit.service';
+import type { AuditRepository } from '../audit/audit.repository';
+import { AuditService } from '../audit/audit.service';
 import type { TeamsRepository } from '../teams/teams.repository';
 import { InMemoryBlobStore } from './blob/in-memory-blob-store';
+import { InMemoryProfilesRepository } from './in-memory-profiles.repository';
 import type { ProfilesRepository } from './profiles.repository';
-import { ProfilesService, type SyncProfileInput } from './profiles.service';
+import {
+  DEFAULT_FREE_PROFILE_LIMIT,
+  ProfilesService,
+  type SyncProfileInput,
+} from './profiles.service';
 
 /** No S3_* configured — the blob refs the service builds then name the in-memory store. */
 const config = { get: () => undefined } as unknown as ConfigService;
@@ -35,6 +41,138 @@ function makeService(cfg: ConfigService = config): {
   const audit = { record: async () => {} } as unknown as AuditService;
   return { service: new ProfilesService(profiles, teams, blobs, audit, cfg), blobs };
 }
+
+function makeProfileCreationService(): {
+  service: ProfilesService;
+  repository: InMemoryProfilesRepository;
+  auditActions: string[];
+} {
+  const repository = new InMemoryProfilesRepository();
+  const teams = {
+    getMembership: async () => ({ teamId: 'team-1', userId: 'user-1', role: 'admin' }),
+  } as unknown as TeamsRepository;
+  const auditActions: string[] = [];
+  const audit = {
+    record: async (input: { action: string }) => {
+      auditActions.push(input.action);
+    },
+  } as unknown as AuditService;
+  return {
+    service: new ProfilesService(repository, teams, new InMemoryBlobStore(), audit, config),
+    repository,
+    auditActions,
+  };
+}
+
+test('two creates racing for the final plan slot produce one profile and one 403', async () => {
+  const { service, repository, auditActions } = makeProfileCreationService();
+  for (let index = 0; index < DEFAULT_FREE_PROFILE_LIMIT - 1; index += 1) {
+    await service.create(
+      'user-1',
+      { name: `Existing ${index}`, engine: 'lobium', os: 'windows' },
+      'team-1',
+    );
+  }
+  const auditCountBeforeRace = auditActions.length;
+
+  const results = await Promise.allSettled([
+    service.create('user-1', { name: 'Racer A', engine: 'lobium', os: 'windows' }, 'team-1'),
+    service.create('user-1', { name: 'Racer B', engine: 'lobium', os: 'windows' }, 'team-1'),
+  ]);
+
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal(
+    results.filter(
+      (result) => result.status === 'rejected' && result.reason instanceof ForbiddenException,
+    ).length,
+    1,
+  );
+  const stored = await repository.findAllByTeam('team-1');
+  assert.equal(stored.length, DEFAULT_FREE_PROFILE_LIMIT);
+  assert.equal(stored.filter((profile) => /^Racer [AB]$/.test(profile.name)).length, 1);
+  assert.deepEqual(auditActions.slice(auditCountBeforeRace), ['profile.create']);
+});
+
+test('capacity-rejected bulk and import batches write no profiles or audits', async () => {
+  const { service, repository, auditActions } = makeProfileCreationService();
+  for (let index = 0; index < DEFAULT_FREE_PROFILE_LIMIT - 1; index += 1) {
+    await service.create(
+      'user-1',
+      { name: `Existing ${index}`, engine: 'lobium', os: 'windows' },
+      'team-1',
+    );
+  }
+  const auditCountBeforeFailures = auditActions.length;
+
+  await assert.rejects(
+    () =>
+      service.bulkCreate(
+        'user-1',
+        { count: 2, namePrefix: 'Bulk', engine: 'lobium', os: 'windows' },
+        'team-1',
+      ),
+    ForbiddenException,
+  );
+  await assert.rejects(
+    () =>
+      service.importBundle(
+        'user-1',
+        {
+          version: 1,
+          profiles: [
+            {
+              name: 'Imported A',
+              engine: 'lobium',
+              os: 'windows',
+              fingerprintSeed: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            },
+            {
+              name: 'Imported B',
+              engine: 'lobium',
+              os: 'windows',
+              fingerprintSeed: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            },
+          ],
+        },
+        'team-1',
+      ),
+    ForbiddenException,
+  );
+
+  const stored = await repository.findAllByTeam('team-1');
+  assert.equal(stored.length, DEFAULT_FREE_PROFILE_LIMIT - 1);
+  assert.equal(
+    stored.some((profile) => /^(Bulk|Imported)/.test(profile.name)),
+    false,
+  );
+  assert.deepEqual(auditActions.slice(auditCountBeforeFailures), []);
+});
+
+test('a failed best-effort audit write cannot turn a committed bulk create into an API failure', async () => {
+  const repository = new InMemoryProfilesRepository();
+  const teams = {
+    getMembership: async () => ({ teamId: 'team-1', userId: 'user-1', role: 'admin' }),
+  } as unknown as TeamsRepository;
+  const audit = new AuditService(
+    {
+      record: async () => {
+        throw new Error('audit store unavailable');
+      },
+      listByTeam: async () => [],
+    } as unknown as AuditRepository,
+    teams,
+  );
+  const service = new ProfilesService(repository, teams, new InMemoryBlobStore(), audit, config);
+
+  const created = await service.bulkCreate(
+    'user-1',
+    { count: 2, namePrefix: 'Committed', engine: 'lobium', os: 'windows' },
+    'team-1',
+  );
+
+  assert.equal(created.length, 2);
+  assert.equal((await repository.findAllByTeam('team-1')).length, 2);
+});
 
 test('two interleaved pushes at the same baseVersion resolve to exactly one success and one 409 (atomic compare-and-set)', async () => {
   const { service, blobs } = makeService();
@@ -64,6 +202,25 @@ test('two interleaved pushes at the same baseVersion resolve to exactly one succ
   assert.equal(latest?.version, 1);
 });
 
+test('a direct push without baseVersion is a 400 and cannot mutate the blob store', async () => {
+  const { service, blobs } = makeService();
+
+  await assert.rejects(
+    () =>
+      service.sync(
+        'user-1',
+        'p1',
+        {
+          direction: 'push',
+          payload: Buffer.from('must-not-write').toString('base64'),
+        } as unknown as SyncProfileInput,
+        'team-1',
+      ),
+    BadRequestException,
+  );
+  assert.equal(await blobs.getLatest('team-1/p1'), null);
+});
+
 test('blobRef names the bucket and key prefix the store actually writes under', async () => {
   // Only the ref DERIVATION is under test (the in-memory store still holds the bytes here). The
   // ref used to be a hardcoded `s3://lobster-profiles/…` that ignored both settings, so every ref
@@ -76,7 +233,7 @@ test('blobRef names the bucket and key prefix the store actually writes under', 
   const result = await service.sync(
     'user-1',
     'p1',
-    { direction: 'push', payload: Buffer.from('cipher').toString('base64') },
+    { direction: 'push', payload: Buffer.from('cipher').toString('base64'), baseVersion: 0 },
     'team-1',
   );
   assert.equal(result.blobRef, 's3://lobster-blobs/profiles/team-1/p1/1.enc');

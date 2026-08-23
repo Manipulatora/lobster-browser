@@ -462,10 +462,17 @@ mod tests {
     /// version of this check belongs in CI, where the checkout is guaranteed.
     #[test]
     fn tracked_prefs_cover_the_forks_list() {
-        let source = Path::new(
-            "/home/ivyhfx/lobium-build/src/chrome/browser/prefs/chrome_pref_service_factory.cc",
-        );
-        let Ok(text) = std::fs::read_to_string(source) else {
+        let Some(checkout) = std::env::var_os("LOBIUM_CHROMIUM_SRC")
+            .or_else(|| std::env::var_os("CHROMIUM_SRC"))
+        else {
+            eprintln!(
+                "skipping tracked-pref drift check: set LOBIUM_CHROMIUM_SRC to a Chromium checkout"
+            );
+            return;
+        };
+        let source = Path::new(&checkout)
+            .join("chrome/browser/prefs/chrome_pref_service_factory.cc");
+        let Ok(text) = std::fs::read_to_string(&source) else {
             eprintln!(
                 "skipping tracked-pref drift check: {} not present",
                 source.display()

@@ -1,8 +1,17 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import type { Membership, Role, Team } from '@lobster/shared-types';
 
 import { PrismaService } from '../prisma/prisma.service';
-import type { TeamsRepository } from './teams.repository';
+import type {
+  LeaveTeamResult,
+  RemoveMemberResult,
+  SetRoleResult,
+  TeamsRepository,
+} from './teams.repository';
+
+/** Prisma reports a serializable write conflict/deadlock as P2034 and explicitly requires retry. */
+const SERIALIZABLE_ATTEMPTS = 5;
 
 /** The subset of a Prisma `teams` row this repository maps to a `Team`. */
 interface TeamRow {
@@ -31,8 +40,13 @@ export class PrismaTeamsRepository implements TeamsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   async createTeam(ownerUserId: string, name: string): Promise<Team> {
-    const row = await this.prisma.team.create({ data: { name, ownerUserId } });
-    return this.toTeam(row);
+    return this.prisma.$transaction(async (tx) => {
+      const row = await tx.team.create({ data: { name, ownerUserId } });
+      await tx.membership.create({
+        data: { teamId: row.id, userId: ownerUserId, role: 'admin' },
+      });
+      return this.toTeam(row);
+    });
   }
 
   async addMember(teamId: string, userId: string, role: Role): Promise<Membership> {
@@ -46,14 +60,6 @@ export class PrismaTeamsRepository implements TeamsRepository {
       orderBy: { createdAt: 'asc' },
     });
     return rows.map((row) => this.toMembership(row));
-  }
-
-  async setRole(teamId: string, userId: string, role: Role): Promise<Membership> {
-    const row = await this.prisma.membership.update({
-      where: { userId_teamId: { userId, teamId } },
-      data: { role },
-    });
-    return this.toMembership(row);
   }
 
   async findTeamsForUser(userId: string): Promise<Team[]> {
@@ -71,15 +77,113 @@ export class PrismaTeamsRepository implements TeamsRepository {
     return row ? this.toMembership(row) : null;
   }
 
-  async removeMember(teamId: string, userId: string): Promise<boolean> {
-    try {
-      await this.prisma.membership.delete({
-        where: { userId_teamId: { userId, teamId } },
+  async setRoleAsAdmin(
+    teamId: string,
+    actorUserId: string,
+    targetUserId: string,
+    role: Role,
+  ): Promise<SetRoleResult> {
+    return this.runSerializable(async (tx) => {
+      const actor = await tx.membership.findUnique({
+        where: { userId_teamId: { userId: actorUserId, teamId } },
       });
-      return true;
-    } catch {
-      return false;
+      if (!actor) return { outcome: 'actor_not_member' };
+      if (actor.role !== 'admin') return { outcome: 'actor_not_admin' };
+
+      const target = await tx.membership.findUnique({
+        where: { userId_teamId: { userId: targetUserId, teamId } },
+      });
+      if (!target) return { outcome: 'target_not_member' };
+
+      if (role === 'member' && target.role === 'admin') {
+        const adminCount = await tx.membership.count({ where: { teamId, role: 'admin' } });
+        if (adminCount <= 1) return { outcome: 'last_admin' };
+      }
+
+      const row = await tx.membership.update({
+        where: { userId_teamId: { userId: targetUserId, teamId } },
+        data: { role },
+      });
+      return { outcome: 'updated', membership: this.toMembership(row) };
+    });
+  }
+
+  async removeMemberAsAdmin(
+    teamId: string,
+    actorUserId: string,
+    targetUserId: string,
+  ): Promise<RemoveMemberResult> {
+    return this.runSerializable(async (tx) => {
+      const actor = await tx.membership.findUnique({
+        where: { userId_teamId: { userId: actorUserId, teamId } },
+      });
+      if (!actor) return { outcome: 'actor_not_member' };
+      if (actor.role !== 'admin') return { outcome: 'actor_not_admin' };
+
+      const target = await tx.membership.findUnique({
+        where: { userId_teamId: { userId: targetUserId, teamId } },
+      });
+      if (!target) return { outcome: 'target_not_member' };
+
+      if (target.role === 'admin') {
+        const adminCount = await tx.membership.count({ where: { teamId, role: 'admin' } });
+        if (adminCount <= 1) return { outcome: 'last_admin' };
+      }
+
+      await tx.membership.delete({
+        where: { userId_teamId: { userId: targetUserId, teamId } },
+      });
+      return { outcome: 'removed' };
+    });
+  }
+
+  async leaveTeam(teamId: string, actorUserId: string): Promise<LeaveTeamResult> {
+    return this.runSerializable(async (tx) => {
+      const actor = await tx.membership.findUnique({
+        where: { userId_teamId: { userId: actorUserId, teamId } },
+      });
+      if (!actor) return { outcome: 'actor_not_member' };
+
+      if (actor.role === 'admin') {
+        const adminCount = await tx.membership.count({ where: { teamId, role: 'admin' } });
+        if (adminCount <= 1) return { outcome: 'last_admin' };
+      }
+
+      await tx.membership.delete({
+        where: { userId_teamId: { userId: actorUserId, teamId } },
+      });
+      return { outcome: 'left' };
+    });
+  }
+
+  /**
+   * Serializable isolation is what turns the admin-count predicate into an invariant across rows.
+   * Under the default READ COMMITTED isolation, two transactions can each count two admins and
+   * update/delete a different row. PostgreSQL SSI aborts one of those transactions; retrying it
+   * observes the winner and returns `last_admin` (or an authorization failure) instead.
+   */
+  private async runSerializable<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= SERIALIZABLE_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.prisma.$transaction(operation, {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        });
+      } catch (error) {
+        if (!this.isSerializationConflict(error) || attempt === SERIALIZABLE_ATTEMPTS) throw error;
+      }
     }
+    throw new Error('unreachable: serializable membership transaction exhausted without throwing');
+  }
+
+  private isSerializationConflict(error: unknown): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      (error as { code?: unknown }).code === 'P2034'
+    );
   }
 
   private toTeam(row: TeamRow): Team {

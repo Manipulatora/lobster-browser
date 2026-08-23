@@ -61,12 +61,15 @@ $root = Split-Path -Parent $PSScriptRoot
 # ---------------------------------------------------------------------------------------------
 # Locate the build output
 # ---------------------------------------------------------------------------------------------
+$configuredOut = if ($env:LOBIUM_CHROMIUM_SRC) {
+  Join-Path $env:LOBIUM_CHROMIUM_SRC 'out'
+}
 $candidates = @(
   $SourceDir,
   $env:LOBSTER_LOBIUM_DIR,
   $env:LOBSTER_LOBIUM_SRC,
-  'E:\lobium-build\src\out\Lobium',
-  'E:\lobium-build\src\out\LobiumOfficial',
+  $(if ($configuredOut) { Join-Path $configuredOut 'Lobium' }),
+  $(if ($configuredOut) { Join-Path $configuredOut 'LobiumOfficial' }),
   (Join-Path $env:USERPROFILE 'lobium-build\src\out\Lobium')
 ) | Where-Object { $_ }
 
@@ -252,7 +255,13 @@ Remove-Item $probeOut -Force -ErrorAction SilentlyContinue
 if (-not $manifest) {
   throw 'packaged chrome.exe did not emit a capability manifest; this is not a Lobium build'
 }
-$caps = ($manifest | ConvertFrom-Json).capabilities
+$capabilityManifest = $manifest | ConvertFrom-Json
+$expectedContractVersion = 2
+if ($capabilityManifest.product -ne 'Lobium' -or
+    $capabilityManifest.contractVersion -ne $expectedContractVersion) {
+  throw "packaged engine has an incompatible capability contract (expected Lobium v$expectedContractVersion)"
+}
+$caps = $capabilityManifest.capabilities
 foreach ($required in @('config-channel-v1', 'webgl-deep', 'webgl2-deep', 'font-isolation',
                         'native-timezone', 'webgpu-adapter', 'media-devices', 'screen-metrics')) {
   if ($caps -notcontains $required) {

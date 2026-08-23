@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
-import type { Profile } from '@lobster/shared-types';
+import { FREE_PLAN_PROFILE_LIMIT, type Profile } from '@lobster/shared-types';
 
-import type {
-  CreateProfileRecord,
-  ProfilesRepository,
-  UpdateProfileRecord,
+import {
+  ProfileLimitExceededError,
+  type CreateProfileRecord,
+  type ProfilesRepository,
+  type RemoveProfileAsAdminResult,
+  type UpdateProfileRecord,
 } from './profiles.repository';
 import { sanitizeCookieImportMetadata } from './sanitize-cookie-import';
 
@@ -15,37 +17,64 @@ import { sanitizeCookieImportMetadata } from './sanitize-cookie-import';
  * instance is provisioned — it lets profiles run (and be tested) with no DB. State lives for the
  * lifetime of the process only; it is intentionally NOT durable.
  *
- * There is no in-memory subscription store, so {@link getProfileLimit} returns null and the
- * service falls back to the default free-tier limit.
+ * There is no in-memory subscription store, so creation and {@link getProfileLimit} use the
+ * default free-tier entitlement.
  */
 @Injectable()
 export class InMemoryProfilesRepository implements ProfilesRepository {
   private readonly byId = new Map<string, Profile>();
 
-  async create(input: CreateProfileRecord): Promise<Profile> {
+  constructor(
+    private readonly isTeamAdmin: (teamId: string, userId: string) => boolean = () => false,
+  ) {}
+
+  async createManyWithinLimit(inputs: readonly CreateProfileRecord[]): Promise<Profile[]> {
+    if (inputs.length === 0) return [];
+
+    const ownerTeamId = inputs[0]!.ownerTeamId;
+    if (inputs.some((input) => input.ownerTeamId !== ownerTeamId)) {
+      throw new Error('profile creation batch must belong to one team');
+    }
+    const currentCount = [...this.byId.values()].filter(
+      (profile) => profile.ownerTeamId === ownerTeamId,
+    ).length;
+    if (currentCount + inputs.length > FREE_PLAN_PROFILE_LIMIT) {
+      throw new ProfileLimitExceededError(FREE_PLAN_PROFILE_LIMIT, currentCount, inputs.length);
+    }
+
+    // Stage every row before mutating the Map. A bad record (or any future mapping failure) throws
+    // with zero writes, matching the Prisma transaction's rollback guarantee.
     const now = new Date().toISOString();
-    const profile: Profile = {
-      id: randomUUID(),
-      name: input.name,
-      engine: input.engine,
-      os: input.os,
-      osVersion: input.osVersion,
-      fingerprintSeed: input.fingerprintSeed,
-      fingerprintOverrides: input.fingerprintOverrides,
-      proxyId: input.proxyId,
-      templateId: input.templateId,
-      cookiesImport: sanitizeCookieImportMetadata(input.cookiesImport),
-      extensions: input.extensions,
-      tags: input.tags,
-      folder: input.folder,
-      notes: input.notes,
-      status: 'idle',
-      ownerTeamId: input.ownerTeamId,
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.byId.set(profile.id, profile);
-    return profile;
+    const reservedIds = new Set(this.byId.keys());
+    const staged = inputs.map((input): Profile => {
+      let id: string;
+      do {
+        id = randomUUID();
+      } while (reservedIds.has(id));
+      reservedIds.add(id);
+      return {
+        id,
+        name: input.name,
+        engine: input.engine,
+        os: input.os,
+        osVersion: input.osVersion,
+        fingerprintSeed: input.fingerprintSeed,
+        fingerprintOverrides: input.fingerprintOverrides,
+        proxyId: input.proxyId,
+        templateId: input.templateId,
+        cookiesImport: sanitizeCookieImportMetadata(input.cookiesImport),
+        extensions: input.extensions,
+        tags: input.tags,
+        folder: input.folder,
+        notes: input.notes,
+        status: 'idle',
+        ownerTeamId: input.ownerTeamId,
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
+    for (const profile of staged) this.byId.set(profile.id, profile);
+    return staged;
   }
 
   async findById(teamId: string, id: string): Promise<Profile | null> {
@@ -85,13 +114,19 @@ export class InMemoryProfilesRepository implements ProfilesRepository {
     return updated;
   }
 
-  async remove(teamId: string, id: string): Promise<boolean> {
+  async removeAsAdmin(
+    teamId: string,
+    id: string,
+    actorUserId: string,
+  ): Promise<RemoveProfileAsAdminResult> {
+    // No await before the delete: role check + profile scope check + mutation are one JS turn.
+    if (!this.isTeamAdmin(teamId, actorUserId)) return { outcome: 'forbidden' };
     const existing = this.byId.get(id);
     if (!existing || existing.ownerTeamId !== teamId) {
-      return false;
+      return { outcome: 'not_found' };
     }
     this.byId.delete(id);
-    return true;
+    return { outcome: 'removed' };
   }
 
   async getProfileLimit(_teamId: string): Promise<number | null> {

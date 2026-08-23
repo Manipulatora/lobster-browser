@@ -6,6 +6,7 @@ import type { ConfigService } from '@nestjs/config';
 import { InMemoryDesktopAuthRepository } from '../auth/desktop-auth.repository';
 import { InMemoryUsersRepository } from '../auth/in-memory-users.repository';
 import { InMemoryLeasesRepository } from '../leases/in-memory-leases.repository';
+import { InMemoryTeamsRepository } from '../teams/in-memory-teams.repository';
 import { HousekeepingService } from './housekeeping.service';
 
 const HOUR = 60 * 60 * 1000;
@@ -20,7 +21,10 @@ function makeService(): {
   desktopAuth: InMemoryDesktopAuthRepository;
   leases: InMemoryLeasesRepository;
 } {
-  const users = new InMemoryUsersRepository();
+  const teams = new InMemoryTeamsRepository();
+  const users = new InMemoryUsersRepository((ownerUserId, name) =>
+    teams.prepareTeamWithOwner(ownerUserId, name),
+  );
   const desktopAuth = new InMemoryDesktopAuthRepository();
   const leases = new InMemoryLeasesRepository();
   // Never started: the tests drive `sweep` directly, and an interval would only add a timer.
@@ -99,8 +103,11 @@ test('a sweep drops what has expired and keeps what has not', async () => {
   assert.equal(await users.findPendingRegistration('abandoned@gmail.com'), null);
   assert.ok(await users.findPendingRegistration('in-flight@gmail.com'), 'a live sign-up survives');
 
-  assert.equal(await desktopAuth.redeem(hash('stale-grant'), past), null);
-  assert.ok(await desktopAuth.redeem(hash('live-grant'), now), 'a live grant is still redeemable');
+  assert.equal(await desktopAuth.redeem(hash('stale-grant'), 's', 'c', past), null);
+  assert.ok(
+    await desktopAuth.redeem(hash('live-grant'), 's', 'c', now),
+    'a live grant is still redeemable',
+  );
 
   // An expired lease already read as free; the point of dropping it is that the row does not
   // outlive the launch by the life of the deployment.

@@ -47,19 +47,42 @@ function stubMail(): MailSpy {
   } as unknown as MailSpy;
 }
 
-function makeService(): {
+function makeService(options: { failFirstTeamCommit?: boolean } = {}): {
   service: AuthService;
   jwt: JwtService;
   teams: InMemoryTeamsRepository;
   users: InMemoryUsersRepository;
   mail: MailSpy;
+  preparedOwnerIds: string[];
 } {
-  const users = new InMemoryUsersRepository();
   const teams = new InMemoryTeamsRepository();
+  const preparedOwnerIds: string[] = [];
+  let failTeamCommit = options.failFirstTeamCommit ?? false;
+  const users = new InMemoryUsersRepository((ownerUserId, name) => {
+    preparedOwnerIds.push(ownerUserId);
+    const plan = teams.prepareTeamWithOwner(ownerUserId, name);
+    return {
+      commit: () => {
+        plan.commit();
+        if (failTeamCommit) {
+          failTeamCommit = false;
+          throw new Error('injected personal-team write failure');
+        }
+      },
+      rollback: () => plan.rollback(),
+    };
+  });
   const jwt = new JwtService({ secret: DEV_JWT_SECRET });
   const config = { get: () => undefined } as unknown as ConfigService;
   const mail = stubMail();
-  return { service: new AuthService(users, teams, jwt, config, mail), jwt, teams, users, mail };
+  return {
+    service: new AuthService(users, jwt, config, mail),
+    jwt,
+    teams,
+    users,
+    mail,
+    preparedOwnerIds,
+  };
 }
 
 /** Register + verify, the whole happy path, for tests that need an existing account. */
@@ -126,8 +149,35 @@ test('the emailed code creates the account, the personal team, and a session', a
   const userTeams = await teams.findTeamsForUser(result.user.id);
   assert.equal(userTeams.length, 1, 'expected exactly one auto-created personal team');
   assert.equal(userTeams[0]?.ownerUserId, result.user.id);
+  assert.equal(userTeams[0]?.name, `${NAME}'s Team`);
   const membership = await teams.getMembership(userTeams[0]!.id, result.user.id);
   assert.equal(membership?.role, 'admin');
+});
+
+test('a personal-team failure rolls back the user and preserves the pending code for retry', async () => {
+  const s = makeService({ failFirstTeamCommit: true });
+  await s.service.register({ email: EMAIL, password: PASSWORD, fullName: NAME });
+  const code = s.mail.lastCode();
+
+  await assert.rejects(
+    () => s.service.completeRegistration(EMAIL, code),
+    /injected personal-team write failure/,
+  );
+
+  assert.equal(await s.users.findByEmail(EMAIL), null, 'the user write must roll back');
+  assert.ok(
+    await s.users.findPendingRegistration(EMAIL),
+    'a failed graph write must not consume the valid code',
+  );
+  assert.equal(
+    (await s.teams.findTeamsForUser(s.preparedOwnerIds[0]!)).length,
+    0,
+    'the staged team and membership must roll back too',
+  );
+
+  const retried = await s.service.completeRegistration(EMAIL, code);
+  assert.equal(retried.user.email, EMAIL);
+  assert.equal((await s.teams.findTeamsForUser(retried.user.id)).length, 1);
 });
 
 test('the password set at registration is the one that works at login', async () => {
@@ -161,6 +211,32 @@ test('a code is single-use', async () => {
   await service.completeRegistration(EMAIL, code);
   // Replaying it must not produce a second account or a second session.
   await assert.rejects(() => service.completeRegistration(EMAIL, code), /incorrect or has expired/);
+});
+
+test('concurrent submissions of one code create exactly one complete account graph', async () => {
+  const s = makeService();
+  await s.service.register({ email: EMAIL, password: PASSWORD, fullName: NAME });
+  const code = s.mail.lastCode();
+
+  const results = await Promise.allSettled([
+    s.service.completeRegistration(EMAIL, code),
+    s.service.completeRegistration(EMAIL, code),
+  ]);
+  const successes = results.filter(
+    (
+      result,
+    ): result is PromiseFulfilledResult<Awaited<ReturnType<AuthService['completeRegistration']>>> =>
+      result.status === 'fulfilled',
+  );
+
+  assert.equal(successes.length, 1);
+  assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+  const user = successes[0]!.value.user;
+  assert.equal((await s.teams.findTeamsForUser(user.id)).length, 1);
+  assert.equal(
+    (await s.teams.listMembers((await s.teams.findTeamsForUser(user.id))[0]!.id)).length,
+    1,
+  );
 });
 
 test('the code dies after too many wrong guesses', async () => {

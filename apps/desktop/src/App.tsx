@@ -4,6 +4,7 @@ import { accountClient, type AccountState } from './api/account';
 import { authClient, type CloudUser } from './api/auth';
 import { profilesClient } from './api/tauri';
 import { AuthScreen } from './features/auth/AuthScreen';
+import { AuthBootstrapGate } from './features/auth/authBootstrap';
 import { ProfilesView } from './features/profiles/ProfilesView';
 import { ProxiesView } from './features/proxies/ProxiesView';
 import { TemplatesView } from './features/templates/TemplatesView';
@@ -67,9 +68,17 @@ export function App(): JSX.Element {
   const [user, setUser] = useState<CloudUser | null>(null);
   const [offline, setOffline] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
+  const [authRefresh, setAuthRefresh] = useState(0);
+  const authBootstrap = useRef(new AuthBootstrapGate()).current;
 
   useEffect(() => {
     let cancelled = false;
+    const generation = authBootstrap.begin();
+    const apply = (state: { user: CloudUser | null; offline: boolean } | undefined): void => {
+      if (cancelled || !state) return;
+      setUser(state.user);
+      setOffline(state.offline);
+    };
 
     // PAINT FROM LOCAL STATE FIRST. This resolves without touching the network, so a cold start is
     // not held behind `/auth/me` and its 15-second timeout — which used to mean a slow connection
@@ -78,11 +87,11 @@ export function App(): JSX.Element {
     void authClient
       .statusCached()
       .then((cached) => {
-        if (!cancelled) setUser(cached.user);
+        apply(authBootstrap.acceptCached(generation, cached));
       })
       .catch(() => undefined)
       .finally(() => {
-        if (!cancelled) setAuthChecked(true);
+        if (!cancelled && authBootstrap.markCachedSettled(generation)) setAuthChecked(true);
       });
 
     // ...then confirm with the server behind the already-painted UI, and correct it if the token has
@@ -90,22 +99,17 @@ export function App(): JSX.Element {
     void authClient
       .status()
       .then((state) => {
-        if (cancelled) return;
-        setUser(state.user);
-        setOffline(state.offline);
+        apply(authBootstrap.acceptNetwork(generation, state));
       })
       .catch(() => {
         // Unreachable keychain or IPC failure. The cached answer above already decided what to
         // show; an error dialog here would just be a dead end.
-      })
-      .finally(() => {
-        if (!cancelled) setAuthChecked(true);
       });
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authBootstrap, authRefresh]);
 
   // Only the local read is awaited, so this is a frame or two rather than a network round trip.
   // Flashing the sign-in screen at an already signed-in user still has to be avoided — that reads as
@@ -113,13 +117,24 @@ export function App(): JSX.Element {
   if (!authChecked) return <div className="app-boot" aria-busy="true" />;
 
   if (!user && !offline) {
-    return <AuthScreen onAuthenticated={setUser} />;
+    return (
+      <AuthScreen
+        onAttemptStarted={() => authBootstrap.supersede()}
+        onUnauthenticatedAttemptFinished={() => setAuthRefresh((value) => value + 1)}
+        onAuthenticated={(authenticatedUser) => {
+          authBootstrap.supersede();
+          setOffline(false);
+          setUser(authenticatedUser);
+        }}
+      />
+    );
   }
 
   return (
     <Dashboard
       user={user}
       onSignedOut={() => {
+        authBootstrap.supersede();
         setUser(null);
         setOffline(false);
       }}

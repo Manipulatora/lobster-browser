@@ -1,12 +1,12 @@
 # Project Status — What Exists, What Runs Where
 
-Status date: 2026-08-21. This is the orientation document for an engineer or agent picking this
+Status date: 2026-08-23. This is the orientation document for an engineer or agent picking this
 repository up on a new machine. It records what is true today, not what is planned; the plans live in
 [`ENGINEERING.md`](ENGINEERING.md) §5 and [`LOBEE_AGENT_ROADMAP.md`](subsystems/agent.md).
 
 > **The series has now been measured in a browser — on Linux, once, on 2026-08-21.**
 >
-> A `linux-x64` engine was built from the current series at `152.0.7977.42` on the Linux host and
+> A `linux-x64` engine was built from the then-current series at `152.0.7977.42` on the Linux host and
 > `gate:oracles` scored it: **37 of 43 oracles pass, 10 of 15 aspects green, one real regression**
 > (`canvas-getpixelmods-toblob` — `toBlob` and `getImageData` disagree on ~65-72 of 256 bytes, and
 > the count varies per run, so the two paths are drawing different noise rather than the same
@@ -19,10 +19,11 @@ repository up on a new machine. It records what is true today, not what is plann
 > real-GPU run has happened. Treat §5.1 closures on Windows-only surfaces as *compiled and
 > reviewed*; the rest now have one Linux datapoint behind them.
 >
-> **The published artifact is still the old one.** `engine-manifest.json` names `152.0.7928.0`,
-> which advertises 12 capabilities against the launcher's required set and is refused. The new
-> build advertises **18** and the launcher accepts it, but it has not been uploaded, so a fresh
-> install on another machine still provisions the refused binary.
+> **Every existing native artifact now predates the source contract.** `engine-manifest.json` names
+> the old Linux `152.0.7928.0` artifact, while the locally built Linux and Windows binaries predate
+> the contract-v2 and native-policy fixes landed on 2026-08-23. The launcher refuses all of them.
+> Current source advertises 19 capabilities on Linux and 20 on Windows (the extra hook is Windows
+> font isolation); a clean rebuild and a new oracle run are required before either can be published.
 >
 > The audit itself (2026-08-14) returned **79 findings — 10 critical, 19 high**. Most remain open.
 > This is a solid native foundation with real, documented gaps, not a finished anti-detect product.
@@ -34,7 +35,7 @@ Six deliverables share one monorepo:
 | Deliverable | Path | State |
 | --- | --- | --- |
 | **Desktop app** — Tauri 2 (Rust) + React UI, the product | `apps/desktop` | Builds and runs on Linux and Windows. Per-platform bundle targets (`deb` / `nsis`). |
-| **Lobium engine** — Chromium fork with native fingerprinting | `lobium/` (build scripts + patches) | Series is cut against `152.0.7977.42`. Built on the owner's Windows PC; **not buildable on the Linux dev host today** — see §3. |
+| **Lobium engine** — Chromium fork with native fingerprinting | `lobium/` (build scripts + patches) | Series is cut against `152.0.7977.42`. Existing binaries are stale against the current series and capability contract; see §3. |
 | **Sidecar** — profile lifecycle, CDP, agent bridge | `packages/engine-runner` | Ships on Linux and Windows. |
 | **Lobee agent** — in-browser side panel | `packages/agent`, `packages/lobee-app` | Ships. Plus/Pro/Max only, metered per call. See [`subsystems/agent.md`](subsystems/agent.md). |
 | **Cloud backend** — NestJS (auth, teams, sync, billing, model proxy) | `apps/backend` | Live at `api.lobrowser.com`. See [`subsystems/billing-and-auth.md`](subsystems/billing-and-auth.md). |
@@ -66,7 +67,7 @@ one with a published engine artifact. macOS is neither built nor configured.
 | Rust/Tauri core | Builds and runs | Builds and runs | Untested |
 | Sidecar (`engine-runner`) | Verified — bundled sidecar answers `ping`/`status` over stdio under the vendored `node.exe`, and the Lobee loopback bridge binds | Ships | Untested |
 | Vendored Node runtime | Official win-x64 `node.exe`, SHA-256 verified against nodejs.org | Ships | Not implemented |
-| Lobium engine | **Built** — `152.0.7977.42`, `is_official_build` + PGO + ThinLTO. **Not published to the manifest.** | Published artifact is `152.0.7928.0` and is **refused by the launcher** (§5) | Does not exist |
+| Lobium engine | Prior official/PGO/ThinLTO `152.0.7977.42` build exists, but is **stale and refused** by contract v2. Clean rebuild required. | Published `152.0.7928.0` and later local build are both **stale and refused** (§5) | Does not exist |
 | Installer bundle target | `nsis` (`tauri.windows.conf.json`) | `deb` (`tauri.linux.conf.json`) | Not configured |
 | Engine archive form | `.zip` | `.tar.gz` | — |
 | Font isolation | Native (DirectWrite filter + font-pack sideload) | Environmental (`FONTCONFIG_FILE` + private pack) | Not implemented |
@@ -78,10 +79,12 @@ Build the desktop app with `scripts/build-windows-product.ps1` or `scripts/build
 
 ### What is left before a Windows launch works
 
-**One step: publish a `win-x64` engine archive.** The engine is built and its hooks were verified
-in-browser on the build host. `engine-manifest.json` has no `win-x64` entry, deliberately — naming a URL
-before the artifact exists means every Windows first run 404s after an ~840 MB download. An absent entry
-fails immediately and says why.
+**Rebuild, verify, then publish a `win-x64` engine archive.** The prior official build predates the
+current patch series and semantic capability contract. Force-clean the pinned checkout, apply all
+patches, rebuild with official/PGO/ThinLTO settings, and run the native oracles before packaging.
+`engine-manifest.json` has no `win-x64` entry deliberately: naming a URL before the current artifact
+exists makes every Windows first run 404 or install a stale engine. An absent entry fails immediately
+and says why.
 
 Until then the Windows app installs, opens, and manages profiles, proxies and templates but **cannot
 launch a profile**: `startProfile` refuses any engine but Lobium, so it fails closed rather than falling
@@ -167,8 +170,8 @@ What the sync actually costs is worth recording, because the obvious command is 
 `npm run gate:series` still fails on a host whose checkout has moved on from the patch bases; that is
 the gate working correctly. It is a reproducibility check, not a build prerequisite.
 
-The last engine actually produced on this host is from July and lacks five of the capabilities the
-launcher now requires; it is a development artifact, not a candidate.
+The last engine actually produced on this host predates the current series and semantic capability
+contract; it is a development artifact that the launcher correctly refuses, not a release candidate.
 
 Chromium's own requirements, checked against `lobium/gn-args.gn.example`:
 
@@ -262,18 +265,18 @@ the full picture. The short version, because it is easy to overstate:
 - The **software gate** (`regression-gate.mjs`) runs anywhere: coherence, device-class diversity floors,
   and fingerprint unit contracts. It reads no baseline and launches no browser.
 - The **offline structural gates** run anywhere and are fast: `npm run gate:engine` (patch-series
-  structure, version coherence, source hygiene — 18 tests), `npm run gate:desktop-css`, and
-  `npm run gate:migrations`. All three run in CI on every push. `lobium/test/run.ps1`
-  (`npm run gate:kernels`) is a PowerShell entry point for the Windows build host: property tests that
-  compile the SHIPPING canvas and audio kernels from `lobium/src/` and assert the detection oracles
-  directly.
-- The **series reproducibility gate** (`npm run gate:series`) needs the Chromium checkout but no browser.
-  It replays the whole series into a scratch tree built from pristine git blobs and diffs the result
-  against the checkout. This is the only check that the patches produce the binary that was actually
-  tested. **It fails on any host whose checkout is stale, including this one** — six patches currently do
-  not apply to the pristine `152.0.7928.0` tree they are diffed against, because the series is cut
-  against `152.0.7977.42`. CI runs it as an opt-in job on the `lobium-build` self-hosted runner, gated
-  behind `vars.LOBSTER_ENABLE_SERIES_REPLAY`, for exactly this reason.
+  structure, version coherence, source hygiene, and canonical-seed contracts — 26 tests),
+  `npm run gate:desktop-css`, and `npm run gate:migrations`. All three run in CI on every push.
+  `lobium/test/run.ps1` (`npm run gate:kernels`) is a PowerShell entry point for the Windows build
+  host: property tests that compile the SHIPPING canvas and audio kernels from `lobium/src/` and
+  assert the detection oracles directly.
+- The **series reproducibility gate** (`npm run gate:series`) needs the Chromium checkout but no
+  browser. It first requires checkout HEAD to resolve to the pinned Chromium tag, then replays all 31
+  patches into a scratch tree built from that tag's pristine git blobs and compares the complete
+  active-patch and staged-copy footprint. The pristine replay is green on this Windows host; its live
+  build checkout is intentionally stale/drifted and will keep reporting footprint differences until
+  the documented force-clean rebuild. CI runs the gate as an opt-in job on the `lobium-build`
+  self-hosted runner, behind `vars.LOBSTER_ENABLE_SERIES_REPLAY`.
 - The **audit oracle gate** (`npm run gate:oracles`) needs the native binary. It runs the detection
   oracles from `ENGINE_AUDIT.md` *in the browser*, which is the only way to prove a kernel fix actually
   reaches the page. It has three outcomes, and the distinction is the point:

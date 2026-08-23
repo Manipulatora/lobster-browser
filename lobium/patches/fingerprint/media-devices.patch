@@ -15,9 +15,8 @@ The values describe the same modest integrated hardware the labels already claim
 with no pan/tilt/zoom, and a mono 48 kHz microphone - rather than a maximal set. facingMode is
 stated only on Android, where front/back means something; a desktop camera reports none, which is
 what Chrome does.
-
 diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.cc b/third_party/blink/renderer/modules/mediastream/media_devices.cc
-index 4fe2cb45a0089..f231abe4e00e7 100644
+index 4fe2cb4..31dbc95 100644
 --- a/third_party/blink/renderer/modules/mediastream/media_devices.cc
 +++ b/third_party/blink/renderer/modules/mediastream/media_devices.cc
 @@ -2,9 +2,14 @@
@@ -44,7 +43,17 @@ index 4fe2cb45a0089..f231abe4e00e7 100644
  #include "media/base/media_permission.h"
  #include "mojo/public/cpp/bindings/remote.h"
  #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
-@@ -1486,6 +1493,202 @@ void MediaDevices::DevicesEnumerated(
+@@ -505,7 +512,8 @@ MediaDevices::MediaDevices(Navigator& navigator)
+       ExecutionContextLifecycleObserver(navigator.DomWindow()),
+       is_execution_context_active_(!!navigator.DomWindow()),
+       dispatcher_host_(navigator.GetExecutionContext()),
+-      receiver_(this, navigator.DomWindow()) {}
++      receiver_(this, navigator.DomWindow()),
++      lobium_media_device_document_salt_(lobium::CreateMediaDeviceDocumentSalt()) {}
+ 
+ MediaDevices::~MediaDevices() = default;
+ 
+@@ -1486,6 +1494,198 @@ void MediaDevices::DevicesEnumerated(
      }
    }
  
@@ -95,22 +104,18 @@ index 4fe2cb45a0089..f231abe4e00e7 100644
 +    ExecutionContext* context = GetExecutionContext();
 +    const std::string origin =
 +        context ? context->GetSecurityOrigin()->ToString().Utf8() : std::string("null");
-+    const std::string salt =
-+        md.stable_device_ids ? lobium::MediaDeviceSaltFromSeed(cfg->seeds.media_devices)
-+                             : lobium::MediaDeviceEphemeralSalt();
-+    // The GROUP id gets its own salt, and never the seed-derived one.
-+    //
-+    // Chrome rotates group ids far more often than device ids: a device id is stable for the origin
-+    // until storage is cleared, but the group id is regenerated as the media-device salt is renewed,
-+    // so a page cannot use it to link a visitor across sessions. Deriving both from the same
-+    // per-profile seed made the group id permanent - a stable cross-origin, cross-session
-+    // identifier that is strictly stronger than the device id it sits beside, and one the
-+    // stableDeviceIds setting silently made worse rather than better.
-+    //
-+    // MediaDeviceEphemeralSalt() is a process-lifetime token, so this rotates per renderer process
-+    // rather than per document commit. That is short of Chrome exactly, and it is the difference
-+    // between "rotates" and "never rotates".
-+    const std::string group_salt = lobium::MediaDeviceEphemeralSalt();
++    // Mirror content/browser/media/media_devices_util.cc::GotSalt. The profile-derived portion is
++    // what makes persistent device ids survive a new document; the MediaDevices-instance token is
++    // appended only for non-persistent ids. groupId always carries the instance token, so it rotates
++    // at every document boundary regardless of the stableDeviceIds policy.
++    const std::string profile_salt =
++        lobium::MediaDeviceSaltFromSeed(cfg->seeds.media_devices);
++    const std::string device_salt =
++        md.stable_device_ids
++            ? profile_salt
++            : base::StrCat({profile_salt, lobium_media_device_document_salt_});
++    const std::string group_salt = base::StrCat(
++        {profile_salt, lobium_media_device_document_salt_, "group_id"});
 +    const std::string& platform = cfg->navigator.ua_platform;
 +
 +    auto push_device = [&](mojom::blink::MediaDeviceType type, std::string_view kind_key,
@@ -119,7 +124,7 @@ index 4fe2cb45a0089..f231abe4e00e7 100644
 +      // them the group of the real device they point at, which is why they are pushed at index 0.
 +      const String id =
 +          pseudo.empty() ? String::FromUtf8(lobium::MediaDeviceHmacId(
-+                               origin, salt, kind_key, index, /*group=*/false))
++                               origin, device_salt, kind_key, index, /*group=*/false))
 +                         : String::FromUtf8(pseudo);
 +      const String group = String::FromUtf8(
 +          lobium::MediaDeviceHmacId(origin, group_salt, group_key, index, /*group=*/true));
@@ -247,3 +252,28 @@ index 4fe2cb45a0089..f231abe4e00e7 100644
    ReportCompletedEnumerateDevices(result_contains_nonempty_input_device_ids);
    result_tracker->Resolve(media_devices);
    tracer->End();
+diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.h b/third_party/blink/renderer/modules/mediastream/media_devices.h
+index d3168aa..7711b92 100644
+--- a/third_party/blink/renderer/modules/mediastream/media_devices.h
++++ b/third_party/blink/renderer/modules/mediastream/media_devices.h
+@@ -5,6 +5,8 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_MEDIASTREAM_MEDIA_DEVICES_H_
+ #define THIRD_PARTY_BLINK_RENDERER_MODULES_MEDIASTREAM_MEDIA_DEVICES_H_
+ 
++#include <string>
++
+ #include "base/feature_list.h"
+ #include "base/functional/callback.h"
+ #include "base/gtest_prod_util.h"
+@@ -308,6 +310,11 @@ class MODULES_EXPORT MediaDevices final
+       FirstEnumerateDevicesState::kNoEnumeration;
+   FirstGetUserMediaState first_gum_state_ =
+       FirstGetUserMediaState::kNoGetUserMedia;
++
++  // Lobium: Chromium's frame salt is stable within one document and unique to the next. Keeping
++  // this token on the Navigator.mediaDevices supplement gives repeated enumerateDevices() calls
++  // the same identities without leaking an ephemeral id across documents in one renderer process.
++  const std::string lobium_media_device_document_salt_;
+ };
+ 
+ }  // namespace blink

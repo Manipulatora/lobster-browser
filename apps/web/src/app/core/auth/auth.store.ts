@@ -35,8 +35,10 @@ export class AuthStore {
   /** The single outstanding `/auth/me` call, so concurrent restores share one result. */
   private _inFlight?: Promise<void>;
 
-  readonly user = this._user.asReadonly();
-  readonly isAuthenticated = computed(() => this._user() !== null);
+  // Token loss is session loss even when it happened in a different ApiClient caller. Deriving the
+  // public identity through TokenStore makes a guarded 401 hide the stale user synchronously.
+  readonly user = computed(() => (this.tokens.read() ? this._user() : null));
+  readonly isAuthenticated = computed(() => this.user() !== null);
   readonly restoring = this._restoring.asReadonly();
 
   /**
@@ -128,13 +130,19 @@ export class AuthStore {
   }
 
   private async fetchSession(): Promise<void> {
+    // Capture the credential this restore represents. Login/logout may complete while `/auth/me` is
+    // in flight; that old answer must not overwrite the newer session (or resurrect a logged-out
+    // one). ApiClient independently applies the same identity check before clearing a rejected token.
+    const auth = this.tokens.snapshot();
+    if (!auth.token) return;
     this._restoring.set(true);
     try {
-      this._user.set(await this.api.get<AuthUser>('/auth/me'));
+      const user = await this.api.get<AuthUser>('/auth/me');
+      if (this.tokens.isCurrent(auth)) this._user.set(user);
     } catch {
       // ApiClient already cleared the token on 401. Any other failure leaves the user signed out,
       // which is the safe direction to be wrong in.
-      this._user.set(null);
+      if (this.tokens.isCurrent(auth)) this._user.set(null);
     } finally {
       this._restoring.set(false);
     }

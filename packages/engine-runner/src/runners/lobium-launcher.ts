@@ -790,6 +790,8 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
           ? requiredLobiumCapabilities(
               ctx.fingerprintPolicy,
               ctx.fingerprint.locale.geolocation !== undefined,
+              process.platform,
+              ctx.isMobileProfile === true,
             )
           : LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
       );

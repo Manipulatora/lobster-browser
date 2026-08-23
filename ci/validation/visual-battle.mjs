@@ -9,17 +9,23 @@
  * Usage: node visual-battle.mjs <fonts|webgl|phone|tablet>
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CompositeRunner, buildLaunchers, startProfile } from '@lobster/engine-runner';
+import { canonicalFingerprintSeed } from './canonical-seed.mjs';
 
-const OUT = '/tmp/claude-1001/-home-ivyhfx-browser/852bab08-84ea-4f91-82e1-dfdb3a94db06/scratchpad';
+const OUT = process.env.LOBSTER_VISUAL_BATTLE_OUT || join(tmpdir(), 'lobster-visual-battle');
 const mode = process.argv[2] ?? 'fonts';
 
 // ---- tiny CDP client over native WebSocket ----
 class Cdp {
-  constructor(url) { this.url = url; this.id = 0; this.pending = new Map(); this.handlers = new Map(); }
+  constructor(url) {
+    this.url = url;
+    this.id = 0;
+    this.pending = new Map();
+    this.handlers = new Map();
+  }
   connect() {
     return new Promise((res, rej) => {
       this.ws = new WebSocket(this.url);
@@ -28,7 +34,8 @@ class Cdp {
       this.ws.onmessage = (m) => {
         const msg = JSON.parse(m.data);
         if (msg.id && this.pending.has(msg.id)) {
-          const { res, rej } = this.pending.get(msg.id); this.pending.delete(msg.id);
+          const { res, rej } = this.pending.get(msg.id);
+          this.pending.delete(msg.id);
           msg.error ? rej(new Error(msg.error.message)) : res(msg.result);
         } else if (msg.method && this.handlers.has(msg.method)) {
           this.handlers.get(msg.method)(msg.params);
@@ -41,11 +48,22 @@ class Cdp {
     return new Promise((res, rej) => {
       this.pending.set(id, { res, rej });
       this.ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
-      setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); rej(new Error('timeout ' + method)); } }, 60000);
+      setTimeout(() => {
+        if (this.pending.has(id)) {
+          this.pending.delete(id);
+          rej(new Error('timeout ' + method));
+        }
+      }, 60000);
     });
   }
-  on(method, fn) { this.handlers.set(method, fn); }
-  close() { try { this.ws.close(); } catch {} }
+  on(method, fn) {
+    this.handlers.set(method, fn);
+  }
+  close() {
+    try {
+      this.ws.close();
+    } catch {}
+  }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -96,14 +114,36 @@ async function capturePage(ws, html, outPng) {
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   await cdp.send('Page.enable', {}, sessionId);
   await cdp.send('Runtime.enable', {}, sessionId);
-  let loaded = false; cdp.on('Page.loadEventFired', () => { loaded = true; });
+  let loaded = false;
+  cdp.on('Page.loadEventFired', () => {
+    loaded = true;
+  });
   await cdp.send('Page.navigate', { url }, sessionId);
   for (let i = 0; i < 60 && !loaded; i++) await sleep(200);
   await sleep(1500); // settle fonts/webgl
   let title = '';
-  try { title = (await cdp.send('Runtime.evaluate', { expression: 'document.title', returnByValue: true }, sessionId)).result.value; } catch {}
+  try {
+    title = (
+      await cdp.send(
+        'Runtime.evaluate',
+        { expression: 'document.title', returnByValue: true },
+        sessionId,
+      )
+    ).result.value;
+  } catch {}
   let infoText = '';
-  try { infoText = (await cdp.send('Runtime.evaluate', { expression: "(document.getElementById('info')||{}).textContent||''", returnByValue: true }, sessionId)).result.value; } catch {}
+  try {
+    infoText = (
+      await cdp.send(
+        'Runtime.evaluate',
+        {
+          expression: "(document.getElementById('info')||{}).textContent||''",
+          returnByValue: true,
+        },
+        sessionId,
+      )
+    ).result.value;
+  } catch {}
   const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
   await writeFile(outPng, Buffer.from(shot.data, 'base64'));
   cdp.close();
@@ -117,7 +157,10 @@ async function captureUrl(ws, url, outPng) {
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
   await cdp.send('Page.enable', {}, sessionId);
   await cdp.send('Runtime.enable', {}, sessionId);
-  let loaded = false; cdp.on('Page.loadEventFired', () => { loaded = true; });
+  let loaded = false;
+  cdp.on('Page.loadEventFired', () => {
+    loaded = true;
+  });
   await cdp.send('Page.navigate', { url }, sessionId);
   for (let i = 0; i < 100 && !loaded; i++) await sleep(200);
   await sleep(3000);
@@ -127,7 +170,13 @@ async function captureUrl(ws, url, outPng) {
     return JSON.stringify({ bodyFF: b.fontFamily, bodySize: b.fontSize, h1: pick('h1'), p: pick('p'), a: pick('a') }, null, 1);
   })()`;
   let info = '';
-  try { info = (await cdp.send('Runtime.evaluate', { expression: probe, returnByValue: true }, sessionId)).result.value; } catch (e) { info = 'probe fail: ' + e.message; }
+  try {
+    info = (
+      await cdp.send('Runtime.evaluate', { expression: probe, returnByValue: true }, sessionId)
+    ).result.value;
+  } catch (e) {
+    info = 'probe fail: ' + e.message;
+  }
   const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
   await writeFile(outPng, Buffer.from(shot.data, 'base64'));
   cdp.close();
@@ -136,36 +185,64 @@ async function captureUrl(ws, url, outPng) {
 
 async function launchDesktop(os, seed, renderer) {
   const userDataDir = await mkdtemp(join(tmpdir(), `vb-${os}-`));
-  const runner = new CompositeRunner(await buildLaunchers({ headless: false, extraArgs: ['--no-sandbox', '--disable-dev-shm-usage'] }));
+  const runner = new CompositeRunner(
+    await buildLaunchers({
+      headless: false,
+      extraArgs: ['--no-sandbox', '--disable-dev-shm-usage'],
+    }),
+  );
   const launched = await startProfile(runner, {
-    profileId: `vb-${os}`, profileName: `VB ${os}`, engine: 'lobium', os,
+    profileId: `vb-${os}`,
+    profileName: `VB ${os}`,
+    engine: 'lobium',
+    os,
     fingerprintSeed: seed,
-    fingerprintOverrides: renderer ? { renderer: { mode: 'validated_preset', presetId: renderer } } : {},
-    userDataDir, headless: false,
+    fingerprintOverrides: renderer
+      ? { renderer: { mode: 'validated_preset', presetId: renderer } }
+      : {},
+    userDataDir,
+    headless: false,
   });
   return { runner, userDataDir, launched };
 }
 
 async function launchPhone(deviceType) {
   const userDataDir = await mkdtemp(join(tmpdir(), `vb-${deviceType}-`));
-  const runner = new CompositeRunner(await buildLaunchers({ headless: false, extraArgs: ['--no-sandbox', '--disable-dev-shm-usage'] }));
+  const runner = new CompositeRunner(
+    await buildLaunchers({
+      headless: false,
+      extraArgs: ['--no-sandbox', '--disable-dev-shm-usage'],
+    }),
+  );
   const { dispatch } = await import('@lobster/engine-runner');
   const res = await dispatch(runner, {
-    id: 1, method: 'startProfile',
+    id: 1,
+    method: 'startProfile',
     params: {
-      profileId: `vb-${deviceType}`, profileName: `VB ${deviceType}`, engine: 'lobium', os: 'android',
-      osVersion: '14', fingerprintSeed: `vb-${deviceType}-seed`,
+      profileId: `vb-${deviceType}`,
+      profileName: `VB ${deviceType}`,
+      engine: 'lobium',
+      os: 'android',
+      osVersion: '14',
+      fingerprintSeed: canonicalFingerprintSeed(`vb-${deviceType}-seed`),
       fingerprintOverrides: { androidDeviceType: deviceType },
-      userDataDir, headless: false,
+      userDataDir,
+      headless: false,
     },
   });
-  if (!res.ok) throw new Error('android launch failed: ' + (res.error?.message));
+  if (!res.ok) throw new Error('android launch failed: ' + res.error?.message);
   return { runner, userDataDir, launched: res.result };
 }
 
 async function main() {
+  await mkdir(OUT, { recursive: true });
+
   if (mode === 'fonts') {
-    const { runner, launched } = await launchDesktop('windows', 'vb-fonts-seed', 'win-nvidia-nvidia-geforce-rtx-3080-ti-20gb-2205');
+    const { runner, launched } = await launchDesktop(
+      'windows',
+      canonicalFingerprintSeed('vb-fonts-seed'),
+      'win-nvidia-nvidia-geforce-rtx-3080-ti-20gb-2205',
+    );
     console.log('launched pid', launched.pid, 'ws', launched.ws);
     const r = await capturePage(launched.ws, FONT_PAGE, join(OUT, 'battle-fonts.png'));
     console.log('FONT PAGE title:', r.title);
@@ -173,7 +250,11 @@ async function main() {
     spawnSync('pkill', ['-f', 'vb-windows']);
     console.log('saved', join(OUT, 'battle-fonts.png'));
   } else if (mode === 'webgl') {
-    const { runner, launched } = await launchDesktop('windows', 'vb-webgl-seed', 'win-nvidia-nvidia-geforce-rtx-3080-ti-20gb-2205');
+    const { runner, launched } = await launchDesktop(
+      'windows',
+      canonicalFingerprintSeed('vb-webgl-seed'),
+      'win-nvidia-nvidia-geforce-rtx-3080-ti-20gb-2205',
+    );
     console.log('launched pid', launched.pid, 'ws', launched.ws);
     const r = await capturePage(launched.ws, WEBGL_PAGE, join(OUT, 'battle-webgl.png'));
     console.log('WEBGL title:', r.title);
@@ -183,8 +264,13 @@ async function main() {
   } else if (mode === 'realsite') {
     const url = process.argv[3] || 'https://en.wikipedia.org/wiki/Mobile_phone';
     const os = process.argv[4] || 'windows';
-    const renderer = os === 'windows' ? 'win-nvidia-nvidia-geforce-rtx-3080-ti-20gb-2205' : undefined;
-    const { runner, launched } = await launchDesktop(os, 'vb-realsite-' + os, renderer);
+    const renderer =
+      os === 'windows' ? 'win-nvidia-nvidia-geforce-rtx-3080-ti-20gb-2205' : undefined;
+    const { runner, launched } = await launchDesktop(
+      os,
+      canonicalFingerprintSeed('vb-realsite-' + os),
+      renderer,
+    );
     console.log('launched pid', launched.pid, 'os', os, 'url', url);
     const info = await captureUrl(launched.ws, url, join(OUT, `battle-realsite-${os}.png`));
     console.log('COMPUTED FONTS:\n' + info);
@@ -195,14 +281,29 @@ async function main() {
     const { runner, launched } = await launchPhone('phone');
     console.log('launched pid', launched.pid, 'url', url);
     await sleep(3500);
-    const cdp = new Cdp(launched.ws); await cdp.connect();
+    const cdp = new Cdp(launched.ws);
+    await cdp.connect();
     const { targetInfos } = await cdp.send('Target.getTargets');
     const page = targetInfos.find((t) => t.type === 'page');
-    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: page.targetId, flatten: true });
-    await cdp.send('Page.enable', {}, sessionId); await cdp.send('Runtime.enable', {}, sessionId);
+    const { sessionId } = await cdp.send('Target.attachToTarget', {
+      targetId: page.targetId,
+      flatten: true,
+    });
+    await cdp.send('Page.enable', {}, sessionId);
+    await cdp.send('Runtime.enable', {}, sessionId);
     await cdp.send('Page.navigate', { url }, sessionId);
     await sleep(6000);
-    const info = (await cdp.send('Runtime.evaluate', { expression: "JSON.stringify({body:getComputedStyle(document.body).fontFamily, size:getComputedStyle(document.body).fontSize})", returnByValue: true }, sessionId)).result.value;
+    const info = (
+      await cdp.send(
+        'Runtime.evaluate',
+        {
+          expression:
+            'JSON.stringify({body:getComputedStyle(document.body).fontFamily, size:getComputedStyle(document.body).fontSize})',
+          returnByValue: true,
+        },
+        sessionId,
+      )
+    ).result.value;
     console.log('MOBILE COMPUTED FONTS:', info);
     cdp.close();
     spawnSync('scrot', ['-o', join(OUT, 'battle-mobilesite.png')], { env: process.env });
@@ -215,38 +316,71 @@ async function main() {
     // Navigate the ACTIVE tab to a viewport probe and read the emulated CSS dimensions, so we can
     // confirm the phone's screen resolution matches the profile config (not the host desktop).
     try {
-      const cdp = new Cdp(launched.ws); await cdp.connect();
+      const cdp = new Cdp(launched.ws);
+      await cdp.connect();
       const { targetInfos } = await cdp.send('Target.getTargets');
       const page = targetInfos.find((t) => t.type === 'page');
       if (page) {
-        const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: page.targetId, flatten: true });
+        const { sessionId } = await cdp.send('Target.attachToTarget', {
+          targetId: page.targetId,
+          flatten: true,
+        });
         await cdp.send('Page.enable', {}, sessionId);
         await cdp.send('Runtime.enable', {}, sessionId);
-        const probe = '<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><body style="margin:0;font:20px sans-serif;background:#eef"><div style="padding:16px" id=o></div><script>o.innerHTML="innerWidth="+innerWidth+"<br>innerHeight="+innerHeight+"<br>screen="+screen.width+"x"+screen.height+"<br>dpr="+devicePixelRatio+"<br>touch="+navigator.maxTouchPoints+"<br>ua="+navigator.userAgent.slice(0,60);document.title="vw:"+innerWidth+"x"+innerHeight<\/script></body>';
-        await cdp.send('Page.navigate', { url: 'data:text/html;charset=utf-8,' + encodeURIComponent(probe) }, sessionId);
+        const probe =
+          '<!doctype html><meta name=viewport content="width=device-width,initial-scale=1"><body style="margin:0;font:20px sans-serif;background:#eef"><div style="padding:16px" id=o></div><script>o.innerHTML="innerWidth="+innerWidth+"<br>innerHeight="+innerHeight+"<br>screen="+screen.width+"x"+screen.height+"<br>dpr="+devicePixelRatio+"<br>touch="+navigator.maxTouchPoints+"<br>ua="+navigator.userAgent.slice(0,60);document.title="vw:"+innerWidth+"x"+innerHeight<\/script></body>';
+        await cdp.send(
+          'Page.navigate',
+          { url: 'data:text/html;charset=utf-8,' + encodeURIComponent(probe) },
+          sessionId,
+        );
         await sleep(2500);
-        const t = (await cdp.send('Runtime.evaluate', { expression: 'document.title', returnByValue: true }, sessionId)).result.value;
-        const info = (await cdp.send('Runtime.evaluate', { expression: "document.getElementById('o').innerText", returnByValue: true }, sessionId)).result.value;
+        const t = (
+          await cdp.send(
+            'Runtime.evaluate',
+            { expression: 'document.title', returnByValue: true },
+            sessionId,
+          )
+        ).result.value;
+        const info = (
+          await cdp.send(
+            'Runtime.evaluate',
+            { expression: "document.getElementById('o').innerText", returnByValue: true },
+            sessionId,
+          )
+        ).result.value;
         console.log('PHONE VIEWPORT title:', t);
         console.log('PHONE VIEWPORT probe:\n' + info);
       }
       cdp.close();
-    } catch (e) { console.log('viewport probe failed:', e.message); }
+    } catch (e) {
+      console.log('viewport probe failed:', e.message);
+    }
     await sleep(500);
     // full-window capture (device frame is browser chrome, not page pixels)
     spawnSync('scrot', ['-o', join(OUT, `battle-${mode}-1.png`)], { env: process.env });
     console.log('captured', `battle-${mode}-1.png`);
     // zoom out twice via xdotool Ctrl+minus, then capture again to prove the WHOLE phone scales
-    for (let i = 0; i < 2; i++) { spawnSync('xdotool', ['key', '--clearmodifiers', 'ctrl+minus'], { env: process.env }); await sleep(600); }
+    for (let i = 0; i < 2; i++) {
+      spawnSync('xdotool', ['key', '--clearmodifiers', 'ctrl+minus'], { env: process.env });
+      await sleep(600);
+    }
     spawnSync('scrot', ['-o', join(OUT, `battle-${mode}-zoomout.png`)], { env: process.env });
     console.log('captured', `battle-${mode}-zoomout.png`);
     // reset, then zoom IN hard: the device must grow to fill the stage but NEVER cover the toolbar/omnibox.
-    spawnSync('xdotool', ['key', '--clearmodifiers', 'ctrl+0'], { env: process.env }); await sleep(500);
-    for (let i = 0; i < 7; i++) { spawnSync('xdotool', ['key', '--clearmodifiers', 'ctrl+equal'], { env: process.env }); await sleep(400); }
+    spawnSync('xdotool', ['key', '--clearmodifiers', 'ctrl+0'], { env: process.env });
+    await sleep(500);
+    for (let i = 0; i < 7; i++) {
+      spawnSync('xdotool', ['key', '--clearmodifiers', 'ctrl+equal'], { env: process.env });
+      await sleep(400);
+    }
     spawnSync('scrot', ['-o', join(OUT, `battle-${mode}-zoomin.png`)], { env: process.env });
     console.log('captured', `battle-${mode}-zoomin.png`);
     await runner.stopAll?.().catch(() => {});
   }
   process.exit(0);
 }
-main().catch((e) => { console.error('FAIL', e); process.exit(1); });
+main().catch((e) => {
+  console.error('FAIL', e);
+  process.exit(1);
+});

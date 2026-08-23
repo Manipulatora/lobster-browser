@@ -8,6 +8,10 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 
 import { CompositeRunner, buildLaunchers, startProfile } from '@lobster/engine-runner';
+import {
+  assertCanonicalFingerprintSeed,
+  canonicalFingerprintSeed,
+} from './canonical-seed.mjs';
 
 const output = resolve(
   process.env.LOBSTER_MATRIX_SESSION_FILE || 'ci/validation/reports/detector-session-current.json',
@@ -15,7 +19,12 @@ const output = resolve(
 const userDataDir = resolve(
   process.env.LOBSTER_MATRIX_USER_DATA_DIR || 'ci/validation/reports/detector-profile-current',
 );
-const seed = process.env.LOBSTER_MATRIX_PROFILE_SEED || 'lobster-matrix-fixed-alpha-20260711';
+const seed = process.env.LOBSTER_MATRIX_PROFILE_SEED
+  ? assertCanonicalFingerprintSeed(
+      process.env.LOBSTER_MATRIX_PROFILE_SEED,
+      'LOBSTER_MATRIX_PROFILE_SEED',
+    )
+  : canonicalFingerprintSeed('lobster-matrix-fixed-alpha-20260711');
 const profileId = process.env.LOBSTER_MATRIX_PROFILE_ID || 'matrix-fixed-alpha';
 const profileOs = process.env.LOBSTER_MATRIX_PROFILE_OS || 'linux';
 const fontPackDir = process.env.LOBSTER_FONTS_DIR;

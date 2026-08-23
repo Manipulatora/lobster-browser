@@ -110,8 +110,8 @@ export class ProfilesController {
    * Push/pull the CLIENT-encrypted profile blob. Body:
    *   `{ direction?: 'push' | 'pull', payload?: base64, baseVersion?: int }`
    * `direction` defaults to `'push'`; any other value is a 400 from the validation pipe. On push,
-   * `payload` (the encrypted blob) is stored opaquely and the version bumps; supplying `baseVersion`
-   * turns on conflict detection (a mismatch is a 409). On pull, the latest blob is returned base64.
+   * `payload` (the encrypted blob) and `baseVersion` are required; every write is conflict-checked
+   * (a mismatch is a 409). On pull, the latest blob is returned base64 and no version is required.
    */
   @Post(':id/sync')
   async sync(
@@ -120,11 +120,14 @@ export class ProfilesController {
     @Body() dto: SyncProfileDto,
     @Query('teamId') teamId?: string,
   ): Promise<ApiResponse<SyncResult>> {
+    const direction = dto.direction ?? 'push';
     return ok(
       await this.profilesService.sync(
         user.id,
         id,
-        { direction: dto.direction ?? 'push', payload: dto.payload, baseVersion: dto.baseVersion },
+        direction === 'push'
+          ? { direction, payload: dto.payload, baseVersion: dto.baseVersion! }
+          : { direction, payload: dto.payload, baseVersion: dto.baseVersion },
         teamId,
       ),
     );

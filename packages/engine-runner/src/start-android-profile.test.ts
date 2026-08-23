@@ -33,7 +33,7 @@ test('startAndroidProfile refuses when no ADB device is ready', async () => {
           profileId: 'p1',
           engine: 'lobium',
           os: 'android',
-          fingerprintSeed: 'android-seed-1',
+          fingerprintSeed: '0123456789abcdef0123456789abcdef',
           userDataDir: dir,
         },
         { adb },
@@ -60,7 +60,7 @@ test('startAndroidProfile pushes config, forwards CDP, and starts the APK activi
       profileId: 'android-profile',
       engine: 'lobium',
       os: 'android',
-      fingerprintSeed: 'android-seed-2',
+      fingerprintSeed: 'fedcba9876543210fedcba9876543210',
       userDataDir: dir,
     },
     {

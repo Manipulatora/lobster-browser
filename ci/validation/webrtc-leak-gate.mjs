@@ -18,50 +18,141 @@
  * was open. Nothing caught it because the obvious check - "is the private IP hidden?" - passes
  * anyway: Chrome's default mDNS behaviour hides private IPs whatever the policy says.
  *
- * This gate asserts the OUTCOME (no candidates escape) rather than the flag string, so it stays
- * honest if Chromium renames the switch again.
+ * This gate asserts the OUTCOME after the page calls setConfiguration(STUN+TURN/all), through both
+ * candidate events and localDescription.sdp. Launch flags and native JSON come from the production
+ * builders, so it also fails if orchestration and browser policy drift apart.
  *
  *   LOBSTER_LOBIUM_BIN=<chrome> node ci/validation/webrtc-leak-gate.mjs
  *
  * Exit codes: 0 pass, 1 leak, 2 blocked.
  */
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { withCdpSession, cdpEvaluate } from '../../packages/engine-runner/dist/cdp-client.js';
+import { deriveFingerprint } from '../../packages/fingerprint/dist/index.js';
+import {
+  buildLaunchOptions,
+  buildLobiumConfig,
+  cdpEvaluate,
+  lobiumConfigArg,
+  withCdpSession,
+  writeLobiumConfig,
+} from '../../packages/engine-runner/dist/lib.js';
 
 const bin = process.env.LOBSTER_LOBIUM_BIN;
-if (!bin) { console.error('BLOCKED: set LOBSTER_LOBIUM_BIN'); process.exit(2); }
+if (!bin) {
+  console.error('BLOCKED: set LOBSTER_LOBIUM_BIN');
+  process.exit(2);
+}
+
+const GATE_SEED = '0123456789abcdef0123456789abcdef';
+const gateFingerprint = deriveFingerprint(GATE_SEED, { os: 'windows', engine: 'lobium' });
+const REQUESTED_ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  {
+    urls: 'turn:openrelay.metered.ca:80',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+];
 
 const GATHER = `(async () => {
-  // The page supplies its OWN stun+turn, because that is the case a relay-only policy alone does not
-  // cover: a detector can hand the browser a TURN server and harvest the relay candidates.
-  const iceServers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-  ];
-  const out = { constructs: false };
-  try { const p = new RTCPeerConnection(); p.close(); out.constructs = true; }
-  catch (e) { out.errName = e.name; out.errMessage = e.message; return JSON.stringify(out); }
-  const pc = new RTCPeerConnection({ iceServers });
+  // Start deliberately restrictive, then let the page restore STUN + TURN + "all". Constructor-only
+  // native enforcement passes the old probe and fails this one.
+  const requestedIceServers = ${JSON.stringify(REQUESTED_ICE_SERVERS)};
+  const normalizeServers = (servers) =>
+    (servers || []).map((server) => ({
+      urls: (Array.isArray(server.urls) ? server.urls : [server.urls]).filter(Boolean).sort(),
+      username: server.username || '',
+      credential: typeof server.credential === 'string' ? server.credential : '',
+    }));
+  const candidateTypes = (candidates) => {
+    const types = {};
+    for (const candidate of candidates) {
+      const match = /\\btyp\\s+(\\w+)/.exec(candidate);
+      if (match) types[match[1]] = (types[match[1]] || 0) + 1;
+    }
+    return types;
+  };
+
+  const out = { constructs: false, reconfigured: false, rejectedSet: false };
+  let pc;
+  try {
+    pc = new RTCPeerConnection({
+      iceServers: [],
+      iceTransportPolicy: 'relay',
+      bundlePolicy: 'balanced',
+    });
+    out.constructs = true;
+  } catch (e) {
+    out.errName = e.name;
+    out.errMessage = e.message;
+    return JSON.stringify(out);
+  }
+
+  const initial = pc.getConfiguration();
+  out.initialPolicy = initial.iceTransportPolicy;
+  out.initialServers = normalizeServers(initial.iceServers);
+  try {
+    pc.setConfiguration({
+      iceServers: requestedIceServers,
+      iceTransportPolicy: 'all',
+    });
+    out.reconfigured = true;
+  } catch (e) {
+    out.reconfigureErrName = e.name;
+    out.reconfigureErrMessage = e.message;
+    pc.close();
+    return JSON.stringify(out);
+  }
+
+  const applied = pc.getConfiguration();
+  out.requestedServers = normalizeServers(requestedIceServers);
+  out.echoedPolicy = applied.iceTransportPolicy;
+  out.echoedServers = normalizeServers(applied.iceServers);
+
   pc.createDataChannel('probe');
-  const cands = [];
-  pc.onicecandidate = (e) => { if (e.candidate) cands.push(e.candidate.candidate); };
+  const eventCandidates = [];
+  pc.onicecandidate = (event) => {
+    if (event.candidate) eventCandidates.push(event.candidate.candidate);
+  };
+  const gatheringComplete = new Promise((resolve) => {
+    const onState = () => {
+      if (pc.iceGatheringState === 'complete') {
+        pc.removeEventListener('icegatheringstatechange', onState);
+        resolve();
+      }
+    };
+    pc.addEventListener('icegatheringstatechange', onState);
+    onState();
+  });
   await pc.setLocalDescription(await pc.createOffer());
-  await new Promise((r) => setTimeout(r, 6000));
+  await Promise.race([gatheringComplete, new Promise((resolve) => setTimeout(resolve, 10_000))]);
+
   const sdp = pc.localDescription ? pc.localDescription.sdp : '';
-  const cfg = pc.getConfiguration();
+  const sdpCandidates = sdp.match(/^a=candidate:.*$/gm) || [];
+  out.eventTotal = eventCandidates.length;
+  out.eventTypes = candidateTypes(eventCandidates);
+  out.sdpTotal = sdpCandidates.length;
+  out.sdpTypes = candidateTypes(sdpCandidates);
+
+  // bundlePolicy is immutable after construction, so this reaches native SetConfiguration and is
+  // rejected with INVALID_MODIFICATION. The attempted ICE values must not replace the successful echo.
+  try {
+    pc.setConfiguration({
+      iceServers: [],
+      iceTransportPolicy: 'relay',
+      bundlePolicy: 'max-bundle',
+    });
+  } catch (e) {
+    out.rejectedSet = true;
+    out.rejectedSetName = e.name;
+  }
+  const afterRejected = pc.getConfiguration();
+  out.afterRejectedPolicy = afterRejected.iceTransportPolicy;
+  out.afterRejectedServers = normalizeServers(afterRejected.iceServers);
   pc.close();
-  const types = {};
-  for (const c of cands) { const m = /\\btyp (\\w+)/.exec(c); if (m) types[m[1]] = (types[m[1]] || 0) + 1; }
-  out.total = cands.length;
-  out.types = types;
-  // Candidates reach script through the SDP as well as the event. A gate that watches only the
-  // event passes a build that is still handing out the public IP - measured, not hypothetical.
-  out.sdpCandidateLines = (sdp.match(/^a=candidate:/gm) || []).length;
-  out.echoedPolicy = cfg.iceTransportPolicy;
-  out.echoedServers = (cfg.iceServers || []).length;
   return JSON.stringify(out);
 })()`;
 
@@ -78,31 +169,78 @@ async function waitForPageTarget(wsUrl, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const targets = await fetch(listUrl, { signal: AbortSignal.timeout(4_000) }).then((r) => r.json());
+      const targets = await fetch(listUrl, { signal: AbortSignal.timeout(4_000) }).then((r) =>
+        r.json(),
+      );
       if (targets.some((t) => t.type === 'page' && t.webSocketDebuggerUrl)) return;
-    } catch { /* endpoint not up yet */ }
+    } catch {
+      /* endpoint not up yet */
+    }
     await new Promise((r) => setTimeout(r, 150));
   }
   throw new Error('engine never exposed a page target');
 }
 
-async function gather(label, extraArgs) {
+async function gather(
+  label,
+  { launchPolicy = 'default_public_interface_only', nativePolicy } = {},
+) {
   const udd = await mkdtemp(join(tmpdir(), 'lobium-rtc-gate-'));
-  const child = spawn(bin, [
-    `--user-data-dir=${udd}`, '--remote-debugging-port=0', '--no-first-run',
-    '--no-default-browser-check', '--no-sandbox', '--headless=new', ...extraArgs, 'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const launch = buildLaunchOptions({
+    profileId: `webrtc-gate-${label}`,
+    engine: 'lobium',
+    userDataDir: udd,
+    fingerprint: gateFingerprint,
+    fingerprintSeed: GATE_SEED,
+    webrtcPolicy: launchPolicy,
+    headless: true,
+  });
+  const nativeArgs = [];
+  if (nativePolicy) {
+    // Keep this axis intentionally independent from the browser flag. proxy_only requires a proxy
+    // summary in the production config builder, but the process is left unproxied so a stale native
+    // hook cannot be masked by launch defense-in-depth.
+    const proxy =
+      nativePolicy === 'proxy_only' ? { type: 'http', host: '127.0.0.1', port: 9 } : undefined;
+    const config = buildLobiumConfig(gateFingerprint, {
+      seed: GATE_SEED,
+      webrtcPolicy: nativePolicy,
+      ...(proxy ? { proxy } : {}),
+    });
+    nativeArgs.push(lobiumConfigArg(await writeLobiumConfig(udd, config)));
+  }
+  const child = spawn(
+    bin,
+    [
+      `--user-data-dir=${launch.userDataDir}`,
+      '--remote-debugging-port=0',
+      '--no-sandbox',
+      ...(launch.headless ? ['--headless=new'] : []),
+      ...launch.args,
+      ...nativeArgs,
+      'about:blank',
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
   try {
     const ws = await new Promise((res, rej) => {
       const t = setTimeout(() => rej(new Error('no devtools endpoint')), 45_000);
       child.stderr.on('data', (b) => {
         const m = /(ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/[a-f0-9-]+)/.exec(b.toString());
-        if (m) { clearTimeout(t); res(m[1]); }
+        if (m) {
+          clearTimeout(t);
+          res(m[1]);
+        }
       });
-      child.on('exit', (c) => { clearTimeout(t); rej(new Error(`engine exited (${c})`)); });
+      child.on('exit', (c) => {
+        clearTimeout(t);
+        rej(new Error(`engine exited (${c})`));
+      });
     });
     await waitForPageTarget(ws);
-    const raw = await withCdpSession(ws, (s) => cdpEvaluate(s, GATHER, { awaitPromise: true, timeoutMs: 40_000 }));
+    const raw = await withCdpSession(ws, (s) =>
+      cdpEvaluate(s, GATHER, { awaitPromise: true, timeoutMs: 40_000 }),
+    );
     return JSON.parse(raw);
   } finally {
     child.kill();
@@ -111,72 +249,116 @@ async function gather(label, extraArgs) {
   }
 }
 
-// The native policies need a config file; only the fields the engine reads are required.
-const cfgDir = await mkdtemp(join(tmpdir(), 'lobium-rtc-cfg-'));
-async function policyConfig(policy) {
-  const p = join(cfgDir, `fp-${policy}.json`);
-  await writeFile(p, JSON.stringify({ version: 1, net: { webrtcPolicy: policy } }), 'utf8');
-  return p;
-}
-
 let control, browserPolicy, disabled, proxyOnly;
 try {
   // The control proves the probe can SEE a leak on this host. Without it, a network that simply
   // cannot reach STUN would make every guarded run look like a pass.
-  control = await gather('control', []);
-  browserPolicy = await gather('browser', ['--webrtc-ip-handling-policy=disable_non_proxied_udp']);
-  disabled = await gather('disabled', [`--lobium-fp-config=${await policyConfig('disabled')}`]);
-  proxyOnly = await gather('proxy_only', [`--lobium-fp-config=${await policyConfig('proxy_only')}`]);
+  control = await gather('control');
+  browserPolicy = await gather('browser', { launchPolicy: 'disable_non_proxied_udp' });
+  disabled = await gather('disabled', { nativePolicy: 'disabled' });
+  proxyOnly = await gather('proxy_only', { nativePolicy: 'proxy_only' });
 } catch (err) {
   console.error(`BLOCKED: ${err.message}`);
   process.exit(2);
-} finally {
-  await rm(cfgDir, { recursive: true, force: true }).catch(() => {});
 }
 
 const show = (name, r) =>
   console.log(
-    `  ${name.padEnd(24)} constructs=${r.constructs} candidates=${r.total ?? '-'} ` +
-      `${JSON.stringify(r.types ?? {})} sdpLines=${r.sdpCandidateLines ?? '-'} ` +
-      `echoedPolicy=${r.echoedPolicy ?? '-'} echoedServers=${r.echoedServers ?? '-'}`,
+    `  ${name.padEnd(24)} constructs=${r.constructs} reconfigured=${r.reconfigured} ` +
+      `event=${r.eventTotal ?? '-'} ${JSON.stringify(r.eventTypes ?? {})} ` +
+      `sdp=${r.sdpTotal ?? '-'} ${JSON.stringify(r.sdpTypes ?? {})} ` +
+      `echo=${r.echoedPolicy ?? '-'}/${r.echoedServers?.length ?? '-'} ` +
+      `rejectedSet=${r.rejectedSetName ?? r.rejectedSet}`,
   );
 show('control (no policy)', control);
 show('--webrtc-ip-handling', browserPolicy);
 show('native disabled', disabled);
 show('native proxy_only', proxyOnly);
 
-if (!control.total || !control.sdpCandidateLines) {
-  console.error('BLOCKED: the control gathered nothing, so this host cannot demonstrate a leak');
+const stunOracleReady = (control.eventTypes?.srflx ?? 0) > 0 && (control.sdpTypes?.srflx ?? 0) > 0;
+const turnOracleReady = (control.eventTypes?.relay ?? 0) > 0 && (control.sdpTypes?.relay ?? 0) > 0;
+if (!stunOracleReady) {
+  console.error(
+    'BLOCKED: the control did not expose a STUN/srflx candidate through both the event and SDP, ' +
+      'so this host cannot demonstrate the public-IP leak',
+  );
   process.exit(2);
 }
 
 const failures = [];
-const check = (name, r) => {
+const serverJson = (servers) => JSON.stringify(servers ?? []);
+const typeTotal = (types) => Object.values(types ?? {}).reduce((sum, count) => sum + count, 0);
+const checkCandidateChannel = (name, channel, total, types, mode) => {
+  if (typeTotal(types) !== total) {
+    failures.push(
+      `${name}: ${channel} exposed ${total} candidate(s), but ${typeTotal(types)} had a parseable type`,
+    );
+  }
+  const forbidden =
+    mode === 'none'
+      ? Object.entries(types ?? {})
+      : Object.entries(types ?? {}).filter(([type]) => type !== 'relay');
+  for (const [type, count] of forbidden) {
+    failures.push(`${name}: ${channel} exposed ${count} forbidden ${type} candidate(s)`);
+  }
+};
+const check = (name, r, candidateMode) => {
   if (!r.constructs) {
     // Real Chrome never throws from this constructor in an attached document, so throwing at all is
     // a browser difference - whatever the message says.
     failures.push(`${name}: RTCPeerConnection threw ${r.errName}: ${r.errMessage}`);
     return;
   }
-  if ((r.types?.srflx ?? 0) > 0) failures.push(`${name}: ${r.types.srflx} srflx candidate(s) escaped - real public IP`);
-  if ((r.sdpCandidateLines ?? 0) > 0) failures.push(`${name}: ${r.sdpCandidateLines} candidate line(s) in localDescription.sdp`);
-  if (r.echoedPolicy !== control.echoedPolicy) {
-    failures.push(`${name}: getConfiguration() reports iceTransportPolicy "${r.echoedPolicy}", contradicting the page's "${control.echoedPolicy}"`);
+  if (!r.reconfigured) {
+    failures.push(
+      `${name}: STUN+TURN/all setConfiguration failed ${r.reconfigureErrName}: ${r.reconfigureErrMessage}`,
+    );
+    return;
   }
-  if (r.echoedServers !== control.echoedServers) {
-    failures.push(`${name}: getConfiguration() reports ${r.echoedServers} iceServers, the page supplied ${control.echoedServers}`);
+  if (r.initialPolicy !== 'relay' || (r.initialServers?.length ?? -1) !== 0) {
+    failures.push(`${name}: constructor baseline was not relay with an empty ICE-server list`);
   }
+  if (r.echoedPolicy !== 'all') {
+    failures.push(
+      `${name}: getConfiguration() reports iceTransportPolicy "${r.echoedPolicy}" after the page successfully requested "all"`,
+    );
+  }
+  if (serverJson(r.echoedServers) !== serverJson(r.requestedServers)) {
+    failures.push(
+      `${name}: getConfiguration() did not echo the page's latest STUN+TURN server list`,
+    );
+  }
+  if (!r.rejectedSet || r.rejectedSetName !== 'InvalidModificationError') {
+    failures.push(
+      `${name}: immutable bundlePolicy reconfiguration was not rejected with InvalidModificationError`,
+    );
+  }
+  if (
+    r.afterRejectedPolicy !== r.echoedPolicy ||
+    serverJson(r.afterRejectedServers) !== serverJson(r.echoedServers)
+  ) {
+    failures.push(`${name}: rejected setConfiguration corrupted getConfiguration() echo state`);
+  }
+  checkCandidateChannel(name, 'icecandidate event', r.eventTotal ?? 0, r.eventTypes, candidateMode);
+  checkCandidateChannel(name, 'localDescription.sdp', r.sdpTotal ?? 0, r.sdpTypes, candidateMode);
 };
-check('--webrtc-ip-handling', browserPolicy);
-check('native disabled', disabled);
-check('native proxy_only', proxyOnly);
-if (browserPolicy.total >= control.total) {
-  failures.push('--webrtc-ip-handling changed nothing, so the switch is not reaching the engine');
-}
+check('--webrtc-ip-handling', browserPolicy, 'relay_only');
+check('native disabled', disabled, 'none');
+check('native proxy_only', proxyOnly, 'relay_only');
 
 if (failures.length) {
   console.error('WEBRTC LEAK GATE: FAIL');
   for (const f of failures) console.error(`  - ${f}`);
   process.exit(1);
 }
-console.log('WEBRTC LEAK GATE: PASS - no candidate escapes by event or SDP, and every policy echoes the page back unchanged');
+if (!turnOracleReady) {
+  console.error(
+    'BLOCKED: STUN policy checks passed, but the control did not expose a TURN/relay candidate ' +
+      'through both the event and SDP, so disabled server stripping is not proven',
+  );
+  process.exit(2);
+}
+console.log(
+  'WEBRTC LEAK GATE: PASS - reconfiguration stays policy-constrained in events and SDP, ' +
+    'successful values echo exactly, and rejected updates preserve prior echo state',
+);

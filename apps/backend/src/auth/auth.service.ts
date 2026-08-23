@@ -14,7 +14,6 @@ import type { User } from '@lobster/shared-types';
 import type { LoginDto } from './dto/login.dto';
 import type { RegisterDto } from './dto/register.dto';
 import { USERS_REPOSITORY, type StoredUser, type UsersRepository } from './users.repository';
-import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 import { resolveJwtSecret } from './jwt-secret';
 import { MailService } from '../mail/mail.service';
 
@@ -163,7 +162,6 @@ export interface AgentTokenResult {
 export class AuthService {
   constructor(
     @Inject(USERS_REPOSITORY) private readonly users: UsersRepository,
-    @Inject(TEAMS_REPOSITORY) private readonly teams: TeamsRepository,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly mail: MailService,
@@ -222,32 +220,21 @@ export class AuthService {
    */
   async completeRegistration(emailInput: string, code: string): Promise<AuthResult> {
     const email = this.normalizeEmail(emailInput);
-    const pending = await this.users.consumePendingRegistration(
+    const result = await this.users.completePendingRegistration(
       email,
       hashVerificationCode(code),
       new Date(),
     );
     // Wrong, expired, exhausted or unknown — all one message, so this cannot be used to discover
     // which addresses have a sign-up in flight.
-    if (!pending) throw new BadRequestException('that code is incorrect or has expired');
+    if (result.outcome === 'invalid') {
+      throw new BadRequestException('that code is incorrect or has expired');
+    }
+    if (result.outcome === 'email_conflict') {
+      throw new ConflictException('email already registered');
+    }
 
-    // Re-check between consuming the code and creating the row: the address could have been
-    // registered by another flow while this sign-up sat waiting.
-    const existing = await this.users.findByEmail(email);
-    if (existing) throw new ConflictException('email already registered');
-
-    const user = await this.users.create({
-      email: pending.email,
-      passwordHash: pending.passwordHash,
-      displayName: pending.fullName,
-      company: pending.company,
-    });
-    // Every user gets a personal team + an admin membership so they always have a place to own
-    // profiles the moment the account exists (no separate "create your first team" step).
-    const team = await this.teams.createTeam(user.id, this.personalTeamName(user));
-    await this.teams.addMember(team.id, user.id, 'admin');
-
-    return { user: this.toPublicUser(user), token: this.signToken(user) };
+    return { user: this.toPublicUser(result.user), token: this.signToken(result.user) };
   }
 
   /**
@@ -367,11 +354,6 @@ export class AuthService {
   private toPublicUser(user: StoredUser): User {
     const { passwordHash: _passwordHash, ...publicUser } = user;
     return publicUser;
-  }
-
-  /** Friendly default name for the auto-created personal team. */
-  private personalTeamName(user: StoredUser): string {
-    return `${user.displayName ?? user.email}'s Team`;
   }
 
   // --- Verifying an EXISTING account's address --------------------------------

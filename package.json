@@ -2,7 +2,7 @@
   "name": "lobster-browser",
   "version": "0.0.0",
   "private": true,
-  "description": "Lobster Browser Ã¢â‚¬â€ anti-detect browser + SaaS (monorepo root)",
+  "description": "Lobster Browser — anti-detect browser + SaaS (monorepo root)",
   "license": "UNLICENSED",
   "engines": {
     "node": ">=22.12 <25"
@@ -31,7 +31,7 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json}\"",
     "typecheck:core": "tsc -b packages/shared-types packages/crypto packages/fingerprint packages/proxy",
-    "gate:engine": "node --test ci/validation/patch-series.test.mjs ci/validation/version-coherence.test.mjs ci/validation/source-hygiene.test.mjs",
+    "gate:engine": "node --test ci/validation/patch-series.test.mjs ci/validation/version-coherence.test.mjs ci/validation/source-hygiene.test.mjs ci/validation/canonical-seed.test.mjs",
     "gate:series": "node lobium/verify-series.mjs",
     "gate:kernels": "powershell -NoProfile -ExecutionPolicy Bypass -File lobium/test/run.ps1",
     "gate:desktop-css": "node ci/validation/desktop-css-contract.mjs",

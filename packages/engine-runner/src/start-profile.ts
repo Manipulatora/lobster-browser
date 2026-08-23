@@ -1,5 +1,6 @@
 import {
   applyOverrides,
+  coherentGpuIdentity,
   deriveFingerprintFromHost,
   deriveFingerprint,
   normalizeHostWebglIdentity,
@@ -36,6 +37,7 @@ import {
 } from './lobium-capabilities.js';
 import { ensureHostCalibration } from './ensure-host-calibration.js';
 import { captureHostCalibrationRawSnapshot } from './capture-host-calibration.js';
+import { assertValidFingerprintSeed } from './fingerprint-seed.js';
 
 /** True when a geo/proxy error means the upstream is dead — fail closed, do not launch. */
 function isProxyUnreachableError(err: unknown): boolean {
@@ -85,6 +87,7 @@ export async function startProfile(
   runner: EngineRunner,
   params: StartProfileParams,
 ): Promise<LaunchResult> {
+  assertValidFingerprintSeed(params.fingerprintSeed, params.profileId);
   if (params.engine !== 'lobium') {
     throw new Error(
       `refusing to launch profile ${params.profileId}: Lobium is the only supported engine`,
@@ -222,9 +225,10 @@ export async function startProfile(
       engine: params.engine,
     });
     if (rendererPolicy.mode === 'normalized_host') {
+      const webgl = normalizeHostWebglIdentity(baseFingerprint.webgl);
       baseFingerprint = {
         ...baseFingerprint,
-        webgl: normalizeHostWebglIdentity(baseFingerprint.webgl),
+        ...coherentGpuIdentity(webgl),
       };
     }
   } else {
@@ -240,14 +244,15 @@ export async function startProfile(
             `"${selectedPreset.os}" does not match profile OS "${params.os}"`,
         );
       }
+      const webgl = {
+        ...selectedPreset.webgl,
+        ...(selectedPreset.webgl.extensions
+          ? { extensions: [...selectedPreset.webgl.extensions] }
+          : {}),
+      };
       baseFingerprint = {
         ...baseFingerprint,
-        webgl: {
-          ...selectedPreset.webgl,
-          ...(selectedPreset.webgl.extensions
-            ? { extensions: [...selectedPreset.webgl.extensions] }
-            : {}),
-        },
+        ...coherentGpuIdentity(webgl),
       };
     }
   }

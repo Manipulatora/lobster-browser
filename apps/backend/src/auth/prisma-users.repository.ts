@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import {
   loginBackoffUntil,
+  type CompletePendingRegistrationResult,
   type CreateUserInput,
   type PendingRegistrationInput,
   type StoredPendingRegistration,
@@ -12,6 +13,9 @@ import {
 
 /** Failed guesses allowed against one 6-digit code before it is dead. */
 const MAX_VERIFICATION_ATTEMPTS = 5;
+
+/** Throwing across Prisma's callback boundary is what rolls a claimed pending row back. */
+class EmailAlreadyRegisteredError extends Error {}
 
 /** The subset of a Prisma `users` row this repository maps to a `StoredUser`. */
 interface UserRow {
@@ -83,45 +87,72 @@ export class PrismaUsersRepository implements UsersRepository {
     };
   }
 
-  async consumePendingRegistration(
+  async completePendingRegistration(
     email: string,
     codeHash: string,
     now: Date,
-  ): Promise<StoredPendingRegistration | null> {
-    return this.prisma.$transaction(async (tx) => {
-      // The claim is a conditional deleteMany: matching on the hash, the expiry AND the attempt cap
-      // in one statement means two simultaneous submissions cannot both succeed, and a correct code
-      // is consumed exactly once. Read-then-delete would leave precisely that race.
-      const row = await tx.pendingRegistration.findFirst({
-        where: {
+  ): Promise<CompletePendingRegistrationResult> {
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const validity = {
           email,
           codeHash,
           expiresAt: { gt: now },
           attempts: { lt: MAX_VERIFICATION_ATTEMPTS },
-        },
-      });
+        };
+        const row = await tx.pendingRegistration.findFirst({ where: validity });
 
-      if (!row) {
-        // Wrong, expired or exhausted. Burn an attempt so a six-digit code cannot be ground down
-        // against an endpoint that has no session to rate-limit against.
-        await tx.pendingRegistration.updateMany({
-          where: { email },
-          data: { attempts: { increment: 1 } },
+        if (!row) {
+          // Wrong, expired or exhausted. Burn an attempt so a six-digit code cannot be ground down
+          // against an endpoint that has no session to rate-limit against.
+          await tx.pendingRegistration.updateMany({
+            where: { email },
+            data: { attempts: { increment: 1 } },
+          });
+          return { outcome: 'invalid' } as const;
+        }
+
+        // Conditional deletion is the claim: concurrent correct submissions may both read the row,
+        // but only one can delete it and continue to create an account.
+        const deleted = await tx.pendingRegistration.deleteMany({ where: validity });
+        if (deleted.count === 0) return { outcome: 'invalid' } as const;
+
+        // This error must cross the transaction boundary. Returning a conflict from inside the
+        // callback would commit the delete and destroy the user's only still-valid code.
+        if (await tx.user.findUnique({ where: { email } })) {
+          throw new EmailAlreadyRegisteredError();
+        }
+
+        const userRow = await tx.user.create({
+          data: {
+            email: row.email,
+            passwordHash: row.passwordHash,
+            displayName: row.fullName,
+            company: row.company,
+            emailVerifiedAt: now,
+          },
         });
-        return null;
+        const team = await tx.team.create({
+          data: { ownerUserId: userRow.id, name: `${row.fullName}'s Team` },
+        });
+        await tx.membership.create({
+          data: { teamId: team.id, userId: userRow.id, role: 'admin' },
+        });
+
+        return { outcome: 'created', user: this.toStoredUser(userRow) } as const;
+      });
+    } catch (error) {
+      if (error instanceof EmailAlreadyRegisteredError) {
+        return { outcome: 'email_conflict' };
       }
-
-      const deleted = await tx.pendingRegistration.deleteMany({ where: { email, codeHash } });
-      // Lost the race to a concurrent submission: the other one gets the account.
-      if (deleted.count === 0) return null;
-
-      return {
-        email: row.email,
-        passwordHash: row.passwordHash,
-        fullName: row.fullName,
-        company: row.company ?? undefined,
-      };
-    });
+      // A user inserted concurrently can win after our explicit lookup. Its unique-email error
+      // still rolls this transaction back; confirm the conflicting row before mapping the result.
+      if (this.isUniqueConstraintError(error)) {
+        const existing = await this.prisma.user.findUnique({ where: { email } });
+        if (existing) return { outcome: 'email_conflict' };
+      }
+      throw error;
+    }
   }
 
   async purgeExpiredPendingRegistrations(now: Date): Promise<void> {
@@ -240,5 +271,14 @@ export class PrismaUsersRepository implements UsersRepository {
       failedLoginAttempts: row.failedLoginAttempts,
       lockedUntil: row.lockedUntil?.toISOString(),
     };
+  }
+
+  private isUniqueConstraintError(error: unknown): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      (error as { code?: unknown }).code === 'P2002'
+    );
   }
 }

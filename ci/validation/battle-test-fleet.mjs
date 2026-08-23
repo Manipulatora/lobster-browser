@@ -24,6 +24,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { CompositeRunner, buildLaunchers, dispatch, startProfile } from '@lobster/engine-runner';
+import { canonicalFingerprintSeed } from './canonical-seed.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(here, '..', '..');
@@ -57,30 +58,30 @@ const NOISE_OFF = { canvas: false, webgl: false, audio: false, clientRects: fals
  */
 export const FIXTURES = [
   // --- Windows (6) ---
-  { id: 'win-nvidia-3080', os: 'windows', seed: 'fleet-win-nvidia-3080', renderer: 'win-nvidia-nvidia-geforce-rtx-3080-ti-20gb-2205' },
-  { id: 'win-nvidia-1660', os: 'windows', seed: 'fleet-win-nvidia-1660', renderer: 'win-nvidia-nvidia-geforce-gtx-1660-super-1f09' },
-  { id: 'win-amd-580', os: 'windows', seed: 'fleet-win-amd-580', renderer: 'win-amd-amd-radeon-rx-580-2048sp-6fdf' },
-  { id: 'win-amd-6700', os: 'windows', seed: 'fleet-win-amd-6700', renderer: 'win-amd-amd-radeon-rx-6700-73df' },
-  { id: 'win-intel-uhd', os: 'windows', seed: 'fleet-win-intel-uhd', renderer: 'win-intel-intel--uhd-graphics-46a1' },
-  { id: 'win-noiseoff', os: 'windows', seed: 'fleet-win-noiseoff', renderer: 'win-nvidia-nvidia-geforce-gtx-1070-1b81', hardwareNoise: NOISE_OFF },
+  { id: 'win-nvidia-3080', os: 'windows', seed: canonicalFingerprintSeed('fleet-win-nvidia-3080'), renderer: 'win-nvidia-nvidia-geforce-rtx-3080-ti-20gb-2205' },
+  { id: 'win-nvidia-1660', os: 'windows', seed: canonicalFingerprintSeed('fleet-win-nvidia-1660'), renderer: 'win-nvidia-nvidia-geforce-gtx-1660-super-1f09' },
+  { id: 'win-amd-580', os: 'windows', seed: canonicalFingerprintSeed('fleet-win-amd-580'), renderer: 'win-amd-amd-radeon-rx-580-2048sp-6fdf' },
+  { id: 'win-amd-6700', os: 'windows', seed: canonicalFingerprintSeed('fleet-win-amd-6700'), renderer: 'win-amd-amd-radeon-rx-6700-73df' },
+  { id: 'win-intel-uhd', os: 'windows', seed: canonicalFingerprintSeed('fleet-win-intel-uhd'), renderer: 'win-intel-intel--uhd-graphics-46a1' },
+  { id: 'win-noiseoff', os: 'windows', seed: canonicalFingerprintSeed('fleet-win-noiseoff'), renderer: 'win-nvidia-nvidia-geforce-gtx-1070-1b81', hardwareNoise: NOISE_OFF },
   // --- macOS (5) ---
-  { id: 'mac-m1', os: 'macos', arch: 'arm64', seed: 'fleet-mac-m1', renderer: 'mac-apple-m1' },
-  { id: 'mac-m2', os: 'macos', arch: 'arm64', seed: 'fleet-mac-m2', renderer: 'mac-apple-m2' },
-  { id: 'mac-m3', os: 'macos', arch: 'arm64', seed: 'fleet-mac-m3', renderer: 'mac-apple-m3' },
-  { id: 'mac-intel-iris', os: 'macos', arch: 'x86_64', seed: 'fleet-mac-intel-iris', renderer: 'mac-intel-intel--crystal-well-integrated-iris-pro-graphics-5200-0d22' },
-  { id: 'mac-intel-radeon', os: 'macos', arch: 'x86_64', seed: 'fleet-mac-intel-radeon', renderer: 'mac-amd-amd-radeon-pro-66a0' },
+  { id: 'mac-m1', os: 'macos', arch: 'arm64', seed: canonicalFingerprintSeed('fleet-mac-m1'), renderer: 'mac-apple-m1' },
+  { id: 'mac-m2', os: 'macos', arch: 'arm64', seed: canonicalFingerprintSeed('fleet-mac-m2'), renderer: 'mac-apple-m2' },
+  { id: 'mac-m3', os: 'macos', arch: 'arm64', seed: canonicalFingerprintSeed('fleet-mac-m3'), renderer: 'mac-apple-m3' },
+  { id: 'mac-intel-iris', os: 'macos', arch: 'x86_64', seed: canonicalFingerprintSeed('fleet-mac-intel-iris'), renderer: 'mac-intel-intel--crystal-well-integrated-iris-pro-graphics-5200-0d22' },
+  { id: 'mac-intel-radeon', os: 'macos', arch: 'x86_64', seed: canonicalFingerprintSeed('fleet-mac-intel-radeon'), renderer: 'mac-amd-amd-radeon-pro-66a0' },
   // --- Linux (5) ---
-  { id: 'linux-nvidia-3060', os: 'linux', seed: 'fleet-linux-nvidia-3060', renderer: 'linux-nvidia-nvidia-geforce-rtx-3060-ti-2414' },
-  { id: 'linux-amd-6600', os: 'linux', seed: 'fleet-linux-amd-6600', renderer: 'linux-amd-amd-radeon-rx-6600-73ff' },
-  { id: 'linux-intel-uhd', os: 'linux', seed: 'fleet-linux-intel-uhd', renderer: 'linux-intel-intel--uhd-graphics-46a1' },
-  { id: 'linux-nvidia-1080ti', os: 'linux', seed: 'fleet-linux-nvidia-1080ti', renderer: 'linux-nvidia-nvidia-geforce-gtx-1080-ti-1b06' },
-  { id: 'linux-noiseoff', os: 'linux', seed: 'fleet-linux-noiseoff', renderer: 'linux-amd-amd-radeon-rx-6600-73ff', hardwareNoise: NOISE_OFF },
+  { id: 'linux-nvidia-3060', os: 'linux', seed: canonicalFingerprintSeed('fleet-linux-nvidia-3060'), renderer: 'linux-nvidia-nvidia-geforce-rtx-3060-ti-2414' },
+  { id: 'linux-amd-6600', os: 'linux', seed: canonicalFingerprintSeed('fleet-linux-amd-6600'), renderer: 'linux-amd-amd-radeon-rx-6600-73ff' },
+  { id: 'linux-intel-uhd', os: 'linux', seed: canonicalFingerprintSeed('fleet-linux-intel-uhd'), renderer: 'linux-intel-intel--uhd-graphics-46a1' },
+  { id: 'linux-nvidia-1080ti', os: 'linux', seed: canonicalFingerprintSeed('fleet-linux-nvidia-1080ti'), renderer: 'linux-nvidia-nvidia-geforce-gtx-1080-ti-1b06' },
+  { id: 'linux-noiseoff', os: 'linux', seed: canonicalFingerprintSeed('fleet-linux-noiseoff'), renderer: 'linux-amd-amd-radeon-rx-6600-73ff', hardwareNoise: NOISE_OFF },
   // --- Non-US locale edge cases (2) ---
-  { id: 'locale-de', os: 'windows', seed: 'fleet-locale-de', renderer: 'win-nvidia-nvidia-geforce-rtx-3080-ti-20gb-2205', overrides: localeOverride('DE') },
-  { id: 'locale-ja', os: 'macos', arch: 'arm64', seed: 'fleet-locale-ja', renderer: 'mac-apple-m2', overrides: localeOverride('JP') },
+  { id: 'locale-de', os: 'windows', seed: canonicalFingerprintSeed('fleet-locale-de'), renderer: 'win-nvidia-nvidia-geforce-rtx-3080-ti-20gb-2205', overrides: localeOverride('DE') },
+  { id: 'locale-ja', os: 'macos', arch: 'arm64', seed: canonicalFingerprintSeed('fleet-locale-ja'), renderer: 'mac-apple-m2', overrides: localeOverride('JP') },
   // --- Android, emulated (2) ---
-  { id: 'android-phone', os: 'android', seed: 'fleet-android-phone', androidDeviceType: 'mobile', androidDeviceModel: 'Google Pixel 8 (Pixel 8)', osVersion: 'Android 15' },
-  { id: 'android-tablet', os: 'android', seed: 'fleet-android-tablet', androidDeviceType: 'tablet', osVersion: 'Android 14' },
+  { id: 'android-phone', os: 'android', seed: canonicalFingerprintSeed('fleet-android-phone'), androidDeviceType: 'mobile', androidDeviceModel: 'Google Pixel 8 (Pixel 8)', osVersion: 'Android 15' },
+  { id: 'android-tablet', os: 'android', seed: canonicalFingerprintSeed('fleet-android-tablet'), androidDeviceType: 'tablet', osVersion: 'Android 14' },
 ];
 
 function argValue(name) {

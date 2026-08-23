@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Audit oracles â€” the executable half of docs/ENGINE_AUDIT.md.
+ * Audit oracles — the executable half of docs/ENGINE_AUDIT.md.
  *
  * Every check here is a DETECTION ORACLE: a short script a real page can run that returns a
  * different answer on Lobium than on honest Chrome. They come straight from the adversarial audit,
@@ -10,7 +10,7 @@
  *
  * Why both: a third-party scanner tells you your score on the checks IT happens to run. An oracle
  * tells you whether a specific, known, cheap contradiction is present. The audit found several that
- * no listed scanner probes â€” a 1x1 getImageData read recovering the pristine canvas, a
+ * no listed scanner probes — a 1x1 getImageData read recovering the pristine canvas, a
  * ConstantSourceNode render coming back non-constant, PACK_ROW_LENGTH switching WebGL farbling off.
  * Those need their own gate or they regress silently.
  *
@@ -20,13 +20,13 @@
  *   LOBIUM_ORACLE_EXIT_IP=<ip> ...      the proxy's egress IP, enabling the WebRTC leak check
  *
  * WHICH PERSONA OS. Windows is the first target platform, so it is the default even when the host is
- * something else â€” taking the persona OS from `process.platform` meant a Linux runner only ever
+ * something else — taking the persona OS from `process.platform` meant a Linux runner only ever
  * measured a Linux persona, and every Windows-only surface (font isolation, native timezone, UA-CH
  * platformVersion) went unmeasured while the report still said "all oracles pass".
  *
  * Exit codes:
  *   0  every declared aspect is green.
- *   1  an oracle whose finding is marked FIXED measured and failed â€” a regression. Oracles for
+ *   1  an oracle whose finding is marked FIXED measured and failed — a regression. Oracles for
  *      findings still OPEN are reported and counted, but never fail the run: they are tracked work.
  *   2  BLOCKED. The run measured nothing it can draw a conclusion from: no binary, a build missing
  *      hooks the product's own launcher requires, or an aspect whose every probe was inconclusive.
@@ -55,7 +55,13 @@ import {
 } from '@lobster/engine-runner';
 
 import { launchEngine } from './e2e/engine.mjs';
-import { ASPECTS, aspectOf, exitCodeFor, formatAspectTable, scoreAspects } from './aspect-coverage.mjs';
+import {
+  ASPECTS,
+  aspectOf,
+  exitCodeFor,
+  formatAspectTable,
+  scoreAspects,
+} from './aspect-coverage.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPORTS_DIR = join(here, 'reports');
@@ -72,7 +78,9 @@ const PERSONA_OSES = (process.env.LOBIUM_ORACLE_OS || 'windows')
  * recent enough to describe this same engine; otherwise those aspects are BLOCKED, never assumed.
  */
 const TLS_REPORT = join(REPORTS_DIR, 'tls-fingerprint.json');
-const TLS_REPORT_MAX_AGE_MS = Number(process.env.LOBIUM_ORACLE_TLS_MAX_AGE_MS || 2 * 60 * 60 * 1000);
+const TLS_REPORT_MAX_AGE_MS = Number(
+  process.env.LOBIUM_ORACLE_TLS_MAX_AGE_MS || 2 * 60 * 60 * 1000,
+);
 
 // ---------------------------------------------------------------------------------------------
 // The oracles.
@@ -84,7 +92,7 @@ const TLS_REPORT_MAX_AGE_MS = Number(process.env.LOBIUM_ORACLE_TLS_MAX_AGE_MS ||
 // `run` is a JS expression evaluated in the page that resolves to { pass: boolean, detail: string }.
 // Keep each one small enough to paste into a devtools console: that is the point.
 //
-// `applies(ctx)` opts an oracle out of environments where it measures nothing meaningful â€” a
+// `applies(ctx)` opts an oracle out of environments where it measures nothing meaningful — a
 // Windows-only surface under a Linux persona, an egress check with no proxy. A row that does not
 // apply is recorded and excluded from scoring; that is NOT the same as inconclusive, which means the
 // probe should have worked and did not.
@@ -139,7 +147,7 @@ export const ORACLES = [
     status: 'fixed',
     surface: 'canvas',
     severity: 'critical',
-    why: 'A 1x1 read used to have no neighbours of its own, was always classified flat, and so returned the PRISTINE pixel â€” recovering the whole host canvas one pixel at a time and proving tampering in two calls.',
+    why: 'A 1x1 read used to have no neighbours of its own, was always classified flat, and so returned the PRISTINE pixel — recovering the whole host canvas one pixel at a time and proving tampering in two calls.',
     run: `(() => {${SCENE}
       const c = document.createElement('canvas'); c.width = 160; c.height = 90;
       const x = scene(c);
@@ -154,6 +162,174 @@ export const ORACLES = [
         }
       }
       return { pass: mismatch === 0, detail: mismatch + '/' + checked + ' 1x1 reads disagreed with the full read' };
+    })()`,
+  },
+  {
+    id: 'canvas-float-readback-coherent',
+    finding: 'canvas-float-readback-bypass',
+    status: 'fixed',
+    surface: 'canvas',
+    severity: 'critical',
+    why: 'rgba-float16 and rgba-float32 getImageData must use the same canonical farbling decision as rgba-unorm8 without quantizing untouched channels, alpha, or HDR/negative values.',
+    run: `(() => {
+      if (typeof Float16Array === 'undefined' || typeof ImageData === 'undefined') {
+        return { inconclusive: true, detail: 'float ImageData APIs unavailable' };
+      }
+      const W = 32, H = 18;
+      const formats = ['rgba-unorm8', 'rgba-float16', 'rgba-float32'];
+      const problems = [];
+      const check = (condition, message) => {
+        if (!condition && problems.length < 12) problems.push(message);
+      };
+      const raw = (imageData, pixelFormat) => {
+        const d = imageData.data;
+        if (pixelFormat === 'rgba-float16') {
+          return new Uint16Array(d.buffer, d.byteOffset, d.length);
+        }
+        if (pixelFormat === 'rgba-float32') {
+          return new Uint32Array(d.buffer, d.byteOffset, d.length);
+        }
+        return new Uint8Array(d.buffer, d.byteOffset, d.byteLength);
+      };
+      const read = (ctx, pixelFormat, x = 0, y = 0, width = W, height = H) =>
+        ctx.getImageData(x, y, width, height, { colorSpace: 'srgb', pixelFormat });
+      let source;
+      const makeContext = (hostEntropy, colorType = 'float16') => {
+        const canvas = document.createElement('canvas');
+        // The host glyph is real entropy but lies outside the measured source
+        // rectangle, so this does not depend on stale clearRect provenance.
+        canvas.width = W + 64; canvas.height = H;
+        const ctx = canvas.getContext('2d', {
+          alpha: false,
+          colorSpace: 'srgb',
+          colorType,
+          willReadFrequently: true,
+        });
+        if (!ctx || ctx.getContextAttributes().colorType !== colorType) {
+          throw new Error(colorType + ' canvas storage unavailable');
+        }
+        ctx.putImageData(source, 0, 0);
+        if (hostEntropy) {
+          ctx.font = '15px serif';
+          ctx.fillText('Lobium Ag', W + 2, 15);
+        }
+        return ctx;
+      };
+
+      let referenceContext, testContext;
+      try {
+        const values = new Float32Array(W * H * 4);
+        for (let pixel = 0; pixel < W * H; ++pixel) {
+          const x = pixel % W, y = Math.floor(pixel / W), o = pixel * 4;
+          values[o] = (((x * 37 + y * 19) % 247) + 0.314159) / 255;
+          values[o + 1] = (((x * 11 + y * 53) % 241) + 0.271828) / 255;
+          values[o + 2] = (((x * 71 + y * 7) % 239) + 0.161803) / 255;
+          values[o + 3] = (((x * 17 + y * 29) % 223) + 0.5) / 255;
+          if (pixel % 7 === 0) values[o] = 1.5;
+          if (pixel % 11 === 0) values[o + 1] = -0.25;
+        }
+        source = new ImageData(values, W, H, {
+          colorSpace: 'srgb',
+          pixelFormat: 'rgba-float32',
+        });
+        referenceContext = makeContext(false);
+        testContext = makeContext(true);
+      } catch (error) {
+        return { inconclusive: true, detail: String(error) };
+      }
+
+      const reference = {}, test = {};
+      for (const pixelFormat of formats) {
+        reference[pixelFormat] = read(referenceContext, pixelFormat);
+        test[pixelFormat] = read(testContext, pixelFormat);
+      }
+      const refU8 = reference['rgba-unorm8'], testU8 = test['rgba-unorm8'];
+      const refF16 = reference['rgba-float16'], testF16 = test['rgba-float16'];
+      const refF32 = reference['rgba-float32'], testF32 = test['rgba-float32'];
+      const refF16Raw = raw(refF16, 'rgba-float16');
+      const testF16Raw = raw(testF16, 'rgba-float16');
+      const refF32Raw = raw(refF32, 'rgba-float32');
+      const testF32Raw = raw(testF32, 'rgba-float32');
+      let changed = 0, unchangedSiblings = 0, rangeGuard = 0;
+
+      for (let i = 0; i < testU8.data.length; ++i) {
+        const channel = i % 4;
+        const canonicalChanged = testU8.data[i] !== refU8.data[i];
+        if (channel === 3) {
+          check(
+            !canonicalChanged && testF16Raw[i] === refF16Raw[i] &&
+              testF32Raw[i] === refF32Raw[i],
+            'alpha changed at component ' + i,
+          );
+          continue;
+        }
+        if (!canonicalChanged) {
+          check(testF16Raw[i] === refF16Raw[i], 'unchanged F16 precision at ' + i);
+          check(testF32Raw[i] === refF32Raw[i], 'unchanged F32 precision at ' + i);
+          const base = i - channel;
+          if (
+            testU8.data[base] !== refU8.data[base] ||
+            testU8.data[base + 1] !== refU8.data[base + 1] ||
+            testU8.data[base + 2] !== refU8.data[base + 2]
+          ) ++unchangedSiblings;
+          continue;
+        }
+        ++changed;
+        for (const tuple of [
+          ['F16', refF16.data, testF16.data, refF16Raw, testF16Raw],
+          ['F32', refF32.data, testF32.data, refF32Raw, testF32Raw],
+        ]) {
+          const name = tuple[0], refData = tuple[1], testData = tuple[2];
+          const refRaw = tuple[3], testRaw = tuple[4], value = refData[i];
+          if (Number.isFinite(value) && value >= 0 && value <= 1) {
+            check(
+              Math.round(testData[i] * 255) === testU8.data[i],
+              name + ' disagrees with rgba-unorm8 at ' + i,
+            );
+          } else {
+            check(testRaw[i] === refRaw[i], 'range-guard failed for ' + name + ' at ' + i);
+            ++rangeGuard;
+          }
+        }
+      }
+
+      for (const pixelFormat of ['rgba-float16', 'rgba-float32']) {
+        const fullRaw = raw(test[pixelFormat], pixelFormat);
+        for (let y = 0; y < H; ++y) for (let x = 0; x < W; ++x) {
+          const oneRaw = raw(read(testContext, pixelFormat, x, y, 1, 1), pixelFormat);
+          const base = (y * W + x) * 4;
+          for (let channel = 0; channel < 4; ++channel) {
+            check(
+              oneRaw[channel] === fullRaw[base + channel],
+              'full-vs-1x1 ' + pixelFormat + ' at ' + x + ',' + y + ',' + channel,
+            );
+          }
+        }
+      }
+
+      for (const pixelFormat of ['rgba-float16', 'rgba-float32']) {
+        // Ordinary unorm8 backing avoids legitimate half-rounding between two
+        // F32 reads while still testing the public float fixed point.
+        const ctx = makeContext(true, 'unorm8');
+        const first = read(ctx, pixelFormat);
+        ctx.putImageData(first, 0, 0);
+        const second = read(ctx, pixelFormat);
+        const a = raw(first, pixelFormat), b = raw(second, pixelFormat);
+        for (let i = 0; i < a.length; ++i) {
+          check(a[i] === b[i], 'read-put-read ' + pixelFormat + ' at ' + i);
+        }
+      }
+
+      check(changed > 0, 'no canonical RGB channel was farbled');
+      check(unchangedSiblings > 0, 'per-channel precision path was not exercised');
+      check(rangeGuard > 0, 'range-guard path was not exercised');
+      return {
+        pass: problems.length === 0,
+        detail: problems.length
+          ? problems.join('; ')
+          : 'changed=' + changed + ', unchanged-siblings=' + unchangedSiblings +
+            ', range-guard=' + rangeGuard + '; float formats coherent and idempotent',
+      };
     })()`,
   },
   {
@@ -184,7 +360,7 @@ export const ORACLES = [
     why: 'getImageData -> putImageData -> getImageData must be a fixed point. An additive nudge gives b = v + 2d, handing the page the true pixel as 2a - b.',
     // An {alpha:false} canvas on purpose. Chromium stores canvas pixels PREMULTIPLIED, while
     // ImageData is unpremultiplied, so on an alpha canvas the round trip loses precision on
-    // semi-transparent pixels in HONEST Chrome too â€” testing there would measure Skia's rounding,
+    // semi-transparent pixels in HONEST Chrome too — testing there would measure Skia's rounding,
     // not our farble. With kOpaque_SkAlphaType the write-back is a memcpy and honest Chrome is
     // byte-exact, which is what makes this a clean oracle.
     run: `(() => {
@@ -283,7 +459,7 @@ export const ORACLES = [
     status: 'fixed',
     surface: 'audio',
     why: 'The canonical FingerprintJS sum must land near the known Chrome cluster. The old 1.5e-3 amplitude moved it ~190x further than the entire honest population spread, i.e. off the manifold.',
-    // The compressor parameters are NOT defaults â€” these are the exact values FingerprintJS uses,
+    // The compressor parameters are NOT defaults — these are the exact values FingerprintJS uses,
     // and the published 124.043... cluster only means anything for this precise graph.
     run: `(async () => {
       const ctx = new OfflineAudioContext(1, 5000, 44100);
@@ -389,7 +565,7 @@ export const ORACLES = [
       const leaked = excluded.filter((n) => gl.getExtension(n) || gl.getExtension(n.toLowerCase()));
       // If almost nothing is excluded, the persona is not filtering extensions at all and the page
       // is seeing the host's own list. There is then no filter to be case-sensitive ABOUT, so a
-      // "pass" here would be vacuous â€” report it as inconclusive instead of banking it.
+      // "pass" here would be vacuous — report it as inconclusive instead of banking it.
       if (excluded.length < 3) {
         return { inconclusive: true, detail: 'only ' + excluded.length + ' of ' + pool.length +
           ' probe names are excluded, so this persona is not filtering extensions - nothing to test' };
@@ -405,7 +581,7 @@ export const ORACLES = [
     status: 'fixed',
     surface: 'webgl',
     severity: 'high',
-    why: 'Real Chrome returns registration order. A perfectly alphabetised list is a fingerprint of the spoof itself, not of any real browser. NOTE: when the persona configures no extension list this passes against the HOST order, which is correct-but-unspoofed â€” webgl-surfaces-match-the-persona is what reports that.',
+    why: 'Real Chrome returns registration order. A perfectly alphabetised list is a fingerprint of the spoof itself, not of any real browser. NOTE: when the persona configures no extension list this passes against the HOST order, which is correct-but-unspoofed — webgl-surfaces-match-the-persona is what reports that.',
     run: `(() => {
       const gl = document.createElement('canvas').getContext('webgl');
       if (!gl) return { inconclusive: true, detail: 'no webgl context on this host' };
@@ -422,7 +598,7 @@ export const ORACLES = [
     surface: 'webgl',
     severity: 'critical',
     why: 'WebGL2RenderingContextBase::getParameter intercepts VERSION and SHADING_LANGUAGE_VERSION before the Lobium hook, so a webgl2 context leaks the real driver.',
-    // NOT the unmasked renderer â€” WebGL2 INHERITS that from the hooked base class, so comparing it
+    // NOT the unmasked renderer — WebGL2 INHERITS that from the hooked base class, so comparing it
     // passes even when WebGL2 is otherwise entirely uncovered. The finding is specifically about the
     // strings WebGL2RenderingContextBase::getParameter answers ITSELF before delegating.
     run: `(() => {
@@ -454,10 +630,10 @@ export const ORACLES = [
     severity: 'critical',
     why: 'gl.pixelStorei(PACK_ROW_LENGTH, width) is a byte-for-byte no-op, but it takes readPixels off the default-pack path and switches farbling off, returning the true GPU pixels.',
     // The scene MUST be textured. A gl.clear() to a solid colour is skipped by the flat-run rule by
-    // design, so reading it back twice trivially gives 0 difference and proves nothing at all â€” it
+    // design, so reading it back twice trivially gives 0 difference and proves nothing at all — it
     // does not even prove WebGL farbling is running. This draws a per-pixel-varying fragment so
     // every pixel is eligible, then asserts (a) farbling is actually happening, and (b) setting
-    // PACK_ROW_LENGTH to exactly the row width â€” a byte-for-byte no-op â€” does not change the result.
+    // PACK_ROW_LENGTH to exactly the row width — a byte-for-byte no-op — does not change the result.
     run: `(() => {
       const c = document.createElement('canvas'); c.width = 64; c.height = 64;
       const gl = c.getContext('webgl2', { preserveDrawingBuffer: true });
@@ -654,7 +830,7 @@ export const ORACLES = [
     status: 'fixed',
     surface: 'locale',
     severity: 'critical',
-    why: 'The launcher sets TZ, but ICU ignores it on Windows and reads the registry instead â€” so the persona timezone silently did not apply there at all, while the profile still routed through a proxy in that zone. A page compares Intl against the exit IP in one line.',
+    why: 'The launcher sets TZ, but ICU ignores it on Windows and reads the registry instead — so the persona timezone silently did not apply there at all, while the profile still routed through a proxy in that zone. A page compares Intl against the exit IP in one line.',
     run: (persona) => `(() => {
       const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       const want = ${JSON.stringify(persona.locale.timezone)};
@@ -702,7 +878,7 @@ export const ORACLES = [
       // What this oracle is for: proving the WebGL2 context is served the WebGL2 list. Before the
       // fix it got the WebGL1 list, which collapsed to the handful of names common to both.
       //
-      // MISSING names are not a defect here â€” webgl-runtime-safety intersects the persona list with
+      // MISSING names are not a defect here — webgl-runtime-safety intersects the persona list with
       // what the backend can enable, and SwiftShader enables fewer than a real GPU. EXTRA names are,
       // because they can only have come from the host. The decisive claim is the one that
       // distinguishes the two lists: names unique to the WebGL2 list must actually appear.
@@ -761,18 +937,35 @@ export const ORACLES = [
     severity: 'critical',
     why: 'WebGPU and WebGL describe the same card in two calls. Reporting the persona in one and the real GPU in the other is worse than spoofing neither: the mismatch positively identifies a rewriter.',
     run: (persona) => `(async () => {
+      const want = ${JSON.stringify(persona.webgpu ?? null)};
+      if (!want) return { pass: false, detail: 'persona carries no webgpu block; native hook would expose the host adapter' };
       if (!navigator.gpu) return { inconclusive: true, detail: 'navigator.gpu unavailable (WebGPU off in this environment)' };
       const adapter = await navigator.gpu.requestAdapter();
       if (!adapter) return { inconclusive: true, detail: 'requestAdapter() returned null' };
       const info = adapter.info || {};
-      const want = ${JSON.stringify(persona.webgpu ?? null)};
-      if (!want) return { inconclusive: true, detail: 'persona carries no webgpu block' };
       const problems = [];
       if (info.vendor !== want.vendor) problems.push('vendor=' + info.vendor + ' want ' + want.vendor);
       if (info.architecture !== want.architecture) problems.push('architecture=' + info.architecture + ' want ' + want.architecture);
       // isFallbackAdapter is derived from the adapter TYPE. A persona claiming real hardware while
       // reporting a fallback adapter contradicts itself inside one object read.
       if (adapter.isFallbackAdapter) problems.push('isFallbackAdapter=true for a persona claiming ' + want.description);
+      // A clamped adapter limit is only coherent if requestDevice enforces the same ceiling. Dawn
+      // knows the real host limits, so without the Blink-side guard this succeeds on a stronger host
+      // and reveals that adapter.limits was rewritten.
+      const claimedMaxBufferSize = adapter.limits.maxBufferSize;
+      try {
+        const device = await adapter.requestDevice({
+          requiredLimits: { maxBufferSize: claimedMaxBufferSize + 1 },
+        });
+        problems.push('requestDevice accepted maxBufferSize=' + (claimedMaxBufferSize + 1) +
+          ' above adapter.limits.maxBufferSize=' + claimedMaxBufferSize);
+        device.destroy();
+      } catch (error) {
+        if (error?.name !== 'OperationError') {
+          problems.push('over-limit request rejected with ' + (error?.name || error) +
+            ' instead of OperationError');
+        }
+      }
       return {
         pass: problems.length === 0,
         detail: problems.length ? problems.join('; ') : 'vendor=' + info.vendor + ' architecture=' + info.architecture,
@@ -784,7 +977,7 @@ export const ORACLES = [
     finding: 'media-devices-id-shape',
     status: 'fixed',
     surface: 'mediaDevices',
-    why: 'Chrome device ids are a 64-char lowercase hex HMAC, with `default` and `communications` passed through verbatim. Any other shape â€” a short token, uppercase, a UUID â€” is a tell on its own, before anyone compares values across origins.',
+    why: 'Chrome device ids are a 64-char lowercase hex HMAC, with `default` and `communications` passed through verbatim. Any other shape — a short token, uppercase, a UUID — is a tell on its own, before anyone compares values across origins.',
     run: `(async () => {
       const list = await navigator.mediaDevices.enumerateDevices();
       if (!list.length) return { inconclusive: true, detail: 'no devices enumerated in this environment' };
@@ -808,12 +1001,12 @@ export const ORACLES = [
     surface: 'fonts',
     severity: 'critical',
     // Off Windows the isolation is the launcher's per-profile FONTCONFIG_FILE, not a property of the
-    // binary, and this harness launches without one â€” so a leak here would be the harness, not the
+    // binary, and this harness launches without one — so a leak here would be the harness, not the
     // engine. Only a build that carries the DirectWrite filter can be judged.
     applies: (ctx) => ctx.capabilities.includes('font-isolation'),
     why: 'The installed font set is high-entropy and readable without permission by measuring text width against a fallback. Any family measurable but NOT claimed by the persona is a host font leaking through.',
     run: (persona) => `(() => {
-      // Probe families that exist on some machines and not others â€” the exact set a detector walks.
+      // Probe families that exist on some machines and not others — the exact set a detector walks.
       // Anything measurable here must be in the persona list, or it came from the host.
       const probes = [
         'Arial', 'Times New Roman', 'Courier New', 'Segoe UI', 'Calibri', 'Cambria', 'Consolas',
@@ -899,7 +1092,7 @@ export const ORACLES = [
     status: 'fixed',
     surface: 'canvas',
     severity: 'critical',
-    why: 'CreepJS getPixelMods: 64 known 1x1 writes read back one pixel at a time. Known input, known output, no host baseline needed â€” which is why it is the check every profile is scored on.',
+    why: 'CreepJS getPixelMods: 64 known 1x1 writes read back one pixel at a time. Known input, known output, no host baseline needed — which is why it is the check every profile is scored on.',
     run: `(() => {
       const len = 8, alpha = 255;
       const opts = { willReadFrequently: true, desynchronized: true };
@@ -940,7 +1133,7 @@ export const ORACLES = [
     finding: 'canvas-snapshot-readback-bypass',
     status: 'fixed',
     surface: 'canvas',
-    why: 'toBlob is a third readback path beside getImageData and toDataURL. PNG is lossless, so a known-input write must survive the encode/decode byte-exact â€” and must agree with what getImageData reports for the same canvas.',
+    why: 'toBlob is a third readback path beside getImageData and toDataURL. PNG is lossless, so known pixels must survive direct image/canvas drawing, ImageBitmap copying and cloning, ImageData and CanvasPattern construction, worker transfer, OffscreenCanvas transfer, and bitmaprenderer transport without acquiring a second farble.',
     run: `(async () => {
       const len = 8;
       const c = document.createElement('canvas'); c.width = len; c.height = len;
@@ -952,14 +1145,150 @@ export const ORACLES = [
       const direct = x.getImageData(0, 0, len, len).data;
       const blob = await new Promise((res) => c.toBlob(res, 'image/png'));
       if (!blob) return { inconclusive: true, detail: 'toBlob produced no blob' };
+      const imageUrl = URL.createObjectURL(blob);
+      const imageElement = new Image(); imageElement.src = imageUrl;
+      await imageElement.decode();
+      URL.revokeObjectURL(imageUrl);
       const bmp = await createImageBitmap(blob);
-      const c2 = document.createElement('canvas'); c2.width = len; c2.height = len;
-      const x2 = c2.getContext('2d', { willReadFrequently: true });
-      x2.drawImage(bmp, 0, 0);
-      const viaBlob = x2.getImageData(0, 0, len, len).data;
-      let diff = 0;
-      for (let i = 0; i < direct.length; i++) if (direct[i] !== viaBlob[i]) diff++;
-      return { pass: diff === 0, detail: diff + '/' + direct.length + ' bytes differ between toBlob and getImageData' };
+      const copied = await createImageBitmap(bmp);
+      const cloned = structuredClone(bmp);
+      const fromImageData = await createImageBitmap(
+        new ImageData(new Uint8ClampedArray(direct), len, len),
+      );
+      const transferSource = await createImageBitmap(bmp);
+      const workerUrl = URL.createObjectURL(new Blob([
+        'onmessage = (event) => postMessage(event.data, [event.data]);',
+      ], { type: 'text/javascript' }));
+      const worker = new Worker(workerUrl);
+      const transferred = await new Promise((resolve, reject) => {
+        worker.onmessage = (event) => resolve(event.data);
+        worker.onerror = reject;
+        worker.postMessage(transferSource, [transferSource]);
+      });
+      worker.terminate();
+      URL.revokeObjectURL(workerUrl);
+
+      let bitmapRenderer = null;
+      let offscreenTransfer = null;
+      if (typeof OffscreenCanvas !== 'undefined') {
+        const carrier = new OffscreenCanvas(len, len);
+        const bitmapContext = carrier.getContext('bitmaprenderer');
+        if (bitmapContext) {
+          const carrierSource = await createImageBitmap(bmp);
+          bitmapContext.transferFromImageBitmap(carrierSource);
+          bitmapRenderer = carrier.transferToImageBitmap();
+        }
+        const offscreen = new OffscreenCanvas(len, len);
+        const offscreenContext = offscreen.getContext('2d', { willReadFrequently: true });
+        if (offscreenContext) {
+          const offscreenSource = await createImageBitmap(bmp);
+          offscreenContext.drawImage(offscreenSource, 0, 0);
+          offscreenTransfer = offscreen.transferToImageBitmap();
+        }
+      }
+
+      const read = (bitmap) => {
+        const out = document.createElement('canvas'); out.width = len; out.height = len;
+        const context = out.getContext('2d', { willReadFrequently: true });
+        context.drawImage(bitmap, 0, 0);
+        return context.getImageData(0, 0, len, len).data;
+      };
+      const patternCanvas = document.createElement('canvas');
+      patternCanvas.width = len; patternCanvas.height = len;
+      const patternContext = patternCanvas.getContext('2d', { willReadFrequently: true });
+      const pattern = patternContext.createPattern(await createImageBitmap(bmp), 'no-repeat');
+      patternContext.fillStyle = pattern;
+      patternContext.fillRect(0, 0, len, len);
+      const variants = {
+        imageElement: read(imageElement),
+        canvas: read(c),
+        decoded: read(bmp),
+        copied: read(copied),
+        cloned: read(cloned),
+        imageData: read(fromImageData),
+        pattern: patternContext.getImageData(0, 0, len, len).data,
+        transferred: read(transferred),
+      };
+      if (bitmapRenderer) variants.bitmapRenderer = read(bitmapRenderer);
+      if (offscreenTransfer) variants.offscreenTransfer = read(offscreenTransfer);
+      const diffs = Object.fromEntries(Object.entries(variants).map(([name, bytes]) => {
+        let count = 0;
+        for (let i = 0; i < direct.length; i++) if (direct[i] !== bytes[i]) count++;
+        return [name, count];
+      }));
+      const total = Object.values(diffs).reduce((sum, count) => sum + count, 0);
+      return {
+        pass: total === 0,
+        detail: Object.entries(diffs).map(([name, count]) => name + '=' + count).join(', ') +
+                ' differing bytes versus direct getImageData',
+      };
+    })()`,
+  },
+  {
+    id: 'canvas-offscreen-placeholder-readback',
+    finding: 'canvas-snapshot-readback-bypass',
+    status: 'fixed',
+    surface: 'canvas',
+    severity: 'critical',
+    why: 'transferControlToOffscreen leaves the visible HTML canvas without a local rendering context. Its exported worker frame must carry both provenance and surface metadata so direct placeholder toBlob applies the same one-time farble as worker convertToBlob.',
+    run: `(async () => {
+      if (typeof OffscreenCanvas === 'undefined' ||
+          typeof HTMLCanvasElement.prototype.transferControlToOffscreen !== 'function') {
+        return { inconclusive: true, detail: 'transferControlToOffscreen unavailable' };
+      }
+      const width = 96, height = 40;
+      const placeholder = document.createElement('canvas');
+      placeholder.width = width; placeholder.height = height;
+      const offscreen = placeholder.transferControlToOffscreen();
+      const workerUrl = URL.createObjectURL(new Blob([
+        'onmessage = async (event) => { try {',
+        'const canvas = event.data; const x = canvas.getContext("2d");',
+        'x.fillStyle = "#192a3a"; x.fillRect(0, 0, canvas.width, canvas.height);',
+        'x.fillStyle = "#f5e9d5"; x.font = "23px Arial"; x.fillText("Lobium 42", 3, 28);',
+        'const blob = await canvas.convertToBlob({type:"image/png"});',
+        'postMessage({blob}); } catch (error) { postMessage({error:String(error)}); } };',
+      ], { type: 'text/javascript' }));
+      const worker = new Worker(workerUrl);
+      const result = await new Promise((resolve) => {
+        const timeout = setTimeout(() => resolve({ error: 'timeout' }), 10000);
+        worker.onmessage = (event) => { clearTimeout(timeout); resolve(event.data); };
+        worker.onerror = (event) => { clearTimeout(timeout); resolve({ error: event.message }); };
+        worker.postMessage(offscreen, [offscreen]);
+      });
+      worker.terminate();
+      URL.revokeObjectURL(workerUrl);
+      if (!result?.blob) {
+        return { inconclusive: true, detail: 'worker render failed: ' + (result?.error || 'no blob') };
+      }
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      let placeholderBlob;
+      try {
+        placeholderBlob = await new Promise((resolve) => placeholder.toBlob(resolve, 'image/png'));
+      } catch (error) {
+        return { inconclusive: true, detail: 'placeholder toBlob unavailable: ' + error };
+      }
+      if (!placeholderBlob) return { inconclusive: true, detail: 'placeholder produced no blob' };
+      const read = async (blob) => {
+        const bitmap = await createImageBitmap(blob);
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const x = canvas.getContext('2d', { willReadFrequently: true });
+        x.drawImage(bitmap, 0, 0);
+        bitmap.close();
+        return x.getImageData(0, 0, width, height).data;
+      };
+      const [workerBytes, placeholderBytes] = await Promise.all([
+        read(result.blob), read(placeholderBlob),
+      ]);
+      let diffs = 0;
+      for (let i = 0; i < workerBytes.length; i++) {
+        if (workerBytes[i] !== placeholderBytes[i]) diffs++;
+      }
+      return {
+        pass: diffs === 0,
+        detail: diffs + ' differing bytes: worker convertToBlob vs HTML placeholder toBlob',
+      };
     })()`,
   },
   {
@@ -1236,7 +1565,7 @@ export const ORACLES = [
       if (!reflexive.length) {
         // Under disable_non_proxied_udp the stack is SUPPOSED to gather no reflexive candidate at all,
         // which is the strongest possible answer: nothing left the proxy.
-        return { pass: true, detail: 'no server-reflexive candidate gathered â€” UDP never left the proxy' };
+        return { pass: true, detail: 'no server-reflexive candidate gathered — UDP never left the proxy' };
       }
       const want = ${JSON.stringify(ctx.exitIp)};
       const wrong = [...new Set(reflexive.filter((a) => a !== want))];
@@ -1335,7 +1664,7 @@ export const ORACLES = [
     surface: 'locale',
     aspect: 'languages',
     severity: 'critical',
-    why: 'The header is emitted by the network stack and the JS value by Blink. They are set by different hooks, so they drift independently â€” and a page that compares its own request header against navigator.languages catches it without any fingerprinting library at all.',
+    why: 'The header is emitted by the network stack and the JS value by Blink. They are set by different hooks, so they drift independently — and a page that compares its own request header against navigator.languages catches it without any fingerprinting library at all.',
     run: (persona) => `(async () => {
       const res = await fetch('/echo', { cache: 'no-store' });
       const headers = await res.json();
@@ -1362,7 +1691,13 @@ const EXIT_REGRESSION = 1;
 const EXIT_BLOCKED = 2;
 
 function fmt(row) {
-  const mark = row.pass ? 'PASS' : row.inconclusive ? '  ? ' : row.status === 'open' ? 'OPEN' : 'FAIL';
+  const mark = row.pass
+    ? 'PASS'
+    : row.inconclusive
+      ? '  ? '
+      : row.status === 'open'
+        ? 'OPEN'
+        : 'FAIL';
   return `  [${mark}] ${row.personaOs.padEnd(7)} ${row.id.padEnd(38)} ${row.detail}`;
 }
 
@@ -1373,9 +1708,9 @@ function fmt(row) {
  *                against without leaving the origin.
  *   /sw.js       a service worker, the one context whose navigator is built furthest from the page.
  *   /echo        the request headers as JSON, which is how Accept-Language becomes readable from
- *                inside the browser at all â€” it is not exposed to script any other way.
+ *                inside the browser at all — it is not exposed to script any other way.
  *
- * `about:blank` is NOT a secure context, and `navigator.userAgentData` â€” which several oracles read â€”
+ * `about:blank` is NOT a secure context, and `navigator.userAgentData` — which several oracles read —
  * is only exposed in one, so on about:blank they threw instead of measuring anything. A loopback
  * origin is "potentially trustworthy" per the spec, so it gives a secure context with no certificate
  * machinery.
@@ -1402,7 +1737,10 @@ self.addEventListener('message', (e) => {
       return;
     }
     if (path === '/sw.js') {
-      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' });
+      res.writeHead(200, {
+        'content-type': 'text/javascript; charset=utf-8',
+        'cache-control': 'no-store',
+      });
       res.end(sw);
       return;
     }
@@ -1416,30 +1754,61 @@ self.addEventListener('message', (e) => {
  * are measured by tls-fingerprint.mjs and folded in here from its report.
  *
  * A report older than the age limit describes some earlier engine, and an absent one describes
- * nothing at all. Both cases yield an INCONCLUSIVE row, which blocks the aspect â€” the alternative is
+ * nothing at all. Both cases yield an INCONCLUSIVE row, which blocks the aspect — the alternative is
  * a run that never touched the network reporting network aspects green.
  */
 async function networkRows(personaOs) {
   const stale = (detail) => [
-    { id: 'tls-clienthello-matches-stock-chrome', aspect: 'networkTls', status: 'fixed', personaOs, pass: false, inconclusive: true, detail },
-    { id: 'http2-settings-match-stock-chrome', aspect: 'networkHttp2', status: 'fixed', personaOs, pass: false, inconclusive: true, detail },
+    {
+      id: 'tls-clienthello-matches-stock-chrome',
+      aspect: 'networkTls',
+      status: 'fixed',
+      personaOs,
+      pass: false,
+      inconclusive: true,
+      detail,
+    },
+    {
+      id: 'http2-settings-match-stock-chrome',
+      aspect: 'networkHttp2',
+      status: 'fixed',
+      personaOs,
+      pass: false,
+      inconclusive: true,
+      detail,
+    },
   ];
   let report;
   try {
     report = JSON.parse(await readFile(TLS_REPORT, 'utf8'));
   } catch {
-    return stale(`no ${TLS_REPORT} â€” run tls-fingerprint.mjs before the oracles to score TLS/HTTP2`);
+    return stale(
+      `no ${TLS_REPORT} — run tls-fingerprint.mjs before the oracles to score TLS/HTTP2`,
+    );
   }
   const age = Date.now() - Date.parse(report.generatedAt ?? '');
   if (!Number.isFinite(age) || age > TLS_REPORT_MAX_AGE_MS) {
-    return stale(`tls-fingerprint.json is ${Number.isFinite(age) ? Math.round(age / 60000) + ' minutes' : 'of unknown age'} old â€” too stale to describe this engine`);
+    return stale(
+      `tls-fingerprint.json is ${Number.isFinite(age) ? Math.round(age / 60000) + ' minutes' : 'of unknown age'} old — too stale to describe this engine`,
+    );
   }
   const rows = (report.oracleRows ?? []).filter((r) => r.personaOs === personaOs);
-  return rows.length ? rows : stale(`tls-fingerprint.json carries no rows for the ${personaOs} persona`);
+  return rows.length
+    ? rows
+    : stale(`tls-fingerprint.json carries no rows for the ${personaOs} persona`);
 }
 
 /** Run every applicable oracle once against one persona OS. */
-async function measurePersona({ bin, personaOs, seed, headful, capabilities, pageUrl, exitIp, stunUrl }) {
+async function measurePersona({
+  bin,
+  personaOs,
+  seed,
+  headful,
+  capabilities,
+  pageUrl,
+  exitIp,
+  stunUrl,
+}) {
   const persona = deriveFingerprint(seed, { os: personaOs, engine: 'lobium' });
   const config = buildLobiumConfig(persona, { seed });
   const ctx = {
@@ -1451,8 +1820,8 @@ async function measurePersona({ bin, personaOs, seed, headful, capabilities, pag
     stunUrl,
   };
 
-  // The config must exist before the browser starts â€” the browser process reads it once during
-  // startup â€” so write it to its own directory rather than the profile's, and launch once.
+  // The config must exist before the browser starts — the browser process reads it once during
+  // startup — so write it to its own directory rather than the profile's, and launch once.
   const configDir = await mkdtemp(join(tmpdir(), 'lobium-oracles-cfg-'));
   const configPath = await writeLobiumConfig(configDir, config);
 
@@ -1467,12 +1836,21 @@ async function measurePersona({ bin, personaOs, seed, headful, capabilities, pag
     await withCdpSession(engine.ws, async (session) => {
       await session.send('Page.navigate', { url: pageUrl });
       for (let i = 0; i < 100; i++) {
-        const ready = await cdpEvaluate(session, `(() => location.origin + '|' + document.readyState)()`, { timeoutMs: 10_000 });
-        if (String(ready).startsWith('http://127.0.0.1') && String(ready).endsWith('|complete')) break;
+        const ready = await cdpEvaluate(
+          session,
+          `(() => location.origin + '|' + document.readyState)()`,
+          { timeoutMs: 10_000 },
+        );
+        if (String(ready).startsWith('http://127.0.0.1') && String(ready).endsWith('|complete'))
+          break;
         await new Promise((r) => setTimeout(r, 100));
       }
-      const ctxInfo = await cdpEvaluate(session, `(() => location.href + ' secure=' + window.isSecureContext)()`, { timeoutMs: 10_000 });
-      console.log(`context    ${personaOs} persona Â· ${ctxInfo}`);
+      const ctxInfo = await cdpEvaluate(
+        session,
+        `(() => location.href + ' secure=' + window.isSecureContext)()`,
+        { timeoutMs: 10_000 },
+      );
+      console.log(`context    ${personaOs} persona · ${ctxInfo}`);
 
       for (const oracle of ORACLES) {
         if (oracle.applies && !oracle.applies(ctx)) {
@@ -1500,7 +1878,7 @@ async function measurePersona({ bin, personaOs, seed, headful, capabilities, pag
           detail = (res && res.detail) || '';
         } catch (err) {
           // A throwing oracle measured nothing. That is INCONCLUSIVE, not a pass and not a
-          // regression â€” reporting a broken probe as either would be a lie about the engine.
+          // regression — reporting a broken probe as either would be a lie about the engine.
           inconclusive = true;
           detail = `oracle threw: ${err instanceof Error ? err.message : String(err)}`;
         }
@@ -1527,7 +1905,7 @@ async function main() {
   const bin = process.env.LOBSTER_LOBIUM_BIN || resolveLobiumBinary();
   if (!bin) {
     console.error(
-      'BLOCKED â€” no Lobium binary. These oracles measure the SHIPPING engine; running them against\n' +
+      'BLOCKED — no Lobium binary. These oracles measure the SHIPPING engine; running them against\n' +
         'stock Chromium would report a wall of failures that mean nothing. Set LOBSTER_LOBIUM_BIN.',
     );
     process.exitCode = EXIT_BLOCKED;
@@ -1537,7 +1915,9 @@ async function main() {
   // Prove it is actually Lobium before drawing any conclusion from a pass.
   const capabilities = await probeLobiumBuildCapabilities(bin);
   console.log(`engine     ${bin}`);
-  console.log(`capabilities ${capabilities.capabilities.length}: ${capabilities.capabilities.join(', ')}`);
+  console.log(
+    `capabilities ${capabilities.capabilities.length}: ${capabilities.capabilities.join(', ')}`,
+  );
 
   const seed = process.argv[2] || generateSeed();
   const headful = process.env.LOBIUM_ORACLES_HEADFUL === '1';
@@ -1584,7 +1964,7 @@ async function main() {
       'utf8',
     );
     console.error(
-      `\nBLOCKED â€” this build is missing ${missing.length} native hook(s) the launcher requires:\n  ` +
+      `\nBLOCKED — this build is missing ${missing.length} native hook(s) the launcher requires:\n  ` +
         missing.join('\n  ') +
         '\n\nThe product refuses to launch a profile on it (packages/engine-runner start-profile), so any\n' +
         'score measured here would describe a binary that cannot ship. This is neither a pass nor a\n' +
@@ -1599,15 +1979,26 @@ async function main() {
   const pageUrl = `http://127.0.0.1:${server.address().port}/`;
 
   const gpuArgs = buildGpuArgs();
-  console.log(`gpu mode   ${resolveGpuMode()}${gpuArgs.length ? ` (${gpuArgs.join(' ')})` : ' â€” no GPU flags; WebGL will be unavailable headless'}`);
+  console.log(
+    `gpu mode   ${resolveGpuMode()}${gpuArgs.length ? ` (${gpuArgs.join(' ')})` : ' — no GPU flags; WebGL will be unavailable headless'}`,
+  );
   console.log(`page       ${pageUrl}`);
-  console.log(`personas   ${PERSONA_OSES.join(', ')}${exitIp ? ` Â· proxy exit ${exitIp}` : ' Â· no proxy exit configured'}\n`);
+  console.log(
+    `personas   ${PERSONA_OSES.join(', ')}${exitIp ? ` · proxy exit ${exitIp}` : ' · no proxy exit configured'}\n`,
+  );
 
   const rows = [];
   try {
     for (const personaOs of PERSONA_OSES) {
       const measured = await measurePersona({
-        bin, personaOs, seed, headful, capabilities, pageUrl, exitIp, stunUrl,
+        bin,
+        personaOs,
+        seed,
+        headful,
+        capabilities,
+        pageUrl,
+        exitIp,
+        stunUrl,
       });
       rows.push(...measured.rows);
       rows.push(...(await networkRows(personaOs)));
@@ -1623,7 +2014,7 @@ async function main() {
   const unmeasured = scored.filter((r) => r.inconclusive);
   const score = scoreAspects(rows);
 
-  console.log(`\nseed ${seed} Â· ${headful ? 'headful' : 'HEADLESS (not release evidence)'}\n`);
+  console.log(`\nseed ${seed} · ${headful ? 'headful' : 'HEADLESS (not release evidence)'}\n`);
   for (const r of rows) if (r.applicable !== false) console.log(fmt(r));
 
   console.log(
@@ -1633,14 +2024,14 @@ async function main() {
   console.log(`\nPER-ASPECT COVERAGE\n${formatAspectTable(score)}`);
   if (unmeasured.length) {
     console.log(
-      `\nINCONCLUSIVE (${unmeasured.length}) â€” the probe could not run here, so this is neither\n` +
+      `\nINCONCLUSIVE (${unmeasured.length}) — the probe could not run here, so this is neither\n` +
         `evidence of a fix nor of a defect:\n  ` +
         unmeasured.map((r) => `${r.personaOs} ${r.id}: ${r.detail.split('\n')[0]}`).join('\n  '),
     );
   }
   if (closedOpen.length) {
     console.log(
-      `\n${closedOpen.length} oracle(s) marked OPEN now PASS â€” if that is a real fix, flip their\n` +
+      `\n${closedOpen.length} oracle(s) marked OPEN now PASS — if that is a real fix, flip their\n` +
         `status to 'fixed' so a future regression fails the gate:\n  ` +
         [...new Set(closedOpen.map((r) => r.id))].join('\n  '),
     );
@@ -1653,7 +2044,7 @@ async function main() {
   }
   if (regressions.length) {
     console.log(
-      `\nREGRESSIONS (${regressions.length}) â€” these were fixed and are broken again:\n  ` +
+      `\nREGRESSIONS (${regressions.length}) — these were fixed and are broken again:\n  ` +
         regressions.map((r) => `${r.personaOs} ${r.id}: ${r.detail}`).join('\n  '),
     );
   }
@@ -1710,7 +2101,7 @@ async function main() {
   // A regression outranks a block; a block never reads as a pass.
   const exit = regressions.length ? EXIT_REGRESSION : exitCodeFor(score);
   console.log(
-    `\nORACLE GATE: ${exit === EXIT_PASS ? 'PASS' : exit === EXIT_REGRESSION ? 'FAIL' : 'BLOCKED'} â€” ` +
+    `\nORACLE GATE: ${exit === EXIT_PASS ? 'PASS' : exit === EXIT_REGRESSION ? 'FAIL' : 'BLOCKED'} — ` +
       `${score.aspectsPassed}/${score.aspectsTotal} aspects green` +
       (score.failedAspects.length ? `, failed: ${score.failedAspects.join(', ')}` : '') +
       (score.blockedAspects.length ? `, blocked: ${score.blockedAspects.join(', ')}` : ''),

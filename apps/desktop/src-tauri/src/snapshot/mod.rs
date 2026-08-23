@@ -1506,7 +1506,10 @@ fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<()> {
 /// something real to work with.
 fn sync_path(path: &Path) -> Result<()> {
     if path.is_file() {
-        let file = std::fs::File::open(path)?;
+        // Windows FlushFileBuffers rejects a read-only handle with ERROR_ACCESS_DENIED. These are
+        // staged files we just created, so open without truncation but with write permission before
+        // sync_all; Unix keeps the same durability semantics.
+        let file = std::fs::OpenOptions::new().write(true).open(path)?;
         file.sync_all()?;
         return Ok(());
     }
@@ -1566,6 +1569,39 @@ mod tests {
 
     fn vault_at(root: &Path) -> SnapshotVault {
         SnapshotVault::with_key(&root.join("snapshots"), &[42u8; 32]).unwrap()
+    }
+
+    fn capture_fixture(
+        vault: &SnapshotVault,
+        udd: &Path,
+        profile_id: &str,
+        mode: CaptureMode,
+        identity: &Identity,
+        options: &CaptureOptions,
+    ) -> Result<SnapshotManifest> {
+        // Synthetic UDDs intentionally contain only the artifacts each test exercises; they do not
+        // carry a host-owned Local State. Injecting the fixture key keeps capture deterministic and
+        // avoids asking Windows DPAPI to unwrap a key that this test never wrote.
+        let keyring = oscrypt::InjectedKeyring::single(oscrypt::OsKey::Aes128Cbc(
+            oscrypt::linux::LINUX_V10_KEY,
+        ));
+        capture_with_keyring(vault, udd, profile_id, mode, identity, options, &keyring)
+    }
+
+    fn restore_fixture(
+        vault: &SnapshotVault,
+        udd: &Path,
+        profile_id: &str,
+        version: u64,
+        identity: &Identity,
+        force: bool,
+    ) -> Result<RestoreReport> {
+        // Match `capture_fixture`: synthetic snapshots have no host-owned Local State, so restore
+        // must not consult or mutate the host key store either.
+        let keyring = oscrypt::InjectedKeyring::single(oscrypt::OsKey::Aes128Cbc(
+            oscrypt::linux::LINUX_V10_KEY,
+        ));
+        restore_with_keyring(vault, udd, profile_id, version, identity, force, &keyring)
     }
 
     /// A user-data-dir shaped like the real ones: SQLite DOM storage in WAL mode, a v24 cookie jar
@@ -1887,6 +1923,7 @@ mod tests {
             .query_row("SELECT password_value FROM logins", [], |r| r.get(0))
             .unwrap();
         assert_eq!(oscrypt::decrypt_value(&ring_b, &pw).unwrap(), b"hunter2");
+        drop(login);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1975,7 +2012,7 @@ mod tests {
         build_profile(&udd, "live-session-token", "ls-token-1");
         let vault = vault_at(&root);
 
-        let manifest = capture(
+        let manifest = capture_fixture(
             &vault,
             &udd,
             "prf_test",
@@ -2010,7 +2047,8 @@ mod tests {
 
         // Wipe the user-data-dir the way a reinstall or a corrupt-profile purge would.
         std::fs::remove_dir_all(&udd).unwrap();
-        let report = restore(&vault, &udd, "prf_test", 1, &Identity::fixture(), false).unwrap();
+        let report =
+            restore_fixture(&vault, &udd, "prf_test", 1, &Identity::fixture(), false).unwrap();
         assert!(report.ok, "{:?}", report.failure);
         assert!(!report.rolled_back);
 
@@ -2088,7 +2126,7 @@ mod tests {
         let udd = root.join("prf_test");
         build_profile(&udd, "original-token", "ls-original");
         let vault = vault_at(&root);
-        capture(
+        capture_fixture(
             &vault,
             &udd,
             "prf_test",
@@ -2116,7 +2154,8 @@ mod tests {
         bytes[last] ^= 0xff;
         std::fs::write(&blob, &bytes).unwrap();
 
-        let report = restore(&vault, &udd, "prf_test", 1, &Identity::fixture(), false).unwrap();
+        let report =
+            restore_fixture(&vault, &udd, "prf_test", 1, &Identity::fixture(), false).unwrap();
         assert!(!report.ok, "a corrupted artifact must not report success");
         assert!(report.failure.unwrap().contains("passwords"));
 
@@ -2152,7 +2191,7 @@ mod tests {
         build_profile(&udd, "authToken=carried-forward", "ls-old");
         let vault = vault_at(&root);
 
-        let mut manifest = capture(
+        let mut manifest = capture_fixture(
             &vault,
             &udd,
             "prf_old",
@@ -2175,7 +2214,7 @@ mod tests {
         vault.commit(&manifest).unwrap();
 
         std::fs::remove_dir_all(&udd).unwrap();
-        let report = restore(
+        let report = restore_fixture(
             &vault,
             &udd,
             "prf_old",
@@ -2247,7 +2286,7 @@ mod tests {
         let cookies_path = udd.join("Default").join("Cookies");
 
         let vault = SnapshotVault::with_key(&root.join("ledger"), &[9u8; 32]).unwrap();
-        let captured = capture(
+        let captured = capture_fixture(
             &vault,
             &udd,
             "prf_test",
@@ -2277,7 +2316,7 @@ mod tests {
         let mut moved_on = Identity::fixture();
         moved_on.fingerprint_seed = "ffffffffffffffffffffffffffffffff".to_string();
 
-        let err = restore(&vault, &udd, "prf_test", captured.version, &moved_on, false)
+        let err = restore_fixture(&vault, &udd, "prf_test", captured.version, &moved_on, false)
             .expect_err("a persona change must refuse");
         let text = format!("{err:#}");
         assert!(text.contains("IDENTITY_MISMATCH"), "{text}");
@@ -2299,7 +2338,7 @@ mod tests {
 
         // A matching identity restores, which is what proves the refusal above was the identity check
         // and not some unrelated failure.
-        let ok = restore(
+        let ok = restore_fixture(
             &vault,
             &udd,
             "prf_test",
@@ -2392,7 +2431,7 @@ mod tests {
         let udd = root.join("prf_test");
         build_profile(&udd, "t", "ls");
         let vault = vault_at(&root);
-        capture(
+        capture_fixture(
             &vault,
             &udd,
             "prf_test",
@@ -2414,7 +2453,8 @@ mod tests {
             DomBackend::LevelDb
         );
 
-        let report = restore(&vault, &target, "prf_test", 1, &Identity::fixture(), false).unwrap();
+        let report =
+            restore_fixture(&vault, &target, "prf_test", 1, &Identity::fixture(), false).unwrap();
         assert!(!report.ok);
         let failure = report.failure.unwrap();
         assert!(failure.contains("DOM_BACKEND_MISMATCH"), "{failure}");
@@ -2437,7 +2477,7 @@ mod tests {
         std::fs::write(leveldb.join("LOCK"), b"").unwrap();
 
         let vault = vault_at(&root);
-        let manifest = capture(
+        let manifest = capture_fixture(
             &vault,
             &udd,
             "prf_leveldb",
@@ -2452,7 +2492,8 @@ mod tests {
         assert_eq!(record.fidelity, Fidelity::Opaque);
 
         std::fs::remove_dir_all(udd.join("Default").join("Local Storage")).unwrap();
-        let report = restore(&vault, &udd, "prf_leveldb", 1, &Identity::fixture(), false).unwrap();
+        let report =
+            restore_fixture(&vault, &udd, "prf_leveldb", 1, &Identity::fixture(), false).unwrap();
         assert!(report.ok, "{:?}", report.failure);
         assert_eq!(
             std::fs::read(leveldb.join("000003.log")).unwrap(),
@@ -2478,7 +2519,7 @@ mod tests {
         .unwrap();
         let vault = vault_at(&root);
 
-        let err = capture(
+        let err = capture_fixture(
             &vault,
             &udd,
             "prf_test",
@@ -2491,7 +2532,7 @@ mod tests {
         assert!(err.contains("PROFILE_IS_RUNNING"), "{err}");
 
         // Dirty mode is the escape hatch that makes an unlaunchable or busy profile recoverable.
-        let manifest = capture(
+        let manifest = capture_fixture(
             &vault,
             &udd,
             "prf_test",
@@ -2513,7 +2554,7 @@ mod tests {
         let udd = root.join("prf_test");
         build_profile(&udd, "t1", "ls1");
         let vault = vault_at(&root);
-        capture(
+        capture_fixture(
             &vault,
             &udd,
             "prf_test",
@@ -2523,7 +2564,7 @@ mod tests {
         )
         .unwrap();
 
-        let v2 = capture(
+        let v2 = capture_fixture(
             &vault,
             &udd,
             "prf_test",
@@ -2545,7 +2586,8 @@ mod tests {
         // And the carried-forward reference still resolves, both to verify and to restore.
         assert!(verify(&vault, "prf_test", 2).unwrap().ok);
         std::fs::remove_dir_all(&udd).unwrap();
-        let report = restore(&vault, &udd, "prf_test", 2, &Identity::fixture(), false).unwrap();
+        let report =
+            restore_fixture(&vault, &udd, "prf_test", 2, &Identity::fixture(), false).unwrap();
         assert!(report.ok, "{:?}", report.failure);
         assert!(udd
             .join("Default")
@@ -2613,7 +2655,7 @@ mod tests {
         drop(bare);
 
         let vault = vault_at(&root);
-        capture(
+        capture_fixture(
             &vault,
             &udd,
             "prf_test",
@@ -2624,7 +2666,8 @@ mod tests {
         .unwrap();
         drop(keep_alive);
         std::fs::remove_dir_all(&udd).unwrap();
-        let report = restore(&vault, &udd, "prf_test", 1, &Identity::fixture(), false).unwrap();
+        let report =
+            restore_fixture(&vault, &udd, "prf_test", 1, &Identity::fixture(), false).unwrap();
         assert!(report.ok, "{:?}", report.failure);
         assert_eq!(read_local_storage_token(&udd), b"\x01wal-only".to_vec());
         std::fs::remove_dir_all(root).unwrap();
@@ -2636,7 +2679,7 @@ mod tests {
         let udd = root.join("prf_test");
         build_profile(&udd, "t", "ls");
         let vault = vault_at(&root);
-        capture(
+        capture_fixture(
             &vault,
             &udd,
             "prf_test",
@@ -2674,7 +2717,7 @@ mod tests {
         let udd = root.join("prf_test");
         build_profile(&udd, "t", "ls");
         let vault = vault_at(&root);
-        let manifest = capture(
+        let manifest = capture_fixture(
             &vault,
             &udd,
             "prf_test",

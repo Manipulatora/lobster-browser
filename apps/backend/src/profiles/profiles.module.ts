@@ -4,6 +4,8 @@ import { ConfigService } from '@nestjs/config';
 import { AuditModule } from '../audit/audit.module';
 import { AuthModule } from '../auth/auth.module';
 import { PrismaService } from '../prisma/prisma.service';
+import { InMemoryTeamsRepository } from '../teams/in-memory-teams.repository';
+import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 import { BLOB_STORE, type BlobStore } from './blob/blob-store';
 import { FilesystemBlobStore } from './blob/filesystem-blob-store';
 import { InMemoryBlobStore } from './blob/in-memory-blob-store';
@@ -74,11 +76,14 @@ export function resolveBlobStore(config: ConfigService): BlobStore {
     ProfilesService,
     {
       provide: PROFILES_REPOSITORY,
-      inject: [ConfigService, PrismaService],
-      useFactory: (config: ConfigService, prisma: PrismaService) =>
-        config.get<string>('DATABASE_URL')
-          ? new PrismaProfilesRepository(prisma)
-          : new InMemoryProfilesRepository(),
+      inject: [ConfigService, PrismaService, TEAMS_REPOSITORY],
+      useFactory: (config: ConfigService, prisma: PrismaService, teams: TeamsRepository) => {
+        if (config.get<string>('DATABASE_URL')) return new PrismaProfilesRepository(prisma);
+        if (!(teams instanceof InMemoryTeamsRepository)) {
+          throw new Error('in-memory profiles require the shared in-memory teams repository');
+        }
+        return new InMemoryProfilesRepository((teamId, userId) => teams.isAdmin(teamId, userId));
+      },
     },
     {
       provide: BLOB_STORE,

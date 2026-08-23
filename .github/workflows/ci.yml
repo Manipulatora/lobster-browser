@@ -35,6 +35,15 @@ jobs:
       - run: npm run typecheck --workspaces --if-present
       - run: npm run build --if-present
       - run: npm run test --workspaces --if-present
+      # apps/web is intentionally outside the npm workspace because it pins its own Angular and
+      # TypeScript graph. Validate that independent lockfile explicitly; the workspace commands
+      # above cannot see it.
+      - run: npm ci --no-audit --no-fund
+        working-directory: apps/web
+      - run: npm run build
+        working-directory: apps/web
+      - run: npm test -- --watch=false
+        working-directory: apps/web
 
   # The `gate:*` scripts in the root package.json. Every one of them is pure Node over files already
   # in the checkout — no engine, no GPU, no database, no browser — and none of them ran in any
@@ -112,12 +121,11 @@ jobs:
   # launch profiles trusting spoofing the next clean build does not contain.
   #
   # OPT-IN on the build host, NOT a github-hosted job and NOT advisory. It needs a Chromium checkout
-  # at LOBIUM_CHROMIUM_SRC, and it legitimately exits 1 on any host whose tree has moved on from the
-  # patch bases — the current Linux build box fails six patches for exactly that reason. Wiring it as
-  # a required check on a runner without the tree would make it permanently red, which is how a real
-  # signal gets trained out of a team. Enable LOBSTER_ENABLE_SERIES_REPLAY on a self-hosted runner
-  # labelled `lobium-build` whose checkout is synced to the pinned ref, and it blocks from that
-  # moment.
+  # at LOBIUM_CHROMIUM_SRC. It refuses any checkout whose HEAD is not the pinned Chromium ref, then
+  # fails on any live-tree footprint drift from the reproducible series. Wiring it as a required
+  # check on a runner without the tree would make it permanently red, which is how a real signal gets
+  # trained out of a team. Enable LOBSTER_ENABLE_SERIES_REPLAY on a self-hosted runner labelled
+  # `lobium-build` whose checkout is synced to the pinned ref, and it blocks from that moment.
   patch-series:
     name: Patch series replay (build host, opt-in)
     runs-on: [self-hosted, lobium-build]
@@ -178,21 +186,8 @@ jobs:
       - name: cargo clippy
         working-directory: apps/desktop/src-tauri
         run: cargo clippy --lib --all-targets -- -D warnings
-      # `cargo test --lib` is NOT self-contained: sidecar.rs:158-183 spawns the BUILT sidecar
-      # (packages/engine-runner/dist/index.js, resolved from CARGO_MANIFEST_DIR) and asserts a real
-      # ping/status round-trip; several local_api tests additionally need `node` on PATH for their own
-      # generated fake sidecar (local_api.rs:643). Without the sidecar bundle the spawn still succeeds,
-      # node dies immediately, and the test fails with
-      # "ping: sidecar closed before responding to 'ping'" — verified by running the suite with
-      # LOBSTER_SIDECAR pointed at a nonexistent path. This job never built it, so the one Rust gate in
-      # CI could not have been green; the same build is why the cross-platform job runs its node suites
-      # before cargo.
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - run: npm install --no-audit --no-fund
-      - run: npx tsc -b packages/shared-types packages/proxy packages/fingerprint packages/agent packages/engine-runner
+      # The sidecar and local-API unit tests launch the Rust test executable itself as a deterministic
+      # JSON-RPC child, so this suite is self-contained and does not depend on Node or POSIX utilities.
       - name: cargo test
         working-directory: apps/desktop/src-tauri
         run: cargo test --lib
@@ -205,13 +200,9 @@ jobs:
   # macOS ships no installer today (recorded in ci/validation/version-coherence.test.mjs:133); it is
   # here as the second Keychain-wrapped platform and the cheap POSIX-but-not-Linux signal.
   #
-  # This job runs ONLY what is genuinely portable today, so a red here always means a real defect:
-  #   - `cargo check` rather than `cargo test` on Windows: two `cargo test --lib` cases are
-  #     POSIX-shaped rather than platform-agnostic — engine_provision's synthetic archive installs a
-  #     `chrome` that `engine_present` looks for as `chrome.exe` (src/engine_provision.rs:301 vs
-  #     lib.rs:196), and sidecar.rs:191 spawns `true` as a fake sidecar, which is not an executable on
-  #     Windows. Checking every target still compiles every `cfg(windows)` block, which is where the
-  #     Windows-only breakage this job exists to catch actually lives.
+  # This job runs what is genuinely portable today, so a red here always means a real defect:
+  #   - the complete release Rust library suite is blocking on Windows. Its sidecar child and profile
+  #     crypto fixtures are deterministic and host-independent; no POSIX-tool or DPAPI carve-out remains.
   #   - the node:test suites run through ci/validation/cross-platform-suite.mjs rather than
   #     `npm run test --workspaces`: four individual test files are not portable today, and a
   #     permanently red job gates nothing. That script names every excluded file, the platform, and the
@@ -242,8 +233,7 @@ jobs:
       # Same reason as the web job: the backend typechecks against the generated Prisma client.
       - run: npx prisma generate --schema=apps/backend/prisma/schema.prisma
       - run: npm run typecheck --workspaces --if-present
-      # The portable node:test suites. This also builds packages/engine-runner/dist, which the Rust
-      # sidecar test below needs.
+      # The portable node:test suites.
       - run: node ci/validation/cross-platform-suite.mjs
       # The toolchain version is pinned by rust-toolchain.toml (>= 1.85 for edition2024 deps).
       - uses: dtolnay/rust-toolchain@stable
@@ -257,10 +247,13 @@ jobs:
       - name: cargo check
         working-directory: apps/desktop/src-tauri
         run: cargo check --lib --all-targets
-      # macOS is the second Keychain-wrapped platform AND a POSIX box, so unlike Windows it has no
-      # known reason to fail the Rust suite: `true` exists, CHROME_BIN is `chrome`, the `cfg(unix)`
-      # mode assertions hold, and keychain.rs degrades to the file key on any keyring error
-      # (keychain.rs:57-100) rather than requiring an unlocked login keychain.
+      - name: cargo test (Windows, blocking)
+        if: matrix.os == 'windows-latest'
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --release --lib -- --test-threads=1
+      # macOS is the second Keychain-wrapped platform. The synthetic snapshot and sidecar fixtures no
+      # longer touch the host keychain or assume POSIX helper commands, but the full suite has not yet
+      # had a recorded macOS run.
       #
       # It is advisory ONLY because this suite has never executed on macOS anywhere, and a gate whose
       # first run reds the branch teaches the team to ignore gates. Promote it by deleting the
@@ -279,9 +272,10 @@ jobs:
       # job is for. A cookie jar that stops restoring on a Keychain-wrapped platform is exactly the
       # failure that passes green on Linux, so it may not be advisory anywhere.
       #
-      # `--lib snapshot::` rather than the whole suite so the two POSIX-shaped cases documented above
-      # (engine_provision's `chrome` vs `chrome.exe`, sidecar.rs spawning `true`) cannot red this.
-      - name: Snapshot capture/restore round-trip
+      # Windows already runs these in the complete blocking suite above. Keep this focused blocking
+      # invocation on macOS until the complete macOS suite is promoted from advisory.
+      - name: Snapshot capture/restore round-trip (macOS, blocking)
+        if: matrix.os == 'macos-latest'
         working-directory: apps/desktop/src-tauri
         run: cargo test --lib 'snapshot::'
       # STILL MISSING, and named so it is not mistaken for covered: the LIVE round-trip — launch a

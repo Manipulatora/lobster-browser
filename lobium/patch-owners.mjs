@@ -12,10 +12,11 @@ import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveChromiumSrc } from './chromium-src.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PATCHES = join(HERE, 'patches');
-const SRC = process.env.LOBIUM_CHROMIUM_SRC || 'E:\\lobium-build\\src';
+const SRC = resolveChromiumSrc();
 
 const series = readFileSync(join(PATCHES, 'series'), 'utf8')
   .split('\n')

@@ -6,6 +6,7 @@ import {
   normalizeHostWebglIdentity,
   validateFingerprintCoherence,
   validateHostCalibrationProfile,
+  webgpuIdentityFor,
 } from './index.js';
 
 const precision: WebGlShaderPrecisionProfile = {
@@ -104,6 +105,7 @@ test('deriveFingerprintFromHost inherits captured host hardware while keeping Ch
   assert.equal(fp.webgl.renderer, host().webgl.renderer);
   assert.deepEqual(fp.webgl.extensions, host().webgl.extensions);
   assert.deepEqual(fp.webgl.shaderPrecision, precision);
+  assert.deepEqual(fp.webgpu, webgpuIdentityFor(fp.webgl));
   assert.deepEqual(fp.fonts, ['DejaVu Sans', 'Liberation Sans', 'Noto Sans']);
   assert.match(fp.navigator.userAgent, /Chrome\/152\.0\.0\.0/);
   assert.equal(fp.navigator.uaFullVersion, '152.0.7977.42');

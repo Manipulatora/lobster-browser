@@ -1,12 +1,12 @@
 {
   "$schema": "stock-Chrome network-fingerprint references, keyed by Chrome major version",
-  "$why": "Lobium's ClientHello and HTTP/2 SETTINGS must be byte-identical to the stock Chrome it forks. A shape check (t13d....h2) passes on every TLS1.3 browser and therefore proves nothing; only equality against a real stock capture catches a reordered extension, a dropped ALPS entry or a changed SETTINGS frame - each of which changes the hash a WAF keys on while leaving the shape intact.",
+  "$why": "Lobium's stable JA4/PeetPrint ClientHello signatures and Akamai HTTP/2 SETTINGS signature must equal the stock Chrome it forks. Raw JA3 is captured for diagnosis but not compared because Chrome randomizes extension order per connection. A shape check (t13d....h2) passes on every TLS 1.3 browser and therefore proves nothing; equality against a real stock capture catches stable cipher, ALPS, and SETTINGS drift while leaving randomized JA3 out of the verdict.",
   "$capture": "LOBSTER_STOCK_CHROME_BIN=<stock chrome of that major> node ci/validation/tls-fingerprint.mjs --capture-reference",
   "$policy": "Values here are MEASURED, never hand-written. An unpinned major BLOCKS the gate (exit 2) rather than passing it: no reference means no comparison, which is not the same as agreement. Recapture whenever the engine is rebased onto a new Chromium major.",
   "references": {
     "152": {
       "capturedAt": "2026-08-23T13:31:10.339Z",
-      "source": "/tmp/claude-1001/-home-ivyhfx-browser/d743a986-448f-4577-b0af-80e8f45f62aa/scratchpad/stock/chrome-linux64/chrome",
+      "source": "stock-chrome-152.0.7977.42-linux-x64",
       "echo": "https://tls.peet.ws/api/all",
       "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/152.0.0.0 Safari/537.36",
       "ja3_hash": "efa09682f1ab8dfb893d6ec1eee3f266",

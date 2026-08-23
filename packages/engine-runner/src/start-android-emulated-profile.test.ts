@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { LaunchParams, LaunchResult, StartProfileParams } from '@lobster/shared-types';
 import type { EngineRunner } from './runner.js';
+import { webgpuIdentityFor } from '@lobster/fingerprint';
 import {
   LOBIUM_CAPABILITY_CONTRACT_VERSION,
   LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
@@ -34,7 +35,7 @@ class RecordingRunner implements EngineRunner {
 
 const base: StartProfileParams = {
   profileId: 'android-1',
-  fingerprintSeed: 'seed-android-emulated',
+  fingerprintSeed: '0123456789abcdef0123456789abcdef',
   os: 'android',
   engine: 'lobium',
   userDataDir: '/tmp/does-not-matter',
@@ -52,6 +53,7 @@ test('the emulated Android path launches a mobile profile with the catalog rende
     presetId: 'android-device-catalog',
   });
   assert.equal(launched.webrtcPolicy, 'default_public_interface_only');
+  assert.deepEqual(launched.fingerprint.webgpu, webgpuIdentityFor(launched.fingerprint.webgl));
 });
 
 test('persona WebRTC, hardware-noise and media-device choices reach the Android launch', async () => {

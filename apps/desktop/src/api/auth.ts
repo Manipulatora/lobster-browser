@@ -23,7 +23,9 @@ export interface AuthState {
 export interface AuthClient {
   status(): Promise<AuthState>;
   /** Opens the browser and resolves when the loopback callback completes. Rejects on timeout. */
-  signIn(mode: 'signup' | 'login'): Promise<CloudUser>;
+  signIn(mode: 'signup' | 'login', attemptId: string): Promise<CloudUser>;
+  /** Cancels or queues cancellation for this handoff; false means this exact id already finished. */
+  cancelSignIn(attemptId: string): Promise<boolean>;
   signOut(): Promise<void>;
   /**
    * The signed-in state from local cache only — no network, answers immediately.
@@ -38,7 +40,8 @@ export interface AuthClient {
 const tauriAuth: AuthClient = {
   status: () => invoke<AuthState>('auth_status'),
   statusCached: () => invoke<AuthState>('auth_status_cached'),
-  signIn: (mode) => invoke<CloudUser>('auth_sign_in', { mode }),
+  signIn: (mode, attemptId) => invoke<CloudUser>('auth_sign_in', { mode, attemptId }),
+  cancelSignIn: (attemptId) => invoke<boolean>('auth_cancel_sign_in', { attemptId }),
   signOut: () => invoke<void>('auth_sign_out'),
 };
 
@@ -59,6 +62,7 @@ const mockAuth: AuthClient = {
     offline: false,
   }),
   signIn: async () => ({ id: 'dev-user', email: 'dev@localhost', displayName: 'Dev' }),
+  cancelSignIn: async () => true,
   signOut: async () => undefined,
 };
 

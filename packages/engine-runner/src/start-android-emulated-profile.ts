@@ -18,6 +18,7 @@ import {
   assertLobiumBuildCapabilities,
   requiredLobiumCapabilities,
 } from './lobium-capabilities.js';
+import { assertValidFingerprintSeed } from './fingerprint-seed.js';
 
 /** True for the codes `deriveGeoFromExitIp`/upstream checks raise when the proxy is genuinely dead. */
 function isProxyUnreachableError(err: unknown): boolean {
@@ -50,6 +51,7 @@ export async function startAndroidEmulatedProfile(
   runner: EngineRunner,
   params: StartProfileParams,
 ): Promise<LaunchResult> {
+  assertValidFingerprintSeed(params.fingerprintSeed, params.profileId);
   if (params.engine !== 'lobium') {
     throw new Error(
       `refusing to launch profile ${params.profileId}: Lobium is the only supported engine`,
@@ -123,6 +125,7 @@ export async function startAndroidEmulatedProfile(
     navigator: android.navigator,
     screen: android.screen,
     webgl: android.webgl,
+    webgpu: android.webgpu,
     locale: android.locale,
     fonts: android.fonts,
   };
@@ -130,7 +133,12 @@ export async function startAndroidEmulatedProfile(
   const buildCapabilities = await runner.getLobiumBuildCapabilities();
   assertLobiumBuildCapabilities(
     buildCapabilities,
-    requiredLobiumCapabilities(launchPolicy, fingerprint.locale.geolocation !== undefined),
+    requiredLobiumCapabilities(
+      launchPolicy,
+      fingerprint.locale.geolocation !== undefined,
+      process.platform,
+      true,
+    ),
   );
 
   const launchParams: LaunchParams = {

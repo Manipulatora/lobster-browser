@@ -111,7 +111,7 @@ export class AuthController {
    * PUBLIC, and it has to be: registration no longer issues a token, so there is no session to
    * authenticate with at this point — establishing one is the whole purpose of the call. What
    * bounds guessing is the attempt counter on the pending row, not a guard here; see
-   * `consumePendingRegistration`.
+   * `completePendingRegistration`.
    */
   @Post('verify-email')
   @HttpCode(200)

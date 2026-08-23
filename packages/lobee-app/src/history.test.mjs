@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { findSnapshotForThread, matchThreadHistory, threadExchanges } from './history.ts';
+import {
+  canSwitchThread,
+  findSnapshotForThread,
+  matchThreadHistory,
+  resumeFailureEvent,
+  threadExchanges,
+} from './history.ts';
 
 test('encrypted thread messages reconstruct tasks, outcomes, timestamps, and stable ids', () => {
   assert.deepEqual(
@@ -79,4 +85,22 @@ test('new-chat reopen ignores a retained snapshot from the previous thread', () 
     undefined,
     'thread-less snapshots fail closed instead of leaking into the current chat',
   );
+});
+
+test('conversation switching is locked while a run still owns the rendered turn ids', () => {
+  assert.equal(canSwitchThread(true, false, 'other-thread', 'current-thread'), false);
+  assert.equal(canSwitchThread(false, true, 'other-thread', 'current-thread'), false);
+  assert.equal(canSwitchThread(false, false, 'other-thread', 'current-thread'), true);
+  assert.equal(canSwitchThread(false, false, 'current-thread', 'current-thread'), false);
+  assert.equal(canSwitchThread(false, false, '', 'current-thread'), false);
+});
+
+test('a retained run that cannot reattach becomes a truthful terminal error', () => {
+  assert.equal(resumeFailureEvent(true), null);
+  assert.deepEqual(resumeFailureEvent(false), {
+    type: 'run.finished',
+    status: 'error',
+    error:
+      'Lobee could not reconnect to this retained run. It may still be active in the agent service; reconnect before starting another task.',
+  });
 });

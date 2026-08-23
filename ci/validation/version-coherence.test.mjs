@@ -1,13 +1,15 @@
 // Version-coherence gate (roadmap W4). Offline, no browser, no network — runs in the software tier.
 //
-// The Chrome version is pinned in three files that must never disagree:
+// The Chrome version is pinned in four files that must never disagree:
 //
 //   lobium/build.sh            CHROMIUM_REF        — which source is built
+//   lobium/build.ps1           ChromiumRef         — which source is built on Windows
 //   packages/fingerprint       ENGINE_CHROME       — what every persona's UA claims
 //   engine-manifest.json       version/url/sha256  — which tarball first-run provisioning installs
 //
-// A mismatch between the first two is a fingerprint LIE: every profile advertises a Chrome the binary
-// is not, and getHighEntropyValues(['fullVersionList']) exposes it without any probing. A mismatch with
+// A mismatch among the first three is a fingerprint LIE: the platform builds diverge or every
+// profile advertises a Chrome the binary is not, and getHighEntropyValues(['fullVersionList'])
+// exposes it without any probing. A mismatch with
 // the third is a different thing — a rebuild that has not happened yet — so it is allowed, but only
 // when the manifest DECLARES it. Silent drift and a declared pending rebuild look identical on disk
 // otherwise, and the declared form is what makes the difference reviewable.
@@ -27,10 +29,13 @@ const FULL_VERSION = /^\d+\.\d+\.\d+\.\d+$/;
 function pins() {
   const buildSh = read('lobium/build.sh');
   const pinned = /CHROMIUM_REF="\$\{CHROMIUM_REF:-([0-9.]+)\}"/.exec(buildSh)?.[1];
+  const buildPs1 = read('lobium/build.ps1');
+  const windowsPinned = /\$ChromiumRef\s*=\s*'([0-9.]+)'/.exec(buildPs1)?.[1];
   const pools = read('packages/fingerprint/src/pools.ts');
   const block = /export const ENGINE_CHROME = \{[\s\S]*?\} as const;/.exec(pools)?.[0] ?? '';
   return {
     pinned,
+    windowsPinned,
     major: /major:\s*'([0-9]+)'/.exec(block)?.[1],
     reduced: /reduced:\s*'([0-9.]+)'/.exec(block)?.[1],
     full: /full:\s*'([0-9.]+)'/.exec(block)?.[1],
@@ -42,6 +47,7 @@ test('every version pin was found (the regexes still match their files)', () => 
   const p = pins();
   for (const [name, v] of Object.entries({
     'build.sh CHROMIUM_REF': p.pinned,
+    'build.ps1 ChromiumRef': p.windowsPinned,
     'ENGINE_CHROME.major': p.major,
     'ENGINE_CHROME.reduced': p.reduced,
     'ENGINE_CHROME.full': p.full,
@@ -49,11 +55,17 @@ test('every version pin was found (the regexes still match their files)', () => 
     assert.ok(v, `${name} could not be parsed — a refactor moved it out from under this gate`);
   }
   assert.match(p.pinned, FULL_VERSION, 'CHROMIUM_REF must be a full w.x.y.z build');
+  assert.match(p.windowsPinned, FULL_VERSION, 'ChromiumRef must be a full w.x.y.z build');
   assert.match(p.full, FULL_VERSION, 'ENGINE_CHROME.full must be a full w.x.y.z build');
 });
 
 test('the UA claims exactly the build that gets compiled', () => {
   const p = pins();
+  assert.equal(
+    p.windowsPinned,
+    p.pinned,
+    'build.ps1 ChromiumRef must equal build.sh CHROMIUM_REF — Windows and Linux must build the same source',
+  );
   assert.equal(
     p.full,
     p.pinned,
@@ -65,6 +77,16 @@ test('the UA claims exactly the build that gets compiled', () => {
     p.reduced,
     `${p.pinned.split('.')[0]}.0.0.0`,
     'ENGINE_CHROME.reduced must be the UA-reduced form of the pinned major',
+  );
+});
+
+test('the version bump command moves both platform build pins', () => {
+  const bump = read('scripts/bump-engine-version.mjs');
+  assert.match(bump, /const BUILD_PS1 = 'lobium\/build\.ps1'/);
+  assert.match(
+    bump,
+    /await patch\(BUILD_PS1,[\s\S]*?\['ChromiumRef',[\s\S]*?`\$ChromiumRef = '\$\{target\}'`/,
+    'bumping Chromium must update the Windows build pin in the same operation',
   );
 });
 
@@ -197,4 +219,27 @@ test('the engine manifest either matches the pin, or declares the rebuild as pen
     `pending rebuild spans a milestone (${p.manifest.version} → ${p.full}). The reduced UA and the ` +
       'engine feature surface now disagree; ship the rebuild before merging a cross-milestone bump.',
   );
+});
+
+test('the Windows product build cannot reuse a source-stale sidecar', () => {
+  const productBuild = read('scripts/build-windows-product.ps1');
+  const sidecarBundler = read('scripts/bundle-sidecar.mjs');
+  const sidecarStep =
+    /Step '\[1\/4\] Bundle the self-contained sidecar'([\s\S]*?)Step "\[2\/4\] Vendor/.exec(
+      productBuild,
+    )?.[1];
+
+  assert.ok(sidecarStep, 'could not isolate the Windows sidecar staging step');
+  assert.match(sidecarStep, /node scripts\\bundle-sidecar\.mjs/);
+  assert.doesNotMatch(
+    sidecarStep,
+    /Test-Path|already staged|\$Force/,
+    'an existing sidecar is not evidence that it was built from the current workspace sources',
+  );
+
+  // The always-run staging command is also the artifact test: bundle-sidecar rebuilds its workspace
+  // inputs, starts the exact generated entry point, and requires a successful ping/pong round trip.
+  assert.match(sidecarBundler, /mustBuild\(ws\)/);
+  assert.match(sidecarBundler, /spawnSync\(process\.execPath, \[join\(outDir, 'index\.js'\)\]/);
+  assert.match(sidecarBundler, /pong\.ok !== true \|\| pong\.result\?\.pong !== true/);
 });

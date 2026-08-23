@@ -83,7 +83,7 @@ export function scoreAspects(rows, options = {}) {
   for (const row of rows) {
     const id = aspectOf(row);
     // A row the environment does not apply to (a Windows-only probe under a Linux persona, a proxy
-    // exit check with no proxy) is not evidence in either direction. It is recorded, never scored â€”
+    // exit check with no proxy) is not evidence in either direction. It is recorded, never scored —
     // but it is remembered, because an aspect that HAS oracles none of which can run here is a gap in
     // the environment, while an aspect with no oracles at all is a gap in the work.
     if (row.applicable === false) {

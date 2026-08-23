@@ -219,6 +219,11 @@ pub fn create_from_portable_row(
     row: &PortableRow,
     name: String,
 ) -> Result<Profile> {
+    // The seed is the imported browser identity. Validate it before parsing secondary metadata or
+    // writing a row; substituting a generated seed here would make the import appear successful while
+    // restoring the session onto a different fingerprint.
+    profile_store::validate_fingerprint_seed(&row.fingerprint_seed)
+        .context("the imported profile carries an invalid fingerprint seed")?;
     let overrides = match &row.fingerprint_overrides_json {
         Some(text) => Some(
             serde_json::from_str::<serde_json::Value>(text)
@@ -226,7 +231,7 @@ pub fn create_from_portable_row(
         ),
         None => None,
     };
-    let created = profile_store::create(
+    let created = profile_store::create_preserving_fingerprint_seed(
         conn,
         cipher,
         CreateProfileInput {
@@ -641,9 +646,17 @@ pub fn export_profile_file(
         &passphrase,
         profile_password.as_deref(),
         options.unwrap_or_default(),
-        &reporter,
+        ExportRuntime {
+            reporter: &reporter,
+            keyring: None,
+        },
     )
     .map_err(|e| format!("{e:#}"))
+}
+
+struct ExportRuntime<'a> {
+    reporter: &'a Reporter,
+    keyring: Option<&'a dyn snapshot::oscrypt::OsCryptKeyring>,
 }
 
 fn export_inner(
@@ -653,8 +666,10 @@ fn export_inner(
     passphrase: &str,
     profile_password: Option<&str>,
     options: ExportOptions,
-    reporter: &Reporter,
+    runtime: ExportRuntime<'_>,
 ) -> Result<ExportReport> {
+    let reporter = runtime.reporter;
+    let keyring = runtime.keyring;
     let mut row = {
         let conn = data.conn()?;
         let profile = profile_store::get(&conn, data.cipher, id)
@@ -701,16 +716,22 @@ fn export_inner(
         mode => {
             reporter.step("capture", "Capturing the profile's data…", 0, 0)?;
             let mode = parse_mode(mode.unwrap_or("quiesced")).map_err(|e| anyhow!("{e}"))?;
-            snapshot::capture(
-                vault,
-                &data.profiles_dir.join(id),
-                id,
-                mode,
-                &identity,
-                &CaptureOptions {
-                    exclude: options.exclude_artifacts.clone(),
-                },
-            )
+            let capture_options = CaptureOptions {
+                exclude: options.exclude_artifacts.clone(),
+            };
+            let udd = data.profiles_dir.join(id);
+            match keyring {
+                Some(keyring) => snapshot::capture_with_keyring(
+                    vault,
+                    &udd,
+                    id,
+                    mode,
+                    &identity,
+                    &capture_options,
+                    keyring,
+                ),
+                None => snapshot::capture(vault, &udd, id, mode, &identity, &capture_options),
+            }
             .context("capturing the profile's data")?
         }
     };
@@ -1155,6 +1176,67 @@ fn rollback(data: &ProfileData<'_>, id: &str) {
 mod tests {
     use super::*;
 
+    fn portable_row_with_seed(seed: &str) -> PortableRow {
+        PortableRow {
+            source_profile_id: "prf_source".into(),
+            name: "Portable".into(),
+            engine: "lobium".into(),
+            os: "windows".into(),
+            os_version: Some("11".into()),
+            fingerprint_seed: seed.into(),
+            fingerprint_overrides_json: None,
+            proxy: None,
+            cookies_import: None,
+            cookies_import_applied_at: None,
+            extensions: None,
+            tags: vec!["portable".into()],
+            folder: None,
+            notes: None,
+            password_hash: None,
+        }
+    }
+
+    #[test]
+    fn portable_rows_reject_invalid_seeds_and_preserve_canonical_or_legacy_identity() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(profile_store::SCHEMA).unwrap();
+        let cipher = crate::secrets::SecretCipher::new(&[42u8; 32]);
+
+        for (index, seed) in [
+            "".to_string(),
+            "abcdefg".to_string(),
+            "deadbeeG".to_string(),
+            "DEADBEEF".to_string(),
+            "a".repeat(257),
+            "a".repeat(1024 * 1024),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let invalid = portable_row_with_seed(&seed);
+            let error =
+                create_from_portable_row(&conn, &cipher, &invalid, format!("Invalid {index}"))
+                    .expect_err(
+                        "an import must reject malformed identity instead of regenerating it",
+                    );
+            assert!(
+                error.to_string().contains("invalid fingerprint seed"),
+                "unexpected error: {error:#}"
+            );
+        }
+        assert_eq!(profile_store::count_active(&conn).unwrap(), 0);
+
+        for seed in ["deadbeef", "0123456789abcdef0123456789abcdef"] {
+            let valid = portable_row_with_seed(seed);
+            let created = create_from_portable_row(&conn, &cipher, &valid, format!("Valid {seed}"))
+                .expect("bounded lowercase-hex identity must import");
+            assert_eq!(
+                created.fingerprint_seed, seed,
+                "import identity must be pinned without reseeding"
+            );
+        }
+    }
+
     #[test]
     fn the_same_passphrase_under_a_different_salt_yields_a_different_key() {
         // The salt is what stops one cracked file from opening every other file the user exported
@@ -1430,6 +1512,9 @@ mod tests {
     }
 
     fn export(machine: &Machine, id: &str, dest: &Path, passphrase: &str) -> ExportReport {
+        // Synthetic profile values are sealed under this fixture key on every host. Inject it
+        // explicitly instead of asking Windows to unwrap a nonexistent DPAPI Local State.
+        let keyring = oscrypt::InjectedKeyring::single(linux_key());
         export_inner(
             &machine.data(),
             id,
@@ -1437,19 +1522,23 @@ mod tests {
             passphrase,
             None,
             ExportOptions::default(),
-            &Reporter::new(None, None),
+            ExportRuntime {
+                reporter: &Reporter::new(None, None),
+                keyring: Some(&keyring),
+            },
         )
         .unwrap()
     }
 
     fn import(machine: &Machine, file: &Path, passphrase: &str) -> Result<ImportReport> {
+        let keyring = oscrypt::InjectedKeyring::single(linux_key());
         import_inner(
             &machine.data(),
             file,
             passphrase,
             None,
             &Reporter::new(None, None),
-            None,
+            Some(&keyring),
         )
     }
 
@@ -1598,7 +1687,10 @@ mod tests {
                 capture: Some("reuse-latest".into()),
                 ..Default::default()
             },
-            &Reporter::new(None, None),
+            ExportRuntime {
+                reporter: &Reporter::new(None, None),
+                keyring: None,
+            },
         )
         .unwrap();
 
@@ -1936,13 +2028,15 @@ mod tests {
             let conn = machine.db.lock().unwrap();
             snapshot::commands::identity_of_row(&conn, &machine.cipher, &profile.id).unwrap()
         };
-        let manifest = snapshot::capture(
+        let keyring = oscrypt::InjectedKeyring::single(linux_key());
+        let manifest = snapshot::capture_with_keyring(
             &data.vault,
             &udd,
             &profile.id,
             CaptureMode::Quiesced,
             &identity,
             &CaptureOptions::default(),
+            &keyring,
         )
         .unwrap();
 
@@ -2006,13 +2100,15 @@ mod tests {
             let conn = source.db.lock().unwrap();
             snapshot::commands::identity_of_row(&conn, &source.cipher, &profile.id).unwrap()
         };
-        let manifest = snapshot::capture(
+        let keyring = oscrypt::InjectedKeyring::single(linux_key());
+        let manifest = snapshot::capture_with_keyring(
             &source_data.vault,
             &udd,
             &profile.id,
             CaptureMode::Quiesced,
             &identity,
             &CaptureOptions::default(),
+            &keyring,
         )
         .unwrap();
 
@@ -2152,7 +2248,10 @@ mod tests {
                 capture: Some("reuse-latest".into()),
                 ..Default::default()
             },
-            &Reporter::new(None, None),
+            ExportRuntime {
+                reporter: &Reporter::new(None, None),
+                keyring: None,
+            },
         )
         .unwrap();
         let seal_ms = started.elapsed().as_millis();

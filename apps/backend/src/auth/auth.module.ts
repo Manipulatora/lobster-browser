@@ -5,7 +5,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import { InMemoryTeamsRepository } from '../teams/in-memory-teams.repository';
 import { PrismaTeamsRepository } from '../teams/prisma-teams.repository';
-import { TEAMS_REPOSITORY } from '../teams/teams.repository';
+import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { DesktopAuthService } from './desktop-auth.service';
@@ -51,16 +51,8 @@ import { USERS_REPOSITORY } from './users.repository';
     // otherwise fall back to the in-memory store for local dev / tests (no DB required to boot).
     //
     // Users AND teams live here (and are exported) so they are single shared singletons: the
-    // personal team AuthService creates at register time is the SAME store TeamsModule and
+    // personal team registration creates is in the SAME store TeamsModule and
     // ProfilesModule read from.
-    {
-      provide: USERS_REPOSITORY,
-      inject: [ConfigService, PrismaService],
-      useFactory: (config: ConfigService, prisma: PrismaService) =>
-        config.get<string>('DATABASE_URL')
-          ? new PrismaUsersRepository(prisma)
-          : new InMemoryUsersRepository(),
-    },
     {
       provide: TEAMS_REPOSITORY,
       inject: [ConfigService, PrismaService],
@@ -68,6 +60,19 @@ import { USERS_REPOSITORY } from './users.repository';
         config.get<string>('DATABASE_URL')
           ? new PrismaTeamsRepository(prisma)
           : new InMemoryTeamsRepository(),
+    },
+    {
+      provide: USERS_REPOSITORY,
+      inject: [ConfigService, PrismaService, TEAMS_REPOSITORY],
+      useFactory: (config: ConfigService, prisma: PrismaService, teams: TeamsRepository) => {
+        if (config.get<string>('DATABASE_URL')) return new PrismaUsersRepository(prisma);
+        if (!(teams instanceof InMemoryTeamsRepository)) {
+          throw new Error('in-memory users require the shared in-memory teams repository');
+        }
+        return new InMemoryUsersRepository((ownerUserId, name) =>
+          teams.prepareTeamWithOwner(ownerUserId, name),
+        );
+      },
     },
   ],
   // Re-export JwtModule so modules that import AuthModule to reuse JwtAuthGuard (Teams, Profiles)

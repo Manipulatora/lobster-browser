@@ -20,23 +20,30 @@ const policy: FingerprintLaunchPolicy = {
   mediaDevices: { cameras: 1, microphones: 1, speakers: 2, stableDeviceIds: true },
 };
 
-test('the navigator/UA-CH hook is required by every profile, whatever its policy', () => {
+test('the navigator and webdriver hooks are required by every profile, whatever its policy', () => {
   // A build with the config channel but without this hook parses the persona and then reports the
   // host's UA, platform, hardwareConcurrency and deviceMemory — a launch that succeeds while the
   // profile is fully identifiable, so no policy combination may make it optional.
   for (const platform of ['win32', 'darwin', 'linux'] as const) {
+    const required = requiredLobiumCapabilities(
+      {
+        ...policy,
+        hardwareNoise: { canvas: false, webgl: false, audio: false, clientRects: false },
+      },
+      false,
+      platform,
+    );
+    assert.ok(required.includes('navigator-ua-ch'), `navigator-ua-ch must be required on ${platform}`);
     assert.ok(
-      requiredLobiumCapabilities(
-        {
-          ...policy,
-          hardwareNoise: { canvas: false, webgl: false, audio: false, clientRects: false },
-        },
-        false,
-        platform,
-      ).includes('navigator-ua-ch'),
-      `navigator-ua-ch must be required on ${platform}`,
+      required.includes('navigator-webdriver'),
+      `navigator-webdriver must be required on ${platform}`,
     );
   }
+});
+
+test('mobile-persona is required only for emulated Android personas', () => {
+  assert.ok(!requiredLobiumCapabilities(policy, false, 'win32', false).includes('mobile-persona'));
+  assert.ok(requiredLobiumCapabilities(policy, false, 'win32', true).includes('mobile-persona'));
 });
 
 test('required capability set follows selected native policies', () => {
@@ -65,6 +72,28 @@ test('exact executable capability probe parses the native contract', async () =>
   try {
     const observed = await probeLobiumBuildCapabilities(executable);
     assert.deepEqual(observed, manifest);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a binary from the previous behavioural contract is rejected even when all names match', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lobium-capabilities-stale-'));
+  const staleManifest = {
+    contractVersion: LOBIUM_CAPABILITY_CONTRACT_VERSION - 1,
+    product: 'Lobium',
+    capabilities: LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
+  };
+  const executable = await writeFakeBinary(
+    dir,
+    'stale-lobium',
+    `process.stdout.write(${JSON.stringify(`${JSON.stringify(staleManifest)}\n`)});\n`,
+  );
+  try {
+    await assert.rejects(
+      probeLobiumBuildCapabilities(executable),
+      /incompatible native capability contract/,
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

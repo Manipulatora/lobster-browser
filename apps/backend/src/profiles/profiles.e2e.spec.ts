@@ -17,6 +17,7 @@ import { ApiExceptionFilter } from '../common/api-exception.filter';
 import { PrismaModule } from '../prisma/prisma.module';
 import { MailModule } from '../mail/mail.module';
 import { AuthModule } from '../auth/auth.module';
+import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 import { configureBodyLimit } from '../body-limit';
 import { ProfilesModule } from './profiles.module';
 import { DEFAULT_FREE_PROFILE_LIMIT } from './profiles.service';
@@ -159,6 +160,45 @@ test("profiles are isolated per team: one user never sees another user's profile
     .set({ Authorization: `Bearer ${tokenB}` });
   assert.equal(listB.status, 200);
   assert.equal(listB.body.data.length, 0, "user B must not see user A's profiles");
+});
+
+test('only an admin can delete a team profile and purge its encrypted blob versions', async () => {
+  const admin = await signUpOverHttp(app, mailCapture, 'profile-delete-admin@gmail.com');
+  const member = await signUpOverHttp(app, mailCapture, 'profile-delete-member@gmail.com');
+  const teams = app.get<TeamsRepository>(TEAMS_REPOSITORY, { strict: false });
+  const team = await teams.createTeam(admin.userId, 'Shared Profiles');
+  await teams.addMember(team.id, member.userId, 'member');
+
+  const created = await request(app.getHttpServer())
+    .post('/profiles')
+    .query({ teamId: team.id })
+    .set({ Authorization: `Bearer ${admin.token}` })
+    .send({ name: 'Admin-owned shared profile', engine: 'lobium', os: 'windows' });
+  assert.ok([200, 201].includes(created.status), `create status ${created.status}`);
+  const profileId: string = created.body.data.id;
+
+  const memberDelete = await request(app.getHttpServer())
+    .delete(`/profiles/${profileId}`)
+    .query({ teamId: team.id })
+    .set({ Authorization: `Bearer ${member.token}` });
+  assert.equal(memberDelete.status, 403);
+
+  const stillPresent = await request(app.getHttpServer())
+    .get(`/profiles/${profileId}`)
+    .query({ teamId: team.id })
+    .set({ Authorization: `Bearer ${admin.token}` });
+  assert.equal(
+    stillPresent.status,
+    200,
+    'the rejected member request must not tombstone the profile',
+  );
+
+  const adminDelete = await request(app.getHttpServer())
+    .delete(`/profiles/${profileId}`)
+    .query({ teamId: team.id })
+    .set({ Authorization: `Bearer ${admin.token}` });
+  assert.equal(adminDelete.status, 200);
+  assert.equal(adminDelete.body.data.deleted, true);
 });
 
 test('create accepts the lobium engine (no longer a contract-drift 400)', async () => {
@@ -364,8 +404,27 @@ test('sync rejects an invalid direction with 400', async () => {
   const badPayload = await request(app.getHttpServer())
     .post(`/profiles/${id}/sync`)
     .set(auth)
-    .send({ direction: 'push', payload: 'not base64!!!' });
+    .send({ direction: 'push', payload: 'not base64!!!', baseVersion: 0 });
   assert.equal(badPayload.status, 400);
+});
+
+test('a push without baseVersion is rejected with 400 and stores nothing', async () => {
+  const token = await registerToken('profiles-version-required@gmail.com');
+  const auth = { Authorization: `Bearer ${token}` };
+  const id = await createProfile(auth, 'Version required');
+
+  const missingVersion = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'push', payload: encryptedBlob('must-not-write') });
+  assert.equal(missingVersion.status, 400);
+
+  const pull = await request(app.getHttpServer())
+    .post(`/profiles/${id}/sync`)
+    .set(auth)
+    .send({ direction: 'pull' });
+  assert.equal(pull.body.data.version, 0);
+  assert.equal(pull.body.data.payload, null);
 });
 
 test('push then pull round-trips the exact encrypted payload (server stores opaque bytes)', async () => {
@@ -375,11 +434,11 @@ test('push then pull round-trips the exact encrypted payload (server stores opaq
 
   const payload = encryptedBlob('cipher-v1-🔒-опаковый-blob');
 
-  // Omitting direction falls back to the 'push' default.
+  // Omitting direction falls back to the 'push' default; a first push explicitly claims version 0.
   const push = await request(app.getHttpServer())
     .post(`/profiles/${id}/sync`)
     .set(auth)
-    .send({ payload });
+    .send({ payload, baseVersion: 0 });
   assert.ok([200, 201].includes(push.status), `push status ${push.status}`);
   assert.equal(push.body.code, 0);
   assert.equal(push.body.data.direction, 'push');
@@ -443,7 +502,7 @@ test('SEC-1: real LBv1 envelope syncs opaquely and decrypts only client-side', a
   const push = await request(app.getHttpServer())
     .post(`/profiles/${id}/sync`)
     .set(auth)
-    .send({ direction: 'push', payload });
+    .send({ direction: 'push', payload, baseVersion: 0 });
   assert.ok([200, 201].includes(push.status), `push status ${push.status}`);
   assert.equal(push.body.data.version, 1);
 
@@ -471,13 +530,13 @@ test('version increments across pushes and pull returns the latest', async () =>
   const first = await request(app.getHttpServer())
     .post(`/profiles/${id}/sync`)
     .set(auth)
-    .send({ direction: 'push', payload: encryptedBlob('v1') });
+    .send({ direction: 'push', payload: encryptedBlob('v1'), baseVersion: 0 });
   assert.equal(first.body.data.version, 1);
 
   const second = await request(app.getHttpServer())
     .post(`/profiles/${id}/sync`)
     .set(auth)
-    .send({ direction: 'push', payload: encryptedBlob('v2') });
+    .send({ direction: 'push', payload: encryptedBlob('v2'), baseVersion: 1 });
   assert.equal(second.body.data.version, 2);
   assert.match(second.body.data.blobRef, /\/2\.enc$/);
 
@@ -537,7 +596,7 @@ test('a >100kb encrypted blob syncs (push) successfully (body limit raised above
   const push = await request(app.getHttpServer())
     .post(`/profiles/${id}/sync`)
     .set(auth)
-    .send({ direction: 'push', payload });
+    .send({ direction: 'push', payload, baseVersion: 0 });
   assert.ok([200, 201].includes(push.status), `push status ${push.status}`);
   assert.equal(push.body.data.version, 1);
 
@@ -741,7 +800,7 @@ test('export is secret-free; import transfers profiles (preserving seed identity
   await request(app.getHttpServer())
     .post(`/profiles/${p1.body.data.id}/sync`)
     .set(authA)
-    .send({ payload: Buffer.from('SECRET').toString('base64') });
+    .send({ payload: Buffer.from('SECRET').toString('base64'), baseVersion: 0 });
 
   const exp = await request(app.getHttpServer()).get('/profiles/export').set(authA);
   assert.equal(exp.status, 200);

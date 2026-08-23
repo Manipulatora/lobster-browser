@@ -18,7 +18,7 @@ import {
   webgl1ExtensionsFor,
   webgl2ExtensionsFor,
 } from './webgl-extensions.js';
-import { webgpuIdentityFor } from './webgpu-identity.js';
+import { coherentGpuIdentity } from './webgpu-identity.js';
 
 export interface DeriveOptions {
   os: OsFamily;
@@ -99,6 +99,20 @@ export function deriveFromPools(
     uaFormFactor: 'Desktop',
   };
 
+  // Build the final WebGL object first. Renderer-policy paths use the same atomic helper whenever
+  // they replace it, so navigator.gpu can never retain the identity of an earlier catalog card.
+  const webgl: WebGlFingerprint = {
+    ...device.webgl,
+    version: 'WebGL 1.0 (OpenGL ES 2.0 Chromium)',
+    shadingLanguageVersion: 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)',
+    extensions: webgl1ExtensionsFor(os, {
+      appleSilicon: isAppleSiliconRenderer(device.webgl.renderer),
+    }),
+    extensions2: webgl2ExtensionsFor(os, {
+      appleSilicon: isAppleSiliconRenderer(device.webgl.renderer),
+    }),
+  };
+
   return {
     os,
     arch: device.arch,
@@ -112,20 +126,7 @@ export function deriveFromPools(
     // platform and GPU (they describe the WebGL/GLSL level, not the driver), so pinning them costs
     // no plausibility and removes any backend-dependent variance — notably a software renderer,
     // which would otherwise report a different string here than the persona's GPU implies.
-    webgl: {
-      ...device.webgl,
-      version: 'WebGL 1.0 (OpenGL ES 2.0 Chromium)',
-      shadingLanguageVersion: 'WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)',
-      extensions: webgl1ExtensionsFor(os, {
-        appleSilicon: isAppleSiliconRenderer(device.webgl.renderer),
-      }),
-      extensions2: webgl2ExtensionsFor(os, {
-        appleSilicon: isAppleSiliconRenderer(device.webgl.renderer),
-      }),
-    },
-    // Derived from the WebGL renderer above rather than stored alongside it, so the two GPU
-    // descriptions a page can read cannot name different hardware.
-    webgpu: webgpuIdentityFor(device.webgl),
+    ...coherentGpuIdentity(webgl),
     locale: {
       timezone: 'America/New_York',
       locale: primaryLocale,

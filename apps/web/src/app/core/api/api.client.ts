@@ -52,7 +52,8 @@ export class ApiClient {
 
   private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
     let headers = new HttpHeaders({ 'Content-Type': 'application/json' });
-    const token = this.tokens.read();
+    const auth = this.tokens.snapshot();
+    const token = auth.token;
     if (token) headers = headers.set('Authorization', `Bearer ${token}`);
 
     try {
@@ -72,7 +73,10 @@ export class ApiClient {
         // A 401 means the stored token is gone or expired. Clear it here rather than leaving every
         // caller to notice — otherwise the UI keeps showing a signed-in shell that cannot load
         // anything.
-        if (err.status === 401) this.tokens.clear();
+        // Clear only the credential THIS request actually used. A slow request carrying token A can
+        // finish after a fresh login has installed token B; letting A's 401 clear B signs the new
+        // session out from underneath its own successful login.
+        if (err.status === 401 && this.tokens.isCurrent(auth)) this.tokens.clear();
         throw new ApiError(extractMessage(err), err.status);
       }
       throw new ApiError('network error', 0);

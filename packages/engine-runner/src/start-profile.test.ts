@@ -7,7 +7,7 @@ import type {
   StartProfileParams,
 } from '@lobster/shared-types';
 import type { EngineRunner } from './runner.js';
-import { WINDOWS_RENDERER_PRESETS } from '@lobster/fingerprint';
+import { WINDOWS_RENDERER_PRESETS, webgpuIdentityFor } from '@lobster/fingerprint';
 import {
   LOBIUM_CAPABILITY_CONTRACT_VERSION,
   LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
@@ -41,12 +41,36 @@ class RecordingRunner implements EngineRunner {
 
 const base: StartProfileParams = {
   profileId: 'p1',
-  fingerprintSeed: 'seed-coherence',
+  fingerprintSeed: '0123456789abcdef0123456789abcdef',
   os: 'windows',
   engine: 'lobium',
   userDataDir: '/tmp/does-not-matter',
   hostCalibration: hostCalibration(),
 };
+
+test('startProfile rejects malformed seeds before fingerprint derivation or engine launch', async () => {
+  for (const fingerprintSeed of [
+    '',
+    'g123456789abcdef0123456789abcdef',
+    '0123456789ABCDEF0123456789ABCDEF',
+    'abcdefg',
+    'a'.repeat(257),
+    'a'.repeat(1024 * 1024),
+  ]) {
+    const runner = new RecordingRunner();
+    await assert.rejects(
+      () => startProfile(runner, { ...base, fingerprintSeed }),
+      /expected 8 to 256 lowercase hexadecimal characters/,
+    );
+    assert.equal(runner.launched.length, 0);
+  }
+});
+
+test('startProfile preserves a bounded legacy fingerprint identity', async () => {
+  const runner = new RecordingRunner();
+  await startProfile(runner, { ...base, fingerprintSeed: 'deadbeef' });
+  assert.equal(runner.launched.length, 1, 'a legacy profile remains launchable');
+});
 
 function withoutHostCalibration(
   params: StartProfileParams = base,
@@ -170,6 +194,7 @@ test('startProfile carries UI launch policy fields to the runner', async () => {
   });
   assert.equal(launched.cookiesImport?.parsedCount, 1);
   assert.equal(launched.extensions?.[0]?.source, 'chrome_web_store');
+  assert.deepEqual(launched.fingerprint.webgpu, webgpuIdentityFor(launched.fingerprint.webgl));
   assert.equal(
     launched.fingerprint.navigator.uaPlatformVersion,
     '15.0.0',
@@ -285,6 +310,10 @@ test('a restored sourced renderer preset launches with its complete WebGL surfac
   assert.equal(runner.launched.length, 1);
   assert.equal(runner.launched[0]?.fingerprint.webgl.renderer, preset.webgl.renderer);
   assert.deepEqual(runner.launched[0]?.fingerprint.webgl.caps, preset.webgl.caps);
+  assert.deepEqual(
+    runner.launched[0]?.fingerprint.webgpu,
+    webgpuIdentityFor(runner.launched[0]!.fingerprint.webgl),
+  );
 });
 
 test('startProfile rejects a selected native policy when the exact build lacks its hook', async () => {
@@ -346,12 +375,13 @@ test('startProfile derives from host calibration when one is supplied', async ()
     'WEBGL_debug_renderer_info',
     'ANGLE_instanced_arrays',
   ]);
+  assert.deepEqual(launched.fingerprint.webgpu, webgpuIdentityFor(launched.fingerprint.webgl));
   assert.equal(launched.fingerprint.navigator.hardwareConcurrency, 12);
   assert.equal(
-      launched.fingerprint.navigator.deviceMemory,
-      32,
-      'a large host clamps to the DESKTOP maximum of 32, not the retired cap of 8',
-    );
+    launched.fingerprint.navigator.deviceMemory,
+    32,
+    'a large host clamps to the DESKTOP maximum of 32, not the retired cap of 8',
+  );
   assert.equal(launched.fingerprint.navigator.uaFullVersion, '152.0.7977.42');
 });
 

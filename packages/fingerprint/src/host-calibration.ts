@@ -16,6 +16,7 @@ import {
 } from './coherence.js';
 import { deriveFromPools } from './derive.js';
 import { normalizeDevicePixelRatio } from './displays.js';
+import { coherentGpuIdentity } from './webgpu-identity.js';
 
 export interface DeriveFromHostOptions {
   engine: EngineKind;
@@ -145,6 +146,7 @@ export function deriveFingerprintFromHost(
         ? languagesToAcceptLanguage(languages)
         : locale.acceptLanguage),
   };
+  const webgl = cloneHostWebgl(host.webgl);
 
   return {
     ...base,
@@ -175,7 +177,7 @@ export function deriveFingerprintFromHost(
         : 0,
     },
     screen: normalizeHostScreen(host.os, host.screen, base.screen),
-    webgl: cloneHostWebgl(host.webgl),
+    ...coherentGpuIdentity(webgl),
     locale: calibratedLocale,
     fonts: normalizedFonts(host.fonts, base.fonts),
   };

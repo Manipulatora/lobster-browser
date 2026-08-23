@@ -12,8 +12,8 @@
 //!   3. The user signs up or logs in on lobrowser.com.
 //!   4. The site redirects to `http://127.0.0.1:<port>/callback?code=…&state=…`.
 //!   5. The listener answers with a "you can close this" page and hands the code back.
-//!   6. [`wait`] exchanges the code — plus the PKCE verifier, over HTTPS — for a real token, and
-//!      stores it in the OS keychain.
+//!   6. [`SignInAttempt::wait`] exchanges the code — plus the PKCE verifier, over HTTPS — for a real
+//!      token, then stores it only if that exact attempt still owns the sign-in slot.
 //!
 //! WHAT PROTECTS WHAT, since a loopback redirect has more than one weakness:
 //! * `state`    — a callback meant for a different launcher instance, and CSRF on the listener.
@@ -22,6 +22,7 @@
 //! * 127.0.0.1  — binding the loopback interface only, so nothing off-machine can reach it.
 //! * timeout    — the listener does not outlive the sign-in attempt.
 
+use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,6 +43,8 @@ const TOKEN_ACCOUNT: &str = "cloud-token";
 /// Generous: this covers reading a pricing page, checking email for a verification link, and
 /// finding a password. The listener is bound the whole time, so it is not unbounded either.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Bounds pre-registration cancels and finished ids retained to order racing IPC commands.
+const RECENT_ATTEMPT_LIMIT: usize = 32;
 
 /// Default web origin. Overridable for staging via `LOBSTER_WEB_ORIGIN`.
 const DEFAULT_WEB_ORIGIN: &str = "https://lobrowser.com";
@@ -79,9 +82,194 @@ pub struct PendingSignIn {
     shutdown: Option<oneshot::Sender<()>>,
 }
 
+/// Owns the one sign-in attempt this launcher may have in flight.
+///
+/// Cancellation and credential commit take the same mutex. Whichever gets it first wins: an
+/// accepted cancellation removes the attempt before any keychain mutation, while a commit that
+/// already started makes a later cancel return `false` so the UI accepts the completed sign-in.
+#[derive(Clone, Default)]
+pub struct SignInCoordinator {
+    inner: Arc<std::sync::Mutex<SignInState>>,
+}
+
+#[derive(Default)]
+struct SignInState {
+    active: Option<ActiveSignIn>,
+    pending_cancels: VecDeque<String>,
+    finished: VecDeque<String>,
+}
+
+struct ActiveSignIn {
+    id: String,
+    cancel: Option<oneshot::Sender<()>>,
+}
+
+/// Registration for one IPC call. Dropping it releases only its own id, never a newer attempt.
+pub struct SignInAttempt {
+    coordinator: SignInCoordinator,
+    id: String,
+    cancel_rx: Option<oneshot::Receiver<()>>,
+}
+
+impl SignInState {
+    fn contains_finished(&self, id: &str) -> bool {
+        self.finished.iter().any(|candidate| candidate == id)
+    }
+
+    fn take_pending_cancel(&mut self, id: &str) -> bool {
+        let Some(index) = self
+            .pending_cancels
+            .iter()
+            .position(|candidate| candidate == id)
+        else {
+            return false;
+        };
+        self.pending_cancels.remove(index);
+        true
+    }
+
+    fn remember_pending_cancel(&mut self, id: &str) {
+        if self.pending_cancels.iter().any(|candidate| candidate == id) {
+            return;
+        }
+        self.pending_cancels.push_back(id.to_owned());
+        while self.pending_cancels.len() > RECENT_ATTEMPT_LIMIT {
+            self.pending_cancels.pop_front();
+        }
+    }
+
+    fn remember_finished(&mut self, id: &str) {
+        if let Some(index) = self.finished.iter().position(|candidate| candidate == id) {
+            self.finished.remove(index);
+        }
+        self.finished.push_back(id.to_owned());
+        while self.finished.len() > RECENT_ATTEMPT_LIMIT {
+            self.finished.pop_front();
+        }
+    }
+}
+
 struct CallbackResult {
     code: String,
     state: String,
+}
+
+impl SignInCoordinator {
+    /// Reserve the single desktop sign-in slot for this UI-generated UUID.
+    pub fn register(&self, id: &str) -> Result<SignInAttempt> {
+        uuid::Uuid::parse_str(id).context("invalid sign-in attempt id")?;
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("sign-in coordinator lock was poisoned"))?;
+        if state.contains_finished(id) {
+            return Err(anyhow!("sign-in attempt already finished"));
+        }
+        if state.active.is_some() {
+            return Err(anyhow!("another sign-in attempt is already in progress"));
+        }
+        if state.take_pending_cancel(id) {
+            state.remember_finished(id);
+            return Err(anyhow!("sign-in was cancelled"));
+        }
+
+        let (cancel, cancel_rx) = oneshot::channel();
+        state.active = Some(ActiveSignIn {
+            id: id.to_owned(),
+            cancel: Some(cancel),
+        });
+        Ok(SignInAttempt {
+            coordinator: self.clone(),
+            id: id.to_owned(),
+            cancel_rx: Some(cancel_rx),
+        })
+    }
+
+    /// Cancel only the attempt the caller names, remembering a cancel that beats registration.
+    ///
+    /// `true` means cancellation was accepted (immediately or queued); `false` means that exact id
+    /// already reached a terminal/committed state and its real result remains authoritative.
+    pub fn cancel(&self, id: &str) -> Result<bool> {
+        uuid::Uuid::parse_str(id).context("invalid sign-in attempt id")?;
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("sign-in coordinator lock was poisoned"))?;
+        if state.contains_finished(id) {
+            return Ok(false);
+        }
+        if state.active.as_ref().map(|attempt| attempt.id.as_str()) == Some(id) {
+            let mut cancelled = state
+                .active
+                .take()
+                .expect("matching active sign-in disappeared");
+            state.remember_finished(id);
+            if let Some(cancel) = cancelled.cancel.take() {
+                let _ = cancel.send(());
+            }
+        } else {
+            state.remember_pending_cancel(id);
+        }
+        Ok(true)
+    }
+
+    fn commit(&self, id: &str, result: ExchangeData) -> Result<CloudUser> {
+        self.commit_with(id, result, |result| {
+            store_session(&result.token, &result.user)
+        })
+    }
+
+    fn commit_with<F>(&self, id: &str, result: ExchangeData, persist: F) -> Result<CloudUser>
+    where
+        F: FnOnce(&ExchangeData) -> Result<()>,
+    {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("sign-in coordinator lock was poisoned"))?;
+        if state.active.as_ref().map(|attempt| attempt.id.as_str()) != Some(id) {
+            return Err(anyhow!("sign-in was cancelled"));
+        }
+
+        // Keep the ownership lock through both credential writes. This is the cancellation boundary:
+        // after this check an exact-id cancel cannot report success until the commit is complete.
+        persist(&result)?;
+        state.active.take();
+        state.remember_finished(id);
+        Ok(result.user)
+    }
+
+    fn release(&self, id: &str) {
+        let Ok(mut state) = self.inner.lock() else {
+            return;
+        };
+        if state.active.as_ref().map(|attempt| attempt.id.as_str()) == Some(id) {
+            state.active.take();
+            state.remember_finished(id);
+        }
+    }
+}
+
+impl SignInAttempt {
+    /// Race explicit cancellation against the loopback callback, then commit only while still owner.
+    pub async fn wait(mut self, pending: PendingSignIn) -> Result<CloudUser> {
+        let mut cancel_rx = self
+            .cancel_rx
+            .take()
+            .ok_or_else(|| anyhow!("sign-in attempt already consumed"))?;
+        let result = tokio::select! {
+            biased;
+            _ = &mut cancel_rx => return Err(anyhow!("sign-in was cancelled")),
+            result = pending.redeem() => result?,
+        };
+        self.coordinator.commit(&self.id, result)
+    }
+}
+
+impl Drop for SignInAttempt {
+    fn drop(&mut self) {
+        self.coordinator.release(&self.id);
+    }
 }
 
 /// Website origin. `pub(crate)` so the shell can send the user to the billing page, which is where
@@ -187,10 +375,10 @@ pub async fn begin(mode: &str) -> Result<(SignInHandle, PendingSignIn)> {
 }
 
 impl PendingSignIn {
-    /// Wait for the browser callback, redeem the code, and persist the token.
+    /// Wait for the browser callback and redeem its code, without mutating the signed-in account.
     ///
     /// Consumes the attempt: a code is single-use, so there is nothing to retry with.
-    pub async fn wait(mut self) -> Result<CloudUser> {
+    async fn redeem(mut self) -> Result<ExchangeData> {
         let code_rx = self
             .code_rx
             .take()
@@ -214,17 +402,7 @@ impl PendingSignIn {
             let _ = tx.send(());
         }
 
-        let result = exchange(&callback.code, &self.state, &self.verifier).await?;
-        store_token(&result.token)?;
-        // Cache the identity HERE, not only in `current_user`.
-        //
-        // Without this a fresh sign-in stored the token but no cached user, so the next cold start
-        // asked `auth_status_cached` who was signed in, got None, and showed the sign-in screen to
-        // someone who had signed in minutes earlier. The token was valid the whole time — only the
-        // thing first paint reads was missing. Signing in is precisely the moment the identity is
-        // known and proven, so it is the right place to record it.
-        cache_user(&result.user);
-        Ok(result.user)
+        exchange(&callback.code, &self.state, &self.verifier).await
     }
 }
 
@@ -305,12 +483,38 @@ async fn exchange(code: &str, state: &str, verifier: &str) -> Result<ExchangeDat
 /// Keychain account holding the last verified user, so the app can paint before the network answers.
 const USER_ACCOUNT: &str = "cloud-user";
 
+/// Process-local logical session generation. Token bytes alone are insufficient: two logins in the
+/// same second can mint an identical JWT, while their in-flight responses still belong to different
+/// sessions. Every credential mutation advances this value under the same lock as keychain access.
+static TOKEN_REVISION: std::sync::OnceLock<std::sync::Mutex<u64>> = std::sync::OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct TokenSnapshot {
+    token: String,
+    revision: u64,
+}
+
+fn token_revision_guard() -> std::sync::MutexGuard<'static, u64> {
+    TOKEN_REVISION
+        .get_or_init(|| std::sync::Mutex::new(0))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn token_snapshot_matches(
+    snapshot: &TokenSnapshot,
+    revision: u64,
+    current_token: Option<&str>,
+) -> bool {
+    snapshot.revision == revision && current_token == Some(snapshot.token.as_str())
+}
+
 /// Remember who the token belongs to.
 ///
 /// NOT a security control — the token is the credential and it is stored beside this. It exists so a
 /// cold start can render the signed-in UI immediately instead of holding first paint on `/auth/me`,
 /// which has a 15-second timeout and therefore made a slow network look like a hung app.
-pub fn cache_user(user: &CloudUser) {
+fn cache_user_unlocked(user: &CloudUser) {
     let Ok(entry) = keyring::Entry::new(TOKEN_SERVICE, USER_ACCOUNT) else {
         return;
     };
@@ -322,28 +526,33 @@ pub fn cache_user(user: &CloudUser) {
 
 /// The last verified user, if one was cached. Purely local — never a network call.
 pub fn cached_user() -> Option<CloudUser> {
+    let _revision = token_revision_guard();
     let entry = keyring::Entry::new(TOKEN_SERVICE, USER_ACCOUNT).ok()?;
     let json = entry.get_password().ok()?;
     serde_json::from_str(&json).ok()
 }
 
 /// Forget the cached identity. Called on sign-out so the next start does not flash a stale name.
-pub fn clear_cached_user() {
+fn clear_cached_user_unlocked() {
     if let Ok(entry) = keyring::Entry::new(TOKEN_SERVICE, USER_ACCOUNT) {
         let _ = entry.delete_credential();
     }
 }
 
-pub fn store_token(token: &str) -> Result<()> {
+fn store_session(token: &str, user: &CloudUser) -> Result<()> {
+    let mut revision = token_revision_guard();
     let entry = keyring::Entry::new(TOKEN_SERVICE, TOKEN_ACCOUNT)
         .context("no OS keychain available to store the sign-in")?;
     entry
         .set_password(token)
         .context("could not save the sign-in to the OS keychain")?;
+    // Token and cached owner become visible as one logical mutation to current_user's stale guards.
+    cache_user_unlocked(user);
+    *revision = revision.wrapping_add(1);
     Ok(())
 }
 
-pub fn load_token() -> Option<String> {
+fn load_token_unlocked() -> Option<String> {
     let entry = keyring::Entry::new(TOKEN_SERVICE, TOKEN_ACCOUNT).ok()?;
     match entry.get_password() {
         Ok(token) if !token.is_empty() => Some(token),
@@ -351,17 +560,64 @@ pub fn load_token() -> Option<String> {
     }
 }
 
+pub fn load_token() -> Option<String> {
+    let _revision = token_revision_guard();
+    load_token_unlocked()
+}
+
+fn token_snapshot() -> Option<TokenSnapshot> {
+    let revision = token_revision_guard();
+    let token = load_token_unlocked()?;
+    Some(TokenSnapshot {
+        token,
+        revision: *revision,
+    })
+}
+
 pub fn clear_token() {
+    let mut revision = token_revision_guard();
+    clear_token_unlocked();
+    *revision = revision.wrapping_add(1);
+}
+
+fn clear_token_unlocked() {
     if let Ok(entry) = keyring::Entry::new(TOKEN_SERVICE, TOKEN_ACCOUNT) {
         let _ = entry.delete_credential();
     }
     // ...and the cached identity with it, or the next cold start paints a name that is signed out.
-    clear_cached_user();
+    clear_cached_user_unlocked();
+}
+
+fn session_is_current(snapshot: &TokenSnapshot) -> bool {
+    let revision = token_revision_guard();
+    let token = load_token_unlocked();
+    token_snapshot_matches(snapshot, *revision, token.as_deref())
+}
+
+fn cache_user_if_current(snapshot: &TokenSnapshot, user: &CloudUser) -> bool {
+    let revision = token_revision_guard();
+    let token = load_token_unlocked();
+    if !token_snapshot_matches(snapshot, *revision, token.as_deref()) {
+        return false;
+    }
+    cache_user_unlocked(user);
+    true
+}
+
+fn clear_token_if_current(snapshot: &TokenSnapshot) -> bool {
+    let mut revision = token_revision_guard();
+    let token = load_token_unlocked();
+    if !token_snapshot_matches(snapshot, *revision, token.as_deref()) {
+        return false;
+    }
+    clear_token_unlocked();
+    *revision = revision.wrapping_add(1);
+    true
 }
 
 /// Resolve the stored token to a user, confirming it is still valid.
 pub async fn current_user() -> Result<Option<CloudUser>> {
-    let Some(token) = load_token() else {
+    let Some(session) = token_snapshot() else {
         return Ok(None);
     };
 
@@ -370,7 +626,7 @@ pub async fn current_user() -> Result<Option<CloudUser>> {
         .build()?;
     let res = client
         .get(format!("{}/auth/me", api_origin()))
-        .bearer_auth(&token)
+        .bearer_auth(&session.token)
         .send()
         .await;
 
@@ -388,7 +644,11 @@ pub async fn current_user() -> Result<Option<CloudUser>> {
                     // answers. The cache tracks reality because it is only written here, after a
                     // successful verification.
                     if let Some(user) = env.data.as_ref() {
-                        cache_user(user);
+                        if !cache_user_if_current(&session, user) {
+                            return Ok(None);
+                        }
+                    } else if !session_is_current(&session) {
+                        return Ok(None);
                     }
                     Ok(env.data)
                 }
@@ -396,8 +656,9 @@ pub async fn current_user() -> Result<Option<CloudUser>> {
             }
         }
         Ok(res) if res.status() == reqwest::StatusCode::UNAUTHORIZED => {
-            // Definitively rejected: drop it so the UI stops trying and shows sign-in.
-            clear_token();
+            // Definitively rejected, but only for the logical session that issued this request. A
+            // slow token-A response must never delete a token-B sign-in that completed meanwhile.
+            clear_token_if_current(&session);
             Ok(None)
         }
         Ok(_) => Ok(None),
@@ -506,6 +767,125 @@ mod tests {
     fn urlencode_leaves_base64url_untouched_and_escapes_the_rest() {
         assert_eq!(urlencode("aZ09-_.~"), "aZ09-_.~");
         assert_eq!(urlencode("a b&c"), "a%20b%26c");
+    }
+
+    #[test]
+    fn stale_native_auth_responses_require_both_token_bytes_and_logical_revision() {
+        let snapshot = TokenSnapshot {
+            token: "same-token".into(),
+            revision: 7,
+        };
+
+        assert!(token_snapshot_matches(&snapshot, 7, Some("same-token")));
+        assert!(!token_snapshot_matches(&snapshot, 7, Some("new-token")));
+        assert!(
+            !token_snapshot_matches(&snapshot, 8, Some("same-token")),
+            "an identical-token re-login is still a different logical session"
+        );
+        assert!(!token_snapshot_matches(&snapshot, 7, None));
+    }
+
+    const FIRST_ATTEMPT: &str = "11111111-1111-4111-8111-111111111111";
+    const SECOND_ATTEMPT: &str = "22222222-2222-4222-8222-222222222222";
+    const THIRD_ATTEMPT: &str = "33333333-3333-4333-8333-333333333333";
+
+    #[test]
+    fn a_cancel_that_arrives_before_registration_is_not_lost() {
+        let coordinator = SignInCoordinator::default();
+        assert!(coordinator.cancel(FIRST_ATTEMPT).expect("early cancel"));
+
+        let error = coordinator
+            .register(FIRST_ATTEMPT)
+            .err()
+            .expect("pre-cancelled registration must fail");
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!coordinator.cancel(FIRST_ATTEMPT).expect("finished cancel"));
+
+        let next = coordinator
+            .register(SECOND_ATTEMPT)
+            .expect("a different id remains usable");
+        drop(next);
+    }
+
+    #[test]
+    fn cancellation_is_exact_and_a_dropped_old_attempt_cannot_release_a_new_one() {
+        let coordinator = SignInCoordinator::default();
+        let first = coordinator.register(FIRST_ATTEMPT).expect("first attempt");
+
+        assert!(coordinator.register(SECOND_ATTEMPT).is_err());
+        assert!(coordinator.cancel(SECOND_ATTEMPT).expect("queued cancel"));
+        assert!(coordinator.register(SECOND_ATTEMPT).is_err());
+        assert!(coordinator.cancel(FIRST_ATTEMPT).expect("exact cancel"));
+
+        let second_error = coordinator
+            .register(SECOND_ATTEMPT)
+            .err()
+            .expect("queued exact-id cancel must survive the other attempt");
+        assert!(second_error.to_string().contains("cancelled"));
+        let third = coordinator
+            .register(THIRD_ATTEMPT)
+            .expect("slot released after cancel");
+        drop(first);
+        assert!(
+            !coordinator.cancel(FIRST_ATTEMPT).expect("stale cancel"),
+            "the old id must not disturb the replacement attempt"
+        );
+        assert!(coordinator.cancel(THIRD_ATTEMPT).expect("new cancel"));
+        drop(third);
+    }
+
+    #[test]
+    fn an_accepted_cancel_prevents_the_credential_persistence_callback() {
+        let coordinator = SignInCoordinator::default();
+        let attempt = coordinator.register(FIRST_ATTEMPT).expect("attempt");
+        assert!(coordinator.cancel(FIRST_ATTEMPT).expect("cancel"));
+
+        let persisted = std::cell::Cell::new(false);
+        let result = ExchangeData {
+            user: CloudUser {
+                id: "cancelled-user".into(),
+                email: "cancelled@example.test".into(),
+                display_name: None,
+            },
+            token: "must-not-be-stored".into(),
+        };
+        let error = coordinator
+            .commit_with(FIRST_ATTEMPT, result, |_| {
+                persisted.set(true);
+                Ok(())
+            })
+            .expect_err("cancelled commit must fail");
+
+        assert!(!persisted.get());
+        assert!(error.to_string().contains("cancelled"));
+        drop(attempt);
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_wait_releases_its_loopback_listener() {
+        let coordinator = SignInCoordinator::default();
+        let attempt = coordinator.register(FIRST_ATTEMPT).expect("attempt");
+        let (handle, pending) = begin("login").await.expect("begin");
+        assert!(coordinator.cancel(FIRST_ATTEMPT).expect("cancel"));
+
+        let error = attempt
+            .wait(pending)
+            .await
+            .expect_err("cancel must interrupt the wait");
+        assert!(error.to_string().contains("cancelled"));
+
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, handle.port));
+        for _ in 0..50 {
+            if let Ok(listener) = tokio::net::TcpListener::bind(address).await {
+                drop(listener);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!(
+            "loopback port {} stayed bound after cancellation",
+            handle.port
+        );
     }
 
     /// Every parameter the website needs must survive into the URL.

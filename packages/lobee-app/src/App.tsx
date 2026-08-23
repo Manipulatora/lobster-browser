@@ -9,7 +9,7 @@ import {
 } from 'react';
 import { ChevronDownIcon, MagnifyingGlassIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { brandIcon } from './icons';
-import { findSnapshotForThread } from './history';
+import { canSwitchThread, findSnapshotForThread, resumeFailureEvent } from './history';
 import { renderMarkdown, stableBlockBoundary } from './md';
 import {
   fetchEntitlement,
@@ -386,18 +386,21 @@ function Trigger({
   open,
   controls,
   haspopup = 'menu',
+  disabled = false,
   onToggle,
   children,
 }: {
   open: boolean;
   controls: string;
   haspopup?: 'menu' | 'dialog';
+  disabled?: boolean;
   onToggle: (trigger: HTMLButtonElement) => void;
   children: ReactNode;
 }) {
   return (
     <button
       type="button"
+      disabled={disabled}
       onClick={(e) => {
         e.stopPropagation();
         onToggle(e.currentTarget);
@@ -405,7 +408,7 @@ function Trigger({
       aria-haspopup={haspopup}
       aria-expanded={open}
       aria-controls={open ? controls : undefined}
-      className={`inline-flex h-6 max-w-full items-center gap-1 rounded-md px-1.5 text-[11.5px] font-semibold text-ink-soft transition-colors hover:bg-violet-50 hover:text-ink ${open ? 'bg-violet-50 text-ink' : ''}`}
+      className={`inline-flex h-6 max-w-full items-center gap-1 rounded-md px-1.5 text-[11.5px] font-semibold text-ink-soft transition-colors hover:bg-violet-50 hover:text-ink disabled:pointer-events-none disabled:opacity-40 ${open ? 'bg-violet-50 text-ink' : ''}`}
     >
       {children}
       <ChevronDownIcon className="h-3 w-3 shrink-0 opacity-70" />
@@ -519,6 +522,9 @@ export function App() {
   const [entitlement, setEntitlement] = useState<AgentEntitlement | null>(null);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const [switchingThread, setSwitchingThread] = useState(false);
+  const switchingThreadRef = useRef(false);
   const [stopping, setStopping] = useState(false);
   /**
    * How much of the conversation is settled.
@@ -574,25 +580,44 @@ export function App() {
    * deleting anything, so "New chat" means "start clean", never "destroy what I had". Per-domain
    * learned facts are profile-scoped and deliberately survive: they are knowledge, not conversation.
    */
-  const startNewChat = useCallback(() => {
-    const id = newThreadId();
-    void retainCurrentRows();
-    store.set({ threadId: id });
-    setThreadId(id);
-    setTurns([]);
+  const startNewChat = useCallback(async () => {
+    if (busyRef.current || switchingThreadRef.current) return;
+    switchingThreadRef.current = true;
+    setSwitchingThread(true);
+    try {
+      const id = newThreadId();
+      await retainCurrentRows();
+      // The submit path observes switchingThreadRef synchronously. Rechecking the live run bit here
+      // also protects against a non-composer source attaching a run while storage was pending.
+      if (busyRef.current) return;
+      store.set({ threadId: id });
+      setThreadId(id);
+      setTurns([]);
+    } finally {
+      switchingThreadRef.current = false;
+      setSwitchingThread(false);
+    }
   }, [retainCurrentRows]);
 
   /** Reopen an earlier conversation, re-reading its bodies from encrypted memory. */
   const openThread = useCallback(
     async (id: string) => {
       closeMenu();
-      if (!id || id === threadId) return;
-      // The reload re-reads the index from storage, so the rows on screen have to be in it first.
-      await retainCurrentRows();
-      store.set({ threadId: id });
-      setThreadId(id);
-      setTurns([]);
-      setHistoryRetry((value) => value + 1);
+      if (!canSwitchThread(busyRef.current, switchingThreadRef.current, id, threadId)) return;
+      switchingThreadRef.current = true;
+      setSwitchingThread(true);
+      try {
+        // The reload re-reads the index from storage, so the rows on screen have to be in it first.
+        await retainCurrentRows();
+        if (busyRef.current) return;
+        store.set({ threadId: id });
+        setThreadId(id);
+        setTurns([]);
+        setHistoryRetry((value) => value + 1);
+      } finally {
+        switchingThreadRef.current = false;
+        setSwitchingThread(false);
+      }
     },
     [closeMenu, retainCurrentRows, threadId],
   );
@@ -620,11 +645,14 @@ export function App() {
 
   const openChats = useCallback(
     async (trigger: HTMLButtonElement) => {
+      if (busyRef.current || switchingThreadRef.current) return;
       if (menu === 'chats') {
         closeMenu();
         return;
       }
       const list = recentThreads(await loadTranscript(), threadId);
+      // Do not open stale navigation over a run that began while storage was being read.
+      if (busyRef.current || switchingThreadRef.current) return;
       setThreads(list);
       openMenu('chats', trigger);
       void loadThreadPreviews(list, threadPreviews);
@@ -781,6 +809,7 @@ export function App() {
   const patchTurn = useCallback((id: number, ev: AgentEvent) => {
     setTurns((prev) => prev.map((t) => (t.id === id ? applyEvent(t, ev) : t)));
     if (ev.type !== 'run.finished') return;
+    busyRef.current = false;
     setBusy(false);
     // A run can also die because the wallet emptied or the package lapsed WHILE it was running. The
     // sidecar records that refusal, so re-asking here is what turns "something failed" into the one
@@ -888,10 +917,17 @@ export function App() {
       setTurns(hydrated);
       setTranscriptState('ready');
       if (live) {
+        busyRef.current = true;
         setBusy(true);
         const currentLive = live;
         void resumeTask(currentLive.sessionId, {
           onEvent: (event) => patchTurn(currentLive.id, event),
+        }).then((attached) => {
+          if (!alive) return;
+          const failure = resumeFailureEvent(attached);
+          if (!failure) return;
+          setBridgeReady(false);
+          patchTurn(currentLive.id, failure);
         });
       }
     })();
@@ -1031,12 +1067,13 @@ export function App() {
   const locked = entitlement !== null && !entitlement.entitled;
 
   /** Whether a new message can be sent right now — the one condition Retry and the composer share. */
-  const canSubmit = transcriptState !== 'loading' && composerReady && !busy && !locked;
+  const canSubmit =
+    transcriptState !== 'loading' && composerReady && !busy && !switchingThread && !locked;
 
   const submit = useCallback(async () => {
     const el = inputRef.current;
     const task = (el?.value ?? '').trim();
-    if (!task || !canSubmit) return;
+    if (!task || !canSubmit || busyRef.current || switchingThreadRef.current) return;
     if (!allowedDomains.ok) {
       setMenu('policy');
       return;
@@ -1070,6 +1107,7 @@ export function App() {
       animateAnswer: false,
     };
     setTurns((prev) => [...prev, turn]);
+    busyRef.current = true;
     setBusy(true);
     const start = await runTask(
       task,
@@ -1114,7 +1152,7 @@ export function App() {
    */
   const regenerate = useCallback(
     (turn: Turn) => {
-      if (!canSubmit) return;
+      if (!canSubmit || busyRef.current || switchingThreadRef.current) return;
       fillComposer(turn.task);
       void submit();
     },
@@ -1184,6 +1222,7 @@ export function App() {
             <Trigger
               open={menu === 'chats'}
               controls="lobee-chats-menu"
+              disabled={busy || switchingThread}
               onToggle={(trigger) => void openChats(trigger)}
             >
               <span>Chats</span>
@@ -1246,8 +1285,8 @@ export function App() {
           ) : (
             <button
               type="button"
-              onClick={startNewChat}
-              disabled={turns.length === 0 || !transcriptReady}
+              onClick={() => void startNewChat()}
+              disabled={turns.length === 0 || !transcriptReady || switchingThread}
               title="Start a new conversation"
               className="rounded-lg px-2 py-1 text-[0.75rem] text-ink-soft transition-colors hover:bg-violet-50 hover:text-violet-700 disabled:pointer-events-none disabled:opacity-40"
             >

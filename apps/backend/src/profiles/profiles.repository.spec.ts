@@ -18,28 +18,32 @@ const extensions = [
 
 test('in-memory profile repository round-trips all non-secret desktop metadata', async () => {
   const repository = new InMemoryProfilesRepository();
-  const created = await repository.create({
-    ownerTeamId: 'team-1',
-    name: 'Metadata profile',
-    engine: 'lobium',
-    os: 'windows',
-    osVersion: 'Windows 11 23H2',
-    fingerprintSeed: '0123456789abcdef0123456789abcdef',
-    fingerprintOverrides: { navigator: { hardwareConcurrency: 8 } },
-    proxyId: 'proxy-1',
-    templateId: 'template-1',
-    cookiesImport: {
-      mode: 'merge',
-      source: 'file',
-      fileName: 'cookies.txt',
-      parsedCount: 4,
-      errors: [{ line: 2, message: 'invalid domain' }],
-    },
-    extensions,
-    tags: ['ecom'],
-    folder: 'Work',
-    notes: 'non-secret notes',
-  });
+  const created = (
+    await repository.createManyWithinLimit([
+      {
+        ownerTeamId: 'team-1',
+        name: 'Metadata profile',
+        engine: 'lobium',
+        os: 'windows',
+        osVersion: 'Windows 11 23H2',
+        fingerprintSeed: '0123456789abcdef0123456789abcdef',
+        fingerprintOverrides: { navigator: { hardwareConcurrency: 8 } },
+        proxyId: 'proxy-1',
+        templateId: 'template-1',
+        cookiesImport: {
+          mode: 'merge',
+          source: 'file',
+          fileName: 'cookies.txt',
+          parsedCount: 4,
+          errors: [{ line: 2, message: 'invalid domain' }],
+        },
+        extensions,
+        tags: ['ecom'],
+        folder: 'Work',
+        notes: 'non-secret notes',
+      },
+    ])
+  )[0]!;
 
   assert.equal(created.osVersion, 'Windows 11 23H2');
   assert.equal(created.proxyId, 'proxy-1');
@@ -84,15 +88,19 @@ test('repository strips raw cookie text even when a direct caller bypasses DTO v
     parsedCount: 1,
   };
 
-  const created = await repository.create({
-    ownerTeamId: 'team-1',
-    name: 'Sanitized',
-    engine: 'lobium',
-    os: 'linux',
-    fingerprintSeed: 'seed',
-    cookiesImport: unsafeCookieDraft as SafeCookieImportMetadata,
-    tags: [],
-  });
+  const created = (
+    await repository.createManyWithinLimit([
+      {
+        ownerTeamId: 'team-1',
+        name: 'Sanitized',
+        engine: 'lobium',
+        os: 'linux',
+        fingerprintSeed: 'seed',
+        cookiesImport: unsafeCookieDraft as SafeCookieImportMetadata,
+        tags: [],
+      },
+    ])
+  )[0]!;
 
   assert.deepEqual(created.cookiesImport, {
     mode: 'replace',
@@ -100,4 +108,33 @@ test('repository strips raw cookie text even when a direct caller bypasses DTO v
     parsedCount: 1,
   });
   assert.equal((created.cookiesImport as CookieImportDraft).rawText, undefined);
+});
+
+test('in-memory tombstone re-checks admin authority in the same turn as deletion', async () => {
+  let actorRole: 'admin' | 'member' = 'admin';
+  const repository = new InMemoryProfilesRepository(
+    (teamId, userId) => teamId === 'team-1' && userId === 'user-1' && actorRole === 'admin',
+  );
+  const created = (
+    await repository.createManyWithinLimit([
+      {
+        ownerTeamId: 'team-1',
+        name: 'Protected',
+        engine: 'lobium',
+        os: 'windows',
+        fingerprintSeed: '0123456789abcdef0123456789abcdef',
+        tags: [],
+      },
+    ])
+  )[0]!;
+
+  actorRole = 'member';
+  assert.equal(
+    (await repository.removeAsAdmin('team-1', created.id, 'user-1')).outcome,
+    'forbidden',
+  );
+  assert.equal((await repository.findById('team-1', created.id))?.id, created.id);
+
+  actorRole = 'admin';
+  assert.equal((await repository.removeAsAdmin('team-1', created.id, 'user-1')).outcome, 'removed');
 });

@@ -7,7 +7,6 @@
 #include <array>
 
 #include "base/containers/span.h"
-#include "base/no_destructor.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/unguessable_token.h"
@@ -108,10 +107,8 @@ std::string MediaDeviceSaltFromSeed(uint32_t seed) {
   return base::HexEncodeLower(base::span(digest).first(16u));
 }
 
-std::string MediaDeviceEphemeralSalt() {
-  static const base::NoDestructor<std::string> salt(
-      base::UnguessableToken::Create().ToString());
-  return *salt;
+std::string CreateMediaDeviceDocumentSalt() {
+  return base::UnguessableToken::Create().ToString();
 }
 
 std::string MediaDeviceLabel(std::string_view ua_platform,

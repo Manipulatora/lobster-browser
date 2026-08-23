@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deriveAndroidFingerprint } from '@lobster/fingerprint';
+import { deriveAndroidFingerprint, webgpuIdentityFor } from '@lobster/fingerprint';
 import type { ProxyConfig } from '@lobster/shared-types';
 import {
   ANDROID_LOBIUM_CONFIG_FILENAME,
@@ -25,6 +25,7 @@ test('buildAndroidLobiumConfig carries Android identity + mobile UA-CH model', (
   assert.equal(config.navigator.uaModel, fp.android.model);
   assert.equal(config.screen.width, fp.screen.width);
   assert.equal(config.webgl.renderer, fp.webgl.renderer);
+  assert.deepEqual(config.webgpu, webgpuIdentityFor(config.webgl));
   assert.ok(config.fonts.includes('Roboto'));
   assert.deepEqual(config.policy.renderer, {
     mode: 'validated_preset',

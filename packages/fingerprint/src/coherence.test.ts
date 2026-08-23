@@ -14,6 +14,7 @@ import {
 import { applyOverrides } from './overrides.js';
 import { deriveFingerprint } from './derive.js';
 import { buildChromeBrands } from './pools.js';
+import { coherentGpuIdentity } from './webgpu-identity.js';
 
 /** A coherent, freshly derived Windows fingerprint to mutate in the rule tests below. */
 function coherentBase(): Fingerprint {
@@ -28,6 +29,10 @@ function assertFlags(fp: Fingerprint, re: RegExp): void {
     validateFingerprintCoherence(fp).some((i) => re.test(i)),
     `expected a coherence issue matching ${re}, got: ${JSON.stringify(validateFingerprintCoherence(fp))}`,
   );
+}
+
+function replaceWebgl(fp: Fingerprint, webgl: Fingerprint['webgl']): void {
+  Object.assign(fp, coherentGpuIdentity(webgl));
 }
 
 test('applyGeoToFingerprint aligns timezone/locale/languages with the proxy geo', () => {
@@ -283,11 +288,11 @@ test('flags an implausible hardwareConcurrency, OS-aware (96 cores ok on Windows
 
   // 96 threads is fine on Windows — on the workstation this GPU says it is.
   const win = coherentBase();
-  win.webgl = {
+  replaceWebgl(win, {
     ...win.webgl,
     renderer: 'ANGLE (NVIDIA, NVIDIA RTX A6000 Direct3D11 vs_5_0 ps_5_0, D3D11)',
     unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA RTX A6000 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-  };
+  });
   win.navigator.hardwareConcurrency = 96;
   assert.ok(!validateFingerprintCoherence(win).some((i) => /hardwareConcurrency/.test(i)));
 });
@@ -377,24 +382,24 @@ test('a Retina Mac reports one of Apple s scaled modes, never the panel at dpr 2
 test('rejects hardware combinations no machine ships, without rejecting real ones', () => {
   // The reported case: every value individually legal, the machine impossible.
   const implausible = coherentBase();
-  implausible.webgl = {
+  replaceWebgl(implausible, {
     ...implausible.webgl,
     vendor: 'Google Inc. (Intel)',
     renderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
     unmaskedVendor: 'Google Inc. (Intel)',
     unmaskedRenderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-  };
+  });
   implausible.navigator.hardwareConcurrency = 24;
   implausible.navigator.deviceMemory = 4;
   assertFlags(implausible, /24-thread machine/);
 
   // A discrete GPU is never found next to 4 GB of RAM...
   const starvedGpu = coherentBase();
-  starvedGpu.webgl = {
+  replaceWebgl(starvedGpu, {
     ...starvedGpu.webgl,
     renderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)',
     unmaskedRenderer: 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-  };
+  });
   starvedGpu.navigator.hardwareConcurrency = 12;
   starvedGpu.navigator.deviceMemory = 4;
   assertFlags(starvedGpu, /below the high-discrete GPU tier's minimum/);
@@ -407,11 +412,11 @@ test('rejects hardware combinations no machine ships, without rejecting real one
   assert.deepEqual(validateFingerprintCoherence(upgraded), []);
 
   const office = coherentBase();
-  office.webgl = {
+  replaceWebgl(office, {
     ...office.webgl,
     renderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
     unmaskedRenderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-  };
+  });
   office.navigator.hardwareConcurrency = 4;
   office.navigator.deviceMemory = 4;
   assert.deepEqual(validateFingerprintCoherence(office), []);
@@ -430,11 +435,11 @@ test('the desktop deviceMemory choices are exactly the spec rungs a desktop may 
     const fp = coherentBase();
     // An integrated-GPU laptop: the tier with the lowest memory floor there is, so what remains is
     // the desktop floor itself.
-    fp.webgl = {
+    replaceWebgl(fp, {
       ...fp.webgl,
       renderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
       unmaskedRenderer: 'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    };
+    });
     fp.navigator.deviceMemory = value;
     fp.navigator.hardwareConcurrency = 8;
     // Only the LADDER/CLAMP rule is under test here. A GPU tier may additionally refuse a value it
@@ -577,4 +582,17 @@ test('navigator.languages matches Chromium own per-locale default, not a two-ent
       `${countryCode}: the Accept-Language header must agree with navigator.languages`,
     );
   }
+});
+
+test('desktop coherence rejects a missing WebGPU identity instead of leaking the host adapter', () => {
+  const fp = coherentBase();
+  delete fp.webgpu;
+  assertFlags(fp, /WebGPU adapter identity is missing/);
+});
+
+test('desktop coherence rejects a WebGPU identity derived from a different renderer', () => {
+  const fp = coherentBase();
+  assert.ok(fp.webgpu);
+  fp.webgpu = { ...fp.webgpu, architecture: '__mismatch__' };
+  assertFlags(fp, /WebGPU adapter identity does not match/);
 });

@@ -506,6 +506,8 @@ mod tests {
         // A database with no meta table at all is a legitimate shape (DOM storage before init).
         let bare = Connection::open(dir.join("bare")).unwrap();
         assert_eq!(meta_version(&bare, 24).unwrap(), None);
+        drop(bare);
+        drop(conn);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -548,10 +550,11 @@ mod tests {
     fn parking_moves_the_sidecars_with_the_database() {
         let dir = temp_dir("park");
         let db = dir.join("LocalStorage");
-        // The reader stays open for the whole test: closing it would checkpoint the `-wal` away, and
-        // the sidecar being present is the entire point. Renaming a file another handle has open is
-        // fine on every platform we ship to.
-        let (keep_alive, _, _) = wal_db_with_unmerged_content(&db);
+        // This test exercises the filesystem transaction, not SQLite's WAL codec. Explicit sidecar
+        // fixtures are deterministic and, unlike a live SQLite handle, remain renameable on Windows.
+        std::fs::write(&db, b"main").unwrap();
+        std::fs::write(dir.join("LocalStorage-wal"), b"wal").unwrap();
+        std::fs::write(dir.join("LocalStorage-shm"), b"shm").unwrap();
         assert!(dir.join("LocalStorage-wal").exists());
 
         let parked = dir.join(".pre-restore");
@@ -565,7 +568,6 @@ mod tests {
             std::fs::rename(to, from).unwrap();
         }
         assert!(db.exists() && dir.join("LocalStorage-wal").exists());
-        drop(keep_alive);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

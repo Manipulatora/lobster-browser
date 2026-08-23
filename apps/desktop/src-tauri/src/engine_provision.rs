@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 /// error instead of a frozen progress bar the user can only escape by killing the app.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const INSTALLED_SOURCE_STAMP: &str = ".lobium-engine-version";
 
 /// Where a manifest / env points the download.
 #[derive(Debug, Clone)]
@@ -163,6 +164,25 @@ pub fn engine_present(runtime_dir: &Path) -> bool {
     runtime_dir.join(crate::CHROME_BIN).is_file()
 }
 
+fn source_stamp(source: &EngineSource) -> String {
+    format!(
+        "version={}\nsha256={}\n",
+        source.version,
+        source.sha256.to_ascii_lowercase()
+    )
+}
+
+/// True only when the installed binary came from this exact manifest entry.
+///
+/// The archive digest is part of the identity because Lobium can rebuild its patch set without
+/// changing Chromium's version. A legacy version-only marker is deliberately stale once, after
+/// which future same-version rebuilds are detected by their new digest.
+pub fn engine_matches_source(runtime_dir: &Path, source: &EngineSource) -> bool {
+    engine_present(runtime_dir)
+        && std::fs::read_to_string(runtime_dir.join(INSTALLED_SOURCE_STAMP))
+            .is_ok_and(|installed| installed == source_stamp(source))
+}
+
 /// Download + verify + extract the engine into `runtime_dir`. `on_progress(received, total)` is called
 /// periodically during the download (total is None when the server sends no Content-Length).
 pub async fn provision<F>(
@@ -263,25 +283,26 @@ where
     let archive_path = tmp_archive.clone();
     let staging_for_task = staging.clone();
     let runtime_owned = runtime_dir.to_path_buf();
+    let installed_stamp = source_stamp(source);
     let extracted = tokio::task::spawn_blocking(move || -> Result<()> {
-        extract_and_swap(&archive_path, &staging_for_task, &runtime_owned)
+        extract_and_swap(
+            &archive_path,
+            &staging_for_task,
+            &runtime_owned,
+            &installed_stamp,
+        )
     })
     .await
     .context("engine extraction task panicked")?;
 
     let _ = std::fs::remove_file(&tmp_archive);
     extracted?;
-    if !engine_present(runtime_dir) {
+    if !engine_matches_source(runtime_dir, source) {
         bail!(
-            "engine extraction completed but {} is missing",
-            runtime_dir.join(crate::CHROME_BIN).display()
+            "engine extraction completed but {} or its exact source stamp is missing",
+            runtime_dir.join(crate::CHROME_BIN).display(),
         );
     }
-    std::fs::write(
-        runtime_dir.join(".lobium-engine-version"),
-        format!("{}\n", source.version),
-    )
-    .with_context(|| "writing installed engine version marker")?;
     Ok(())
 }
 
@@ -365,7 +386,12 @@ fn extracted_root(staging: &Path) -> Result<PathBuf> {
     )
 }
 
-fn extract_and_swap(archive: &Path, staging: &Path, runtime_dir: &Path) -> Result<()> {
+fn extract_and_swap(
+    archive: &Path,
+    staging: &Path,
+    runtime_dir: &Path,
+    installed_stamp: &str,
+) -> Result<()> {
     if staging.exists() {
         std::fs::remove_dir_all(staging).ok();
     }
@@ -375,6 +401,10 @@ fn extract_and_swap(archive: &Path, staging: &Path, runtime_dir: &Path) -> Resul
         ArchiveForm::Zip => unpack_zip(archive, staging)?,
     }
     let root = extracted_root(staging)?;
+    // The stamp travels in the same rename as the binary. A crash can leave the old complete runtime
+    // or the new complete runtime, never a new binary with an old/missing source identity.
+    std::fs::write(root.join(INSTALLED_SOURCE_STAMP), installed_stamp)
+        .with_context(|| "writing installed engine source stamp")?;
 
     // Atomic-ish swap: move any existing runtime aside, rename the extracted root in, then delete the
     // old one.
@@ -499,7 +529,82 @@ mod tests {
         let mut last: (u64, Option<u64>) = (0, None);
         provision(&src, &dir, |r, t| last = (r, t)).await.unwrap();
         assert!(engine_present(&dir), "chrome must be installed");
+        assert!(
+            engine_matches_source(&dir, &src),
+            "the binary and exact manifest source must be installed together"
+        );
         assert!(last.0 > 0, "progress must have been reported");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn installed_source_requires_version_and_digest_even_when_chromium_is_unchanged() {
+        let base =
+            std::env::temp_dir().join(format!("lobium-source-stamp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join(crate::CHROME_BIN), FAKE_CHROME).unwrap();
+        let source = EngineSource {
+            url: "https://example.invalid/lobium.zip".into(),
+            sha256: "a".repeat(64),
+            version: "152.0.7977.42".into(),
+        };
+
+        assert!(!engine_matches_source(&base, &source), "missing stamp");
+        std::fs::write(base.join(INSTALLED_SOURCE_STAMP), &source.version).unwrap();
+        assert!(
+            !engine_matches_source(&base, &source),
+            "legacy version-only stamps must refresh once"
+        );
+        std::fs::write(base.join(INSTALLED_SOURCE_STAMP), source_stamp(&source)).unwrap();
+        assert!(engine_matches_source(&base, &source));
+
+        let rebuilt = EngineSource {
+            sha256: "b".repeat(64),
+            ..source.clone()
+        };
+        assert!(
+            !engine_matches_source(&base, &rebuilt),
+            "a same-Chromium rebuild with different archive bytes must reprovision"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn same_version_stale_digest_is_replaced_with_the_exact_manifest_build() {
+        let base =
+            std::env::temp_dir().join(format!("lobium-reprovision-{}", uuid::Uuid::new_v4()));
+        let dir = base.join("lobium");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(crate::CHROME_BIN), b"stale build").unwrap();
+        let stale = EngineSource {
+            url: "https://example.invalid/old.zip".into(),
+            sha256: "0".repeat(64),
+            version: "152.0.7977.42".into(),
+        };
+        std::fs::write(dir.join(INSTALLED_SOURCE_STAMP), source_stamp(&stale)).unwrap();
+
+        let (archive, sha256) = synthetic_archive();
+        let current = EngineSource {
+            url: serve_once(archive),
+            sha256,
+            version: stale.version.clone(),
+        };
+        assert!(engine_present(&dir));
+        assert!(
+            !engine_matches_source(&dir, &current),
+            "same Chromium version is not enough when the archive digest changed"
+        );
+
+        provision(&current, &dir, |_, _| {}).await.unwrap();
+        assert_eq!(
+            std::fs::read(dir.join(crate::CHROME_BIN)).unwrap(),
+            FAKE_CHROME
+        );
+        assert!(engine_matches_source(&dir, &current));
+        assert!(
+            !PathBuf::from(format!("{}.old", dir.display())).exists(),
+            "the previous runtime must not remain after a successful atomic swap"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -538,6 +643,7 @@ mod tests {
         };
         provision(&src, &dir, |_, _| {}).await.unwrap();
         assert!(engine_present(&dir), "the browser binary must be installed");
+        assert!(engine_matches_source(&dir, &src));
         assert!(
             dir.join("LOBSTER_ENGINE.json").is_file(),
             "the wrapping directory must be unwrapped, not installed as the runtime root"

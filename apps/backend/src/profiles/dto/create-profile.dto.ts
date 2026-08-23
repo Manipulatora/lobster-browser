@@ -6,6 +6,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   ValidateNested,
 } from 'class-validator';
@@ -67,8 +68,12 @@ export class CreateProfileDto implements Pick<
   osVersion?: string;
 
   // Optional — if omitted the server generates a random seed (deterministic fingerprint source).
+  // If supplied it is an immutable identity, so normalization/regeneration would be data corruption.
   @IsOptional()
   @IsString()
+  @Matches(/^[0-9a-f]{32}$/, {
+    message: 'fingerprintSeed must be exactly 32 lowercase hexadecimal characters',
+  })
   fingerprintSeed?: string;
 
   // User-editable overrides applied on top of the seed-derived fingerprint. Accepted as opaque

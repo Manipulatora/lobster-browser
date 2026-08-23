@@ -7,6 +7,10 @@ import test from 'node:test';
 import { PrismaApiKeysRepository } from '../api-keys/prisma-api-keys.repository';
 import { PrismaAuditRepository } from '../audit/prisma-audit.repository';
 import { PrismaProfilesRepository } from '../profiles/prisma-profiles.repository';
+import {
+  ProfileLimitExceededError,
+  type CreateProfileRecord,
+} from '../profiles/profiles.repository';
 import { PrismaTeamsRepository } from '../teams/prisma-teams.repository';
 import { PrismaUsersRepository } from '../auth/prisma-users.repository';
 import { PrismaService } from './prisma.service';
@@ -65,21 +69,83 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
 
   try {
     await t.test('users: create → findByEmail → findById round-trip', async () => {
+      const email = `it-${runId}@example.com`;
       const created = await users.create({
-        email: `it-${runId}@example.com`,
+        email,
         passwordHash: 'bcrypt$fake-hash',
         displayName: 'Integration',
       });
       userId = created.id;
-      assert.equal(created.email, `it-${runId}@example.com`);
+      assert.equal(created.email, email);
 
-      const byEmail = await users.findByEmail(`it-${runId}@example.com`);
+      const byEmail = await users.findByEmail(email);
       assert.equal(byEmail?.id, created.id);
       assert.equal(byEmail?.passwordHash, 'bcrypt$fake-hash');
 
       const byId = await users.findById(created.id);
       assert.equal(byId?.email, created.email);
       assert.equal(await users.findByEmail(`missing-${runId}@example.com`), null);
+
+      // The conflict is discovered after the conditional pending-row claim. It must escape the
+      // transaction callback so PostgreSQL restores that claim instead of consuming a valid code.
+      await users.upsertPendingRegistration({
+        email,
+        passwordHash: 'unused-conflict-hash',
+        fullName: 'Conflict',
+        codeHash: 'conflict-code-hash',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      const conflict = await users.completePendingRegistration(
+        email,
+        'conflict-code-hash',
+        new Date(),
+      );
+      assert.equal(conflict.outcome, 'email_conflict');
+      assert.ok(
+        await users.findPendingRegistration(email),
+        'the valid pending row was rolled back',
+      );
+      await prisma.pendingRegistration.delete({ where: { email } });
+    });
+
+    await t.test('registration completion creates one complete personal-team graph', async () => {
+      const email = `registration-${runId}@example.com`;
+      let registeredUserId = '';
+      try {
+        await users.upsertPendingRegistration({
+          email,
+          passwordHash: 'bcrypt$registration-hash',
+          fullName: 'Registration Integration',
+          company: 'Lobster',
+          codeHash: 'registration-code-hash',
+          expiresAt: new Date(Date.now() + 60_000),
+        });
+
+        const completed = await users.completePendingRegistration(
+          email,
+          'registration-code-hash',
+          new Date(),
+        );
+        assert.equal(completed.outcome, 'created');
+        if (completed.outcome !== 'created')
+          throw new Error('registration did not create its user');
+        registeredUserId = completed.user.id;
+
+        const personalTeams = await teams.findTeamsForUser(registeredUserId);
+        assert.equal(personalTeams.length, 1);
+        assert.equal(personalTeams[0]?.name, "Registration Integration's Team");
+        assert.equal(
+          (await teams.getMembership(personalTeams[0]!.id, registeredUserId))?.role,
+          'admin',
+        );
+        assert.equal(await users.findPendingRegistration(email), null);
+      } finally {
+        await prisma.pendingRegistration.deleteMany({ where: { email } });
+        if (registeredUserId) {
+          await prisma.team.deleteMany({ where: { ownerUserId: registeredUserId } });
+          await prisma.user.delete({ where: { id: registeredUserId } });
+        }
+      }
     });
 
     await t.test('teams: create, membership add/get/list, setRole, findTeamsForUser', async () => {
@@ -87,13 +153,11 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
       teamId = team.id;
       assert.equal(team.ownerUserId, userId);
 
-      await teams.addMember(teamId, userId, 'admin');
       const membership = await teams.getMembership(teamId, userId);
       assert.equal(membership?.role, 'admin');
 
-      const demoted = await teams.setRole(teamId, userId, 'member');
-      assert.equal(demoted.role, 'member');
-      await teams.setRole(teamId, userId, 'admin');
+      const lastAdminDemotion = await teams.setRoleAsAdmin(teamId, userId, userId, 'member');
+      assert.equal(lastAdminDemotion.outcome, 'last_admin');
 
       const members = await teams.listMembers(teamId);
       assert.equal(members.length, 1);
@@ -107,34 +171,38 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
     });
 
     await t.test('profiles: CRUD is team-scoped and metadata round-trips', async () => {
-      const created = await profiles.create({
-        ownerTeamId: teamId,
-        name: 'IT Profile',
-        engine: 'lobium',
-        os: 'linux',
-        osVersion: 'Ubuntu 24.04',
-        fingerprintSeed: `seed-${runId}`,
-        fingerprintOverrides: { navigator: { hardwareConcurrency: 8 } },
-        proxyId: `proxy-${runId}`,
-        templateId: `template-${runId}`,
-        cookiesImport: {
-          mode: 'merge',
-          source: 'file',
-          fileName: 'cookies.txt',
-          parsedCount: 2,
-        },
-        extensions: [
+      const created = (
+        await profiles.createManyWithinLimit([
           {
-            source: 'chrome_web_store',
-            enabled: true,
-            id: 'abcdefghijklmnop',
-            name: 'Example',
+            ownerTeamId: teamId,
+            name: 'IT Profile',
+            engine: 'lobium',
+            os: 'linux',
+            osVersion: 'Ubuntu 24.04',
+            fingerprintSeed: `seed-${runId}`,
+            fingerprintOverrides: { navigator: { hardwareConcurrency: 8 } },
+            proxyId: `proxy-${runId}`,
+            templateId: `template-${runId}`,
+            cookiesImport: {
+              mode: 'merge',
+              source: 'file',
+              fileName: 'cookies.txt',
+              parsedCount: 2,
+            },
+            extensions: [
+              {
+                source: 'chrome_web_store',
+                enabled: true,
+                id: 'abcdefghijklmnop',
+                name: 'Example',
+              },
+            ],
+            tags: ['it', 'prisma'],
+            folder: 'integration',
+            notes: 'created by the BE-2 integration test',
           },
-        ],
-        tags: ['it', 'prisma'],
-        folder: 'integration',
-        notes: 'created by the BE-2 integration test',
-      });
+        ])
+      )[0]!;
       assert.equal(created.fingerprintSeed, `seed-${runId}`);
       assert.equal(created.osVersion, 'Ubuntu 24.04');
       assert.equal(created.proxyId, `proxy-${runId}`);
@@ -190,8 +258,8 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
       const all = await profiles.findAllByTeam(teamId);
       assert.equal(all.length, 1);
 
-      assert.equal(await profiles.remove(teamId, created.id), true);
-      assert.equal(await profiles.remove(teamId, created.id), false);
+      assert.equal((await profiles.removeAsAdmin(teamId, created.id, userId)).outcome, 'removed');
+      assert.equal((await profiles.removeAsAdmin(teamId, created.id, userId)).outcome, 'not_found');
       assert.equal((await profiles.findAllByTeam(teamId)).length, 0);
     });
 
@@ -205,6 +273,55 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
         assert.equal(await profiles.getProfileLimit(teamId), 25);
       },
     );
+
+    await t.test('profiles: concurrent creates cannot exceed the final plan slot', async () => {
+      await prisma.profile.deleteMany({ where: { ownerTeamId: teamId } });
+      await prisma.subscription.update({
+        where: { teamId },
+        data: { profileLimit: 2 },
+      });
+      const record = (name: string, seed: string): CreateProfileRecord => ({
+        ownerTeamId: teamId,
+        name,
+        engine: 'lobium',
+        os: 'windows',
+        fingerprintSeed: seed,
+        tags: [],
+      });
+
+      try {
+        await profiles.createManyWithinLimit([
+          record('Capacity baseline', '11111111111111111111111111111111'),
+        ]);
+        const results = await Promise.allSettled([
+          profiles.createManyWithinLimit([
+            record('Capacity racer A', '22222222222222222222222222222222'),
+          ]),
+          profiles.createManyWithinLimit([
+            record('Capacity racer B', '33333333333333333333333333333333'),
+          ]),
+        ]);
+
+        assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+        assert.equal(
+          results.filter(
+            (result) =>
+              result.status === 'rejected' && result.reason instanceof ProfileLimitExceededError,
+          ).length,
+          1,
+        );
+        assert.equal(
+          await prisma.profile.count({ where: { ownerTeamId: teamId, deletedAt: null } }),
+          2,
+        );
+      } finally {
+        await prisma.profile.deleteMany({ where: { ownerTeamId: teamId } });
+        await prisma.subscription.update({
+          where: { teamId },
+          data: { profileLimit: 25 },
+        });
+      }
+    });
 
     await t.test('api keys: create, findByHash, touchLastUsed, team-scoped remove', async () => {
       const created = await apiKeys.create({

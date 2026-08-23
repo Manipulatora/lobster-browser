@@ -4,6 +4,7 @@ import { Injectable } from '@nestjs/common';
 
 import {
   loginBackoffUntil,
+  type CompletePendingRegistrationResult,
   type CreateUserInput,
   type PendingRegistrationInput,
   type StoredPendingRegistration,
@@ -13,6 +14,14 @@ import {
 
 /** Mirrors the Prisma repository's cap; see it for why a 6-digit code needs one. */
 const MAX_VERIFICATION_ATTEMPTS = 5;
+
+/** Two-phase hook used to include the separate in-memory team store in one synchronous mutation. */
+export interface PreparedPersonalTeam {
+  commit(): void;
+  rollback(): void;
+}
+
+export type PreparePersonalTeam = (ownerUserId: string, name: string) => PreparedPersonalTeam;
 
 /**
  * In-memory `UsersRepository` backed by a Map. The active implementation until a
@@ -25,6 +34,8 @@ const MAX_VERIFICATION_ATTEMPTS = 5;
 export class InMemoryUsersRepository implements UsersRepository {
   private readonly byId = new Map<string, StoredUser>();
   private readonly idByEmail = new Map<string, string>();
+
+  constructor(private readonly preparePersonalTeam: PreparePersonalTeam) {}
 
   async create(input: CreateUserInput): Promise<StoredUser> {
     const user: StoredUser = {
@@ -64,11 +75,11 @@ export class InMemoryUsersRepository implements UsersRepository {
     };
   }
 
-  async consumePendingRegistration(
+  async completePendingRegistration(
     email: string,
     codeHash: string,
     now: Date,
-  ): Promise<StoredPendingRegistration | null> {
+  ): Promise<CompletePendingRegistrationResult> {
     const key = this.normalizeEmail(email);
     const row = this.pending.get(key);
     const live =
@@ -80,18 +91,38 @@ export class InMemoryUsersRepository implements UsersRepository {
     if (!live) {
       // Burn an attempt: the verify endpoint is public, so nothing else bounds guessing.
       if (row) row.attempts += 1;
-      return null;
+      return { outcome: 'invalid' };
     }
 
-    // Delete before returning, so one code can never create two accounts. Single-threaded and no
-    // await between the check and this line, which is what makes it atomic here.
-    this.pending.delete(key);
-    return {
+    if (this.idByEmail.has(key)) return { outcome: 'email_conflict' };
+
+    const createdAt = now.toISOString();
+    const user: StoredUser = {
+      id: randomUUID(),
       email: row.email,
       passwordHash: row.passwordHash,
-      fullName: row.fullName,
+      displayName: row.fullName,
       company: row.company,
+      createdAt,
+      emailVerifiedAt: createdAt,
     };
+    const teamPlan = this.preparePersonalTeam(user.id, `${row.fullName}'s Team`);
+
+    // Deliberately no await from the validity check through the final delete: concurrent calls run
+    // in separate JavaScript turns. The two-phase team hook also lets an exception roll the user
+    // and team maps back without consuming the pending code.
+    try {
+      this.byId.set(user.id, user);
+      this.idByEmail.set(key, user.id);
+      teamPlan.commit();
+      this.pending.delete(key);
+      return { outcome: 'created', user };
+    } catch (error) {
+      this.byId.delete(user.id);
+      if (this.idByEmail.get(key) === user.id) this.idByEmail.delete(key);
+      teamPlan.rollback();
+      throw error;
+    }
   }
 
   async purgeExpiredPendingRegistrations(now: Date): Promise<void> {

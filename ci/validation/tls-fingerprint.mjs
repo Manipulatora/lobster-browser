@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // TLS/HTTP2 network-fingerprint gate (Item 3 baseline).
 //
-// Because Lobium IS a real Chromium build, its ClientHello (JA3/JA4) and HTTP/2 SETTINGS (Akamai H2)
+// Because Lobium IS a real Chromium build, its stable ClientHello signatures (JA4/PeetPrint) and
+// HTTP/2 SETTINGS (Akamai H2)
 // should equal a genuine Chrome's — coherent with the UA by construction. This launches a persona and
-// reads its live JA3/JA4/H2 from a TLS-echo service.
+// reads its live raw JA3 plus stable JA4/PeetPrint/H2 values from a TLS-echo service.
 //
 // WHAT "EQUAL" MEANS HERE, and why the shape check is not enough. `/^t13d\d{4}h2/` is satisfied by
 // every TLS1.3 browser on earth, so it caught nothing a fork could plausibly break: a changed cipher
-// list, a reordered extension, a dropped ALPS entry or a different HTTP/2 SETTINGS order all keep the
-// JA4 shape and change the hash — and the hash is what a WAF actually keys on. So the gate compares
-// the full JA3/JA4/PeetPrint/Akamai-H2 set against a REFERENCE stock Chrome:
+// list, a dropped ALPS entry or a different HTTP/2 SETTINGS order all keep the JA4 shape and change a
+// stable signature — and those signatures are what a WAF actually keys on. So the gate compares
+// JA4/PeetPrint/Akamai-H2 against a REFERENCE stock Chrome and reports raw JA3 diagnostically:
 //
 //   • LOBSTER_STOCK_CHROME_BIN set  -> the reference is measured live, in this same run, through the
 //     same echo. Strongest form: no pin can go stale, and network conditions are shared.
@@ -43,7 +44,13 @@ const LOBIUM = resolveLobiumBinary();
 const STOCK_CHROME = process.env.LOBSTER_STOCK_CHROME_BIN || '';
 const CAPTURE = process.argv.includes('--capture-reference');
 const ECHO = process.env.TLS_ECHO_URL || 'https://tls.peet.ws/api/all';
-const GEO = { ip: '0.0.0.0', countryCode: 'US', timezone: 'America/New_York', latitude: 40.7, longitude: -74 };
+const GEO = {
+  ip: '0.0.0.0',
+  countryCode: 'US',
+  timezone: 'America/New_York',
+  latitude: 40.7,
+  longitude: -74,
+};
 const REFERENCE_PATH = join(HERE, 'tls-reference.json');
 const REPORT_PATH = join(HERE, 'reports', 'tls-fingerprint.json');
 
@@ -90,15 +97,30 @@ async function run(os, { bin = LOBIUM, native = true } = {}) {
   const personaArgs = [];
   if (native) {
     const cfg = await writeLobiumConfig(dir, buildLobiumConfig(fp, { seed }));
-    const launch = buildLaunchOptions({ profileId: seed, engine: 'lobium', userDataDir: dir, fingerprint: fp, headless: true });
+    const launch = buildLaunchOptions({
+      profileId: seed,
+      engine: 'lobium',
+      userDataDir: dir,
+      fingerprint: fp,
+      headless: true,
+    });
     personaArgs.push(lobiumConfigArg(cfg), ...launch.args);
   }
   const args = [
-    '--headless=new', '--no-sandbox', ...buildDevShmArgs(), '--enable-unsafe-swiftshader',
-    `--user-data-dir=${dir}`, '--remote-debugging-port=0',
-    '--no-first-run', '--no-default-browser-check', ...personaArgs,
+    '--headless=new',
+    '--no-sandbox',
+    ...buildDevShmArgs(),
+    '--enable-unsafe-swiftshader',
+    `--user-data-dir=${dir}`,
+    '--remote-debugging-port=0',
+    '--no-first-run',
+    '--no-default-browser-check',
+    ...personaArgs,
   ];
-  const proc = spawn(bin, args, { stdio: 'ignore', env: { ...process.env, TZ: fp.locale.timezone } });
+  const proc = spawn(bin, args, {
+    stdio: 'ignore',
+    env: { ...process.env, TZ: fp.locale.timezone },
+  });
   try {
     const ws = await readCdp(dir);
     return await withCdpSession(
@@ -195,7 +217,11 @@ async function writeReport(rows, extra) {
   await mkdir(dirname(REPORT_PATH), { recursive: true });
   await writeFile(
     REPORT_PATH,
-    JSON.stringify({ generatedAt: new Date().toISOString(), echo: ECHO, ...extra, oracleRows: rows }, null, 2),
+    JSON.stringify(
+      { generatedAt: new Date().toISOString(), echo: ECHO, ...extra, oracleRows: rows },
+      null,
+      2,
+    ),
     'utf8',
   );
 }
@@ -229,7 +255,9 @@ if (!LOBIUM) {
 // The ClientHello has to be echoed back by someone. That someone is a third party we do not run, so its
 // availability is an environment fact, not a property of our TLS stack.
 if (!(await echoReachable())) {
-  await blocked(`echo endpoint unreachable: ${ECHO} (set TLS_ECHO_URL to a reachable equivalent, or SKIP_TLS=1).`);
+  await blocked(
+    `echo endpoint unreachable: ${ECHO} (set TLS_ECHO_URL to a reachable equivalent, or SKIP_TLS=1).`,
+  );
 }
 
 const oses = (process.env.OSES || 'windows').split(',');
@@ -257,8 +285,20 @@ if (misshapen.length) {
   const detail = misshapen.map((r) => `${r.os}: ja4=${r.ja4}`).join('; ');
   await writeReport(
     measurements.flatMap((r) => [
-      aspectRow('tls-clienthello-matches-stock-chrome', 'networkTls', r.os, r.chromeShapedJa4 ? 'inconclusive' : 'fail', `ja4=${r.ja4}`),
-      aspectRow('http2-settings-match-stock-chrome', 'networkHttp2', r.os, 'inconclusive', 'not judged: the ClientHello is not Chrome-shaped'),
+      aspectRow(
+        'tls-clienthello-matches-stock-chrome',
+        'networkTls',
+        r.os,
+        r.chromeShapedJa4 ? 'inconclusive' : 'fail',
+        `ja4=${r.ja4}`,
+      ),
+      aspectRow(
+        'http2-settings-match-stock-chrome',
+        'networkHttp2',
+        r.os,
+        'inconclusive',
+        'not judged: the ClientHello is not Chrome-shaped',
+      ),
     ]),
     { verdict: 'fail', measurements },
   );
@@ -307,8 +347,20 @@ if (STOCK_CHROME) {
       `no stock Chrome ${major} reference. Set LOBSTER_STOCK_CHROME_BIN to compare live, or pin one:\n` +
         `  LOBSTER_STOCK_CHROME_BIN=<stock chrome ${major}> node ci/validation/tls-fingerprint.mjs --capture-reference`,
       measurements.flatMap((r) => [
-        aspectRow('tls-clienthello-matches-stock-chrome', 'networkTls', r.os, 'inconclusive', `no stock Chrome ${major} reference to compare against`),
-        aspectRow('http2-settings-match-stock-chrome', 'networkHttp2', r.os, 'inconclusive', `no stock Chrome ${major} reference to compare against`),
+        aspectRow(
+          'tls-clienthello-matches-stock-chrome',
+          'networkTls',
+          r.os,
+          'inconclusive',
+          `no stock Chrome ${major} reference to compare against`,
+        ),
+        aspectRow(
+          'http2-settings-match-stock-chrome',
+          'networkHttp2',
+          r.os,
+          'inconclusive',
+          `no stock Chrome ${major} reference to compare against`,
+        ),
       ]),
       { measurements },
     );
@@ -340,17 +392,27 @@ for (const r of measurements) {
       'networkHttp2',
       r.os,
       h2Diff ? 'fail' : 'pass',
-      h2Diff ? `akamai_h2=${r.akamai_h2} want ${reference.akamai_h2}` : `akamai_h2=${r.akamai_h2} identical to ${referenceSource}`,
+      h2Diff
+        ? `akamai_h2=${r.akamai_h2} want ${reference.akamai_h2}`
+        : `akamai_h2=${r.akamai_h2} identical to ${referenceSource}`,
     ),
   );
 }
 
-await writeReport(rows, { verdict: ok ? 'pass' : 'fail', referenceSource, reference, measurements });
+await writeReport(rows, {
+  verdict: ok ? 'pass' : 'fail',
+  referenceSource,
+  reference,
+  measurements,
+});
 console.log('');
-for (const row of rows) console.log(`  [${row.pass ? 'PASS' : 'FAIL'}] ${row.id.padEnd(38)} ${row.personaOs.padEnd(7)} ${row.detail}`);
+for (const row of rows)
+  console.log(
+    `  [${row.pass ? 'PASS' : 'FAIL'}] ${row.id.padEnd(38)} ${row.personaOs.padEnd(7)} ${row.detail}`,
+  );
 console.log(
   ok
-    ? `\nTLS GATE: PASS — JA3/JA4/PeetPrint/Akamai-H2 identical to ${referenceSource}`
+    ? `\nTLS GATE: PASS — JA4/PeetPrint/Akamai-H2 identical to ${referenceSource}; raw JA3 reported only`
     : `\nTLS GATE: FAIL — network fingerprint differs from ${referenceSource}`,
 );
 process.exit(ok ? 0 : 1);

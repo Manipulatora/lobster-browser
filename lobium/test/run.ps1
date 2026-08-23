@@ -25,9 +25,11 @@ $Out = Join-Path $Here 'out'
 function Die([string] $m) { Write-Host "FAILED: $m" -ForegroundColor Red; exit 1 }
 
 if (-not $Compiler) {
+    $checkoutCompiler = if ($env:LOBIUM_CHROMIUM_SRC) {
+        Join-Path $env:LOBIUM_CHROMIUM_SRC 'third_party\llvm-build\Release+Asserts\bin\clang-cl.exe'
+    }
     $candidates = @(
-        "$env:LOBIUM_CHROMIUM_SRC\third_party\llvm-build\Release+Asserts\bin\clang-cl.exe",
-        'E:\lobium-build\src\third_party\llvm-build\Release+Asserts\bin\clang-cl.exe'
+        $checkoutCompiler
     ) + @((Get-Command clang-cl.exe, clang++.exe, cl.exe -ErrorAction SilentlyContinue).Source)
     $Compiler = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 }

@@ -1,4 +1,4 @@
-import { IsBase64, IsIn, IsInt, IsOptional, Min } from 'class-validator';
+import { IsBase64, IsDefined, IsIn, IsInt, IsOptional, Min, ValidateIf } from 'class-validator';
 import type { SyncDirection } from '../profiles.service';
 
 /**
@@ -11,8 +11,9 @@ import type { SyncDirection } from '../profiles.service';
  * `payload` is the CLIENT-encrypted blob, base64-encoded — the server stores it opaquely and never
  * decrypts it. Required for a push; ignored on a pull.
  *
- * `baseVersion` is the version the client believes is current. When provided on a push it enables
- * optimistic-concurrency conflict detection: a mismatch with the stored version is a 409.
+ * `baseVersion` is the version the client believes is current. It is mandatory on a push (`0` for
+ * a profile that has never been uploaded) so every write is optimistic-concurrency checked; a
+ * mismatch with the stored version is a 409. Pulls do not require it.
  */
 export class SyncProfileDto {
   @IsOptional()
@@ -23,7 +24,8 @@ export class SyncProfileDto {
   @IsBase64()
   payload?: string;
 
-  @IsOptional()
+  @ValidateIf((dto: SyncProfileDto) => dto.direction !== 'pull' || dto.baseVersion !== undefined)
+  @IsDefined()
   @IsInt()
   @Min(0)
   baseVersion?: number;

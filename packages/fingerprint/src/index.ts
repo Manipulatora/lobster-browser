@@ -11,7 +11,7 @@
  * dropped (commit 9499136) to own the model and remove the supply-chain dependency.
  */
 export { SeededRandom, hashStringToUint32, mulberry32 } from './prng.js';
-export { generateSeed, isValidSeed } from './seed.js';
+export { generateSeed, isValidPersistedSeed, isValidSeed } from './seed.js';
 export { deriveDevicePersona, deriveFingerprint, deriveFromPools } from './derive.js';
 export { ENGINE_CHROME } from './pools.js';
 export {
@@ -40,6 +40,11 @@ export {
   DESKTOP_MIN_DEVICE_MEMORY,
 } from './coherence.js';
 export { applyOverrides } from './overrides.js';
+export {
+  coherentGpuIdentity,
+  webgpuIdentityFor,
+  webgpuIdentityMatches,
+} from './webgpu-identity.js';
 export {
   deriveFingerprintFromHost,
   normalizeHostWebglIdentity,

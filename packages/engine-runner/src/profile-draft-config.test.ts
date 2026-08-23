@@ -65,7 +65,7 @@ const params: StartProfileParams = {
   engine: 'lobium',
   os: 'windows',
   osVersion: 'Windows 11 23H2',
-  fingerprintSeed: 'seed-draft-to-config',
+  fingerprintSeed: '0123456789abcdef0123456789abcdef',
   userDataDir: '/tmp/replaced-per-test',
   fingerprintOverrides: draftOverrides,
 };

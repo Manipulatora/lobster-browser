@@ -3,6 +3,12 @@ import { isPlatformBrowser } from '@angular/common';
 
 const STORAGE_KEY = 'lobster.token';
 
+/** A credential plus the logical session generation it was read from. */
+export interface TokenSnapshot {
+  token: string | null;
+  revision: number;
+}
+
 /**
  * Where the bearer token lives.
  *
@@ -26,6 +32,9 @@ const STORAGE_KEY = 'lobster.token';
 @Injectable({ providedIn: 'root' })
 export class TokenStore {
   private readonly isBrowser = isPlatformBrowser(inject(PLATFORM_ID));
+  /** Used only after this document proves that localStorage is unavailable. */
+  private fallbackToken: string | null = null;
+  private useFallback = false;
 
   /**
    * Bumped whenever the token changes, so signals derived from auth state recompute.
@@ -40,31 +49,59 @@ export class TokenStore {
     if (!this.isBrowser) return null;
     // Reading `version` makes callers that use `read()` inside a computed re-evaluate on change.
     this.version();
+    if (this.useFallback) return this.fallbackToken;
     try {
-      return localStorage.getItem(STORAGE_KEY);
+      const token = localStorage.getItem(STORAGE_KEY);
+      // Mirror the last successful read so a later SecurityError does not erase this document's
+      // already-established session merely because storage became unavailable mid-page.
+      this.fallbackToken = token;
+      return token;
     } catch {
-      // Storage can throw in private-browsing modes and when the origin is sandboxed. A user with
-      // storage blocked should get a signed-out app, not a crashed one.
-      return null;
+      // Storage can throw in private-browsing modes and when the origin is sandboxed. Retain the
+      // current document's session in memory; only persistence across a reload is unavailable.
+      this.useFallback = true;
+      return this.fallbackToken;
     }
+  }
+
+  /**
+   * Capture request identity without exposing the token as reactive state.
+   *
+   * The revision matters even when the string does not change: two JWTs minted in the same second
+   * can be byte-identical, while logout followed by login is still a new logical session whose
+   * responses must not be invalidated by the old one.
+   */
+  snapshot(): TokenSnapshot {
+    return { token: this.read(), revision: this.version() };
+  }
+
+  /** True only while neither the token nor its logical session generation has moved. */
+  isCurrent(snapshot: TokenSnapshot): boolean {
+    return this.version() === snapshot.revision && this.read() === snapshot.token;
   }
 
   write(token: string): void {
     if (!this.isBrowser) return;
+    this.fallbackToken = token;
     try {
       localStorage.setItem(STORAGE_KEY, token);
+      this.useFallback = false;
     } catch {
-      /* non-persistent session; the app still works until reload */
+      this.useFallback = true;
     }
     this.version.update((v) => v + 1);
   }
 
   clear(): void {
     if (!this.isBrowser) return;
+    this.fallbackToken = null;
     try {
       localStorage.removeItem(STORAGE_KEY);
+      this.useFallback = false;
     } catch {
-      /* nothing to do */
+      // Do not resurrect an uncleared persistent value inside this document. The logical session is
+      // gone even when the browser refuses access to its backing store.
+      this.useFallback = true;
     }
     this.version.update((v) => v + 1);
   }

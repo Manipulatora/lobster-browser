@@ -30,6 +30,9 @@ constexpr std::string_view kPortableCapabilities[] = {
     // patch rejected still parses the persona and still reports the HOST on every one of those
     // surfaces - a failure that looks exactly like a working launch from the outside.
     "navigator-ua-ch",
+    // navigator.webdriver is a separate Blink hook. Keeping it separate prevents a build that has
+    // the UA/UA-CH patch but missed navigator-webdriver.patch from claiming automation protection.
+    "navigator-webdriver",
     "navigator-languages",
     "network-accept-language",
     "process-locale-timezone",

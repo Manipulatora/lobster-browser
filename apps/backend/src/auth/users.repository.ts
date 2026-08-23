@@ -73,6 +73,10 @@ export interface StoredPendingRegistration {
   company?: string;
 }
 
+/** Result of atomically turning a proven pending sign-up into its initial account graph. */
+export type CompletePendingRegistrationResult =
+  { outcome: 'created'; user: StoredUser } | { outcome: 'invalid' } | { outcome: 'email_conflict' };
+
 /**
  * Persistence boundary for users. AuthService depends on this interface (via the
  * `USERS_REPOSITORY` DI token) rather than a concrete class, so the storage backend
@@ -133,23 +137,23 @@ export interface UsersRepository {
   findPendingRegistration(email: string): Promise<StoredPendingRegistration | null>;
 
   /**
-   * Redeem a pending sign-up, atomically.
+   * Redeem a pending sign-up and create its User, personal Team and admin Membership atomically.
    *
-   * Increments the attempt counter on a wrong code and refuses the row once too many have been
-   * made: the endpoint is necessarily public (there is no session yet), so a six-digit code is
-   * otherwise brute-forceable in minutes.
+   * Keeping the whole graph behind one repository call is load-bearing: consuming the code first
+   * and then issuing separate writes can strand an account without its team, or destroy the only
+   * usable code when a later write fails. Implementations must roll every write back together.
    *
-   * Returns the stored details on success and deletes the row, so the same code cannot be redeemed
-   * twice. Returns null when the code is wrong, expired, exhausted or unknown — the caller cannot
-   * distinguish these, and must not be able to.
+   * A miss still increments the attempt counter and refuses the row once too many guesses have
+   * been made. `invalid` deliberately combines wrong, expired, exhausted, already-used and unknown
+   * codes so this public endpoint does not reveal which addresses have a sign-up in flight.
    */
-  consumePendingRegistration(
+  completePendingRegistration(
     email: string,
     codeHash: string,
     now: Date,
-  ): Promise<StoredPendingRegistration | null>;
+  ): Promise<CompletePendingRegistrationResult>;
 
-  /** Housekeeping. Expiry is already enforced in `consumePendingRegistration`. */
+  /** Housekeeping. Expiry is already enforced in `completePendingRegistration`. */
   purgeExpiredPendingRegistrations(now: Date): Promise<void>;
 
   /**

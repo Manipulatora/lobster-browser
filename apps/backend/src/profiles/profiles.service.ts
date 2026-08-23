@@ -21,20 +21,33 @@ import type { BulkCreateProfilesDto } from './dto/bulk-create-profiles.dto';
 import type { CreateProfileDto } from './dto/create-profile.dto';
 import type { ImportProfilesDto } from './dto/import-profiles.dto';
 import type { UpdateProfileDto } from './dto/update-profile.dto';
-import { PROFILES_REPOSITORY, type ProfilesRepository } from './profiles.repository';
+import {
+  PROFILES_REPOSITORY,
+  ProfileLimitExceededError,
+  type CreateProfileRecord,
+  type ProfilesRepository,
+} from './profiles.repository';
 import { sanitizeCookieImportMetadata } from './sanitize-cookie-import';
 
 /** Direction of an encrypted-blob sync. */
 export type SyncDirection = 'push' | 'pull';
 
 /** Arguments for {@link ProfilesService.sync}, parsed from the validated request DTO. */
-export interface SyncProfileInput {
-  direction: SyncDirection;
-  /** base64 CLIENT-encrypted blob to store. Required on push; ignored on pull. */
-  payload?: string;
-  /** Version the client believes is current; a mismatch on push is a conflict (409). */
-  baseVersion?: number;
-}
+export type SyncProfileInput =
+  | {
+      direction: 'push';
+      /** base64 CLIENT-encrypted blob to store. */
+      payload?: string;
+      /** Version the client believes is current (`0` before its first push). */
+      baseVersion: number;
+    }
+  | {
+      direction: 'pull';
+      /** Ignored on pull. */
+      payload?: string;
+      /** Ignored on pull; accepted for forward-compatible clients. */
+      baseVersion?: number;
+    };
 
 /**
  * Result of a profile sync.
@@ -107,27 +120,30 @@ export class ProfilesService {
 
   async create(userId: string, dto: CreateProfileDto, teamId?: string): Promise<Profile> {
     const ownerTeamId = await this.resolveTeamId(userId, teamId);
-    await this.assertCanAddProfiles(ownerTeamId, 1);
 
     // Every profile MUST get a unique seed — a shared/constant seed would give many profiles the
     // same fingerprint identity. Generate a fresh random 128-bit seed when the caller omits one.
     const fingerprintSeed = dto.fingerprintSeed ?? randomBytes(16).toString('hex');
-    const created = await this.profiles.create({
-      ownerTeamId,
-      name: dto.name,
-      engine: dto.engine,
-      os: dto.os,
-      osVersion: dto.osVersion,
-      fingerprintSeed,
-      fingerprintOverrides: dto.fingerprintOverrides,
-      proxyId: dto.proxyId,
-      templateId: dto.templateId,
-      cookiesImport: sanitizeCookieImportMetadata(dto.cookiesImport),
-      extensions: dto.extensions,
-      tags: dto.tags ?? [],
-      folder: dto.folder,
-      notes: dto.notes,
-    });
+    const created = (
+      await this.createManyWithinLimit([
+        {
+          ownerTeamId,
+          name: dto.name,
+          engine: dto.engine,
+          os: dto.os,
+          osVersion: dto.osVersion,
+          fingerprintSeed,
+          fingerprintOverrides: dto.fingerprintOverrides,
+          proxyId: dto.proxyId,
+          templateId: dto.templateId,
+          cookiesImport: sanitizeCookieImportMetadata(dto.cookiesImport),
+          extensions: dto.extensions,
+          tags: dto.tags ?? [],
+          folder: dto.folder,
+          notes: dto.notes,
+        },
+      ])
+    )[0]!;
     await this.audit.record({
       teamId: ownerTeamId,
       actorUserId: userId,
@@ -141,8 +157,10 @@ export class ProfilesService {
 
   /**
    * Create `count` profiles in one call, each with its OWN fresh unique seed (never a shared
-   * identity). The whole batch is plan-limit-checked up front, so a batch that would exceed the
-   * team's limit is rejected wholesale (no partial creation).
+   * identity). The whole profile-row batch is plan-limit-checked and committed transactionally, so
+   * a rejection or insert failure creates nothing. The one audit record is attempted after commit
+   * through AuditService's fail-safe API; an audit-store failure cannot change the successful API
+   * result.
    */
   async bulkCreate(
     userId: string,
@@ -150,22 +168,16 @@ export class ProfilesService {
     teamId?: string,
   ): Promise<Profile[]> {
     const ownerTeamId = await this.resolveTeamId(userId, teamId);
-    await this.assertCanAddProfiles(ownerTeamId, dto.count);
-
-    const created: Profile[] = [];
-    for (let i = 0; i < dto.count; i += 1) {
-      created.push(
-        await this.profiles.create({
-          ownerTeamId,
-          name: `${dto.namePrefix} ${i + 1}`,
-          engine: dto.engine,
-          os: dto.os,
-          fingerprintSeed: randomBytes(16).toString('hex'),
-          tags: dto.tags ?? [],
-          folder: dto.folder,
-        }),
-      );
-    }
+    const records: CreateProfileRecord[] = Array.from({ length: dto.count }, (_, index) => ({
+      ownerTeamId,
+      name: `${dto.namePrefix} ${index + 1}`,
+      engine: dto.engine,
+      os: dto.os,
+      fingerprintSeed: randomBytes(16).toString('hex'),
+      tags: dto.tags ?? [],
+      folder: dto.folder,
+    }));
+    const created = await this.createManyWithinLimit(records);
     await this.audit.record({
       teamId: ownerTeamId,
       actorUserId: userId,
@@ -194,33 +206,27 @@ export class ProfilesService {
   /**
    * Import a bundle: re-create each exported profile under the caller's team, PRESERVING its
    * `fingerprintSeed` so the same coherent fingerprint identity transfers across teams/accounts.
-   * The full batch is plan-limit-checked before anything is created.
+   * The profile rows commit as one transaction before the fail-safe audit attempt.
    */
   async importBundle(userId: string, dto: ImportProfilesDto, teamId?: string): Promise<Profile[]> {
     const ownerTeamId = await this.resolveTeamId(userId, teamId);
-    await this.assertCanAddProfiles(ownerTeamId, dto.profiles.length);
-
-    const imported: Profile[] = [];
-    for (const item of dto.profiles) {
-      imported.push(
-        await this.profiles.create({
-          ownerTeamId,
-          name: item.name,
-          engine: item.engine,
-          os: item.os,
-          osVersion: item.osVersion,
-          fingerprintSeed: item.fingerprintSeed,
-          fingerprintOverrides: item.fingerprintOverrides,
-          proxyId: item.proxyId,
-          templateId: item.templateId,
-          cookiesImport: sanitizeCookieImportMetadata(item.cookiesImport),
-          extensions: item.extensions,
-          tags: item.tags ?? [],
-          folder: item.folder,
-          notes: item.notes,
-        }),
-      );
-    }
+    const records: CreateProfileRecord[] = dto.profiles.map((item) => ({
+      ownerTeamId,
+      name: item.name,
+      engine: item.engine,
+      os: item.os,
+      osVersion: item.osVersion,
+      fingerprintSeed: item.fingerprintSeed,
+      fingerprintOverrides: item.fingerprintOverrides,
+      proxyId: item.proxyId,
+      templateId: item.templateId,
+      cookiesImport: sanitizeCookieImportMetadata(item.cookiesImport),
+      extensions: item.extensions,
+      tags: item.tags ?? [],
+      folder: item.folder,
+      notes: item.notes,
+    }));
+    const imported = await this.createManyWithinLimit(records);
     await this.audit.record({
       teamId: ownerTeamId,
       actorUserId: userId,
@@ -297,8 +303,11 @@ export class ProfilesService {
     teamId?: string,
   ): Promise<{ id: string; deleted: true }> {
     const ownerTeamId = await this.resolveTeamId(userId, teamId);
-    const deleted = await this.profiles.remove(ownerTeamId, id);
-    if (!deleted) {
+    const result = await this.profiles.removeAsAdmin(ownerTeamId, id, userId);
+    if (result.outcome === 'forbidden') {
+      throw new ForbiddenException('this action requires the admin role');
+    }
+    if (result.outcome === 'not_found') {
       throw new NotFoundException('profile not found');
     }
     await this.audit.record({
@@ -325,9 +334,9 @@ export class ProfilesService {
    * encrypts/decrypts locally with its own AES key; the server only stores opaque bytes + a
    * per-profile version. Every sync is team-scoped: the profile must belong to the caller's team.
    *
-   * Push is optimistic-concurrency-checked: when the caller supplies `baseVersion` it must equal
-   * the currently-stored version, otherwise the write is rejected with a 409 (the caller must pull,
-   * re-apply, and retry). Each successful push bumps the version by one.
+   * Every push is optimistic-concurrency-checked: `baseVersion` must equal the currently-stored
+   * version, otherwise the write is rejected with a 409 (the caller must pull, re-apply, and retry).
+   * The first push uses version 0. Each successful push bumps the version by one.
    */
   async sync(
     userId: string,
@@ -360,15 +369,22 @@ export class ProfilesService {
     return result;
   }
 
-  /** Store a new encrypted blob, enforcing the optimistic-concurrency check when requested. */
+  /** Store a new encrypted blob under its mandatory optimistic-concurrency precondition. */
   private async push(
     profileId: string,
     teamId: string,
     key: string,
-    input: SyncProfileInput,
+    input: Extract<SyncProfileInput, { direction: 'push' }>,
   ): Promise<SyncResult> {
     if (input.payload === undefined) {
       throw new BadRequestException('push requires a base64 payload');
+    }
+    if (
+      input.baseVersion === undefined ||
+      !Number.isInteger(input.baseVersion) ||
+      input.baseVersion < 0
+    ) {
+      throw new BadRequestException('push requires a non-negative integer baseVersion');
     }
     // `payload` is validated as base64 at the DTO boundary; store the decoded bytes opaquely.
     const bytes = Buffer.from(input.payload, 'base64');
@@ -382,7 +398,6 @@ export class ProfilesService {
     // Optimistic concurrency is enforced atomically inside the store (compare-and-set): passing
     // `baseVersion` as `expectedVersion` makes the version check and write one indivisible step,
     // so two concurrent pushes at the same base can't both succeed (one loses with a conflict).
-    // Omitting baseVersion writes unconditionally, matching the previous behaviour.
     let version: number;
     try {
       ({ version } = await this.blobs.put(key, bytes, {
@@ -476,19 +491,17 @@ export class ProfilesService {
     return first.id;
   }
 
-  /**
-   * Per-plan profile-limit gate for adding `count` profiles. Reads the team's
-   * Subscription.profileLimit when present, else the default free-tier limit; throws
-   * `ForbiddenException` when the batch would push the team over its limit (checked as a whole, so
-   * bulk/import never partially create).
-   */
-  private async assertCanAddProfiles(teamId: string, count: number): Promise<void> {
-    const limit = (await this.profiles.getProfileLimit(teamId)) ?? DEFAULT_FREE_PROFILE_LIMIT;
-    const currentCount = (await this.profiles.findAllByTeam(teamId)).length;
-    if (currentCount + count > limit) {
-      throw new ForbiddenException(
-        `profile limit (${limit}) reached for this team: ${currentCount} in use, cannot add ${count} more — upgrade the plan`,
-      );
+  /** Translate the repository's atomic capacity rejection to the API's established 403. */
+  private async createManyWithinLimit(inputs: readonly CreateProfileRecord[]): Promise<Profile[]> {
+    try {
+      return await this.profiles.createManyWithinLimit(inputs);
+    } catch (error) {
+      if (error instanceof ProfileLimitExceededError) {
+        throw new ForbiddenException(
+          `profile limit (${error.limit}) reached for this team: ${error.currentCount} in use, cannot add ${error.requestedCount} more — upgrade the plan`,
+        );
+      }
+      throw error;
     }
   }
 }

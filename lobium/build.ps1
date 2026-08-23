@@ -5,6 +5,7 @@
     (`cp src/* .../components/lobium_fp/`) plus its `quilt push -a` have no Windows equivalent, so
     a Windows engine could not be produced at all before this script existed.
 
+        $env:LOBIUM_CHROMIUM_SRC = '<path-to-chromium-src>'
         powershell -ExecutionPolicy Bypass -File lobium\build.ps1               # dry run: print the plan
         powershell -ExecutionPolicy Bypass -File lobium\build.ps1 -Run          # stage + patch + gen + build
         powershell -ExecutionPolicy Bypass -File lobium\build.ps1 -Run -Stop gen    # stop after `gn gen`
@@ -18,14 +19,15 @@
       * A Chromium checkout synced to the pinned tag, with the win64 PGO profile downloaded
       * ~200 GB free on the checkout volume
 
-    This script is IDEMPOTENT. Staging and patching detect already-applied state and skip.
+    Re-running the patch step requires -Force. Without it, any tracked checkout drift, reject
+    artifact, or patch-created file is rejected before patching begins.
 #>
 [CmdletBinding()]
 param(
     # Execute. Without this the script prints what it would do and changes nothing.
     [switch] $Run,
     # Chromium source checkout (the directory containing .gn, DEPS, chrome/, third_party/).
-    [string] $SrcDir = 'E:\lobium-build\src',
+    [string] $SrcDir = $env:LOBIUM_CHROMIUM_SRC,
     # Output directory, relative to $SrcDir.
     [string] $OutDir = 'out\Lobium',
     # Stop after a given step: stage | patch | gen | build.
@@ -39,7 +41,7 @@ param(
     # them on a 16 GB laptop pages to disk and finishes SLOWER than six that stay resident. Set this
     # to about (RAM_GB / 2) when the machine has less than 4 GB per logical core.
     [int] $Jobs = 0,
-    # Re-stage and re-apply even when the tree already looks patched.
+    # Reset tracked files and re-apply the series from the pinned checkout.
     [switch] $Force
 )
 
@@ -59,6 +61,10 @@ function Ok([string] $m) { Write-Host "    OK   $m" -ForegroundColor Green }
 function Info([string] $m) { Write-Host "    --   $m" -ForegroundColor DarkGray }
 function Die([string] $m) { Write-Host ''; Write-Host "FAILED: $m" -ForegroundColor Red; exit 1 }
 function Plan([string] $m) { Write-Host "    would: $m" -ForegroundColor Yellow }
+
+if (-not $SrcDir) {
+    Die 'Chromium checkout is not configured. Pass -SrcDir or set LOBIUM_CHROMIUM_SRC to the directory containing .gn.'
+}
 
 $stepOrder = @{ stage = 1; patch = 2; gen = 3; build = 4 }
 function ShouldRun([string] $name) { return $stepOrder[$name] -le $stepOrder[$Stop] }
@@ -153,6 +159,60 @@ try {
     if ($tag.Trim() -ne $ChromiumRef) { Die "Checkout is at tag '$($tag.Trim())' but this script pins '$ChromiumRef'." }
     Ok "checkout at $ChromiumRef"
 } finally { Pop-Location }
+
+# Applying onto a partially patched tree is never safe. GNU patch uses the same non-zero status for
+# an already-applied hunk and a genuine reject; the old script guessed from English output and could
+# accept a mixture of skipped and failed hunks. Refuse any evidence of an earlier apply up front.
+# -Force is explicit recovery: it resets tracked files and removes only narrowly scoped artifacts.
+if ($Run -and (ShouldRun 'patch') -and -not $Force) {
+    $preflightSeries = @(Get-Content (Join-Path $Here 'patches\series') |
+        Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() })
+    $patchCreated = @()
+    foreach ($p in $preflightSeries) {
+        $full = Join-Path $Here "patches\$p"
+        if (-not (Test-Path $full)) { Die "series patch is missing: $p" }
+        $lines = [System.IO.File]::ReadAllLines($full, [System.Text.Encoding]::UTF8)
+        for ($i = 0; $i -lt $lines.Length; $i++) {
+            if ($lines[$i] -like 'new file mode*') {
+                for ($j = $i; $j -lt [Math]::Min($i + 6, $lines.Length); $j++) {
+                    if ($lines[$j] -like '+++ b/*') {
+                        $patchCreated += $lines[$j].Substring(6).Trim()
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    $dirtyReason = $null
+    Push-Location $SrcDir
+    try {
+        & git --no-optional-locks diff --quiet -- .
+        if ($LASTEXITCODE -ne 0) { $dirtyReason = 'tracked working-tree changes' }
+        if (-not $dirtyReason) {
+            & git --no-optional-locks diff --cached --quiet -- .
+            if ($LASTEXITCODE -ne 0) { $dirtyReason = 'staged changes' }
+        }
+        if (-not $dirtyReason) {
+            foreach ($rel in ($patchCreated | Sort-Object -Unique)) {
+                if (Test-Path (Join-Path $SrcDir ($rel -replace '/', '\'))) {
+                    $dirtyReason = "patch-created path already exists: $rel"
+                    break
+                }
+            }
+        }
+        if (-not $dirtyReason) {
+            $artifact = & git --no-optional-locks status --porcelain --untracked-files=all |
+                Where-Object { $_ -like '?? *.rej' -or $_ -like '?? *.orig' } |
+                Select-Object -First 1
+            if ($artifact) { $dirtyReason = "stale patch artifact: $($artifact.Substring(3).Trim('"'))" }
+        }
+    } finally { Pop-Location }
+    if ($dirtyReason) {
+        Die "Chromium checkout is not pristine ($dirtyReason). Re-run with -Force to reset and apply the whole series."
+    }
+    Ok 'checkout is pristine for patch application'
+}
 
 # PGO: gn gen with chrome_pgo_phase=2 fails outright without a profile, but failing HERE gives a
 # far clearer message than a GN assertion 200 lines into the generate step.
@@ -296,34 +356,22 @@ if (ShouldRun 'patch') {
         }
         Push-Location $SrcDir
         try {
-            $failed = @()
-            $alreadyApplied = 0
             foreach ($p in $series) {
                 $full = Join-Path $Here "patches\$p"
-                if (-not (Test-Path $full)) { $failed += "$p (missing)"; continue }
-                # --forward makes an already-applied patch a SKIP rather than a reversal, but GNU
-                # patch still exits non-zero for it. Treat that as success: this script is
-                # documented as idempotent, and conflating "already applied" with "rejected" turned
-                # a clean re-run into 24 red FAIL lines.
-                # A genuine reject always prints "Hunk #N FAILED"; an already-applied patch prints
-                # only "Reversed (or previously applied)" / "hunks ignored".
+                if (-not (Test-Path $full)) { Die "series patch is missing: $p" }
+                # --forward prevents an accidental reversal. Every non-zero result is still a hard
+                # failure: parsing human-readable output cannot prove that every hunk was already
+                # applied, and accepting a partial apply would produce an untrustworthy binary.
                 $out = & $patchExe -p1 --forward --batch --no-backup-if-mismatch -i $full 2>&1 | Out-String
                 if ($LASTEXITCODE -eq 0) {
                     Ok $p
-                } elseif ($out -notmatch 'FAILED' -and $out -match 'previously applied|hunks? ignored|already exists') {
-                    Write-Host "    SKIP $p (already applied)" -ForegroundColor DarkGray
-                    $alreadyApplied++
                 } else {
-                    $failed += $p
                     Write-Host "    FAIL $p" -ForegroundColor Red
-                    ($out -split "`n" | Where-Object { $_ -match 'FAILED|malformed|garbage|can.t find file' }) |
+                    ($out -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 12) |
                         ForEach-Object { Write-Host "         $($_.Trim())" -ForegroundColor Red }
+                    Die "Patch $p did not apply cleanly. Use -Force for a full reset, or refresh it against $ChromiumRef."
                 }
             }
-            if ($failed.Count) {
-                Die "$($failed.Count) patch(es) did not apply. Refresh them against $ChromiumRef before building."
-            }
-            if ($alreadyApplied) { Info "$alreadyApplied patch(es) were already applied (pass -Force to re-apply from a clean tree)" }
         } finally { Pop-Location }
     } else {
         Plan "patch -p1 --forward each of the $($series.Count) patches, in series order"

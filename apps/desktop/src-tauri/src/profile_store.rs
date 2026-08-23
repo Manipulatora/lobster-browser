@@ -86,6 +86,33 @@ fn assert_updatable_os(_existing_os: &str, next_os: &str) -> Result<()> {
     )
 }
 
+fn is_lowercase_hex(seed: &str) -> bool {
+    seed.bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Validate an identity seed already persisted by an earlier Lobster release.
+///
+/// Fresh profiles use the canonical 128-bit form below. Historical releases intentionally accepted
+/// shorter hex identities, however, and changing their bytes would change the browser identity. Keep
+/// that compatibility bounded so corrupt, non-hex, or attacker-sized values still fail closed.
+pub fn validate_fingerprint_seed(seed: &str) -> Result<()> {
+    let valid = (8..=256).contains(&seed.len()) && is_lowercase_hex(seed);
+    if valid {
+        return Ok(());
+    }
+    anyhow::bail!("invalid fingerprint seed: expected 8 to 256 lowercase hexadecimal characters")
+}
+
+/// Validate a seed supplied while creating a new profile. New identities have one canonical wire
+/// representation even though bounded legacy identities remain launchable and importable.
+fn validate_canonical_fingerprint_seed(seed: &str) -> Result<()> {
+    if seed.len() == 32 && is_lowercase_hex(seed) {
+        return Ok(());
+    }
+    anyhow::bail!("invalid fingerprint seed: expected exactly 32 lowercase hexadecimal characters")
+}
+
 /// A profile row, serialized to the UI in the exact shape of `@lobster/shared-types` `Profile`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -376,6 +403,16 @@ fn row_to_profile(cipher: &SecretCipher, row: &Row) -> rusqlite::Result<Profile>
     })
 }
 
+fn validate_loaded_profile(profile: Profile) -> Result<Profile> {
+    validate_fingerprint_seed(&profile.fingerprint_seed).map_err(|error| {
+        anyhow::anyhow!(
+            "profile {} has an invalid persisted fingerprint seed: {error}",
+            profile.id
+        )
+    })?;
+    Ok(profile)
+}
+
 /// A fresh 128-bit lowercase-hex fingerprint seed (32 hex chars).
 fn new_seed() -> String {
     uuid::Uuid::new_v4().simple().to_string()
@@ -417,7 +454,7 @@ pub fn list(conn: &Connection, cipher: &SecretCipher) -> Result<Vec<Profile>> {
     let rows = stmt.query_map([], |row| row_to_profile(cipher, row))?;
     let mut profiles = Vec::new();
     for row in rows {
-        profiles.push(row?);
+        profiles.push(validate_loaded_profile(row?)?);
     }
     Ok(profiles)
 }
@@ -428,7 +465,7 @@ pub fn list_trashed(conn: &Connection, cipher: &SecretCipher) -> Result<Vec<Prof
     let rows = stmt.query_map([], |row| row_to_profile(cipher, row))?;
     let mut profiles = Vec::new();
     for row in rows {
-        profiles.push(row?);
+        profiles.push(validate_loaded_profile(row?)?);
     }
     Ok(profiles)
 }
@@ -437,7 +474,7 @@ pub fn get(conn: &Connection, cipher: &SecretCipher, id: &str) -> Result<Option<
     let mut stmt = conn.prepare("SELECT * FROM profiles WHERE id = ?1 AND trashed_at IS NULL")?;
     let mut rows = stmt.query_map([id], |row| row_to_profile(cipher, row))?;
     match rows.next() {
-        Some(row) => Ok(Some(row?)),
+        Some(row) => Ok(Some(validate_loaded_profile(row?)?)),
         None => Ok(None),
     }
 }
@@ -460,10 +497,36 @@ pub fn create(
     cipher: &SecretCipher,
     input: CreateProfileInput,
 ) -> Result<Profile> {
+    create_with_seed_validation(conn, cipher, input, validate_canonical_fingerprint_seed)
+}
+
+/// Materialise an imported profile without changing a bounded legacy identity seed.
+pub(crate) fn create_preserving_fingerprint_seed(
+    conn: &Connection,
+    cipher: &SecretCipher,
+    input: CreateProfileInput,
+) -> Result<Profile> {
+    create_with_seed_validation(conn, cipher, input, validate_fingerprint_seed)
+}
+
+fn create_with_seed_validation(
+    conn: &Connection,
+    cipher: &SecretCipher,
+    input: CreateProfileInput,
+    validate_supplied_seed: fn(&str) -> Result<()>,
+) -> Result<Profile> {
     assert_creatable_os(&input.os)?;
     let id = format!("prf_{}", uuid::Uuid::new_v4().simple());
     // Every profile gets a UNIQUE seed unless one is explicitly supplied — never a shared constant.
-    let seed = input.fingerprint_seed.unwrap_or_else(new_seed);
+    // A supplied value is identity, not a hint: reject malformed values instead of silently replacing
+    // them with a fresh seed and changing the browser the caller meant to persist.
+    let seed = match input.fingerprint_seed {
+        Some(seed) => {
+            validate_supplied_seed(&seed)?;
+            seed
+        }
+        None => new_seed(),
+    };
     let tags = input.tags.unwrap_or_default();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -806,7 +869,7 @@ pub fn find_by_remote_id(
     let mut stmt = conn.prepare("SELECT * FROM profiles WHERE remote_id = ?1")?;
     let mut rows = stmt.query(params![remote_id])?;
     match rows.next()? {
-        Some(row) => Ok(Some(row_to_profile(cipher, row)?)),
+        Some(row) => Ok(Some(validate_loaded_profile(row_to_profile(cipher, row)?)?)),
         None => Ok(None),
     }
 }
@@ -845,7 +908,7 @@ pub fn get_trashed(conn: &Connection, cipher: &SecretCipher, id: &str) -> Result
         conn.prepare("SELECT * FROM profiles WHERE id = ?1 AND trashed_at IS NOT NULL")?;
     let mut rows = stmt.query_map([id], |row| row_to_profile(cipher, row))?;
     match rows.next() {
-        Some(row) => Ok(Some(row?)),
+        Some(row) => Ok(Some(validate_loaded_profile(row?)?)),
         None => Ok(None),
     }
 }
@@ -917,6 +980,82 @@ mod tests {
             "each profile needs its own seed"
         );
         assert_eq!(list(&conn, &cipher).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn supplied_seed_must_be_exactly_32_lowercase_hex_characters() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let invalid = [
+            "".to_string(),
+            "g123456789abcdef0123456789abcdef".to_string(),
+            "0123456789ABCDEF0123456789ABCDEF".to_string(),
+            "0123456789abcdef0123456789abcde".to_string(),
+            "0123456789abcdef0123456789abcdef0".to_string(),
+            "a".repeat(1024 * 1024),
+        ];
+
+        for (index, seed) in invalid.into_iter().enumerate() {
+            let mut candidate = input(&format!("Invalid {index}"));
+            candidate.fingerprint_seed = Some(seed);
+            let error = create(&conn, &cipher, candidate)
+                .expect_err("a malformed supplied seed must be rejected, never regenerated");
+            assert!(
+                error
+                    .to_string()
+                    .contains("expected exactly 32 lowercase hexadecimal characters"),
+                "unexpected error: {error:#}"
+            );
+        }
+        assert_eq!(
+            count_active(&conn).unwrap(),
+            0,
+            "no invalid row may be written"
+        );
+
+        let valid_seed = "0123456789abcdef0123456789abcdef";
+        let mut candidate = input("Valid");
+        candidate.fingerprint_seed = Some(valid_seed.to_string());
+        let created = create(&conn, &cipher, candidate).expect("the canonical seed form is valid");
+        assert_eq!(created.fingerprint_seed, valid_seed);
+    }
+
+    #[test]
+    fn a_legacy_persisted_seed_is_loaded_without_changing_identity() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("Legacy")).unwrap();
+        conn.execute(
+            "UPDATE profiles SET fingerprint_seed = 'deadbeef' WHERE id = ?1",
+            params![created.id],
+        )
+        .unwrap();
+
+        let loaded = get(&conn, &cipher, &created.id)
+            .expect("legacy seed must remain readable")
+            .expect("profile exists");
+        assert_eq!(loaded.fingerprint_seed, "deadbeef");
+    }
+
+    #[test]
+    fn persisted_seed_validation_is_bounded_lowercase_hex() {
+        assert!(validate_fingerprint_seed("deadbeef").is_ok());
+        assert!(validate_fingerprint_seed(&"a".repeat(256)).is_ok());
+        for invalid in [
+            "".to_string(),
+            "abcdefg".to_string(),
+            "deadbeeG".to_string(),
+            "DEADBEEF".to_string(),
+            "a".repeat(257),
+            "a".repeat(1024 * 1024),
+        ] {
+            let error = validate_fingerprint_seed(&invalid)
+                .expect_err("malformed persisted identity must fail closed");
+            assert!(
+                error.to_string().contains("8 to 256 lowercase hexadecimal"),
+                "unexpected error: {error:#}"
+            );
+        }
     }
 
     #[test]
@@ -1188,7 +1327,8 @@ mod tests {
                 .execute(
                     "INSERT INTO profiles \
                      (id, name, engine, os, fingerprint_seed, cookies_import, tags, status, created_at, updated_at) \
-                     VALUES ('prf_legacy', 'Existing', 'lobium', 'windows', 'deadbeef', ?1, '[]', 'idle', ?2, ?2)",
+                     VALUES ('prf_legacy', 'Existing', 'lobium', 'windows', \
+                             '0123456789abcdef0123456789abcdef', ?1, '[]', 'idle', ?2, ?2)",
                     params![
                         cipher
                             .encrypt_str(&serde_json::json!({ "mode": "merge" }).to_string())

@@ -35,6 +35,32 @@ const NOT_IN_SERIES = new Map([
   ],
 ]);
 
+/** Exact patch-to-capability ownership. A broad filename regex cannot prove which hook is present. */
+const FINGERPRINT_PATCH_CAPABILITIES = new Map([
+  ['fingerprint/canvas-farbling.patch', ['canvas-farbling']],
+  ['fingerprint/webgl-surfaces.patch', ['webgl-deep', 'webgl2-deep', 'webgl-farbling']],
+  ['fingerprint/host-gpu-profile.patch', ['webgl-deep']],
+  ['fingerprint/webgl-runtime-safety.patch', ['webgl-deep', 'webgl2-deep']],
+  ['fingerprint/webgl-bypass-closures.patch', ['webgl-deep', 'webgl2-deep', 'webgl-farbling']],
+  ['fingerprint/webgl2-surfaces.patch', ['webgl2-deep']],
+  ['fingerprint/webgpu-adapter.patch', ['webgpu-adapter']],
+  ['fingerprint/audio-context.patch', ['audio-farbling']],
+  ['fingerprint/audio-worklet-tap.patch', ['audio-farbling']],
+  ['fingerprint/screen-dpr.patch', ['screen-metrics']],
+  ['fingerprint/media-values-device-size.patch', ['screen-metrics']],
+  ['fingerprint/navigator-webdriver.patch', ['navigator-webdriver']],
+  [
+    'fingerprint/locale-geolocation.patch',
+    ['navigator-languages', 'process-locale-timezone', 'native-geolocation'],
+  ],
+  ['fingerprint/client-rects.patch', ['client-rects']],
+  ['fingerprint/media-devices.patch', ['media-devices']],
+  ['fingerprint/mobile-persona.patch', ['mobile-persona']],
+  ['fingerprint/webrtc-policy.patch', ['webrtc-policy']],
+  ['fingerprint/native-timezone.patch', ['native-timezone']],
+  ['fingerprint/windows-font-isolation.patch', ['font-isolation']],
+]);
+
 function walk(dir) {
   return readdirSync(dir).flatMap((n) => {
     const p = join(dir, n);
@@ -57,16 +83,30 @@ function parse(rel) {
   const files = [];
   let cur = null;
   let hunk = null;
-  const close = () => { if (hunk) { cur.hunks.push(hunk); hunk = null; } };
+  const close = () => {
+    if (hunk) {
+      cur.hunks.push(hunk);
+      hunk = null;
+    }
+  };
   for (const line of lines) {
     if (line.startsWith('diff --git ')) {
       close();
       const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-      cur = { path: m ? m[1] : null, toPath: m ? m[2] : null, diffLine: line, header: [], hunks: [] };
+      cur = {
+        path: m ? m[1] : null,
+        toPath: m ? m[2] : null,
+        diffLine: line,
+        header: [],
+        hunks: [],
+      };
       files.push(cur);
       continue;
     }
-    if (!cur) { preamble.push(line); continue; }
+    if (!cur) {
+      preamble.push(line);
+      continue;
+    }
     if (line.startsWith('@@')) {
       close();
       const m = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
@@ -80,7 +120,10 @@ function parse(rel) {
       };
       continue;
     }
-    if (hunk) { hunk.body.push(line); continue; }
+    if (hunk) {
+      hunk.body.push(line);
+      continue;
+    }
     cur.header.push(line);
   }
   close();
@@ -98,6 +141,10 @@ test('every patch named in series exists on disk, and every patch on disk is acc
     assert.ok(existsSync(join(PATCHES, rel)), `series names a missing patch: ${rel}`);
   }
   const inSeries = new Set(series);
+  for (const [rel, reason] of NOT_IN_SERIES) {
+    assert.ok(onDisk.includes(rel), `stale NOT_IN_SERIES entry names a missing patch: ${rel}`);
+    assert.ok(!inSeries.has(rel), `${rel} must stay out of the production series: ${reason}`);
+  }
   for (const rel of onDisk) {
     if (inSeries.has(rel)) continue;
     assert.ok(
@@ -134,7 +181,10 @@ test('every file section has a complete diff --git / --- / +++ header trio', () 
   const bad = [];
   for (const [rel, p] of parsed) {
     for (const f of p.files) {
-      if (!f.path || !f.toPath) { bad.push(`${rel}: unparseable "diff --git" line: ${f.diffLine}`); continue; }
+      if (!f.path || !f.toPath) {
+        bad.push(`${rel}: unparseable "diff --git" line: ${f.diffLine}`);
+        continue;
+      }
       const hasMinus = f.header.some((l) => l.startsWith('--- '));
       const hasPlus = f.header.some((l) => l.startsWith('+++ '));
       if (!hasMinus) bad.push(`${rel}: ${f.path} has no "--- a/" header`);
@@ -150,16 +200,27 @@ test('every hunk header is well formed and its counts match the body', () => {
   for (const [rel, p] of parsed) {
     for (const f of p.files) {
       for (const h of f.hunks) {
-        if (!h.valid) { bad.push(`${rel}: ${f.path}: unparseable hunk header ${JSON.stringify(h.header)}`); continue; }
+        if (!h.valid) {
+          bad.push(`${rel}: ${f.path}: unparseable hunk header ${JSON.stringify(h.header)}`);
+          continue;
+        }
         // A "\ No newline at end of file" marker counts toward neither side.
         const body = h.body.filter((l) => !l.startsWith('\\'));
-        const oldLines = body.filter((l) => l.startsWith(' ') || l.startsWith('-') || l === '').length;
-        const newLines = body.filter((l) => l.startsWith(' ') || l.startsWith('+') || l === '').length;
+        const oldLines = body.filter(
+          (l) => l.startsWith(' ') || l.startsWith('-') || l === '',
+        ).length;
+        const newLines = body.filter(
+          (l) => l.startsWith(' ') || l.startsWith('+') || l === '',
+        ).length;
         if (oldLines !== h.oldCount) {
-          bad.push(`${rel}: ${f.path} ${h.header} declares ${h.oldCount} old lines, body has ${oldLines}`);
+          bad.push(
+            `${rel}: ${f.path} ${h.header} declares ${h.oldCount} old lines, body has ${oldLines}`,
+          );
         }
         if (newLines !== h.newCount) {
-          bad.push(`${rel}: ${f.path} ${h.header} declares ${h.newCount} new lines, body has ${newLines}`);
+          bad.push(
+            `${rel}: ${f.path} ${h.header} declares ${h.newCount} new lines, body has ${newLines}`,
+          );
         }
       }
     }
@@ -175,7 +236,9 @@ test('hunks within a file section are ordered and never overlap', () => {
         const prev = f.hunks[i - 1];
         const next = f.hunks[i];
         if (prev.oldStart + prev.oldCount > next.oldStart) {
-          bad.push(`${rel}: ${f.path}: @${prev.oldStart},${prev.oldCount} overlaps @${next.oldStart}`);
+          bad.push(
+            `${rel}: ${f.path}: @${prev.oldStart},${prev.oldCount} overlaps @${next.oldStart}`,
+          );
         }
       }
     }
@@ -189,9 +252,13 @@ test('patch files are LF-only UTF-8 without a BOM', () => {
   const bad = [];
   for (const rel of [...onDisk, 'series']) {
     const buf = readFileSync(join(PATCHES, rel));
-    if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) bad.push(`${rel}: has a UTF-8 BOM`);
+    if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf)
+      bad.push(`${rel}: has a UTF-8 BOM`);
     for (let i = 1; i < buf.length; i++) {
-      if (buf[i] === 0x0a && buf[i - 1] === 0x0d) { bad.push(`${rel}: contains CRLF`); break; }
+      if (buf[i] === 0x0a && buf[i - 1] === 0x0d) {
+        bad.push(`${rel}: contains CRLF`);
+        break;
+      }
     }
   }
   assert.deepEqual(bad, [], bad.join('\n'));
@@ -208,7 +275,8 @@ test('patch-added source lines are pure ASCII', () => {
           if (!l.startsWith('+')) continue;
           // eslint-disable-next-line no-control-regex
           const hit = l.match(/[^\x00-\x7F]/g);
-          if (hit) bad.push(`${rel}: ${f.path}: ${[...new Set(hit)].join('')} in ${l.slice(0, 80)}`);
+          if (hit)
+            bad.push(`${rel}: ${f.path}: ${[...new Set(hit)].join('')} in ${l.slice(0, 80)}`);
         }
       }
     }
@@ -221,7 +289,12 @@ test('the WebGL and media-values chains stay in their required order', () => {
   // earlier ones already applied, so their context contains Lobium lines. Reordering them silently
   // produces rejects that look like an upstream drift problem.
   const chains = [
-    ['fingerprint/webgl-surfaces.patch', 'fingerprint/host-gpu-profile.patch', 'fingerprint/webgl-runtime-safety.patch'],
+    [
+      'fingerprint/webgl-surfaces.patch',
+      'fingerprint/host-gpu-profile.patch',
+      'fingerprint/webgl-runtime-safety.patch',
+      'fingerprint/webgl-bypass-closures.patch',
+    ],
     ['fingerprint/screen-dpr.patch', 'fingerprint/media-values-device-size.patch'],
     ['core/build-gn.patch', 'core/config-channel.patch', 'core/navigator-ua-ch.patch'],
   ];
@@ -270,7 +343,10 @@ test('the native capability list, its TypeScript mirror, and the series agree', 
   assert.ok(native.size > 0, 'could not parse any capability names out of lobium_capabilities.cc');
 
   const tsBlock = /LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES = \[([\s\S]*?)\] as const;/.exec(tsSrc);
-  assert.ok(tsBlock, 'could not find LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES in the TypeScript mirror');
+  assert.ok(
+    tsBlock,
+    'could not find LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES in the TypeScript mirror',
+  );
   const ts = new Set([...tsBlock[1].matchAll(/'([a-z0-9-]+)'/g)].map((m) => m[1]));
 
   const missingInTs = [...native].filter((n) => !ts.has(n));
@@ -293,43 +369,92 @@ test('the native capability list, its TypeScript mirror, and the series agree', 
   );
   const tsVersion = /LOBIUM_CAPABILITY_CONTRACT_VERSION = (\d+)/.exec(tsSrc);
   assert.ok(nativeVersion && tsVersion, 'could not read the contract version from both sides');
-  assert.equal(nativeVersion[1], tsVersion[1], 'contract version mismatch between engine and sidecar');
+  assert.equal(
+    nativeVersion[1],
+    tsVersion[1],
+    'contract version mismatch between engine and sidecar',
+  );
 });
 
-test('every fingerprint patch in series has a capability that covers it', () => {
-  // Not a 1:1 mapping - several patches make up one capability (webgl-deep spans the renderer
-  // string, the caps, the extension list and shader precision). What this catches is a NEW
-  // fingerprint surface landing in the series with no capability at all, which would ship a hook the
-  // sidecar can never require and therefore can never guarantee.
-  const covered = {
-    'canvas-farbling': [/canvas/],
-    'audio-farbling': [/audio/],
-    'webgl-farbling': [/webgl-(surfaces|runtime-safety)/],
-    // host-gpu-profile is part of webgl-deep: it carries the UNMASKED_VENDOR/RENDERER strings and the
-    // MAX_* caps, which is the same surface as the rest of the WebGL1 hooks.
-    'webgl-deep': [/webgl/, /gpu-profile/],
-    'webgl2-deep': [/webgl/],
-    'screen-metrics': [/screen-|media-values/],
-    'mobile-persona': [/mobile-persona/],
-    'client-rects': [/client-rects/],
-    'media-devices': [/media-devices/],
-    'webgpu-adapter': [/webgpu/],
-    'native-timezone': [/timezone|locale/],
-    'font-isolation': [/font/],
-    'navigator-languages': [/navigator|language|user-agent|ua-/],
-    'network-accept-language': [/accept-language|net/],
-    'process-locale-timezone': [/locale|timezone/],
-    'native-geolocation': [/geolocation/],
-    'webrtc-policy': [/webrtc/],
-    'config-channel-v1': [/config-channel/],
-  };
-  const patterns = Object.values(covered).flat();
-  for (const p of series.filter((s) => s.startsWith('fingerprint/'))) {
-    const name = p.slice('fingerprint/'.length, -'.patch'.length);
+test('every fingerprint patch has an explicit mapping to emitted capabilities', () => {
+  const root = join(HERE, '..', '..');
+  const nativeSrc = readFileSync(join(root, 'lobium', 'src', 'lobium_capabilities.cc'), 'utf8');
+  const nativeNames = [...nativeSrc.matchAll(/^\s*"([a-z0-9-]+)",\s*$/gm)].map((m) => m[1]);
+  const winOnly = [...nativeSrc.matchAll(/names\.push_back\("([a-z0-9-]+)"\);/g)].map((m) => m[1]);
+  const native = new Set([...nativeNames, ...winOnly]);
+  const fingerprintPatches = series.filter((s) => s.startsWith('fingerprint/')).sort();
+  assert.deepEqual(
+    [...FINGERPRINT_PATCH_CAPABILITIES.keys()].sort(),
+    fingerprintPatches,
+    'the explicit capability map must name every fingerprint patch in the series, and no absent one',
+  );
+  for (const [patch, capabilities] of FINGERPRINT_PATCH_CAPABILITIES) {
+    assert.ok(capabilities.length > 0, `${patch} has no capability owner`);
+    for (const capability of capabilities) {
+      assert.ok(
+        native.has(capability),
+        `${patch} claims ${capability}, but the native binary does not emit that capability`,
+      );
+    }
+  }
+});
+
+test('series replay is pinned and audits the complete checkout footprint', () => {
+  const verifier = readFileSync(join(HERE, '..', '..', 'lobium', 'verify-series.mjs'), 'utf8');
+
+  for (const script of [
+    'verify-series.mjs',
+    'chain-delta.mjs',
+    'make-patch.mjs',
+    'patch-owners.mjs',
+    'regen-patch.mjs',
+  ]) {
+    const source = readFileSync(join(HERE, '..', '..', 'lobium', script), 'utf8');
+    assert.match(source, /import \{ resolveChromiumSrc \} from '\.\/chromium-src\.mjs';/);
+    assert.match(source, /const SRC = resolveChromiumSrc\(\);/);
+  }
+
+  assert.match(
+    verifier,
+    /CHROMIUM_REF="\\\$\\\{CHROMIUM_REF:-\(\[0-9\.\]\+\)\\\}"/,
+    'the verifier must derive the canonical pin from build.sh instead of carrying another constant',
+  );
+  assert.match(verifier, /refs\/tags\/\$\{PINNED_REF\}\^\{commit\}/);
+  assert.match(verifier, /headCommit !== pinnedCommit/);
+  assert.match(
+    verifier,
+    /\['show', `\$\{pinnedCommit\}:\$\{f\}`\]/,
+    'pristine replay blobs must come from the pinned commit, not an unchecked HEAD',
+  );
+  for (const command of [
+    "['diff', '--name-only', '-z', '--']",
+    "['diff', '--cached', '--name-only', '-z', '--']",
+    "['ls-files', '--others', '--exclude-standard', '-z']",
+  ]) {
     assert.ok(
-      patterns.some((re) => re.test(name)),
-      `fingerprint/${name}.patch is not covered by any capability in lobium_capabilities.cc - ` +
-        'a surface the sidecar cannot require is a surface it cannot guarantee',
+      verifier.includes(command),
+      `the verifier does not audit checkout footprint via ${command}`,
     );
   }
+  assert.match(verifier, /changed only by patch\(es\) absent from series/);
+  assert.match(verifier, /staged copy differs from its Lobium source/);
+});
+
+test('Windows patch application never infers success from GNU patch prose', () => {
+  const build = readFileSync(join(HERE, '..', '..', 'lobium', 'build.ps1'), 'utf8');
+
+  assert.match(build, /\[string\] \$SrcDir = \$env:LOBIUM_CHROMIUM_SRC/);
+  assert.doesNotMatch(build, /[A-Za-z]:\\lobium-build\\src/i);
+  assert.match(build, /\$Run -and \(ShouldRun 'patch'\) -and -not \$Force/);
+  assert.match(build, /git --no-optional-locks diff --quiet -- \./);
+  assert.match(build, /git --no-optional-locks diff --cached --quiet -- \./);
+  assert.match(build, /patch-created path already exists/);
+  assert.match(build, /stale patch artifact/);
+  assert.doesNotMatch(build, /\$out\s+-notmatch/);
+  assert.doesNotMatch(build, /SKIP \$p/);
+  assert.match(
+    build,
+    /if \(\$LASTEXITCODE -eq 0\) \{[\s\S]*?Ok \$p[\s\S]*?\} else \{[\s\S]*?Die "Patch \$p did not apply cleanly/,
+    'every non-zero patch exit status must stop the build',
+  );
 });

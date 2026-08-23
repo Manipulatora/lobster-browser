@@ -2,7 +2,7 @@
   "name": "@lobster/backend",
   "version": "0.0.0",
   "private": true,
-  "description": "Lobster Browser cloud SaaS API (NestJS) â€” auth, teams, encrypted profile sync, and billing.",
+  "description": "Lobster Browser cloud SaaS API (NestJS) — auth, teams, encrypted profile sync, and billing.",
   "scripts": {
     "build": "nest build",
     "start": "node dist/main.js",

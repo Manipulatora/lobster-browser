@@ -59,6 +59,8 @@ struct AppState {
     /// In memory only: persisting it would put a copy on this machine's disk for no benefit, since
     /// it is re-fetchable from the server by anyone who can sign in.
     account_key: Arc<Mutex<Option<vault_key::AccountKey>>>,
+    /// Exact-id ownership and cancellation for the browser loopback sign-in flow.
+    sign_in: cloud_auth::SignInCoordinator,
 }
 
 /// Returns the desktop agent version, sourced from Cargo at compile time.
@@ -175,7 +177,12 @@ async fn auth_status() -> Result<AuthState, String> {
 async fn auth_sign_in(
     state: State<'_, AppState>,
     mode: String,
+    attempt_id: String,
 ) -> Result<cloud_auth::CloudUser, String> {
+    let attempt = state
+        .sign_in
+        .register(&attempt_id)
+        .map_err(|e| e.to_string())?;
     let (handle, pending) = cloud_auth::begin(&mode).await.map_err(|e| e.to_string())?;
 
     open_in_browser(&handle.url).map_err(|e| {
@@ -185,7 +192,7 @@ async fn auth_sign_in(
         )
     })?;
 
-    let user = pending.wait().await.map_err(|e| e.to_string())?;
+    let user = attempt.wait(pending).await.map_err(|e| e.to_string())?;
     // Signing in is the moment the agent becomes usable (or the moment we learn this package cannot
     // use it). Handing the sidecar the answer now means a panel opened straight afterwards paints
     // the truth instead of the pre-sign-in "not configured" state.
@@ -193,6 +200,12 @@ async fn auth_sign_in(
         agent_proxy::push(sidecar, true).await;
     }
     Ok(user)
+}
+
+/// Stop exactly the browser handoff the UI names. A stale cancel cannot affect a later attempt.
+#[tauri::command]
+fn auth_cancel_sign_in(state: State<'_, AppState>, attempt_id: String) -> Result<bool, String> {
+    state.sign_in.cancel(&attempt_id).map_err(|e| e.to_string())
 }
 
 /// Whether this session can seal and open snapshots for other machines.
@@ -279,7 +292,7 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
             target.as_ptr(),
             std::ptr::null(),
             std::ptr::null(),
-            SW_SHOWNORMAL as i32,
+            SW_SHOWNORMAL,
         )
     };
 
@@ -405,25 +418,65 @@ struct EngineStatus {
     runtime_dir: String,
 }
 
+fn explicit_lobium_bin_from(
+    configured: Option<PathBuf>,
+    managed_runtime: Option<&std::path::Path>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(path) = configured else {
+        return Ok(None);
+    };
+    // `ensure_lobium_env` publishes the canonical downloaded path for the sidecar. That value is
+    // managed by the provisioner and therefore must be judged by the manifest stamp, not treated as
+    // a developer override. Any other set value is explicit and must either name a real file or fail
+    // actionably; silently falling through could report a managed runtime ready while the sidecar
+    // still inherits this stale path.
+    if managed_runtime.is_some_and(|runtime| path == runtime.join(CHROME_BIN)) {
+        return Ok(None);
+    }
+    if path.is_file() {
+        return Ok(Some(path));
+    }
+    Err(format!(
+        "LOBSTER_LOBIUM_BIN points to `{}`, but that path is not a browser executable file; update or unset the variable before provisioning",
+        path.display()
+    ))
+}
+
+fn explicit_lobium_bin() -> Result<Option<PathBuf>, String> {
+    let configured = std::env::var_os("LOBSTER_LOBIUM_BIN").map(PathBuf::from);
+    let managed_runtime = user_engine_runtime_dir();
+    explicit_lobium_bin_from(configured, managed_runtime.as_deref())
+}
+
 /// Whether the Lobium engine is installed. Drives the first-run download gate: the `.deb` ships without
 /// the engine (DOWNLOADER distribution model), so a fresh install reports `present: false`.
 #[tauri::command]
-fn engine_status() -> EngineStatus {
-    if let Some(bin) = std::env::var_os("LOBSTER_LOBIUM_BIN") {
-        let path = PathBuf::from(&bin);
-        if path.is_file() {
+fn engine_status(app: tauri::AppHandle) -> EngineStatus {
+    let explicit = match explicit_lobium_bin() {
+        Ok(explicit) => explicit,
+        Err(_) => {
+            let dir = user_engine_runtime_dir().unwrap_or_default();
             return EngineStatus {
-                present: true,
-                runtime_dir: path
-                    .parent()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                present: false,
+                runtime_dir: dir.to_string_lossy().into_owned(),
             };
         }
+    };
+    if let Some(path) = explicit {
+        return EngineStatus {
+            present: true,
+            runtime_dir: path
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        };
     }
     let dir = user_engine_runtime_dir().unwrap_or_default();
+    let manifest = app_resource_dir(&app).map(|resources| resources.join("engine-manifest.json"));
+    let present = engine_provision::resolve_source(manifest.as_deref())
+        .is_ok_and(|source| engine_provision::engine_matches_source(&dir, &source));
     EngineStatus {
-        present: engine_provision::engine_present(&dir),
+        present,
         runtime_dir: dir.to_string_lossy().into_owned(),
     }
 }
@@ -441,17 +494,20 @@ struct EngineDownloadProgress {
 #[tauri::command]
 async fn provision_engine(app: tauri::AppHandle) -> Result<(), String> {
     use tauri::Emitter;
+    if explicit_lobium_bin()?.is_some() {
+        return Ok(());
+    }
     let runtime_dir = user_engine_runtime_dir().ok_or_else(|| {
         "cannot resolve the engine runtime directory (no LOCALAPPDATA/USERPROFILE on Windows, \
          no HOME otherwise)"
             .to_string()
     })?;
-    if engine_provision::engine_present(&runtime_dir) {
-        return Ok(());
-    }
     let manifest = app_resource_dir(&app).map(|r| r.join("engine-manifest.json"));
     let source = engine_provision::resolve_source(manifest.as_deref())
         .map_err(|e| format!("no engine source configured: {e:#}"))?;
+    if engine_provision::engine_matches_source(&runtime_dir, &source) {
+        return Ok(());
+    }
     let app_for_progress = app.clone();
     engine_provision::provision(&source, &runtime_dir, move |received, total| {
         let _ = app_for_progress.emit(
@@ -1764,6 +1820,7 @@ pub fn run() {
                 profiles_dir: profiles_dir.clone(),
                 cipher: cipher.clone(),
                 account_key: Arc::new(Mutex::new(None)),
+                sign_in: cloud_auth::SignInCoordinator::default(),
             });
 
             // Bring this machine and the account into agreement, behind first paint. A second machine
@@ -1802,6 +1859,7 @@ pub fn run() {
             app_version,
             auth_status,
             auth_sign_in,
+            auth_cancel_sign_in,
             auth_sign_out,
             engine_status,
             provision_engine,
@@ -1853,7 +1911,9 @@ pub fn run() {
 
 #[cfg(test)]
 mod lifecycle_tests {
-    use super::{first_font_pack_dir, remove_profile_data_dir};
+    use super::{
+        explicit_lobium_bin_from, first_font_pack_dir, remove_profile_data_dir, CHROME_BIN,
+    };
 
     #[cfg(target_os = "linux")]
     use super::packaged_runtime_needs_software_gpu;
@@ -1868,6 +1928,43 @@ mod lifecycle_tests {
         std::fs::write(packed.join("font-pack.manifest.json"), b"{}").unwrap();
 
         assert_eq!(first_font_pack_dir([empty, packed.clone()]), Some(packed));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_explicit_lobium_override_fails_instead_of_falling_through_to_managed() {
+        let root =
+            std::env::temp_dir().join(format!("lobster-explicit-engine-{}", uuid::Uuid::new_v4()));
+        let managed_runtime = root.join("managed");
+        let missing_override = root.join("missing").join(CHROME_BIN);
+
+        let error = explicit_lobium_bin_from(
+            Some(missing_override.clone()),
+            Some(managed_runtime.as_path()),
+        )
+        .expect_err("a missing developer override must not silently use the managed engine");
+        assert!(error.contains("LOBSTER_LOBIUM_BIN"), "{error}");
+        assert!(error.contains("update or unset"), "{error}");
+
+        std::fs::create_dir_all(missing_override.parent().unwrap()).unwrap();
+        std::fs::write(&missing_override, b"browser").unwrap();
+        assert_eq!(
+            explicit_lobium_bin_from(
+                Some(missing_override.clone()),
+                Some(managed_runtime.as_path())
+            )
+            .unwrap(),
+            Some(missing_override),
+            "a real explicit developer binary remains supported"
+        );
+
+        // The canonical path is different: `ensure_lobium_env` publishes it for the sidecar, while
+        // status/provision must still evaluate the exact manifest stamp and may safely install there.
+        let canonical = managed_runtime.join(CHROME_BIN);
+        assert_eq!(
+            explicit_lobium_bin_from(Some(canonical), Some(managed_runtime.as_path())).unwrap(),
+            None
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

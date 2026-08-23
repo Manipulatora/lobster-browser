@@ -5,6 +5,7 @@ import {
   gpuTierFromRenderer,
 } from './device-tiers.js';
 import { isPlausibleDisplayMode } from './displays.js';
+import { webgpuIdentityMatches } from './webgpu-identity.js';
 import type {
   AndroidFingerprint,
   Fingerprint,
@@ -749,6 +750,11 @@ export function validateFingerprintCoherence(fp: Fingerprint): string[] {
         `WebGL renderer on Linux should present a Mesa/OpenGL/ANGLE backend: ${fp.webgl.renderer}`,
       );
     }
+  }
+  if (!fp.webgpu) {
+    issues.push('WebGPU adapter identity is missing; the engine would expose the host GPU');
+  } else if (!webgpuIdentityMatches(fp.webgl, fp.webgpu)) {
+    issues.push('WebGPU adapter identity does not match the WebGL renderer');
   }
 
   // --- CPU architecture must agree with the GPU (Apple-Silicon coherence, FP-3) --------------------

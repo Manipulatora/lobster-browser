@@ -255,6 +255,8 @@ export interface AndroidFingerprint {
   navigator: NavigatorFingerprint;
   screen: ScreenFingerprint;
   webgl: WebGlFingerprint;
+  /** Derived atomically from `webgl`; Android WebGL must never sit beside the host WebGPU adapter. */
+  webgpu: WebGpuFingerprint;
   locale: LocaleFingerprint;
   fonts: string[];
 }

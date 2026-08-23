@@ -105,7 +105,7 @@ test('profile draft hydrates and serializes the complete editable desktop shape'
   expect(draft.cpuCores).toBe('12');
   expect(draft.ramSize).toBe('4');
   expect(draft.fonts.available).toContain('Arial');
-  expect(draft.fonts.available.length).toBeGreaterThan(400);
+  expect(draft.fonts.available.length).toBeGreaterThan(100);
   expect(draft.fonts.selected).toEqual(['Arial']);
   expect(draft.mediaSpeakers).toBe('3');
   expect(draft.proxyId).toBe('proxy-1');
@@ -199,8 +199,10 @@ test('Android is selectable and its device identity round-trips', () => {
 });
 
 test('rich font and WebGL catalogs remain exposed to the profile editor', () => {
-  expect(fontPresetsForTarget('windows').length).toBeGreaterThan(400);
-  expect(fontPresetsForTarget('macos_arm').length).toBeGreaterThan(400);
+  // The verified catalogs intentionally shrank when generated family aliases and style faces were
+  // removed. Guard useful breadth here, not the obsolete pre-cleanup row count.
+  expect(fontPresetsForTarget('windows').length).toBeGreaterThan(100);
+  expect(fontPresetsForTarget('macos_arm').length).toBeGreaterThan(350);
   expect(fontPresetsForTarget('linux').length).toBeGreaterThan(300);
   expect(rendererPresetsForTarget('windows').length).toBeGreaterThan(100);
   expect(rendererPresetsForTarget('linux').length).toBeGreaterThan(100);
@@ -253,15 +255,15 @@ test('two default drafts describe two different machines, and either one is pinn
 });
 
 test('the desktop editor offers only values the launch gate accepts', () => {
-  // Coherence refuses deviceMemory < 4 on a desktop UA, so a picker offering 2 GB could only ever
-  // produce a profile that saves and then cannot start.
+  // Chrome 152 widened the desktop ladder to 2..32 GB. Values below that floor still must not be
+  // offered or accepted by an editor whose output is launchable.
   expect(DEVICE_MEMORY_OPTIONS.every((value) => value >= DESKTOP_MIN_DEVICE_MEMORY)).toBe(true);
   const draft = {
     ...createProfileDraft('windows'),
     name: 'Low memory',
     deviceSource: 'pinned' as const,
   };
-  const messages = validateProfileDraft({ ...draft, ramSize: '2' }).map((issue) => issue.message);
+  const messages = validateProfileDraft({ ...draft, ramSize: '1' }).map((issue) => issue.message);
   expect(messages).toContain('Choose a Lobium-compatible reported memory value.');
 
   // 1536x864 is a 1080p panel at 125%; claiming it at 1 states a panel nobody manufactures.

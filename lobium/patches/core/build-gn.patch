@@ -1,20 +1,20 @@
-Lobium â€” register the //components/lobium_fp config-channel module in the build graph.
+Lobium — register the //components/lobium_fp config-channel module in the build graph.
 
 Wires the added first-party module (components/lobium_fp/, staged by lobium/build.sh) into the three
 Blink targets whose hooks read lobium::LobiumFpConfig::Current():
   - blink core   (component("core")):     deps += //components/lobium_fp ; core/DEPS   += +components/lobium_fp
   - blink common (source_set("common")):  deps += //components/lobium_fp ; common/DEPS += +components/lobium_fp
-    (owns approximated_device_memory.cc â€” the deviceMemory single source)
+    (owns approximated_device_memory.cc — the deviceMemory single source)
   - blink modules (component("modules")):  deps += //components/lobium_fp ; modules/DEPS += +components/lobium_fp
-    (owns webgl_rendering_context_base.cc â€” the WebGL vendor/renderer hook)
+    (owns webgl_rendering_context_base.cc — the WebGL vendor/renderer hook)
 
 Kept minimal, and in the //components first-party root rather than //third_party (which the license
 scanner tools/licenses.py rejects for a directory lacking README.chromium/LICENSE, breaking the
 is_official_build credits step). COMPILE-VERIFIED on Chromium 152.0.7928.0.
 
-  â€¢ components/embedder_support/BUILD.gn â€” user_agent target deps on //components/lobium_fp (native UA header + Sec-CH-UA metadata).
-  â€¢ content/renderer/BUILD.gn â€” renderer startup applies configured ICU locale before Blink/V8 init.
-  â€¢ chrome/browser/ui/BUILD.gn â€” the separate :lobium_profile_icon target (browser-process Skia, //ui/gfx),
+  • components/embedder_support/BUILD.gn — user_agent target deps on //components/lobium_fp (native UA header + Sec-CH-UA metadata).
+  • content/renderer/BUILD.gn — renderer startup applies configured ICU locale before Blink/V8 init.
+  • chrome/browser/ui/BUILD.gn — the separate :lobium_profile_icon target (browser-process Skia, //ui/gfx),
     kept out of the Blink-facing :lobium_fp so no renderer target inherits the views drawing stack.
 
 diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn

@@ -1,4 +1,5 @@
 import {
+  coherentGpuIdentity,
   deriveAndroidFingerprint,
   resolveFingerprintPersonaModes,
   validateAndroidFingerprintCoherence,
@@ -29,6 +30,7 @@ import {
   type AndroidMirrorOptions,
 } from './android-mirror.js';
 import { resolveDesktopWorkArea } from './device-frame.js';
+import { assertValidFingerprintSeed } from './fingerprint-seed.js';
 
 const DEFAULT_HARDWARE_NOISE: HardwareNoisePolicy = {
   webgl: true,
@@ -100,11 +102,12 @@ function applyAndroidOverrides(
   overrides: FingerprintOverrides | undefined,
 ): AndroidFingerprint {
   if (!overrides) return fp;
+  const webgl = overrides.webgl ? { ...fp.webgl, ...overrides.webgl } : fp.webgl;
   const next: AndroidFingerprint = {
     ...fp,
     navigator: { ...fp.navigator, ...overrides.navigator },
     screen: { ...fp.screen, ...overrides.screen },
-    webgl: { ...fp.webgl, ...overrides.webgl },
+    ...coherentGpuIdentity(webgl),
     locale: { ...fp.locale, ...overrides.locale },
     fonts: overrides.fonts ?? fp.fonts,
     android: { ...fp.android },
@@ -142,6 +145,7 @@ export async function startAndroidProfile(
   params: StartProfileParams,
   opts: StartAndroidProfileOptions = {},
 ): Promise<LaunchResult> {
+  assertValidFingerprintSeed(params.fingerprintSeed, params.profileId);
   if (
     runningAndroidProfiles.has(params.profileId) ||
     startingAndroidProfiles.has(params.profileId)

@@ -45,14 +45,13 @@ std::string MediaDeviceHmacId(std::string_view origin,
 // `deviceSalt` in the config supersedes this; pass that through directly when present.
 std::string MediaDeviceSaltFromSeed(uint32_t seed);
 
-// The salt to use when the profile asks for NON-stable device ids.
+// Mint the random token Chrome scopes to one document's media-device identities.
 //
-// Turning stability off is Chrome's non-persistent-id mode, not an id-free mode: when persistent
-// device ids are disallowed Chrome appends a per-document token to the salt so the ids rotate
-// (content/browser/media/media_devices_util.cc, GotSalt), and it still returns them. A profile that
-// answered a permitted enumeration with empty deviceIds would be describing a browser state that
-// does not exist. Random per process, which is where a renderer's documents already live.
-std::string MediaDeviceEphemeralSalt();
+// The caller must create this exactly once for each MediaDevices instance and retain it for that
+// instance's lifetime. Calling it on every enumerateDevices() would make ids unstable inside one
+// document; caching it globally would let groupId and non-persistent deviceId link separate
+// documents that happen to share a renderer process.
+std::string CreateMediaDeviceDocumentSalt();
 
 // The label Chrome reports for one enumerated device, for a persona on `ua_platform`.
 //

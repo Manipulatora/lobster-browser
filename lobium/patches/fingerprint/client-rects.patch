@@ -20,6 +20,13 @@ call returned two different numbers for the same box: a contradiction no honest 
 and a cheaper tell than the sub-pixel noise the farbling hides. Both paths now farble with the same
 kernel, the same seed and the same policy.
 
+IntersectionGeometry calculates intersectionRatio and its threshold bucket before converting and
+farbling the exposed rectangles. Leaving those cached values untouched made the ratio disagree with
+intersectionRect.area / boundingClientRect.area and could deliver a callback for a threshold the
+entry itself had not crossed. The hook recalculates both fields from the final exposed geometry. It
+also applies the root's own policy to an explicit Element rootBounds; implicit viewport and Document
+roots are not Element client rects and remain untouched.
+
 The policy - "does this box carry HOST entropy, or is it pure CSS arithmetic?" - moved into
 components/lobium_fp (lobium::ClientRectCarriesHostEntropy) precisely so the two callers cannot
 drift apart again. Each caller still does its own ComputedStyle lookup and passes the two booleans.
@@ -163,7 +170,7 @@ index 059682036f50d..cd0c1da2a8dec 100644
  #include "third_party/blink/renderer/core/frame/local_frame.h"
  #include "third_party/blink/renderer/core/frame/local_frame_view.h"
  #include "third_party/blink/renderer/core/frame/settings.h"
-@@ -703,6 +705,36 @@ void IntersectionGeometry::ComputeGeometry(const RootGeometry& root_geometry,
+@@ -703,6 +705,72 @@ void IntersectionGeometry::ComputeGeometry(const RootGeometry& root_geometry,
                                                             *target);
      AdjustForAbsoluteZoom::AdjustRectMaybeExcludingCSSZoom(root_rect_, *root);
    }
@@ -177,23 +184,59 @@ index 059682036f50d..cd0c1da2a8dec 100644
 +  // therefore returned two different numbers for the same box, which is a contradiction no honest
 +  // browser produces and a cheaper tell than the sub-pixel noise the farbling hides.
 +  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
-+      cfg && cfg->seeds.client_rects && target && target->GetNode()) {
-+    if (const auto* element = DynamicTo<Element>(target->GetNode())) {
-+      if (const ComputedStyle* style = element->GetComputedStyle()) {
-+        const bool w_fixed = style->Width().IsFixed();
-+        const bool h_fixed = style->Height().IsFixed();
-+        const uint32_t seed = cfg->seeds.client_rects;
-+        // Each rect is judged on its own geometry, exactly as the client-rect list is.
-+        auto farble = [&](gfx::RectF& r) {
-+          if (!lobium::ClientRectCarriesHostEntropy(r.width(), r.height(), w_fixed, h_fixed)) {
-+            return;
-+          }
-+          float x = r.x(), y = r.y(), w = r.width(), h = r.height();
-+          lobium::FarbleClientRect(&x, &y, &w, &h, seed);
-+          r.SetRect(x, y, w, h);
-+        };
-+        farble(target_rect_);
-+        farble(intersection_rect_);
++      cfg && cfg->seeds.client_rects && target->GetNode()) {
++    const uint32_t seed = cfg->seeds.client_rects;
++    auto farble_for_element = [&](gfx::RectF& rect, const Element& element) {
++      const ComputedStyle* style = element.GetComputedStyle();
++      if (!style || !lobium::ClientRectCarriesHostEntropy(
++                        rect.width(), rect.height(), style->Width().IsFixed(),
++                        style->Height().IsFixed())) {
++        return false;
++      }
++      float x = rect.x(), y = rect.y(), width = rect.width(), height = rect.height();
++      lobium::FarbleClientRect(&x, &y, &width, &height, seed);
++      rect.SetRect(x, y, width, height);
++      return true;
++    };
++
++    bool did_farble = false;
++    if (const auto* target_element = DynamicTo<Element>(target->GetNode())) {
++      // Each target-derived rect is judged on its own geometry, exactly as the client-rect list is.
++      did_farble |= farble_for_element(target_rect_, *target_element);
++      did_farble |= farble_for_element(intersection_rect_, *target_element);
++    }
++    // An explicit Element root exposes rootBounds through the same entry. Farbling only the target
++    // and intersection would leave that third layout-derived rectangle as both a leak and a direct
++    // contradiction when the target fills the root. Implicit viewport and Document roots are not
++    // Elements and stay untouched.
++    if (!RootIsImplicit() && root->GetNode()) {
++      if (const auto* root_element = DynamicTo<Element>(root->GetNode())) {
++        did_farble |= farble_for_element(root_rect_, *root_element);
++      }
++    }
++
++    if (did_farble) {
++      // Upstream calculated these fields from the pre-farbling rectangles. Recalculate both from
++      // the values the entry actually exposes; otherwise intersectionRatio disagrees with the two
++      // visible areas and threshold callbacks describe a different ratio from the callback entry.
++      if (does_intersect) {
++        const gfx::RectF& comparison_rect =
++            ShouldTrackFractionOfRoot() ? root_rect_ : target_rect_;
++        const bool empty_override =
++            !ShouldTrackFractionOfRoot() && pre_margin_target_rect_is_empty;
++        if (comparison_rect.IsEmpty() || empty_override) {
++          intersection_ratio_ = 1;
++        } else {
++          const float intersection_area = intersection_rect_.size().GetArea();
++          const float area_of_interest = comparison_rect.size().GetArea();
++          intersection_ratio_ =
++              std::min(intersection_area / area_of_interest, 1.f);
++        }
++        threshold_index_ =
++            FirstThresholdGreaterThan(intersection_ratio_, thresholds);
++      } else {
++        intersection_ratio_ = 0;
++        threshold_index_ = 0;
 +      }
 +    }
 +  }

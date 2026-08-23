@@ -1,10 +1,13 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { authClient, type CloudUser } from '../../api/auth';
 import siteLogo from '../../assets/brand/site-logo.png';
 import { Button } from '../../ui';
+import { SignInAttemptGate } from './signInAttempt';
 
 interface AuthScreenProps {
+  onAttemptStarted: () => void;
+  onUnauthenticatedAttemptFinished: () => void;
   onAuthenticated: (user: CloudUser) => void;
 }
 
@@ -27,19 +30,79 @@ interface AuthScreenProps {
  * unmissable Cancel. Nothing else: the instruction it used to print ("finish signing in in the
  * browser window that just opened") describes something already happening in front of the user.
  */
-export function AuthScreen({ onAuthenticated }: AuthScreenProps): JSX.Element {
+export function AuthScreen({
+  onAttemptStarted,
+  onUnauthenticatedAttemptFinished,
+  onAuthenticated,
+}: AuthScreenProps): JSX.Element {
   const [waiting, setWaiting] = useState<'signup' | 'login' | null>(null);
+  const [cancelState, setCancelState] = useState<'cancelling' | 'finishing' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const activeAttempt = useRef<SignInAttemptGate | null>(null);
+
+  useEffect(
+    () => () => {
+      const attempt = activeAttempt.current;
+      if (attempt) {
+        activeAttempt.current = null;
+        void attempt
+          .requestCancel((attemptId) => authClient.cancelSignIn(attemptId))
+          .catch(() => undefined);
+      }
+    },
+    [],
+  );
 
   async function start(mode: 'signup' | 'login'): Promise<void> {
+    if (activeAttempt.current) return;
+    const attempt = new SignInAttemptGate();
+    activeAttempt.current = attempt;
+    // Invalidate boot-time auth_status before its old-account response can unmount this attempt.
+    onAttemptStarted();
     setError(null);
+    setCancelState(null);
     setWaiting(mode);
     try {
-      onAuthenticated(await authClient.signIn(mode));
+      const user = await authClient.signIn(mode, attempt.id);
+      if (activeAttempt.current === attempt && (await attempt.acceptsCompletion())) {
+        activeAttempt.current = null;
+        setWaiting(null);
+        setCancelState(null);
+        onAuthenticated(user);
+      }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (activeAttempt.current === attempt && (await attempt.acceptsCompletion())) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setWaiting(null);
+      if (activeAttempt.current === attempt) {
+        activeAttempt.current = null;
+        setWaiting(null);
+        setCancelState(null);
+        // Starting this attempt invalidated boot-time token-A answers. If no new account was
+        // accepted, re-check local/native auth so a still-valid A is not hidden until restart.
+        onUnauthenticatedAttemptFinished();
+      }
+    }
+  }
+
+  async function cancel(): Promise<void> {
+    const attempt = activeAttempt.current;
+    if (!attempt) return;
+    setError(null);
+    setCancelState('cancelling');
+    try {
+      const accepted = await attempt.requestCancel((attemptId) =>
+        authClient.cancelSignIn(attemptId),
+      );
+      // `false` means credential commit won the Rust-side lock. Keep waiting for its real result.
+      if (activeAttempt.current === attempt && !accepted) setCancelState('finishing');
+    } catch (err: unknown) {
+      // Cancellation was not confirmed, so the original attempt remains authoritative and visible.
+      if (activeAttempt.current === attempt) {
+        setCancelState(null);
+        setError(err instanceof Error ? err.message : String(err));
+      }
     }
   }
 
@@ -69,14 +132,23 @@ export function AuthScreen({ onAuthenticated }: AuthScreenProps): JSX.Element {
               <span className="auth-screen__dot" />
               <span className="auth-screen__dot" />
             </div>
-            {/* Cancelling only stops this window waiting; the Rust side drops its loopback
-                listener when the attempt is abandoned. */}
+            {/* Rust confirms the exact attempt was cancelled before this completion is ignored. */}
             <Button
               className="auth-screen__button auth-screen__cancel"
-              onClick={() => setWaiting(null)}
+              disabled={cancelState !== null}
+              onClick={() => void cancel()}
             >
-              Cancel
+              {cancelState === 'cancelling'
+                ? 'Cancelling…'
+                : cancelState === 'finishing'
+                  ? 'Finishing…'
+                  : 'Cancel'}
             </Button>
+            {error ? (
+              <p className="auth-screen__error" role="alert">
+                {error}
+              </p>
+            ) : null}
           </>
         ) : (
           <>

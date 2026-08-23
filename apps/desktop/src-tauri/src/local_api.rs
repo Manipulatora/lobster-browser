@@ -187,6 +187,11 @@ pub async fn start_profile_via_sidecar(
         let profile = profile_store::get(&conn, cipher, profile_id)
             .map_err(StartError::Failed)?
             .ok_or_else(|| StartError::NotFound(profile_id.to_string()))?;
+        // Defence in depth at the last Rust boundary before identity derivation. Store reads already
+        // reject corrupt persisted seeds, but keeping the launch invariant explicit prevents a future
+        // alternate profile source from handing an arbitrary string to the sidecar.
+        profile_store::validate_fingerprint_seed(&profile.fingerprint_seed)
+            .map_err(StartError::Failed)?;
         if !profile_store::verify_password(&conn, profile_id, password)
             .map_err(StartError::Failed)?
         {
@@ -655,52 +660,20 @@ mod tests {
         Arc::new(Mutex::new(conn))
     }
 
-    fn sidecar_path() -> String {
-        std::env::var("LOBSTER_SIDECAR").unwrap_or_else(|_| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../packages/engine-runner/dist/index.js")
-                .to_string_lossy()
-                .into_owned()
-        })
-    }
-
-    fn lifecycle_fake_sidecar() -> (std::path::PathBuf, std::path::PathBuf) {
+    fn lifecycle_temp_root() -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
             "lobster-lifecycle-sidecar-{}",
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let script = root.join("sidecar.mjs");
-        std::fs::write(
-            &script,
-            r#"import readline from 'node:readline';
-const rl = readline.createInterface({ input: process.stdin });
-rl.on('line', (line) => {
-  const request = JSON.parse(line);
-  if (request.method === 'startProfile') {
-    if (request.params.profileName === 'Fail import') {
-      process.stdout.write(JSON.stringify({ id: request.id, ok: false, error: { code: 'inject', message: 'cookie injection failed' } }) + '\n');
-      return;
-    }
-    const applied = Boolean(request.params.cookiesImport);
-    process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: {
-      profileId: request.params.profileId, pid: 7, ws: 'ws://test', debuggerAddress: '127.0.0.1:7',
-      cookieImportApplied: applied, proxyHost: request.params.proxy?.host ?? null
-    } }) + '\n');
-    return;
-  }
-  process.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { running: [] } }) + '\n');
-});"#,
-        )
-        .unwrap();
-        (root, script)
+        root
     }
 
     #[tokio::test]
     async fn start_profile_missing_profile_returns_not_found() {
         let db = mem_db();
         let cipher = SecretCipher::new(&[42u8; 32]);
-        let sidecar = SidecarClient::spawn("true", "")
+        let sidecar = SidecarClient::spawn_test_sidecar("rpc")
             .await
             .expect("spawn fake sidecar");
         let profiles_dir = std::env::temp_dir();
@@ -719,6 +692,35 @@ rl.on('line', (line) => {
     }
 
     #[tokio::test]
+    async fn start_profile_preserves_a_legacy_persisted_seed_at_the_sidecar_boundary() {
+        let db = mem_db();
+        let cipher = SecretCipher::new(&[42u8; 32]);
+        let profile = {
+            let conn = db.lock().unwrap();
+            let profile = profile_store::create(&conn, &cipher, test_input("Legacy seed")).unwrap();
+            conn.execute(
+                "UPDATE profiles SET fingerprint_seed = 'deadbeef' WHERE id = ?1",
+                [&profile.id],
+            )
+            .unwrap();
+            profile
+        };
+        let sidecar = SidecarClient::spawn_test_sidecar("rpc").await.unwrap();
+        let root = lifecycle_temp_root();
+
+        let launched =
+            start_profile_via_sidecar(&db, &cipher, &sidecar, &root, &profile.id, None, true)
+                .await
+                .expect("a bounded legacy identity must remain launchable");
+        assert_eq!(
+            launched.get("fingerprintSeed").and_then(Value::as_str),
+            Some("deadbeef"),
+            "launch must preserve identity rather than silently reseeding"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn start_profile_rejects_a_stale_stored_proxy_reference_before_sidecar_launch() {
         let db = mem_db();
         let cipher = SecretCipher::new(&[42u8; 32]);
@@ -728,7 +730,7 @@ rl.on('line', (line) => {
             let conn = db.lock().unwrap();
             profile_store::create(&conn, &cipher, input).unwrap()
         };
-        let sidecar = SidecarClient::spawn("true", "")
+        let sidecar = SidecarClient::spawn_test_sidecar("rpc")
             .await
             .expect("spawn fake sidecar");
         let error = start_profile_via_sidecar(
@@ -764,10 +766,8 @@ rl.on('line', (line) => {
                 profile_store::create(&conn, &cipher, failure_input).unwrap(),
             )
         };
-        let (root, script) = lifecycle_fake_sidecar();
-        let sidecar = SidecarClient::spawn("node", script.to_string_lossy().as_ref())
-            .await
-            .unwrap();
+        let root = lifecycle_temp_root();
+        let sidecar = SidecarClient::spawn_test_sidecar("rpc").await.unwrap();
 
         let first =
             start_profile_via_sidecar(&db, &cipher, &sidecar, &root, &success.id, None, true)
@@ -833,10 +833,8 @@ rl.on('line', (line) => {
             input.proxy_id = Some("px_fresh".to_string());
             profile_store::create(&conn, &cipher, input).unwrap()
         };
-        let (root, script) = lifecycle_fake_sidecar();
-        let sidecar = SidecarClient::spawn("node", script.to_string_lossy().as_ref())
-            .await
-            .unwrap();
+        let root = lifecycle_temp_root();
+        let sidecar = SidecarClient::spawn_test_sidecar("rpc").await.unwrap();
         let first =
             start_profile_via_sidecar(&db, &cipher, &sidecar, &root, &profile.id, None, true)
                 .await
@@ -948,7 +946,15 @@ rl.on('line', (line) => {
         input.engine = "lobium".to_string();
         let profile = profile_store::create(&conn, &cipher, input).unwrap();
         let db = Arc::new(Mutex::new(conn));
-        let sidecar = SidecarClient::spawn("node", &sidecar_path())
+        let node_path = std::env::var("LOBSTER_NODE_BIN")
+            .expect("set LOBSTER_NODE_BIN to the Node executable for the real-engine E2E");
+        let sidecar_path = std::env::var("LOBSTER_SIDECAR").unwrap_or_else(|_| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../packages/engine-runner/dist/index.js")
+                .to_string_lossy()
+                .into_owned()
+        });
+        let sidecar = SidecarClient::spawn(&node_path, &sidecar_path)
             .await
             .expect("spawn real sidecar");
 

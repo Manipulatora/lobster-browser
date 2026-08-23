@@ -1,0 +1,13 @@
+# Chromium patch files are byte-sensitive: GNU patch tolerates CRLF, but git apply rejects it.
+# A unified-diff context marker is one literal space on otherwise blank lines;
+# do not report that required syntax as trailing whitespace in nested patches.
+*.patch text eol=lf whitespace=-blank-at-eol
+/lobium/patches/series text eol=lf
+
+# These tracked files intentionally use CRLF; do not mistake the carriage return for whitespace.
+/.github/workflows/ci.yml whitespace=cr-at-eol
+/package-lock.json whitespace=cr-at-eol
+/apps/web/package-lock.json whitespace=cr-at-eol
+/scripts/bundle-sidecar.mjs whitespace=cr-at-eol
+/apps/desktop/src-tauri/src/engine_provision.rs whitespace=cr-at-eol
+/apps/desktop/src-tauri/src/sidecar.rs whitespace=cr-at-eol

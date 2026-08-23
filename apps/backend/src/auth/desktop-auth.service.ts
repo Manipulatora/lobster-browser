@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import { AuthService, type AuthResult } from './auth.service';
 import { DESKTOP_AUTH_REPOSITORY, type DesktopAuthRepository } from './desktop-auth.repository';
@@ -114,17 +114,16 @@ export class DesktopAuthService {
       throw new UnauthorizedException('invalid or expired authorization code');
     };
 
-    const grant = await this.repo.redeem(sha256(args.code), new Date());
-    // The claim already enforced existence, expiry and single-use atomically. Anything else is
-    // checked below against the row it returned.
+    const grant = await this.repo.redeem(
+      sha256(args.code),
+      args.state,
+      sha256Base64Url(args.codeVerifier),
+      new Date(),
+    );
+    // The atomic claim includes the PKCE/state proof as well as existence, expiry and single-use.
+    // A local process that intercepts the browser redirect therefore cannot burn the legitimate
+    // launcher's code merely by racing it with a deliberately wrong verifier.
     if (!grant) return invalid();
-
-    if (!constantTimeEquals(grant.state, args.state)) return invalid();
-
-    // PKCE proof: the caller must present the preimage of the challenge submitted at issue time.
-    if (!constantTimeEquals(grant.codeChallenge, sha256Base64Url(args.codeVerifier))) {
-      return invalid();
-    }
 
     // Re-resolve the user rather than trusting the stored id: an account deleted between issue and
     // redemption must not yield a working token.
@@ -143,16 +142,4 @@ function sha256(input: string): string {
 /** base64url SHA-256, the PKCE challenge encoding (RFC 7636 S4.2). */
 function sha256Base64Url(input: string): string {
   return createHash('sha256').update(input, 'utf8').digest('base64url');
-}
-
-/**
- * Constant-time string comparison. A plain `===` short-circuits on the first differing byte, which
- * leaks through timing how much of a guess was correct — enough to reconstruct a secret one byte
- * at a time. Length is compared first because `timingSafeEqual` throws on mismatched lengths, and
- * length is not the secret.
- */
-function constantTimeEquals(a: string, b: string): boolean {
-  const bufA = Buffer.from(a, 'utf8');
-  const bufB = Buffer.from(b, 'utf8');
-  return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
 }

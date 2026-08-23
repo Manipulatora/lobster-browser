@@ -40,7 +40,7 @@ test(
       profileId: 'sp1',
       engine: 'lobium',
       os: 'windows',
-      fingerprintSeed: 'abc123def456abc1',
+      fingerprintSeed: 'abc123def456abc123def456abc123de',
       userDataDir,
       headless: true,
     };

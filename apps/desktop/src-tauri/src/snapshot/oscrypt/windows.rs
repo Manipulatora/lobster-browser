@@ -45,8 +45,8 @@ impl WindowsKeyring {
         let key = local_state::resolve_key(
             local_state,
             allow_create,
-            |raw| dpapi_protect(raw),
-            |wrapped| dpapi_unprotect(wrapped),
+            dpapi_protect,
+            dpapi_unprotect,
             || {
                 use aes_gcm::aead::rand_core::RngCore;
                 let mut raw = [0u8; AES256_KEY_LEN];

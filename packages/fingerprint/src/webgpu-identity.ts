@@ -142,3 +142,34 @@ export function webgpuIdentityFor(webgl: WebGlFingerprint): WebGpuIdentity {
     adapterType: integrated ? 'integrated' : 'discrete',
   };
 }
+
+/**
+ * Return the two page-visible GPU identities as one inseparable update.
+ *
+ * Renderer policy can replace WebGL after the seed-selected catalog identity has already been built
+ * (host calibration, normalized-host mode, a validated preset, or a legacy override). Callers must
+ * replace WebGPU in the same object spread or the two APIs name different cards.
+ */
+export function coherentGpuIdentity(webgl: WebGlFingerprint): {
+  webgl: WebGlFingerprint;
+  webgpu: WebGpuIdentity;
+} {
+  return { webgl, webgpu: webgpuIdentityFor(webgl) };
+}
+
+/** True only when every configured WebGPU identity field is the value derived from this WebGL GPU. */
+export function webgpuIdentityMatches(
+  webgl: WebGlFingerprint,
+  webgpu: WebGpuIdentity | undefined,
+): boolean {
+  if (!webgpu) return false;
+  const expected = webgpuIdentityFor(webgl);
+  return (
+    webgpu.vendor === expected.vendor &&
+    webgpu.architecture === expected.architecture &&
+    webgpu.device === expected.device &&
+    webgpu.description === expected.description &&
+    webgpu.driver === expected.driver &&
+    webgpu.adapterType === expected.adapterType
+  );
+}

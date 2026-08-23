@@ -23,11 +23,12 @@
 
 namespace lobium {
 
-// Contract version. Bump only for a BREAKING change to the manifest's shape - adding a capability
-// name is backward-compatible, because the sidecar checks for the names it needs rather than for an
-// exact set. A bump requires a matching change to LOBIUM_CAPABILITY_CONTRACT_VERSION in
-// packages/engine-runner/src/lobium-capabilities.ts, which rejects any other version.
-inline constexpr int kCapabilityContractVersion = 1;
+// Contract version. This covers both the JSON shape and the behavioural guarantees represented by
+// each capability name. Bump whenever an older binary could truthfully print the same names while
+// implementing weaker semantics; otherwise a stale runtime can pass the launch gate. A bump requires
+// the matching change to LOBIUM_CAPABILITY_CONTRACT_VERSION in the sidecar, which rejects every
+// other version.
+inline constexpr int kCapabilityContractVersion = 2;
 
 // The JSON document printed for --lobium-fingerprint-capabilities, on one line, stdout only.
 std::string CapabilityManifestJson();

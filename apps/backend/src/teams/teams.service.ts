@@ -29,9 +29,7 @@ export class TeamsService {
 
   /** Create a team; the caller becomes its owner and first admin. */
   async createTeam(ownerUserId: string, name: string): Promise<Team> {
-    const team = await this.teams.createTeam(ownerUserId, name);
-    await this.teams.addMember(team.id, ownerUserId, 'admin');
-    return team;
+    return this.teams.createTeam(ownerUserId, name);
   }
 
   /** Every team the caller belongs to. */
@@ -71,21 +69,15 @@ export class TeamsService {
     targetUserId: string,
     role: Role,
   ): Promise<Membership> {
-    await this.assertAdmin(teamId, actorUserId);
-    const target = await this.teams.getMembership(teamId, targetUserId);
-    if (!target) {
+    const result = await this.teams.setRoleAsAdmin(teamId, actorUserId, targetUserId, role);
+    if (result.outcome === 'updated') return result.membership;
+    if (result.outcome === 'target_not_member') {
       throw new NotFoundException('target user is not a member of this team');
     }
-    // Last-admin safety: never let the change leave a team with zero admins. This only bites when
-    // the target is currently the sole admin and is being demoted to member.
-    if (role === 'member' && target.role === 'admin') {
-      const members = await this.teams.listMembers(teamId);
-      const adminCount = members.filter((m) => m.role === 'admin').length;
-      if (adminCount <= 1) {
-        throw new ForbiddenException('a team must have at least one admin');
-      }
+    if (result.outcome === 'last_admin') {
+      throw new ForbiddenException('a team must have at least one admin');
     }
-    return this.teams.setRole(teamId, targetUserId, role);
+    this.throwActorFailure(result.outcome);
   }
 
   /**
@@ -98,22 +90,14 @@ export class TeamsService {
     actorUserId: string,
     targetUserId: string,
   ): Promise<{ teamId: string; userId: string; removed: true }> {
-    await this.assertAdmin(teamId, actorUserId);
-    const target = await this.teams.getMembership(teamId, targetUserId);
-    if (!target) {
+    const result = await this.teams.removeMemberAsAdmin(teamId, actorUserId, targetUserId);
+    if (result.outcome === 'target_not_member') {
       throw new NotFoundException('target user is not a member of this team');
     }
-    if (target.role === 'admin') {
-      const members = await this.teams.listMembers(teamId);
-      const adminCount = members.filter((m) => m.role === 'admin').length;
-      if (adminCount <= 1) {
-        throw new ForbiddenException('a team must have at least one admin');
-      }
+    if (result.outcome === 'last_admin') {
+      throw new ForbiddenException('a team must have at least one admin');
     }
-    const removed = await this.teams.removeMember(teamId, targetUserId);
-    if (!removed) {
-      throw new NotFoundException('target user is not a member of this team');
-    }
+    if (result.outcome !== 'removed') this.throwActorFailure(result.outcome);
     return { teamId, userId: targetUserId, removed: true };
   }
 
@@ -125,17 +109,15 @@ export class TeamsService {
     teamId: string,
     actorUserId: string,
   ): Promise<{ teamId: string; userId: string; left: true }> {
-    const membership = await this.assertMember(teamId, actorUserId);
-    if (membership.role === 'admin') {
-      const members = await this.teams.listMembers(teamId);
-      const adminCount = members.filter((m) => m.role === 'admin').length;
-      if (adminCount <= 1) {
-        throw new ForbiddenException(
-          'the last admin cannot leave; promote another admin or delete the team',
-        );
-      }
+    const result = await this.teams.leaveTeam(teamId, actorUserId);
+    if (result.outcome === 'actor_not_member') {
+      throw new ForbiddenException('you are not a member of this team');
     }
-    await this.teams.removeMember(teamId, actorUserId);
+    if (result.outcome === 'last_admin') {
+      throw new ForbiddenException(
+        'the last admin cannot leave; promote another admin or delete the team',
+      );
+    }
     return { teamId, userId: actorUserId, left: true };
   }
 
@@ -154,5 +136,13 @@ export class TeamsService {
     if (membership.role !== 'admin') {
       throw new ForbiddenException('this action requires the admin role');
     }
+  }
+
+  /** Map repository-level atomic authorization outcomes onto the public API's existing errors. */
+  private throwActorFailure(outcome: 'actor_not_member' | 'actor_not_admin'): never {
+    if (outcome === 'actor_not_member') {
+      throw new ForbiddenException('you are not a member of this team');
+    }
+    throw new ForbiddenException('this action requires the admin role');
   }
 }

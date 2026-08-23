@@ -18,6 +18,8 @@ fingerprinter with those features enabled is exactly the caller worth being cons
 
 adapter.limits and adapter.features are part of the same object and are adjusted with it, downward
 only - see lobium_webgpu.h for why a ceiling is the only safe direction and what it cannot fix.
+requestDevice() validates every requested limit against that final exposed snapshot before passing
+the descriptor to Dawn, so a host limit above the persona ceiling cannot reveal the real adapter.
 
 Hook point: third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
 
@@ -57,7 +59,108 @@ diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc b/third_pa
        }
    }
    return features;
-@@ -113,11 +127,93 @@ GPUAdapter::GPUAdapter(
+@@ -51,3 +65,99 @@ GPUSupportedFeatures* MakeFeatureNameSet(wgpu::Adapter adapter) {
+ }
+-
++
++bool ValidateRequiredLimitsAgainstAdvertised(
++    const GPUSupportedLimits::ComboLimits& required,
++    const GPUSupportedLimits* advertised,
++    ScriptPromiseResolverBase* resolver) {
++#define LOBIUM_VALIDATE_MAXIMUM_LIMIT(name, undefined_value)            \
++  do {                                                                 \
++    if (required.name != undefined_value &&                            \
++        required.name > advertised->name()) {                          \
++      resolver->RejectWithDOMException(                                \
++          DOMExceptionCode::kOperationError,                           \
++          "Required limit exceeds the adapter's advertised limit.");  \
++      return false;                                                    \
++    }                                                                  \
++  } while (false)
++#define LOBIUM_VALIDATE_ALIGNMENT_LIMIT(name)                           \
++  do {                                                                 \
++    if (required.name != wgpu::kLimitU32Undefined &&                   \
++        required.name < advertised->name()) {                          \
++      resolver->RejectWithDOMException(                                \
++          DOMExceptionCode::kOperationError,                           \
++          "Required limit is lower than the adapter's advertised limit."); \
++      return false;                                                    \
++    }                                                                  \
++  } while (false)
++
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxTextureDimension1D,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxTextureDimension2D,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxTextureDimension3D,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxTextureArrayLayers,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxBindGroups, wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxBindGroupsPlusVertexBuffers,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxBindingsPerBindGroup,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxDynamicUniformBuffersPerPipelineLayout,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxDynamicStorageBuffersPerPipelineLayout,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxSampledTexturesPerShaderStage,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxSamplersPerShaderStage,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxStorageBuffersPerShaderStage,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxStorageTexturesPerShaderStage,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxUniformBuffersPerShaderStage,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxUniformBufferBindingSize,
++                                wgpu::kLimitU64Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxStorageBufferBindingSize,
++                                wgpu::kLimitU64Undefined);
++  LOBIUM_VALIDATE_ALIGNMENT_LIMIT(minUniformBufferOffsetAlignment);
++  LOBIUM_VALIDATE_ALIGNMENT_LIMIT(minStorageBufferOffsetAlignment);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxVertexBuffers, wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxBufferSize, wgpu::kLimitU64Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxVertexAttributes, wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxVertexBufferArrayStride,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxInterStageShaderVariables,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxColorAttachments,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxColorAttachmentBytesPerSample,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxComputeWorkgroupStorageSize,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxComputeInvocationsPerWorkgroup,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxComputeWorkgroupSizeX,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxComputeWorkgroupSizeY,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxComputeWorkgroupSizeZ,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxComputeWorkgroupsPerDimension,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxStorageBuffersInFragmentStage,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxStorageTexturesInFragmentStage,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxStorageBuffersInVertexStage,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxStorageTexturesInVertexStage,
++                                wgpu::kLimitU32Undefined);
++  LOBIUM_VALIDATE_MAXIMUM_LIMIT(maxImmediateSize, wgpu::kLimitU32Undefined);
++
++#undef LOBIUM_VALIDATE_ALIGNMENT_LIMIT
++#undef LOBIUM_VALIDATE_MAXIMUM_LIMIT
++  return true;
++}
++
+ }  // anonymous namespace
+@@ -113,11 +223,93 @@ GPUAdapter::GPUAdapter(
    subgroup_max_size_ = info.subgroupMaxSize;
    power_preference_ = powerProperties.powerPreference;
  
@@ -151,3 +254,16 @@ diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc b/third_pa
  
    info_ = CreateAdapterInfoForAdapter();
  }
+@@ -260,6 +452,11 @@ ScriptPromise<GPUDevice> GPUAdapter::requestDevice(
+       return promise;
+     }
+   }
++  if (descriptor->hasRequiredLimits() &&
++      !ValidateRequiredLimitsAgainstAdvertised(required_limits, limits_.Get(),
++                                                resolver)) {
++    return promise;
++  }
++
+-
+   // Use a set to prevent duplicate features.
+   HashSet<wgpu::FeatureName> required_features_set;

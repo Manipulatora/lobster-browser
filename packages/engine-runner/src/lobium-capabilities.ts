@@ -6,7 +6,7 @@ import type { FingerprintLaunchPolicy } from '@lobster/shared-types';
 const execFileAsync = promisify(execFile);
 
 export const LOBIUM_CAPABILITY_SWITCH = '--lobium-fingerprint-capabilities';
-export const LOBIUM_CAPABILITY_CONTRACT_VERSION = 1;
+export const LOBIUM_CAPABILITY_CONTRACT_VERSION = 2;
 
 /**
  * Mirror of the list in `lobium/src/lobium_capabilities.cc`, which is the single source of truth —
@@ -20,6 +20,8 @@ export const LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES = [
   'config-channel-v1',
   /** UA, UA-CH brands, platform, hardwareConcurrency, deviceMemory and maxTouchPoints. */
   'navigator-ua-ch',
+  /** navigator.webdriver=false while a Lobium profile config is active. */
+  'navigator-webdriver',
   'navigator-languages',
   'network-accept-language',
   'process-locale-timezone',
@@ -120,6 +122,7 @@ export function requiredLobiumCapabilities(
   policy: FingerprintLaunchPolicy,
   hasConfiguredGeolocation: boolean,
   platform: NodeJS.Platform = process.platform,
+  isMobilePersona = false,
 ): LobiumNativeFingerprintCapability[] {
   const required: LobiumNativeFingerprintCapability[] = [
     'config-channel-v1',
@@ -129,6 +132,9 @@ export function requiredLobiumCapabilities(
     // the HOST's identity on the surfaces every detector reads first — a failure that looks exactly
     // like a working profile until the account is banned.
     'navigator-ua-ch',
+    // The launcher deliberately no longer uses --disable-blink-features=AutomationControlled.
+    // Without the native hook an automated launch can expose navigator.webdriver=true.
+    'navigator-webdriver',
     'navigator-languages',
     'network-accept-language',
     'process-locale-timezone',
@@ -152,6 +158,9 @@ export function requiredLobiumCapabilities(
     'native-timezone',
   ];
   if (hasConfiguredGeolocation) required.push('native-geolocation');
+  // mobile-persona suppresses desktop-only plugin surfaces for Android personas. It is compiled in
+  // every desktop Lobium build, but only an emulated Android launch needs to require it.
+  if (isMobilePersona) required.push('mobile-persona');
   // Windows resolves fonts through DirectWrite in the browser process; Linux and macOS reach the
   // same isolation through the launcher's per-profile FONTCONFIG_FILE, which is not a property of
   // the binary. Requiring it everywhere would fail launches on platforms that never compile it.

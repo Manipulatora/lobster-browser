@@ -35,8 +35,25 @@ impl SidecarClient {
     /// Spawn `node <sidecar_js>` and start the response reader.
     pub async fn spawn(node_path: &str, sidecar_js: &str) -> Result<Arc<Self>> {
         let mut command = Command::new(node_path);
+        command.arg(sidecar_js);
+        Self::spawn_command(command).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn spawn_test_sidecar(mode: &str) -> Result<Arc<Self>> {
+        let mut command = Command::new(std::env::current_exe()?);
         command
-            .arg(sidecar_js)
+            .args([
+                "--exact",
+                "sidecar::tests::fake_sidecar_process",
+                "--nocapture",
+            ])
+            .env("LOBSTER_TEST_SIDECAR_MODE", mode);
+        Self::spawn_command(command).await
+    }
+
+    async fn spawn_command(mut command: Command) -> Result<Arc<Self>> {
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // PIPED, NOT INHERITED. A GUI process has no console to inherit, so on Windows this is
@@ -182,20 +199,87 @@ impl SidecarClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, Write};
 
-    /// Spawns the built sidecar and round-trips `ping` + `status` (no browser needed).
+    /// A child copy of this test executable is the fake sidecar. This keeps process behavior under
+    /// the test's control on every platform instead of depending on POSIX `true`/`head` or Node on
+    /// PATH. In the parent test process the mode is absent, so this registered test returns at once.
+    #[test]
+    fn fake_sidecar_process() {
+        let Ok(mode) = std::env::var("LOBSTER_TEST_SIDECAR_MODE") else {
+            return;
+        };
+
+        if mode == "exit" {
+            std::process::exit(0);
+        }
+
+        let stdin = std::io::stdin();
+        let mut stdout = std::io::stdout().lock();
+        for line in stdin.lock().lines() {
+            let line = line.expect("read fake-sidecar request");
+            if mode == "close-after-request" {
+                // Start on a fresh line in case libtest printed its own progress prefix. The byte is
+                // deliberately not JSON: the production reader must ignore it, observe EOF, and
+                // cancel the in-flight request.
+                stdout.write_all(b"\nx\n").unwrap();
+                stdout.flush().unwrap();
+                std::process::exit(0);
+            }
+
+            assert_eq!(mode, "rpc", "unknown fake-sidecar mode {mode}");
+            let request: Value = serde_json::from_str(&line).expect("parse fake-sidecar request");
+            let id = request.get("id").cloned().expect("request id");
+            let method = request
+                .get("method")
+                .and_then(Value::as_str)
+                .expect("request method");
+            let response = match method {
+                "ping" => serde_json::json!({ "id": id, "ok": true, "result": { "pong": true } }),
+                "status" => {
+                    serde_json::json!({ "id": id, "ok": true, "result": { "running": [] } })
+                }
+                "startProfile" => {
+                    let params = request.get("params").expect("startProfile params");
+                    if params.get("profileName").and_then(Value::as_str) == Some("Fail import") {
+                        serde_json::json!({
+                            "id": id,
+                            "ok": false,
+                            "error": { "code": "inject", "message": "cookie injection failed" }
+                        })
+                    } else {
+                        serde_json::json!({
+                            "id": id,
+                            "ok": true,
+                            "result": {
+                                "profileId": params.get("profileId").cloned().unwrap_or(Value::Null),
+                                "fingerprintSeed": params
+                                    .get("fingerprintSeed")
+                                    .cloned()
+                                    .unwrap_or(Value::Null),
+                                "pid": 7,
+                                "ws": "ws://test",
+                                "debuggerAddress": "127.0.0.1:7",
+                                "cookieImportApplied": params
+                                    .get("cookiesImport")
+                                    .is_some_and(|value| !value.is_null()),
+                                "proxyHost": params.pointer("/proxy/host").cloned().unwrap_or(Value::Null)
+                            }
+                        })
+                    }
+                }
+                other => panic!("unexpected fake-sidecar method {other}"),
+            };
+            // See the close-after-request branch: isolate JSON from libtest's progress output.
+            writeln!(stdout, "\n{response}").unwrap();
+            stdout.flush().unwrap();
+        }
+    }
+
+    /// Round-trip two requests through a real child process and the production stdio reader.
     #[tokio::test]
     async fn ping_and_status_roundtrip() {
-        // Resolve relative to THIS crate, not the test's CWD (which was wrong before: the crate lives
-        // at apps/desktop/src-tauri, so the sidecar bundle is THREE levels up under packages/). Using
-        // CARGO_MANIFEST_DIR makes `cargo test --lib` pass without needing LOBSTER_SIDECAR set.
-        let sidecar_js = std::env::var("LOBSTER_SIDECAR").unwrap_or_else(|_| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../packages/engine-runner/dist/index.js")
-                .to_string_lossy()
-                .into_owned()
-        });
-        let client = SidecarClient::spawn("node", &sidecar_js)
+        let client = SidecarClient::spawn_test_sidecar("rpc")
             .await
             .expect("spawn sidecar");
 
@@ -213,16 +297,16 @@ mod tests {
     }
 
     /// Regression (bug 1): a `call` that fails to reach the sidecar must not leak its
-    /// pending entry. We use `true` as a fake sidecar: it exits immediately, so its
+    /// pending entry. The fake child exits immediately, so its
     /// reader task ends *before* we call and the stdin write hits a broken pipe. The
     /// call must return an error quickly and leave the pending map empty.
     #[tokio::test]
     async fn call_removes_pending_on_send_failure() {
-        let client = SidecarClient::spawn("true", "")
+        let client = SidecarClient::spawn_test_sidecar("exit")
             .await
             .expect("spawn fake sidecar");
 
-        // Let `true` exit and its reader task finish so the write below fails fast.
+        // Let the child exit and its reader task finish so the write below fails fast.
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let result = tokio::time::timeout(
@@ -246,13 +330,13 @@ mod tests {
     }
 
     /// Regression (bug 2): when the reader task exits with an in-flight caller waiting,
-    /// the caller must fail fast rather than block for the full 90s timeout. `head -c1`
+    /// the caller must fail fast rather than block for the full 90s timeout. The fake child
     /// accepts our request (so the write succeeds), emits one byte, then closes stdout
     /// without a real response — ending the reader loop, which must clear `pending` and
     /// cancel the waiting oneshot.
     #[tokio::test]
     async fn call_fails_fast_when_reader_exits() {
-        let client = SidecarClient::spawn("head", "-c1")
+        let client = SidecarClient::spawn_test_sidecar("close-after-request")
             .await
             .expect("spawn fake sidecar");
 

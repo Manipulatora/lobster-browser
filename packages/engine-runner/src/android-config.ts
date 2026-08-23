@@ -42,6 +42,7 @@ export interface AndroidLobiumConfig {
   navigator: AndroidFingerprint['navigator'];
   screen: AndroidFingerprint['screen'];
   webgl: AndroidFingerprint['webgl'];
+  webgpu: AndroidFingerprint['webgpu'];
   locale: AndroidFingerprint['locale'];
   fonts: string[];
   seeds: AndroidLobiumFarblingSeeds;
@@ -110,6 +111,7 @@ export function buildAndroidLobiumConfig(
     navigator: fp.navigator,
     screen: fp.screen,
     webgl: fp.webgl,
+    webgpu: fp.webgpu,
     locale: fp.locale,
     fonts: fp.fonts,
     seeds: {

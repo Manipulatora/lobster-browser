@@ -8,6 +8,7 @@ import type {
 import { DEVICE_MEMORY_VALUES, languagesToAcceptLanguage } from './coherence.js';
 import { ANDROID_TEMPLATE, buildChromeBrands, ENGINE_CHROME, chromeVersionForms } from './pools.js';
 import { SeededRandom } from './prng.js';
+import { coherentGpuIdentity, webgpuIdentityMatches } from './webgpu-identity.js';
 import {
   ANDROID_PHONE_MODEL_CATALOG,
   ANDROID_TABLET_MODEL_CATALOG,
@@ -193,7 +194,7 @@ export function deriveAndroidFingerprint(
       colorDepth: 24,
       devicePixelRatio: device.screen.dpr,
     },
-    webgl: { ...device.webgl },
+    ...coherentGpuIdentity({ ...device.webgl }),
     locale: {
       timezone: 'America/New_York',
       locale: primaryLocale,
@@ -412,6 +413,11 @@ export function validateAndroidFingerprintCoherence(fp: AndroidFingerprint): str
   }
   if (!/Qualcomm|Adreno|ARM|Mali|PowerVR/i.test(webglText)) {
     issues.push(`Android WebGL renderer/vendor is not a mobile GPU family: ${webglText}`);
+  }
+  if (!fp.webgpu) {
+    issues.push('Android WebGPU adapter identity is missing; the engine would expose the host GPU');
+  } else if (!webgpuIdentityMatches(fp.webgl, fp.webgpu)) {
+    issues.push('Android WebGPU adapter identity does not match the WebGL renderer');
   }
 
   if (!fp.fonts.some((font) => /Roboto|Noto Sans/i.test(font))) {

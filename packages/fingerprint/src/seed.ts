@@ -6,7 +6,12 @@ export function generateSeed(): FingerprintSeed {
   return randomBytes(16).toString('hex');
 }
 
-/** A seed is a lowercase hex string of at least 8 chars. */
+/** The canonical persisted identity: one 128-bit value encoded as exactly 32 lowercase hex chars. */
 export function isValidSeed(seed: string): boolean {
-  return /^[0-9a-f]{8,}$/.test(seed);
+  return /^[0-9a-f]{32}$/.test(seed);
+}
+
+/** A bounded historical identity accepted only when loading/importing an existing profile. */
+export function isValidPersistedSeed(seed: string): boolean {
+  return /^[0-9a-f]{8,256}$/.test(seed);
 }

@@ -57,6 +57,35 @@ export function findSnapshotForThread<T extends { threadId?: string }>(
 }
 
 /**
+ * A live run is attached to the turn ids in the conversation currently rendered by the panel.
+ * Switching underneath it would let its event handler patch an unrelated turn with the same local
+ * numeric id, so conversation navigation stays locked until that run reaches a terminal event.
+ */
+export function canSwitchThread(
+  busy: boolean,
+  navigationLocked: boolean,
+  nextThreadId: string,
+  currentThreadId: string,
+): boolean {
+  return !busy && !navigationLocked && Boolean(nextThreadId) && nextThreadId !== currentThreadId;
+}
+
+/** Convert a failed retained-run attachment into a truthful terminal event instead of a stuck UI. */
+export function resumeFailureEvent(attached: boolean): {
+  type: 'run.finished';
+  status: 'error';
+  error: string;
+} | null {
+  if (attached) return null;
+  return {
+    type: 'run.finished',
+    status: 'error',
+    error:
+      'Lobee could not reconnect to this retained run. It may still be active in the agent service; reconnect before starting another task.',
+  };
+}
+
+/**
  * Match local metadata to encrypted exchanges without positional guessing. Stable server-issued ids
  * win. A legacy plaintext row may be retired only when its complete task/outcome/status identifies
  * exactly one encrypted exchange. Ambiguous or body-less metadata remains unmatched and retained.

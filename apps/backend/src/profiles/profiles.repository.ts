@@ -52,6 +52,28 @@ export interface UpdateProfileRecord {
 }
 
 /**
+ * Capacity rejection raised by the repository's atomic count-and-create operation. Keeping the
+ * measured values on the error lets the service preserve its existing 403 message without moving
+ * the race-prone count back above the transaction boundary.
+ */
+export class ProfileLimitExceededError extends Error {
+  constructor(
+    readonly limit: number,
+    readonly currentCount: number,
+    readonly requestedCount: number,
+  ) {
+    super(
+      `profile limit (${limit}) reached: ${currentCount} in use, cannot add ${requestedCount} more`,
+    );
+    this.name = 'ProfileLimitExceededError';
+  }
+}
+
+/** Result of an admin-guarded profile tombstone. */
+export type RemoveProfileAsAdminResult =
+  { outcome: 'removed' } | { outcome: 'forbidden' } | { outcome: 'not_found' };
+
+/**
  * Persistence boundary for profiles. ProfilesService depends on this interface via the
  * `PROFILES_REPOSITORY` DI token. EVERY read/write is scoped by `ownerTeamId` so one team can
  * never see or mutate another team's profiles.
@@ -61,21 +83,32 @@ export interface UpdateProfileRecord {
  *   - PrismaProfilesRepository   — production persistence via the generated Prisma client.
  */
 export interface ProfilesRepository {
-  create(input: CreateProfileRecord): Promise<Profile>;
+  /**
+   * Create an entire same-team batch under the team's current profile allowance.
+   *
+   * This is the ONLY creation primitive: implementations must make entitlement lookup, live-row
+   * count, limit check, and every insert one atomic operation. Concurrent calls for the same team
+   * must serialize, and any insert failure must roll the whole batch back.
+   */
+  createManyWithinLimit(inputs: readonly CreateProfileRecord[]): Promise<Profile[]>;
   findById(teamId: string, id: string): Promise<Profile | null>;
   findAllByTeam(teamId: string): Promise<Profile[]>;
   /** Returns the updated profile, or null when it does not exist / belongs to another team. */
   update(teamId: string, id: string, patch: UpdateProfileRecord): Promise<Profile | null>;
   /**
-   * Delete the profile. Implementations MAY soft-delete — the Prisma repository writes a
-   * `deletedAt` tombstone so a machine that was offline can still learn the profile is gone — but
-   * either way it stops matching every other method here. Returns true when something was deleted,
-   * false when nothing live matched the (team, id).
+   * Tombstone the profile only while `actorUserId` is an admin of its owning team.
+   *
+   * Authorization and the tombstone must be one atomic persistence operation. Checking the role in
+   * the service and writing later lets a concurrent demotion race through the destructive write.
    */
-  remove(teamId: string, id: string): Promise<boolean>;
+  removeAsAdmin(
+    teamId: string,
+    id: string,
+    actorUserId: string,
+  ): Promise<RemoveProfileAsAdminResult>;
   /**
    * The profile limit the team's Subscription currently entitles it to, or null when no
-   * subscription exists (the service then applies the default free-tier limit).
+   * subscription exists. The atomic creation primitive applies the default free-tier entitlement.
    *
    * ENTITLED, not purchased: a package whose period has ended, or whose last renewal failed, is
    * worth the free allowance however large a limit is stored on the row.

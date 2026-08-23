@@ -47,9 +47,9 @@ core/navigator-ua-ch.patch
 # Canvas 2D + OffscreenCanvas readback farbling (seeds.canvas).
 fingerprint/canvas-farbling.patch
 # WebGL vendor/renderer + scalar caps + pixel farbling (seeds.webgl).
-# CHAIN: webgl-surfaces -> host-gpu-profile -> webgl-runtime-safety, all in
-# webgl_rendering_context_base.cc. The later two are cut against the earlier ones and cannot apply
-# to a pristine tree; never validate them in isolation.
+# CHAIN: webgl-surfaces -> host-gpu-profile -> webgl-runtime-safety -> webgl-bypass-closures, all in
+# webgl_rendering_context_base.cc. Later patches are cut against the output of earlier ones and
+# cannot be validated in isolation.
 fingerprint/webgl-surfaces.patch
 # Deep WebGL: version / shadingLanguageVersion / extensions / shaderPrecision. Confirmed necessary
 # by battle-test on real GPUs - the extension set and precision leaked the host while

@@ -7,7 +7,7 @@
  * - BRANDING + user-visible Chrome/Google/Chromium → Lobium strings
  *
  * Usage: npm run apply:lobium-branding
- * Env: LOBIUM_CHROMIUM_SRC / CHROMIUM_SRC (default /home/ivyhfx/lobium-build/src)
+ * Env: LOBIUM_CHROMIUM_SRC / CHROMIUM_SRC (optional; native source patching is skipped when absent)
  */
 import { mkdir, readFile, writeFile, copyFile, rm } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
@@ -15,6 +15,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { chromium } from 'playwright';
+import { resolveChromiumSrc } from '../lobium/chromium-src.mjs';
 
 // Derived from this file's own location, NOT from the working directory. `resolve('.')` meant every
 // path below silently rebased onto wherever the caller happened to be: run from the Chromium tree —
@@ -22,8 +23,7 @@ import { chromium } from 'playwright';
 // stages — and it died on `Missing brand master: <chromium-src>/apps/desktop/src/assets/brand/icon.png`.
 // The script has one correct root and it is the repository, so it resolves that for itself.
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const CHROMIUM_SRC =
-  process.env.LOBIUM_CHROMIUM_SRC || process.env.CHROMIUM_SRC || '/home/ivyhfx/lobium-build/src';
+const CHROMIUM_SRC = resolveChromiumSrc({ required: false });
 const MAIN_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/icon.png');
 const SITE_LOGO = resolve(ROOT, 'apps/desktop/src/assets/brand/site-logo.png');
 const NTP_MASTER = resolve(ROOT, 'apps/desktop/src/assets/brand/browser-logo.png');
@@ -322,8 +322,11 @@ function generateTauriIcons() {
 }
 
 async function patchNativeBrandingFiles() {
-  if (!existsSync(CHROMIUM_SRC)) {
-    console.warn(`Chromium source not found at ${CHROMIUM_SRC}; skipped native source patching.`);
+  if (!CHROMIUM_SRC || !existsSync(CHROMIUM_SRC)) {
+    console.warn(
+      'Chromium source is not configured or does not exist; skipped native source patching. ' +
+        'Set LOBIUM_CHROMIUM_SRC to enable it.',
+    );
     return;
   }
 
@@ -515,7 +518,7 @@ async function main() {
   try {
     await writeRenderedPng(page, sourceDataUrl, PUBLIC_FAVICON, 32, false);
 
-    if (existsSync(CHROMIUM_SRC)) {
+    if (CHROMIUM_SRC && existsSync(CHROMIUM_SRC)) {
       // Color product logos (window / about / linux desktop).
       const colorTargets = [
         ['chrome/app/theme/chromium/product_logo_16.png', 16],
@@ -548,7 +551,14 @@ async function main() {
         ['chrome/app/theme/default_200_percent/chromium/linux/product_logo_16.png', 32],
       ];
       for (const [file, size] of monoDarkTargets) {
-        await writeRenderedPng(page, sourceDataUrl, resolve(CHROMIUM_SRC, file), size, true, MONO_DARK);
+        await writeRenderedPng(
+          page,
+          sourceDataUrl,
+          resolve(CHROMIUM_SRC, file),
+          size,
+          true,
+          MONO_DARK,
+        );
       }
 
       // Wordmark-style name logos (toolbar / about).
@@ -578,7 +588,14 @@ async function main() {
         ['chrome/app/theme/default_200_percent/common/favicon_ntp.png', 32],
       ];
       for (const [file, size] of faviconTargets) {
-        await writeRenderedPng(page, sourceDataUrl, resolve(CHROMIUM_SRC, file), size, true, MONO_DARK);
+        await writeRenderedPng(
+          page,
+          sourceDataUrl,
+          resolve(CHROMIUM_SRC, file),
+          size,
+          true,
+          MONO_DARK,
+        );
       }
 
       // chrome://version top-right logo (IDR_PRODUCT_LOGO / _WHITE). These live under
@@ -587,9 +604,19 @@ async function main() {
       // ink for light mode, white for dark mode, at 100%/200%.
       const versionLogoTargets = [
         ['components/resources/default_100_percent/chromium/product_logo.png', 171, 32, MONO_DARK],
-        ['components/resources/default_100_percent/chromium/product_logo_white.png', 171, 32, '#ffffff'],
+        [
+          'components/resources/default_100_percent/chromium/product_logo_white.png',
+          171,
+          32,
+          '#ffffff',
+        ],
         ['components/resources/default_200_percent/chromium/product_logo.png', 342, 64, MONO_DARK],
-        ['components/resources/default_200_percent/chromium/product_logo_white.png', 342, 64, '#ffffff'],
+        [
+          'components/resources/default_200_percent/chromium/product_logo_white.png',
+          342,
+          64,
+          '#ffffff',
+        ],
       ];
       for (const [file, w, h, color] of versionLogoTargets) {
         const target = resolve(CHROMIUM_SRC, file);
@@ -609,7 +636,14 @@ async function main() {
         ['components/resources/default_200_percent/chromium/favicon_product.png', 32],
       ];
       for (const [file, size] of versionFaviconTargets) {
-        await writeRenderedPng(page, sourceDataUrl, resolve(CHROMIUM_SRC, file), size, true, MONO_DARK);
+        await writeRenderedPng(
+          page,
+          sourceDataUrl,
+          resolve(CHROMIUM_SRC, file),
+          size,
+          true,
+          MONO_DARK,
+        );
       }
 
       const xpmPath = resolve(CHROMIUM_SRC, 'chrome/app/theme/chromium/linux/product_logo_32.xpm');
@@ -629,7 +663,9 @@ async function main() {
   await writeBrandEmbed('browser-logo-data.ts', 'BROWSER_LOGO_PNG_BASE64', NTP_MASTER);
   await writeBrandEmbed('brand-ad-data.ts', 'BRAND_AD_PNG_BASE64', NTP_AD);
   await patchNativeBrandingFiles();
-  console.log(`Applied Lobium/Lobster branding assets. Chromium source: ${CHROMIUM_SRC}`);
+  console.log(
+    `Applied Lobium/Lobster branding assets. Chromium source: ${CHROMIUM_SRC ?? 'not configured'}`,
+  );
   console.log(`Primary icon: ${MAIN_ICON}`);
   console.log(`Site logo: ${SITE_LOGO}`);
   console.log(

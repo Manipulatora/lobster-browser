@@ -11,6 +11,7 @@ import { resolveSourcedRendererPreset } from './catalog.js';
 import { isPlausibleDisplayMode } from './displays.js';
 import { buildChromeBrands, DEVICE_TEMPLATES } from './pools.js';
 import { generateSeed } from './seed.js';
+import { coherentGpuIdentity } from './webgpu-identity.js';
 
 const OSES: OsFamily[] = ['windows', 'macos', 'linux'];
 const ENGINES: EngineKind[] = ['lobium'];
@@ -245,7 +246,7 @@ test('EVERY catalog device class is coherent (exhaustive, not sampled)', () => {
           colorDepth: appleSilicon ? 30 : 24,
           devicePixelRatio: device.screen.dpr,
         },
-        webgl: { ...device.webgl },
+        ...coherentGpuIdentity({ ...device.webgl }),
         locale: { timezone: 'America/New_York', locale: 'en-US', acceptLanguage: 'en-US,en;q=0.9' },
         fonts: [...tpl.fonts],
       };

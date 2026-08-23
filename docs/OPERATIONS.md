@@ -10,13 +10,14 @@ it applies to both. [`STATUS.md`](STATUS.md) §2–3 has the support matrix and 
 
 ## 1. Build the Lobium engine
 
-Chromium source lives at `~/lobium-build/src` (`E:\lobium-build\src` on the Windows host); `depot_tools`
+Chromium source lives at `~/lobium-build/src` (`C:\lobium-build\src` on the Windows host); `depot_tools`
 beside it, on `PATH`. Custom code is in `components/lobium_fp/` plus the quilt series
 `lobium/patches/series`.
 
 ```bash
 export PATH="$HOME/lobium-build/depot_tools:$PATH"
-cd ~/lobium-build/src
+export LOBIUM_CHROMIUM_SRC="$HOME/lobium-build/src"
+cd "$LOBIUM_CHROMIUM_SRC"
 
 # Official build (shipping): is_official_build, thin-LTO, PGO. Single ~525MB binary + 7 .so.
 autoninja -C out/LobiumOfficial chrome
@@ -29,6 +30,14 @@ On Windows the driver is `lobium/build.ps1` (`build.sh` is bash-only and its `qu
 Windows equivalent). It stages, patches, configures and builds, and it is idempotent; see
 [`STATUS.md`](STATUS.md) §3.1 for the preflight it enforces and why each item is in it.
 
+```powershell
+$env:LOBIUM_CHROMIUM_SRC = 'C:\lobium-build\src'
+powershell -NoProfile -ExecutionPolicy Bypass -File lobium\build.ps1 -Run
+```
+
+All checkout-aware Node tools use the same `LOBIUM_CHROMIUM_SRC` contract. They fail with an
+actionable error when it is absent instead of guessing a developer's drive or home directory.
+
 The official build needs the V8 builtins PGO profile:
 `python3 v8/tools/builtins-pgo/download_profiles.py download --depot-tools ~/lobium-build/depot_tools`.
 
@@ -39,15 +48,15 @@ The official build needs the V8 builtins PGO profile:
 Branding assets (icons, tab/product logos, mono-dark favicon) are rendered by
 `scripts/apply-lobium-branding.mjs`.
 
-> **Before planning a build, read [`STATUS.md`](STATUS.md) §3.** The engine is built on the owner's
-> Windows PC. The Linux dev host's Chromium checkout is at `152.0.7928.0` while the series is cut
-> against `152.0.7977.42`, so building the current series there means a full `gclient sync` first —
-> and `npm run gate:series` fails on that host until it happens.
+> **Before planning a build, read [`STATUS.md`](STATUS.md) §3.** Existing Windows and Linux binaries
+> predate the current semantic capability contract and native-policy fixes. Start from a clean exact
+> `152.0.7977.42` checkout, apply the full current series, and rebuild; never package an older local
+> output merely because its Chromium product version still matches.
 
 ### 1.1 Bumping the Chrome version
 
-Three files pin the version and must never disagree: `lobium/build.sh` (`CHROMIUM_REF`, what is built),
-`packages/fingerprint/src/pools.ts` (`ENGINE_CHROME`, what every persona's UA claims), and
+Four files pin the version and must never disagree: `lobium/build.sh` (`CHROMIUM_REF`, Linux),
+`lobium/build.ps1` (`ChromiumRef`, Windows), `packages/fingerprint/src/pools.ts` (`ENGINE_CHROME`, what every persona's UA claims), and
 `apps/desktop/src-tauri/resources/engine-manifest.json` (which archive first-run provisioning installs).
 Never edit them by hand:
 
@@ -74,9 +83,8 @@ not uploaded does not prepare anything — the URL 404s or the SHA-256 mismatche
 fails for every user. Between the source bump and the rebuild the manifest carries a `rebuildPending`
 block; the coherence test requires that declaration and requires it to stay inside the same milestone.
 
-`lobium/build.ps1` carries a second copy of the Chromium pin that neither the bump script nor the
-coherence gate touches (`buildps1-chromium-ref-ungated` in [`ENGINE_AUDIT.md`](subsystems/engine-audit.md)). Check it
-by hand after a bump until that is closed.
+`scripts/bump-engine-version.mjs` moves both build-script pins, and
+`ci/validation/version-coherence.test.mjs` refuses a Windows/Linux mismatch.
 
 ## 2. Package & install the product
 
@@ -302,7 +310,7 @@ LOBSTER_LOBIUM_BIN=/path/to/chrome npm run gate:oracles   # the ENGINE_AUDIT ora
 LOBSTER_LOBIUM_BIN=/path/to/chrome npm run gate:fonts     # does the font filter actually engage?
 
 # Desktop UI end-to-end (Playwright; starts its own vite, no Tauri shell needed)
-npm run e2e:desktop                       # 22 tests across 3 specs, ci/playwright.desktop.config.ts
+npm run e2e:desktop                       # 38 tests across 7 specs, ci/playwright.desktop.config.ts
 
 # Real-browser agent fixtures (needs an engine; no model, no credentials, no network)
 node ci/validation/e2e/agent-browser-e2e.mjs             # interim Chromium: browser-integration evidence

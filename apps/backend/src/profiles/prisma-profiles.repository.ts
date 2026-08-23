@@ -10,11 +10,13 @@ import {
 } from '@lobster/shared-types';
 
 import { PrismaService } from '../prisma/prisma.service';
-import type {
-  CreateProfileRecord,
-  ProfilesRepository,
-  SafeCookieImportMetadata,
-  UpdateProfileRecord,
+import {
+  ProfileLimitExceededError,
+  type CreateProfileRecord,
+  type ProfilesRepository,
+  type RemoveProfileAsAdminResult,
+  type SafeCookieImportMetadata,
+  type UpdateProfileRecord,
 } from './profiles.repository';
 import { sanitizeCookieImportMetadata } from './sanitize-cookie-import';
 
@@ -47,6 +49,8 @@ interface ProfileRow {
   updatedAt: Date;
 }
 
+const SERIALIZABLE_ATTEMPTS = 5;
+
 /**
  * Production `ProfilesRepository` backed by Postgres via the shared {@link PrismaService}.
  *
@@ -59,29 +63,58 @@ interface ProfileRow {
 export class PrismaProfilesRepository implements ProfilesRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(input: CreateProfileRecord): Promise<Profile> {
-    const metadata: ProfileMetadata = {
-      engine: input.engine,
-      os: input.os,
-      osVersion: input.osVersion,
-      fingerprintOverrides: input.fingerprintOverrides,
-      proxyId: input.proxyId,
-      templateId: input.templateId,
-      cookiesImport: sanitizeCookieImportMetadata(input.cookiesImport),
-      extensions: input.extensions,
-      tags: input.tags,
-      folder: input.folder,
-      notes: input.notes,
-    };
-    const row = await this.prisma.profile.create({
-      data: {
-        name: input.name,
-        fingerprintSeed: input.fingerprintSeed,
-        ownerTeamId: input.ownerTeamId,
-        metadata: metadata as unknown as Prisma.InputJsonValue,
+  async createManyWithinLimit(inputs: readonly CreateProfileRecord[]): Promise<Profile[]> {
+    if (inputs.length === 0) return [];
+
+    const ownerTeamId = inputs[0]!.ownerTeamId;
+    if (inputs.some((input) => input.ownerTeamId !== ownerTeamId)) {
+      throw new Error('profile creation batch must belong to one team');
+    }
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        // PostgreSQL READ COMMITTED takes a fresh snapshot for each statement. Locking the stable
+        // owning-team row first makes every capacity-bearing create for that team queue here; the
+        // next transaction's count therefore sees all profiles committed by its predecessor.
+        const lockedTeam = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "teams" WHERE "id" = ${ownerTeamId} FOR UPDATE
+        `;
+        if (lockedTeam.length !== 1) {
+          throw new Error('profile owner team does not exist');
+        }
+
+        const subscription = await tx.subscription.findUnique({ where: { teamId: ownerTeamId } });
+        const limit = entitledProfileLimit(
+          subscription
+            ? {
+                status: subscription.status,
+                profileLimit: subscription.profileLimit,
+                currentPeriodEnd: subscription.currentPeriodEnd?.toISOString(),
+              }
+            : null,
+        );
+        const currentCount = await tx.profile.count({
+          where: { ownerTeamId, deletedAt: null },
+        });
+        if (currentCount + inputs.length > limit) {
+          throw new ProfileLimitExceededError(limit, currentCount, inputs.length);
+        }
+
+        // Sequential creates preserve the API's requested order. They are still one database
+        // transaction: any row failure aborts every earlier insert in this batch.
+        const created: Profile[] = [];
+        for (const input of inputs) {
+          const row = await tx.profile.create({ data: this.createData(input) });
+          created.push(this.toProfile(row));
+        }
+        return created;
       },
-    });
-    return this.toProfile(row);
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        maxWait: 5_000,
+        timeout: 20_000,
+      },
+    );
   }
 
   async findById(teamId: string, id: string): Promise<Profile | null> {
@@ -152,15 +185,44 @@ export class PrismaProfilesRepository implements ProfilesRepository {
    * synced from here", so it re-uploads and resurrects it). The row stays invisible to every read
    * because they all go through {@link liveScope}, so a tombstone never shows up in a list and
    * never counts toward the team's profile limit. Re-deleting an already-tombstoned profile
-   * returns false, exactly as a second hard delete did.
+   * returns `not_found`, exactly as a second hard delete did.
    */
-  async remove(teamId: string, id: string): Promise<boolean> {
-    const existing = await this.prisma.profile.findFirst({ where: this.liveScope(teamId, id) });
-    if (!existing) {
-      return false;
-    }
-    await this.prisma.profile.update({ where: { id }, data: { deletedAt: new Date() } });
-    return true;
+  async removeAsAdmin(
+    teamId: string,
+    id: string,
+    actorUserId: string,
+  ): Promise<RemoveProfileAsAdminResult> {
+    return this.runSerializable(async (tx) => {
+      // The membership predicate is part of the UPDATE. A service-level role read followed by this
+      // write would let a concurrent demotion race through a destructive tombstone/blob purge.
+      const deleted = await tx.profile.updateMany({
+        where: {
+          ...this.liveScope(teamId, id),
+          ownerTeam: {
+            is: { memberships: { some: { userId: actorUserId, role: 'admin' } } },
+          },
+        },
+        data: { deletedAt: new Date() },
+      });
+      if (deleted.count === 1) return { outcome: 'removed' };
+
+      // Classification happens only after the guarded write failed. It cannot authorize a mutation,
+      // and checking the actor first avoids revealing profile existence to a non-admin member.
+      const actor = await tx.membership.findUnique({
+        where: { userId_teamId: { userId: actorUserId, teamId } },
+      });
+      if (actor?.role !== 'admin') return { outcome: 'forbidden' };
+
+      const existing = await tx.profile.findFirst({
+        where: this.liveScope(teamId, id),
+        select: { id: true },
+      });
+      if (!existing) return { outcome: 'not_found' };
+
+      // A live row plus an admin should have matched the guarded UPDATE. Refuse rather than report a
+      // successful delete when the database did not perform one.
+      throw new Error('guarded profile tombstone matched no row despite live profile and admin');
+    });
   }
 
   /**
@@ -189,6 +251,49 @@ export class PrismaProfilesRepository implements ProfilesRepository {
    */
   private liveScope(teamId: string, id?: string): Prisma.ProfileWhereInput {
     return { ...(id !== undefined ? { id } : {}), ownerTeamId: teamId, deletedAt: null };
+  }
+
+  /** Keep guarded-write classification on one snapshot and retry PostgreSQL SSI conflicts. */
+  private async runSerializable<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= SERIALIZABLE_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.prisma.$transaction(operation, {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        });
+      } catch (error) {
+        const serializationConflict =
+          typeof error === 'object' &&
+          error !== null &&
+          'code' in error &&
+          (error as { code?: unknown }).code === 'P2034';
+        if (!serializationConflict || attempt === SERIALIZABLE_ATTEMPTS) throw error;
+      }
+    }
+    throw new Error('unreachable: serializable profile tombstone exhausted without throwing');
+  }
+
+  private createData(input: CreateProfileRecord): Prisma.ProfileUncheckedCreateInput {
+    const metadata: ProfileMetadata = {
+      engine: input.engine,
+      os: input.os,
+      osVersion: input.osVersion,
+      fingerprintOverrides: input.fingerprintOverrides,
+      proxyId: input.proxyId,
+      templateId: input.templateId,
+      cookiesImport: sanitizeCookieImportMetadata(input.cookiesImport),
+      extensions: input.extensions,
+      tags: input.tags,
+      folder: input.folder,
+      notes: input.notes,
+    };
+    return {
+      name: input.name,
+      fingerprintSeed: input.fingerprintSeed,
+      ownerTeamId: input.ownerTeamId,
+      metadata: metadata as unknown as Prisma.InputJsonValue,
+    };
   }
 
   private readMetadata(value: Prisma.JsonValue): ProfileMetadata {
