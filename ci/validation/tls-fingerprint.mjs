@@ -47,8 +47,24 @@ const GEO = { ip: '0.0.0.0', countryCode: 'US', timezone: 'America/New_York', la
 const REFERENCE_PATH = join(HERE, 'tls-reference.json');
 const REPORT_PATH = join(HERE, 'reports', 'tls-fingerprint.json');
 
-/** The fields a WAF keys on. Every one of them is collected already; every one of them is asserted. */
-const COMPARED = ['ja3_hash', 'ja4', 'peetprint_hash', 'akamai_h2'];
+/**
+ * The fields a WAF keys on that are actually STABLE.
+ *
+ * ja3_hash is deliberately NOT among them. Chrome randomises the ClientHello extension ORDER on
+ * every connection, and JA3 hashes the extension list in order, so stock Chrome does not match
+ * itself. Measured here, three consecutive captures of the same stock Chrome 152.0.7977.42 binary:
+ *
+ *     run 1  ja3=07a3cb4ef17e1ab57cea9cc847ca5060   ja4=t13d1519h2_8daaf6152771_3d1b1b7bef36
+ *     run 2  ja3=a2d1f472a9a77fb21477d1869bf52f7c   ja4=t13d1519h2_8daaf6152771_3d1b1b7bef36
+ *     run 3  ja3=efa09682f1ab8dfb893d6ec1eee3f266   ja4=t13d1519h2_8daaf6152771_3d1b1b7bef36
+ *
+ * Asserting ja3_hash equality therefore made this gate incapable of passing for ANY build, ours or
+ * Google's - it was measuring the randomisation, not a drift. JA4 sorts the extensions before
+ * hashing, which is exactly why it exists, and it is stable across those same three runs. The JA3
+ * value is still captured and reported, because the extension SET it encodes is worth eyeballing;
+ * it is simply not something equality can be asserted on.
+ */
+const COMPARED = ['ja4', 'peetprint_hash', 'akamai_h2'];
 
 async function readCdp(dir, n = 200) {
   for (let i = 0; i < n; i++) {
@@ -299,11 +315,14 @@ if (STOCK_CHROME) {
   }
 }
 
-// ── 3. Equality. A drifted cipher list, extension order or SETTINGS frame changes a hash, not a shape.
+// ── 3. Equality. A drifted cipher list or SETTINGS frame changes a hash, not a shape. Extension
+//      ORDER is excluded: Chrome shuffles it per connection by design.
 const rows = [];
 let ok = true;
 for (const r of measurements) {
-  const tlsDiff = ['ja3_hash', 'ja4', 'peetprint_hash'].filter((k) => r[k] !== reference[k]);
+  // ja3_hash excluded on purpose - see COMPARED above: Chrome's per-connection extension-order
+  // randomisation means stock Chrome does not match itself on it.
+  const tlsDiff = ['ja4', 'peetprint_hash'].filter((k) => r[k] !== reference[k]);
   const h2Diff = r.akamai_h2 !== reference.akamai_h2;
   if (tlsDiff.length || h2Diff) ok = false;
   rows.push(
