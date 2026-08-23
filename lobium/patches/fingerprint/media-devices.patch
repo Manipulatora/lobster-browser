@@ -4,11 +4,30 @@ Replaces the host device list with persona camera/microphone/speaker counts, sha
 browser process shapes the real one: a single blank entry per kind until the frame holds the capture
 permission for it, and hashed deviceIds with OS-shaped labels and groupIds once it does.
 
+CAPABILITIES, not just identity. enumerateDevices always asks for input capabilities - Blink
+hardcodes request_video_input_capabilities=true and enables the audio one by default off mac - and
+every real Chrome answers getCapabilities() with width/height/aspectRatio/frameRate/facingMode on a
+camera and channelCount/sampleRate/latency/echoCancellation on a microphone. The persona devices
+were constructed with only (id, label, groupId, kind), so getCapabilities() returned an almost-empty
+dictionary: a device that enumerates but claims to be capable of nothing, which no real device is.
+
+The values describe the same modest integrated hardware the labels already claim - a 720p webcam
+with no pan/tilt/zoom, and a mono 48 kHz microphone - rather than a maximal set. facingMode is
+stated only on Android, where front/back means something; a desktop camera reports none, which is
+what Chrome does.
+
 diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.cc b/third_party/blink/renderer/modules/mediastream/media_devices.cc
-index 4fe2cb45a0089..d3c24a21eee74 100644
+index 4fe2cb45a0089..f231abe4e00e7 100644
 --- a/third_party/blink/renderer/modules/mediastream/media_devices.cc
 +++ b/third_party/blink/renderer/modules/mediastream/media_devices.cc
-@@ -5,6 +5,7 @@
+@@ -2,9 +2,14 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "ui/gfx/geometry/size.h"
++#include "media/base/video_types.h"
++#include "media/base/channel_layout.h"
++#include "media/base/audio_parameters.h"
  #include "third_party/blink/renderer/modules/mediastream/media_devices.h"
  
  #include <algorithm>
@@ -16,7 +35,7 @@ index 4fe2cb45a0089..d3c24a21eee74 100644
  #include <utility>
  
  #include "base/feature_list.h"
-@@ -14,6 +15,8 @@
+@@ -14,6 +19,8 @@
  #include "base/strings/stringprintf.h"
  #include "base/uuid.h"
  #include "build/build_config.h"
@@ -25,7 +44,7 @@ index 4fe2cb45a0089..d3c24a21eee74 100644
  #include "media/base/media_permission.h"
  #include "mojo/public/cpp/bindings/remote.h"
  #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
-@@ -1486,6 +1489,156 @@ void MediaDevices::DevicesEnumerated(
+@@ -1486,6 +1493,202 @@ void MediaDevices::DevicesEnumerated(
      }
    }
  
@@ -109,8 +128,54 @@ index 4fe2cb45a0089..d3c24a21eee74 100644
 +      if (type == mojom::blink::MediaDeviceType::kMediaAudioInput ||
 +          type == mojom::blink::MediaDeviceType::kMediaVideoInput) {
 +        result_contains_nonempty_input_device_ids = true;
-+        media_devices.push_back(
-+            MakeGarbageCollected<InputDeviceInfo>(id, label, group, type));
++        auto* input = MakeGarbageCollected<InputDeviceInfo>(id, label, group, type);
++        // Lobium: give the persona device real CAPABILITIES.
++        //
++        // enumerateDevices always asks for input capabilities (request_video_input_capabilities is
++        // hardcoded true, and the audio one is enabled by default off mac), and every real Chrome
++        // answers getCapabilities() with width/height/aspectRatio/frameRate/facingMode on a camera
++        // and channelCount/sampleRate/latency/echoCancellation on a microphone. Constructing the
++        // devices without capabilities left getCapabilities() returning an almost-empty dictionary
++        // - a device that enumerates but claims to be capable of nothing, which no real device is.
++        //
++        // The values describe the same modest integrated hardware the labels already claim: a 720p
++        // webcam with no pan/tilt/zoom, and a mono 48 kHz microphone.
++        if (type == mojom::blink::MediaDeviceType::kMediaVideoInput) {
++          auto video_caps = mojom::blink::VideoInputDeviceCapabilities::New();
++          video_caps->device_id = id;
++          video_caps->group_id = group;
++          // An integrated webcam exposes no PTZ. Claiming it would put controls in
++          // getCapabilities() that the persona's own label says it does not have.
++          // Typemapped to the plain C++ struct, not a mojom Ptr.
++          video_caps->control_support.pan = false;
++          video_caps->control_support.tilt = false;
++          video_caps->control_support.zoom = false;
++          // Front/back only mean something on a phone; a desktop camera reports no facing mode.
++          video_caps->facing_mode =
++              platform == "Android"
++                  ? (index <= 0 ? mojom::blink::FacingMode::kEnvironment
++                                : mojom::blink::FacingMode::kUser)
++                  : mojom::blink::FacingMode::kNone;
++          video_caps->availability = media::mojom::CameraAvailability::kAvailable;
++          for (const auto& mode : {std::make_pair(640, 480), std::make_pair(1280, 720)}) {
++            video_caps->formats.emplace_back(gfx::Size(mode.first, mode.second), 30.0f,
++                                             media::PIXEL_FORMAT_I420);
++          }
++          input->SetVideoInputCapabilities(std::move(video_caps));
++        } else {
++          auto audio_caps = mojom::blink::AudioInputDeviceCapabilities::New();
++          audio_caps->device_id = id;
++          audio_caps->group_id = group;
++          audio_caps->is_valid = true;
++          audio_caps->channels = 1;
++          audio_caps->sample_rate = 48000;
++          audio_caps->latency = base::Milliseconds(10);
++          audio_caps->parameters = media::AudioParameters(
++              media::AudioParameters::AUDIO_PCM_LOW_LATENCY,
++              media::ChannelLayoutConfig::Mono(), 48000, 480);
++          input->SetAudioInputCapabilities(std::move(audio_caps));
++        }
++        media_devices.push_back(input);
 +      } else {
 +        media_devices.push_back(
 +            MakeGarbageCollected<MediaDeviceInfo>(id, label, group, type));
