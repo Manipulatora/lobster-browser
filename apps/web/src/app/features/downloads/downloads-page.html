@@ -1,0 +1,90 @@
+<!-- One centred column, same measure as the billing page: this is account furniture, not a landing
+     page, and the two should feel like the same room. -->
+<div class="container-page py-10 sm:py-14">
+  <div class="mx-auto w-full max-w-2xl">
+    <section>
+      <h1 class="text-[0.9375rem] text-muted">Downloads</h1>
+      <p class="mt-1 text-4xl tracking-[-0.03em] text-ink sm:text-5xl">Lobster Browser</p>
+      <p class="mt-3 text-[0.9375rem] text-muted">
+        Version {{ version }} · engine {{ engineVersion }}
+      </p>
+    </section>
+
+    @if (nothingPublished()) {
+      <!-- Said plainly rather than shown as two dead buttons. Someone who just paid needs to know
+           the product exists and when it lands, not to click something that 404s. -->
+      <div class="mt-8 rounded-xl border border-line bg-surface-2 p-5">
+        <p class="text-[0.9375rem] text-ink">The installers are not published yet.</p>
+        <p class="mt-2 text-[0.875rem] text-muted">
+          Your account and Credit are ready now. The builds are in final release validation and will
+          appear on this page as soon as they pass — nothing else is needed from you.
+        </p>
+      </div>
+    }
+
+    <div class="mt-8 grid gap-4">
+      @for (item of artifacts(); track item.platform) {
+        <article class="rounded-xl border border-line bg-surface-2 p-5">
+          <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+            <h2 class="text-lg text-ink">{{ item.name }}</h2>
+            @if (detected() === item.platform) {
+              <span class="text-[0.8125rem] text-accent">For this computer</span>
+            }
+          </div>
+          <p class="mt-1 text-[0.875rem] text-muted">{{ item.requirement }}</p>
+
+          @if (item.notice) {
+            <p class="mt-4 rounded-lg border border-line bg-surface-1 p-3 text-[0.875rem] text-muted">
+              {{ item.notice }}
+            </p>
+          }
+
+          <div class="mt-5 flex flex-wrap items-center gap-3">
+            @if (item.published) {
+              <a
+                [href]="item.url"
+                [attr.download]="item.file"
+                class="btn btn-md btn-primary"
+                rel="noopener"
+              >
+                Download for {{ item.name }}
+              </a>
+              @if (item.size) {
+                <span class="text-[0.8125rem] text-muted">{{ item.size }}</span>
+              }
+            } @else {
+              <!-- Disabled, not hidden: the platform list is itself information. -->
+              <button type="button" class="btn btn-md btn-secondary" disabled>Coming soon</button>
+            }
+          </div>
+
+          @if (item.sha256) {
+            <div class="mt-5 border-t border-line pt-4">
+              <p class="text-[0.8125rem] text-muted">SHA-256</p>
+              <p class="mt-1 break-all font-mono text-[0.8125rem] text-ink">{{ item.sha256 }}</p>
+              <div class="mt-2 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  class="btn btn-sm btn-secondary"
+                  (click)="copyHash(item)"
+                >
+                  {{ copied() === item.platform ? 'Copied' : 'Copy hash' }}
+                </button>
+                <code class="text-[0.8125rem] text-muted">{{ item.verifyCommand }}</code>
+              </div>
+            </div>
+          }
+        </article>
+      }
+    </div>
+
+    <section class="mt-10 border-t border-line pt-6">
+      <p class="text-[0.875rem] text-muted">
+        Need Credit or a larger package?
+        <a routerLink="/account/billing" class="text-ink underline underline-offset-4">
+          Go to billing
+        </a>
+      </p>
+    </section>
+  </div>
+</div>

@@ -40,6 +40,12 @@
       <div class="hidden items-center gap-4 lg:flex">
         @if (isAuthenticated()) {
           <a
+            routerLink="/account/downloads"
+            class="nav-link text-[0.9375rem]"
+            [class]="onDarkBackdrop() ? 'on-scene text-white' : ''"
+            >Downloads</a
+          >
+          <a
             routerLink="/account/billing"
             class="nav-link text-[0.9375rem]"
             [class]="onDarkBackdrop() ? 'on-scene text-white' : ''"
@@ -103,6 +109,13 @@
         }
         <div class="rule mt-3 flex flex-col gap-2 pt-4">
           @if (isAuthenticated()) {
+            <a
+              routerLink="/account/downloads"
+              (click)="closeMenu()"
+              class="btn btn-md btn-secondary"
+            >
+              Downloads
+            </a>
             <a routerLink="/account/billing" (click)="closeMenu()" class="btn btn-md btn-secondary">
               Account
             </a>

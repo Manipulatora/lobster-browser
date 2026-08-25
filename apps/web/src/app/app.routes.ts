@@ -60,6 +60,16 @@ export const routes: Routes = [
         title: 'Signed in — Lobster Browser',
       },
 
+      // Where someone lands after paying: the product itself. Gated like billing because it is
+      // account furniture — the installers behind it are public release assets.
+      {
+        path: 'account/downloads',
+        canActivate: [authGuard],
+        loadComponent: () =>
+          import('./features/downloads/downloads-page').then((m) => m.DownloadsPage),
+        title: 'Downloads — Lobster Browser',
+      },
+
       {
         path: 'account/billing',
         canActivate: [authGuard],
