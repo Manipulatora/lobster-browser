@@ -27,7 +27,9 @@ KEEP=5
 
 verify() {
     echo "==> Verifying"
-    for path in / /pricing /auth/sign-in; do
+    # /download is prerendered like the rest and is the navbar's primary call to action,
+    # so a release that 404s it is a broken release even though the home page serves.
+    for path in / /pricing /download /auth/sign-in; do
         code=$(curl -s -o /dev/null -w "%{http_code}" -L --resolve "lobrowser.com:443:127.0.0.1" --resolve "lobrowser.com:80:127.0.0.1" "http://lobrowser.com$path")
         printf '    %-20s %s\n' "$path" "$code"
         [[ "$code" == "200" ]] || return 1
