@@ -22,13 +22,15 @@ test('quilt series wires every capability-gated native patch', async () => {
 });
 
 test('exact-build manifest and TypeScript contract stay synchronized', async () => {
-  const [nativePatch, nativeSource, nativeHeader, contract, windowsPackager] = await Promise.all([
-    read('lobium/patches/core/capability-contract.patch'),
-    read('lobium/src/lobium_capabilities.cc'),
-    read('lobium/src/lobium_capabilities.h'),
-    read('packages/engine-runner/src/lobium-capabilities.ts'),
-    read('scripts/package-lobium-runtime.ps1'),
-  ]);
+  const [nativePatch, nativeSource, nativeHeader, contract, windowsPackager, runtimeVerifier] =
+    await Promise.all([
+      read('lobium/patches/core/capability-contract.patch'),
+      read('lobium/src/lobium_capabilities.cc'),
+      read('lobium/src/lobium_capabilities.h'),
+      read('packages/engine-runner/src/lobium-capabilities.ts'),
+      read('scripts/package-lobium-runtime.ps1'),
+      read('scripts/verify-lobium-runtime.mjs'),
+    ]);
   assert.match(nativePatch, /HasSwitch\("lobium-fingerprint-capabilities"\)/);
   assert.match(nativePatch, /lobium::CapabilityManifestJson\(\)/);
 
@@ -48,13 +50,18 @@ test('exact-build manifest and TypeScript contract stay synchronized', async () 
   const nativeVersion = /kCapabilityContractVersion = (\d+)/.exec(nativeHeader)?.[1];
   const tsVersion = /LOBIUM_CAPABILITY_CONTRACT_VERSION = (\d+)/.exec(contract)?.[1];
   const packagerVersion = /\$expectedContractVersion = (\d+)/.exec(windowsPackager)?.[1];
+  const verifierVersion = /LOBIUM_CAPABILITY_CONTRACT_VERSION = (\d+)/.exec(runtimeVerifier)?.[1];
   assert.ok(
-    nativeVersion && tsVersion && packagerVersion,
+    nativeVersion && tsVersion && packagerVersion && verifierVersion,
     'could not parse every capability contract version',
   );
   assert.equal(tsVersion, nativeVersion);
   assert.equal(packagerVersion, nativeVersion);
-  assert.ok(Number(nativeVersion) >= 2, 'v1 cannot distinguish the stale pre-policy-fix engine');
+  assert.equal(verifierVersion, nativeVersion);
+  assert.ok(
+    Number(nativeVersion) >= 3,
+    'v2 cannot distinguish an engine that leaks local endpoints through icecandidateerror',
+  );
 });
 
 test('locale/geolocation and WebRTC patches enforce the intended native semantics', async () => {
@@ -71,6 +78,31 @@ test('locale/geolocation and WebRTC patches enforce the intended native semantic
   assert.match(webrtc, /cfg->net\.webrtc_policy == "disabled"/);
   assert.match(webrtc, /configuration\.type = webrtc::PeerConnectionInterface::kRelay/);
   assert.match(webrtc, /platform_candidate->Type\(\) != "relay"/);
+  const webrtcAdded = webrtc
+    .split('\n')
+    .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
+    .map((line) => line.slice(1))
+    .join('\n');
+  const errorHookStart = webrtcAdded.indexOf(
+    '// ICE candidate failures are a separate script-visible channel',
+  );
+  assert.notEqual(errorHookStart, -1, 'WebRTC patch does not cover icecandidateerror');
+  const errorHook = webrtcAdded.slice(errorHookStart);
+  assert.match(
+    errorHook,
+    /webrtc_policy == "disabled"\) \{\s*return;/,
+    'disabled must suppress candidate-error events as well as successful candidates',
+  );
+  assert.match(
+    errorHook,
+    /webrtc_policy == "proxy_only" \|\|\s*cfg->net\.webrtc_policy == "disable_non_proxied_udp"/,
+    'both proxied WebRTC modes must take the endpoint-redaction path',
+  );
+  assert.match(
+    errorHook,
+    /RTCPeerConnectionIceErrorEvent::Create\(\s*String\(\), std::nullopt, String\(\), url, error_code, error_text\)/,
+    'protected modes must preserve relay failure details without exposing the local endpoint',
+  );
 
   const farble = await read('lobium/src/lobium_farble.cc');
   assert.match(farble, /constexpr float kUnit = 1\.0f \/ 64\.0f/);
@@ -289,7 +321,20 @@ test('canvas readback farbling is one-time across every ImageBitmap carrier', as
 
   // bitmaprenderer owns only a StaticBitmapImage internally, so it needs its own carrier bit while
   // transferFromImageBitmap has consumed the wrapper and transferToImageBitmap creates another one.
-  assert.match(addedSource, /bool lobium_host_entropy_ = false/);
+  // Its member default is fail-safe: a partially initialized or newly introduced path must not
+  // suppress farbling. Known empty/reset pixels explicitly assign false below.
+  assert.match(
+    patch,
+    /Tracks provenance after bitmaprenderer consumes the source wrapper\.[\s\S]*Fail-safe true[\s\S]*bool lobium_host_entropy_ = true/,
+  );
+  assert.match(
+    patch,
+    /void ImageBitmapRenderingContext::Stop\(\) \{[\s\S]{0,160}lobium_host_entropy_ = false/,
+  );
+  assert.match(
+    patch,
+    /ResetInternalBitmapToBlackTransparent[\s\S]{0,500}lobium_host_entropy_ = false/,
+  );
   assert.match(addedSource, /lobium_host_entropy_ = image_bitmap->LobiumCarriesHostEntropy\(\)/);
   assert.match(
     addedSource,

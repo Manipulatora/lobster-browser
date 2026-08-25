@@ -39,9 +39,12 @@ export {
   buildFontConfig,
   hasFontPersona,
   loadFontPackManifest,
+  orderFontFallbackFamilies,
+  planFontAliases,
+  verifyFontPackFiles,
   writeFontConfig,
 } from './fonts.js';
-export type { FontPackFile, FontPackManifest } from './fonts.js';
+export type { FontAliasPlan, FontPackFile, FontPackManifest } from './fonts.js';
 export {
   downloadChromeWebStoreCrx,
   extensionLaunchArgs,
@@ -118,6 +121,8 @@ export {
   LOBIUM_CONFIG_VERSION,
   LOBIUM_CONFIG_FILENAME,
   LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES,
+  LOBIUM_BROWSER_ONLY_CONFIG_KEYS,
+  rendererConfigProjection,
 } from './lobium-config.js';
 export type {
   LobiumConfig,

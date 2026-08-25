@@ -8,6 +8,10 @@ import {
   availableFontFamilies,
   buildFontConfig,
   hasFontPersona,
+  orderFontFallbackFamilies,
+  planFontAliases,
+  stageNativeFontPack,
+  verifyFontPackFiles,
   writeFontConfig,
 } from './fonts.js';
 
@@ -66,6 +70,120 @@ test('hasFontPersona: EVERY OS is bundled so non-Windows personas cannot leak ho
   assert.equal(hasFontPersona('macos'), true);
   assert.equal(hasFontPersona('linux'), true);
   assert.equal(hasFontPersona('android'), true);
+});
+
+test('Windows CSS alias plan distinguishes metric clones from class approximations', () => {
+  const plan = planFontAliases(
+    'windows',
+    ['Liberation Sans', 'Liberation Serif', 'Liberation Mono', 'Carlito', 'Caladea'],
+    ['Arial', 'Calibri', 'Cambria', 'Consolas', 'Segoe UI', 'sans-serif'],
+  );
+  assert.deepEqual(plan.aliases, {
+    Arial: 'Liberation Sans',
+    Calibri: 'Carlito',
+    Cambria: 'Caladea',
+    Consolas: 'Liberation Mono',
+    'Segoe UI': 'Liberation Sans',
+  });
+  assert.deepEqual(plan.metricCompatible, ['Arial', 'Calibri', 'Cambria']);
+  assert.deepEqual(plan.classFallback, ['Consolas', 'Segoe UI']);
+});
+
+test('native fallback order puts persona sans/serif/mono ahead of alphabetical coverage', () => {
+  assert.deepEqual(
+    orderFontFallbackFamilies('android', [
+      'Noto Color Emoji',
+      'Noto Music',
+      'Noto Sans',
+      'Noto Sans Mono',
+      'Noto Serif',
+    ]).slice(0, 3),
+    ['Noto Sans', 'Noto Serif', 'Noto Sans Mono'],
+  );
+  assert.deepEqual(
+    orderFontFallbackFamilies('windows', [
+      'Caladea',
+      'Carlito',
+      'Liberation Mono',
+      'Liberation Sans',
+      'Liberation Serif',
+    ]).slice(0, 3),
+    ['Liberation Sans', 'Liberation Serif', 'Liberation Mono'],
+  );
+});
+
+test('verifyFontPackFiles accepts only the exact manifest-hashed font ledger', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fonts-ledger-'));
+  try {
+    const pack = await fixturePack(root);
+    const manifest = await verifyFontPackFiles(pack);
+    assert.equal(manifest.packId, 'fixture-pack');
+
+    await writeFile(join(pack, 'files', 'LiberationSans-Regular.ttf'), 'tampered');
+    await assert.rejects(
+      () => verifyFontPackFiles(pack),
+      /failed SHA-256 verification/,
+      'a declared file with different bytes must never reach DirectWrite',
+    );
+
+    await writeFile(join(pack, 'files', 'LiberationSans-Regular.ttf'), 'font');
+    await writeFile(join(pack, 'files', 'undeclared.otf'), 'font');
+    await assert.rejects(
+      () => verifyFontPackFiles(pack),
+      /ledger mismatch \(undeclared: files\/undeclared\.otf; missing: none\)/,
+      'a font outside the manifest would still be discovered by the native recursive loader',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('native stage contains only the selected persona files and is content-keyed/reusable', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fonts-native-stage-'));
+  try {
+    const pack = await fixturePack(root);
+    const first = await stageNativeFontPack(root, 'android', pack);
+    assert.deepEqual(first.physicalFamilies, ['DejaVu Sans']);
+    const stagedFiles = await readdir(join(first.dir, 'files'));
+    assert.equal(stagedFiles.length, 1);
+    const stagedFile = stagedFiles[0];
+    assert.ok(stagedFile);
+    assert.match(stagedFile, /DejaVuSans-Regular\.ttf$/);
+    assert.ok(!stagedFile.includes('LiberationSans'));
+
+    const second = await stageNativeFontPack(root, 'android', pack);
+    assert.equal(
+      second.dir,
+      first.dir,
+      'same verified content and persona reuse the immutable stage',
+    );
+
+    await writeFile(join(first.dir, 'files', 'undeclared.ttf'), 'font');
+    await assert.rejects(
+      () => stageNativeFontPack(root, 'android', pack),
+      /stage contains an undeclared file/,
+      'a profile-local file dropped into the stage must never reach native recursion',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('native stage rejects a multi-family file that escapes the persona inventory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'fonts-native-companion-'));
+  try {
+    const pack = await fixturePack(root);
+    const manifestPath = join(pack, 'font-pack.manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    manifest.files[1].families.push('Undeclared TTC Companion');
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await assert.rejects(
+      () => stageNativeFontPack(root, 'android', pack),
+      /exposes families outside the android persona: Undeclared TTC Companion/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('private config restores regional Noto CJK selection rules', () => {

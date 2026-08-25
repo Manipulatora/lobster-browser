@@ -5,13 +5,15 @@ variant, which only content/shell and headless/lib read - a chrome/ build ignore
 that flag was doing nothing at all until 2026-08-22). This hook makes the product policies real in
 Blink:
   * default_public_interface_only: Chromium default-public-interface policy.
-  * disable_non_proxied_udp: Chromium blocks UDP paths that bypass the configured proxy.
-  * proxy_only: forces relay-only ICE and suppresses any non-relay candidate defensively.
-  * disabled: the connection constructs normally and never surfaces a candidate.
+  * disable_non_proxied_udp: Chromium blocks UDP paths that bypass the configured proxy; Lobium also
+    redacts the local endpoint from permitted TURN TCP/TLS failure events.
+  * proxy_only: forces relay-only ICE, suppresses non-relay candidates, and redacts the local endpoint
+    from relay failure events while keeping their URL/error details.
+  * disabled: the connection constructs normally and never surfaces a candidate or candidate error.
 
 The sidecar independently rejects proxy_only without a configured proxy before browser spawn.
 
-TWO THINGS THIS PATCH USED TO GET WRONG, both page-observable:
+THREE THINGS THIS PATCH USED TO GET WRONG, all page-observable:
 
 1. "disabled" threw NotSupportedError from RTCPeerConnection::Create with the message
    "WebRTC is disabled by this browser profile." That message is a product signature readable by one
@@ -30,6 +32,14 @@ TWO THINGS THIS PATCH USED TO GET WRONG, both page-observable:
    and setConfiguration(): a page cannot restore host/srflx gathering by reconfiguring after the
    constructor, and a rejected reconfiguration cannot corrupt the values getConfiguration() echoes.
 
+3. icecandidateerror is independent from the successful-candidate callback. WebRTC builds TURN
+   allocation errors from the raw local socket address and port; Blink copies those values into both
+   event.address and event.hostCandidate. A failing page-supplied TURN URL therefore exposed the host
+   endpoint even while proxy_only surfaced no host/srflx/prflx candidate. proxy_only and
+   disable_non_proxied_udp now preserve useful relay failure signaling (URL, errorCode and errorText)
+   but report a null address and port with an empty hostCandidate. disabled suppresses the error event
+   as well as candidate events.
+
 MEASURED, not assumed. A first attempt enforced "disabled" purely in DidGenerateICECandidate, and
 that leaked: the icecandidate event was silent but pc.localDescription.sdp still carried all four
 candidates, host and srflx alike. "disabled" therefore also forces relay-only AND clears
@@ -42,7 +52,7 @@ Verified on the built engine:
     disabled    constructs=true  iceTransportPolicy=all  candidates=0                   sdpLines=0
 
 diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
-index 453ea736a8287..7065ce750b633 100644
+index 453ea736a8..0dbf3500f7 100644
 --- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
 +++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
 @@ -48,6 +48,7 @@
@@ -53,7 +63,7 @@ index 453ea736a8287..7065ce750b633 100644
  #include "build/buildflag.h"
  #include "services/metrics/public/cpp/ukm_builders.h"
  #include "services/network/public/cpp/connection_allowlist.h"
-@@ -621,4 +622,37 @@ String GetSdpFromCache(V8RTCSdpType::Enum type,
+@@ -621,6 +622,39 @@ String GetSdpFromCache(V8RTCSdpType::Enum type,
    }
    return String();
  }
@@ -91,6 +101,8 @@ index 453ea736a8287..7065ce750b633 100644
 +  return requested;
 +}
  }  // namespace
+ 
+ RTCPeerConnection::EventWrapper::EventWrapper(Event* event,
 @@ -642,6 +676,18 @@ RTCPeerConnection* RTCPeerConnection::Create(
      ExecutionContext* context,
      const RTCConfiguration* rtc_configuration,
@@ -170,8 +182,7 @@ index 453ea736a8287..7065ce750b633 100644
          "configuration in an unsupported way.");
 +    return;
    }
--
-+
+ 
 +  // Reapply the native profile policy to every page reconfiguration. Keep the requested values in
 +  // a temporary transaction: a rejected native update must leave the previous echo state intact.
 +  LobiumRequestedRtcConfiguration lobium_requested_configuration =
@@ -205,8 +216,33 @@ index 453ea736a8287..7065ce750b633 100644
    RTCIceCandidate* ice_candidate = RTCIceCandidate::Create(platform_candidate);
    MaybeDispatchEvent(RTCPeerConnectionIceEvent::Create(ice_candidate));
  }
+@@ -2594,6 +2679,24 @@ void RTCPeerConnection::DidFailICECandidate(const String& address,
+                                             const String& error_text) {
+   DCHECK(!closed_);
+   DCHECK(GetExecutionContext()->IsContextThread());
++  // ICE candidate failures are a separate script-visible channel from
++  // DidGenerateICECandidate. WebRTC constructs TURN errors with the raw local
++  // endpoint, so filtering successful candidates alone still leaks it through
++  // RTCPeerConnectionIceErrorEvent.address/hostCandidate.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg) {
++    if (cfg->net.webrtc_policy == "disabled") {
++      return;
++    }
++    if (cfg->net.webrtc_policy == "proxy_only" ||
++        cfg->net.webrtc_policy == "disable_non_proxied_udp") {
++      // Preserve the page's legitimate relay failure signal (URL, code and
++      // text), but remove every field derived from the local socket.
++      MaybeDispatchEvent(RTCPeerConnectionIceErrorEvent::Create(
++          String(), std::nullopt, String(), url, error_code, error_text));
++      return;
++    }
++  }
+   MaybeDispatchEvent(RTCPeerConnectionIceErrorEvent::Create(
+       address, port, host_candidate, url, error_code, error_text));
+ }
 diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
-index d48bc9905668e..7bb9fe07b979e 100644
+index d48bc99056..7bb9fe07b9 100644
 --- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
 +++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
 @@ -34,6 +34,7 @@

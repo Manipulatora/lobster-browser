@@ -36,7 +36,7 @@ and transfer messages carry the exact bit.
 
 
 diff --git a/third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h b/third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
-index 36b0082..e1b9e13 100644
+index 36b00825e7..e1b9e13890 100644
 --- a/third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
 +++ b/third_party/blink/renderer/bindings/core/v8/serialization/serialization_tag.h
 @@ -69,7 +69,8 @@ enum SerializationTag : uint8_t {
@@ -50,7 +50,7 @@ index 36b0082..e1b9e13 100644
        'J',  // index:uint32_t -> ElementImage. For ElementImage transfer
    kOffscreenCanvasTransferTag = 'H',  // index, width, height, id,
 diff --git a/third_party/blink/renderer/bindings/core/v8/serialization/serialized_params.h b/third_party/blink/renderer/bindings/core/v8/serialization/serialized_params.h
-index 252775f..2018af8 100644
+index 252775f19b..2018af8635 100644
 --- a/third_party/blink/renderer/bindings/core/v8/serialization/serialized_params.h
 +++ b/third_party/blink/renderer/bindings/core/v8/serialization/serialized_params.h
 @@ -44,8 +44,12 @@ enum class ImageSerializationTag : uint32_t {
@@ -68,7 +68,7 @@ index 252775f..2018af8 100644
  
  // This enumeration specifies the values used to serialize PredefinedColorSpace.
 diff --git a/third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc b/third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc
-index 90ad523..ae81a69 100644
+index 90ad523bab..ae81a69824 100644
 --- a/third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_deserializer.cc
 @@ -481,6 +481,9 @@ ScriptWrappable* V8ScriptValueDeserializer::ReadDOMObject(
@@ -135,7 +135,7 @@ index 90ad523..ae81a69 100644
                return nullptr;
            }
 diff --git a/third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc b/third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
-index 9dd16ee..4cc6b0c 100644
+index 9dd16eeaab..4cc6b0cecd 100644
 --- a/third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/serialization/v8_script_value_serializer.cc
 @@ -513,6 +513,10 @@ bool V8ScriptValueSerializer::WriteDOMObject(ScriptWrappable* wrappable,
@@ -164,7 +164,7 @@ index 9dd16ee..4cc6b0c 100644
      // Obtain size disregarding image orientation since the image orientation
      // will be applied at deserialization time.
 diff --git a/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h b/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
-index f90e749..01c9f4e 100644
+index f90e749236..01c9f4eb88 100644
 --- a/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
 +++ b/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
 @@ -125,6 +125,21 @@ class CORE_EXPORT CanvasRenderingContext
@@ -190,7 +190,7 @@ index f90e749..01c9f4e 100644
      return canvas_rendering_type_ == CanvasRenderingAPI::kBitmaprenderer;
    }
 diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
-index d1193b6..988634d 100644
+index d1193b68f5..988634d30d 100644
 --- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 +++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 @@ -45,6 +45,8 @@
@@ -358,7 +358,7 @@ index d1193b6..988634d 100644
      auto* options = ImageEncodeOptions::Create();
      options->setType(ImageEncoderUtils::MimeTypeName(encoding_mime_type));
 diff --git a/third_party/blink/renderer/core/imagebitmap/image_bitmap.cc b/third_party/blink/renderer/core/imagebitmap/image_bitmap.cc
-index 828f244..e3f2504 100644
+index 828f244d43..e3f2504dbe 100644
 --- a/third_party/blink/renderer/core/imagebitmap/image_bitmap.cc
 +++ b/third_party/blink/renderer/core/imagebitmap/image_bitmap.cc
 @@ -23,6 +23,7 @@
@@ -443,7 +443,7 @@ index 828f244..e3f2504 100644
  }
  
 diff --git a/third_party/blink/renderer/core/imagebitmap/image_bitmap.h b/third_party/blink/renderer/core/imagebitmap/image_bitmap.h
-index 046bab1..ba22cd9 100644
+index 046bab1bcc..ba22cd9f83 100644
 --- a/third_party/blink/renderer/core/imagebitmap/image_bitmap.h
 +++ b/third_party/blink/renderer/core/imagebitmap/image_bitmap.h
 @@ -93,6 +93,28 @@ class CORE_EXPORT ImageBitmap final : public ScriptWrappable,
@@ -484,7 +484,7 @@ index 046bab1..ba22cd9 100644
    int32_t memory_usage_ = 0;
    NO_UNIQUE_ADDRESS V8ExternalMemoryAccounterBase external_memory_accounter_;
 diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
-index 97e94a4..fd9eaf6 100644
+index 97e94a4aa1..fd9eaf6727 100644
 --- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
 +++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
 @@ -11,6 +11,8 @@
@@ -597,18 +597,10 @@ index 97e94a4..fd9eaf6 100644
    auto* dispatcher = GetOrCreateResourceDispatcher();
    if (placeholder_client_) {
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
-index 1ab234d..253cb53 100644
+index 1ab234ddb6..6e3d461b7e 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
-@@ -7,6 +7,7 @@
- #include <cmath>
- #include <cstdint>
- #include <cstdlib>
-+#include <cstring>
- #include <limits>
- #include <memory>
- #include <optional>
-@@ -14,6 +15,7 @@
+@@ -14,6 +14,7 @@
  
  #include "base/check.h"
  #include "base/check_op.h"
@@ -616,7 +608,7 @@ index 1ab234d..253cb53 100644
  #include "base/location.h"
  #include "base/memory/scoped_refptr.h"
  #include "base/memory/weak_ptr.h"
-@@ -27,6 +29,8 @@
+@@ -27,6 +28,8 @@
  #include "cc/paint/paint_flags.h"
  #include "cc/paint/paint_image.h"
  #include "cc/paint/record_paint_canvas.h"
@@ -625,7 +617,7 @@ index 1ab234d..253cb53 100644
  #include "components/viz/common/resources/shared_image_format_utils.h"
  #include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
  #include "third_party/blink/public/common/metrics/document_update_reason.h"
-@@ -103,6 +107,8 @@
+@@ -103,6 +106,8 @@
  #include "third_party/blink/renderer/platform/wtf/forward.h"
  #include "third_party/blink/renderer/platform/wtf/math_extras.h"
  #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
@@ -634,7 +626,7 @@ index 1ab234d..253cb53 100644
  #include "ui/gfx/geometry/skia_conversions.h"
  #include "ui/gfx/geometry/vector2d_f.h"
  
-@@ -513,6 +519,152 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+@@ -513,6 +518,153 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
        SkIRect bounds =
            snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
        DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
@@ -762,14 +754,15 @@ index 1ab234d..253cb53 100644
 +                    if (image_data_pixmap.colorType() ==
 +                        kRGBA_F16_SkColorType) {
 +                      uint16_t bits = 0;
-+                      std::memcpy(&bits, output_channel.data(), sizeof(bits));
++                      base::byte_span_from_ref(bits).copy_from(output_channel);
 +                      // IEEE-754 binary16: positive finite values through 1.0,
 +                      // plus negative zero. All negative non-zero, Inf and NaN
 +                      // encodings are outside the canonical 8-bit domain.
 +                      in_unit_range = bits == 0x8000u || bits <= 0x3c00u;
 +                    } else {
 +                      float value = 0.0f;
-+                      std::memcpy(&value, output_channel.data(), sizeof(value));
++                      base::byte_span_from_ref(base::allow_nonunique_obj, value)
++                          .copy_from(output_channel);
 +                      in_unit_range = std::isfinite(value) && value >= 0.0f &&
 +                                      value <= 1.0f;
 +                    }
@@ -788,7 +781,7 @@ index 1ab234d..253cb53 100644
    }
  
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
-index e0d1a56..2036c24 100644
+index e0d1a56e9b..2036c24ff0 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
 @@ -75,6 +75,14 @@ enum class PredefinedColorSpace;
@@ -807,7 +800,7 @@ index e0d1a56..2036c24 100644
  
    // Try to restore context 4 times in the event that the context is lost. If
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
-index f5fe406..e5b7bcc 100644
+index f5fe40684f..e5b7bccd62 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
 @@ -18,6 +18,7 @@
@@ -925,7 +918,7 @@ index f5fe406..e5b7bcc 100644
        /*draw_func=*/
        [&image, &vertex_data, &uv_data, &index_data](
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h
-index 7113ac2..a77d3ea 100644
+index 7113ac2516..a77d3ea7d4 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.h
 @@ -459,6 +459,15 @@ class MODULES_EXPORT Canvas2DRecorderContext : public CanvasPath {
@@ -1055,7 +1048,7 @@ index 7113ac2..a77d3ea 100644
        draw_func(paint_canvas, flags);
        ResetAlphaIfNeeded(paint_canvas, global_composite, &bounds);
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_pattern.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_pattern.cc
-index 76aaefc..c78e636 100644
+index 76aaefcfc3..c78e636273 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_pattern.cc
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_pattern.cc
 @@ -65,9 +65,11 @@ Pattern::RepeatMode CanvasPattern::ParseRepetitionType(
@@ -1073,7 +1066,7 @@ index 76aaefc..c78e636 100644
  void CanvasPattern::setTransform(DOMMatrix2DInit* transform,
                                   ExceptionState& exception_state) {
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_pattern.h b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_pattern.h
-index e809ac1..3390b1e 100644
+index e809ac1aee..3390b1e162 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_pattern.h
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_pattern.h
 @@ -48,12 +48,16 @@ class MODULES_EXPORT CanvasPattern final : public ScriptWrappable {
@@ -1103,7 +1096,7 @@ index e809ac1..3390b1e 100644
  
  }  // namespace blink
 diff --git a/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_factories.cc b/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_factories.cc
-index 371ec1f..c5185a3 100644
+index 371ec1f518..c5185a379d 100644
 --- a/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_factories.cc
 +++ b/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_factories.cc
 @@ -481,6 +481,12 @@ void ImageBitmapFactories::ImageBitmapLoader::ResolvePromiseOnOriginalThread(
@@ -1120,7 +1113,7 @@ index 371ec1f..c5185a3 100644
      resolver_->Resolve(image_bitmap);
    } else {
 diff --git a/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_rendering_context.cc b/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_rendering_context.cc
-index 8165f46..6958f28 100644
+index 8165f46a86..6958f28303 100644
 --- a/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_rendering_context.cc
 +++ b/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_rendering_context.cc
 @@ -149,6 +149,7 @@ base::ByteSize ImageBitmapRenderingContext::AllocatedBufferSize() const {
@@ -1165,7 +1158,7 @@ index 8165f46..6958f28 100644
  
  CanvasRenderingContext* ImageBitmapRenderingContext::Factory::Create(
 diff --git a/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_rendering_context.h b/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_rendering_context.h
-index 708d0e5..a38458e 100644
+index 708d0e5275..bd0090e3ae 100644
 --- a/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_rendering_context.h
 +++ b/third_party/blink/renderer/modules/canvas/imagebitmap/image_bitmap_rendering_context.h
 @@ -114,6 +114,8 @@ class MODULES_EXPORT ImageBitmapRenderingContext final
@@ -1181,14 +1174,14 @@ index 708d0e5..a38458e 100644
    Vector<SoftwareResource> recycled_software_resources_;
  
    scoped_refptr<StaticBitmapImage> image_;
-+  // Tracks provenance while bitmaprenderer owns only the pixel carrier and
-+  // transferFromImageBitmap has consumed the source wrapper.
-+  bool lobium_host_entropy_ = false;
++  // Tracks provenance after bitmaprenderer consumes the source wrapper.
++  // Fail-safe true until transfer/reset assigns exact source provenance.
++  bool lobium_host_entropy_ = true;
    bool disposed_ = false;
    bool has_presented_since_last_set_image_ = false;
    bool is_opaque_ = false;
 diff --git a/third_party/blink/renderer/modules/canvas/offscreencanvas2d/offscreen_canvas_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/offscreencanvas2d/offscreen_canvas_rendering_context_2d.cc
-index dd724db..d5e4d46 100644
+index dd724db99e..d5e4d46c99 100644
 --- a/third_party/blink/renderer/modules/canvas/offscreencanvas2d/offscreen_canvas_rendering_context_2d.cc
 +++ b/third_party/blink/renderer/modules/canvas/offscreencanvas2d/offscreen_canvas_rendering_context_2d.cc
 @@ -368,6 +368,7 @@ ImageBitmap* OffscreenCanvasRenderingContext2D::TransferToImageBitmap(
@@ -1212,7 +1205,7 @@ index dd724db..d5e4d46 100644
  
  scoped_refptr<StaticBitmapImage> OffscreenCanvasRenderingContext2D::GetImage() {
 diff --git a/third_party/blink/renderer/platform/graphics/exported_canvas_resource.cc b/third_party/blink/renderer/platform/graphics/exported_canvas_resource.cc
-index a952640..08b62b4 100644
+index a952640c84..08b62b4655 100644
 --- a/third_party/blink/renderer/platform/graphics/exported_canvas_resource.cc
 +++ b/third_party/blink/renderer/platform/graphics/exported_canvas_resource.cc
 @@ -11,8 +11,12 @@
@@ -1231,7 +1224,7 @@ index a952640..08b62b4 100644
    CHECK(!resource_->is_cross_thread());
  }
 diff --git a/third_party/blink/renderer/platform/graphics/exported_canvas_resource.h b/third_party/blink/renderer/platform/graphics/exported_canvas_resource.h
-index 8abb201..cdd84d3 100644
+index 8abb2013a2..cdd84d3045 100644
 --- a/third_party/blink/renderer/platform/graphics/exported_canvas_resource.h
 +++ b/third_party/blink/renderer/platform/graphics/exported_canvas_resource.h
 @@ -19,7 +19,17 @@ class StaticBitmapImage;

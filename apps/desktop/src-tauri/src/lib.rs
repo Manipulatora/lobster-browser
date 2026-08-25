@@ -30,7 +30,8 @@ mod template_store;
 mod vault_key;
 mod window_show;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager, State};
@@ -44,6 +45,92 @@ use template_store::{CreateProfileTemplateInput, ProfileTemplate, UpdateProfileT
 
 /// Port the local automation API binds to on 127.0.0.1. Loopback-only by design.
 const LOCAL_API_PORT: u16 = 53211;
+
+/// Private desktop -> sidecar attestation contract for the canonical per-user engine runtime.
+const MANAGED_ENGINE_VERSION_ENV: &str = "LOBSTER_INTERNAL_MANAGED_ENGINE_VERSION";
+const MANAGED_ENGINE_SHA256_ENV: &str = "LOBSTER_INTERNAL_MANAGED_ENGINE_SHA256";
+#[cfg(target_os = "windows")]
+const MANAGED_ENGINE_BIN_ORIGIN_ENV: &str = "LOBSTER_INTERNAL_LOBIUM_BIN_ORIGIN";
+
+/// Whether the published `LOBSTER_LOBIUM_BIN` points at the managed per-user runtime.
+///
+/// The environment variable is also the supported developer/self-hosting override, and bundled
+/// resource runtimes are valid without a downloader stamp. Either may legitimately use the same path
+/// spelling as the managed runtime, so Rust tracks origin out-of-band on every platform. Windows also
+/// mirrors it to the sidecar for its canonical per-user resolver; other platforms retain the existing
+/// Rust-validated explicit-path handoff.
+static LOBIUM_BIN_IS_MANAGED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LobiumBinOrigin {
+    NonManaged,
+    Managed,
+}
+
+impl LobiumBinOrigin {
+    fn is_managed(self) -> bool {
+        self == Self::Managed
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn managed_engine_bin_origin_value(origin: LobiumBinOrigin) -> Option<&'static str> {
+    origin.is_managed().then_some("managed")
+}
+
+#[cfg(test)]
+fn discovered_lobium_bin_origin(chrome: &Path, user_runtime: Option<&Path>) -> LobiumBinOrigin {
+    if user_runtime.is_some_and(|runtime| chrome == runtime.join(CHROME_BIN)) {
+        LobiumBinOrigin::Managed
+    } else {
+        LobiumBinOrigin::NonManaged
+    }
+}
+
+/// Publish the binary and its origin as one operation. The origin is stored first so a concurrent
+/// status request can never observe a newly managed path and transiently classify it as an override.
+fn publish_lobium_env(chrome: &Path, origin: LobiumBinOrigin) {
+    LOBIUM_BIN_IS_MANAGED.store(origin.is_managed(), Ordering::Release);
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(value) = managed_engine_bin_origin_value(origin) {
+            std::env::set_var(MANAGED_ENGINE_BIN_ORIGIN_ENV, value);
+        } else {
+            std::env::remove_var(MANAGED_ENGINE_BIN_ORIGIN_ENV);
+        }
+    }
+    std::env::set_var("LOBSTER_LOBIUM_BIN", chrome.to_string_lossy().as_ref());
+    if let Some(parent) = chrome.parent() {
+        std::env::set_var("LOBSTER_LOBIUM_DIR", parent.to_string_lossy().as_ref());
+    }
+}
+
+fn managed_engine_expectation(
+    source: Option<&engine_provision::EngineSource>,
+) -> Option<(String, String)> {
+    source.map(|source| (source.version.clone(), source.sha256.to_ascii_lowercase()))
+}
+
+/// Publish the manifest decision before sidecar spawn even when chrome.exe is still absent. Clearing
+/// first is important for a Windows build whose manifest has no win-x64 entry: an inherited/stale
+/// expectation must not authorize the canonical runtime.
+fn publish_managed_engine_expectation(source: Option<&engine_provision::EngineSource>) {
+    std::env::remove_var(MANAGED_ENGINE_VERSION_ENV);
+    std::env::remove_var(MANAGED_ENGINE_SHA256_ENV);
+    if let Some((version, sha256)) = managed_engine_expectation(source) {
+        std::env::set_var(MANAGED_ENGINE_VERSION_ENV, version);
+        std::env::set_var(MANAGED_ENGINE_SHA256_ENV, sha256);
+    }
+}
+
+fn current_managed_lobium_bin(
+    runtime: &Path,
+    source: Option<&engine_provision::EngineSource>,
+) -> Option<PathBuf> {
+    source
+        .filter(|source| engine_provision::engine_matches_source(runtime, source))
+        .map(|_| runtime.join(CHROME_BIN))
+}
 
 /// Shared desktop state: the local SQLite profile store, the engine-runner sidecar (shared with the
 /// local automation API so the UI Launch button and the HTTP API drive the SAME launch path), and the
@@ -420,17 +507,16 @@ struct EngineStatus {
 
 fn explicit_lobium_bin_from(
     configured: Option<PathBuf>,
-    managed_runtime: Option<&std::path::Path>,
+    is_managed: bool,
 ) -> Result<Option<PathBuf>, String> {
     let Some(path) = configured else {
         return Ok(None);
     };
-    // `ensure_lobium_env` publishes the canonical downloaded path for the sidecar. That value is
-    // managed by the provisioner and therefore must be judged by the manifest stamp, not treated as
-    // a developer override. Any other set value is explicit and must either name a real file or fail
-    // actionably; silently falling through could report a managed runtime ready while the sidecar
-    // still inherits this stale path.
-    if managed_runtime.is_some_and(|runtime| path == runtime.join(CHROME_BIN)) {
+    // A per-user path published by discovery/provisioning is managed and therefore must be judged by
+    // the manifest stamp, not treated as a developer override. The origin bit matters more than the
+    // path: a Windows builder is explicitly instructed to point LOBSTER_LOBIUM_BIN at that same path
+    // before a win-x64 release entry exists, and that remains a valid developer override.
+    if is_managed {
         return Ok(None);
     }
     if path.is_file() {
@@ -444,8 +530,7 @@ fn explicit_lobium_bin_from(
 
 fn explicit_lobium_bin() -> Result<Option<PathBuf>, String> {
     let configured = std::env::var_os("LOBSTER_LOBIUM_BIN").map(PathBuf::from);
-    let managed_runtime = user_engine_runtime_dir();
-    explicit_lobium_bin_from(configured, managed_runtime.as_deref())
+    explicit_lobium_bin_from(configured, LOBIUM_BIN_IS_MANAGED.load(Ordering::Acquire))
 }
 
 /// Whether the Lobium engine is installed. Drives the first-run download gate: the `.deb` ships without
@@ -518,11 +603,7 @@ async fn provision_engine(app: tauri::AppHandle) -> Result<(), String> {
     .await
     .map_err(|e| format!("engine provisioning failed: {e:#}"))?;
     // Point the RUNNING process at the freshly installed engine so a launch works without a restart.
-    std::env::set_var(
-        "LOBSTER_LOBIUM_BIN",
-        runtime_dir.join(CHROME_BIN).to_string_lossy().as_ref(),
-    );
-    std::env::set_var("LOBSTER_LOBIUM_DIR", runtime_dir.to_string_lossy().as_ref());
+    publish_lobium_env(&runtime_dir.join(CHROME_BIN), LobiumBinOrigin::Managed);
     Ok(())
 }
 
@@ -1197,20 +1278,42 @@ fn ensure_lobium_env(app: &tauri::AppHandle) {
     // and so it resolves at all on Windows, where HOME is unset.
     let user_runtime = user_engine_runtime_dir();
 
+    // A value inherited when the desktop process started is the documented developer override. Only
+    // publish the managed-origin marker together with a path selected by this process.
+    #[cfg(target_os = "windows")]
+    {
+        if std::env::var_os("LOBSTER_LOBIUM_BIN").is_some()
+            && !LOBIUM_BIN_IS_MANAGED.load(Ordering::Acquire)
+        {
+            std::env::remove_var(MANAGED_ENGINE_BIN_ORIGIN_ENV);
+        }
+    }
+
+    let manifest = resource_dir
+        .as_ref()
+        .map(|resources| resources.join("engine-manifest.json"));
+    let managed_source = match engine_provision::resolve_source(manifest.as_deref()) {
+        Ok(source) => Some(source),
+        Err(error) => {
+            tracing::warn!(%error, "managed Lobium source is unavailable; canonical runtime denied");
+            None
+        }
+    };
+    publish_managed_engine_expectation(managed_source.as_ref());
+
     if std::env::var_os("LOBSTER_LOBIUM_BIN").is_none() {
-        let mut candidates = Vec::new();
+        let mut resource_candidates = Vec::new();
         if let Some(resources) = resource_dir.as_ref() {
-            candidates.push(resources.join("lobium").join(CHROME_BIN));
-            candidates.push(resources.join("engines").join("lobium").join(CHROME_BIN));
+            resource_candidates.push(resources.join("lobium").join(CHROME_BIN));
+            resource_candidates.push(resources.join("engines").join("lobium").join(CHROME_BIN));
         }
-        if let Some(runtime) = user_runtime.as_ref() {
-            candidates.push(runtime.join(CHROME_BIN));
-        }
-        if let Some(chrome) = candidates.into_iter().find(|path| path.is_file()) {
-            std::env::set_var("LOBSTER_LOBIUM_BIN", chrome.to_string_lossy().as_ref());
-            if let Some(parent) = chrome.parent() {
-                std::env::set_var("LOBSTER_LOBIUM_DIR", parent.to_string_lossy().as_ref());
-            }
+        if let Some(chrome) = resource_candidates.into_iter().find(|path| path.is_file()) {
+            publish_lobium_env(&chrome, LobiumBinOrigin::NonManaged);
+        } else if let Some(chrome) = user_runtime
+            .as_ref()
+            .and_then(|runtime| current_managed_lobium_bin(runtime, managed_source.as_ref()))
+        {
+            publish_lobium_env(&chrome, LobiumBinOrigin::Managed);
         }
     }
 
@@ -1912,8 +2015,13 @@ pub fn run() {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::{
-        explicit_lobium_bin_from, first_font_pack_dir, remove_profile_data_dir, CHROME_BIN,
+        current_managed_lobium_bin, discovered_lobium_bin_origin, explicit_lobium_bin_from,
+        first_font_pack_dir, managed_engine_expectation, remove_profile_data_dir, LobiumBinOrigin,
+        CHROME_BIN,
     };
+
+    #[cfg(target_os = "windows")]
+    use super::managed_engine_bin_origin_value;
 
     #[cfg(target_os = "linux")]
     use super::packaged_runtime_needs_software_gpu;
@@ -1932,40 +2040,121 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn a_missing_explicit_lobium_override_fails_instead_of_falling_through_to_managed() {
+    fn explicit_engine_origin_distinguishes_local_package_from_managed_discovery() {
         let root =
             std::env::temp_dir().join(format!("lobster-explicit-engine-{}", uuid::Uuid::new_v4()));
         let managed_runtime = root.join("managed");
         let missing_override = root.join("missing").join(CHROME_BIN);
 
-        let error = explicit_lobium_bin_from(
-            Some(missing_override.clone()),
-            Some(managed_runtime.as_path()),
-        )
-        .expect_err("a missing developer override must not silently use the managed engine");
+        let error = explicit_lobium_bin_from(Some(missing_override.clone()), false)
+            .expect_err("a missing developer override must not silently use the managed engine");
         assert!(error.contains("LOBSTER_LOBIUM_BIN"), "{error}");
         assert!(error.contains("update or unset"), "{error}");
 
         std::fs::create_dir_all(missing_override.parent().unwrap()).unwrap();
         std::fs::write(&missing_override, b"browser").unwrap();
         assert_eq!(
-            explicit_lobium_bin_from(
-                Some(missing_override.clone()),
-                Some(managed_runtime.as_path())
-            )
-            .unwrap(),
+            explicit_lobium_bin_from(Some(missing_override.clone()), false,).unwrap(),
             Some(missing_override),
             "a real explicit developer binary remains supported"
         );
 
-        // The canonical path is different: `ensure_lobium_env` publishes it for the sidecar, while
-        // status/provision must still evaluate the exact manifest stamp and may safely install there.
+        // A pre-set override remains explicit even at the canonical Windows install path. This is
+        // how a locally packaged engine can be exercised before a win-x64 download is published.
         let canonical = managed_runtime.join(CHROME_BIN);
+        std::fs::create_dir_all(&managed_runtime).unwrap();
+        std::fs::write(&canonical, b"browser").unwrap();
         assert_eq!(
-            explicit_lobium_bin_from(Some(canonical), Some(managed_runtime.as_path())).unwrap(),
-            None
+            explicit_lobium_bin_from(Some(canonical.clone()), false).unwrap(),
+            Some(canonical.clone())
+        );
+
+        // But the exact same path auto-published by ensure_lobium_env is not an override. Status and
+        // provisioning must evaluate the exact manifest version + digest stamp for this branch.
+        assert_eq!(
+            explicit_lobium_bin_from(Some(canonical), true).unwrap(),
+            None,
+            "auto-discovery must not weaken the managed-runtime integrity contract"
+        );
+
+        let resource_runtime = root.join("resources").join("lobium");
+        let resource_chrome = resource_runtime.join(CHROME_BIN);
+        std::fs::create_dir_all(&resource_runtime).unwrap();
+        std::fs::write(&resource_chrome, b"browser").unwrap();
+        assert_eq!(
+            discovered_lobium_bin_origin(&resource_chrome, Some(&managed_runtime)),
+            LobiumBinOrigin::NonManaged,
+            "a bundled resource runtime must not be subjected to the downloader stamp"
+        );
+        assert_eq!(
+            explicit_lobium_bin_from(Some(resource_chrome.clone()), false).unwrap(),
+            Some(resource_chrome),
+            "a discovered bundled runtime remains directly usable"
+        );
+        assert_eq!(
+            discovered_lobium_bin_origin(&managed_runtime.join(CHROME_BIN), Some(&managed_runtime)),
+            LobiumBinOrigin::Managed,
+            "canonical user-runtime discovery must retain exact manifest validation"
+        );
+        assert!(
+            LobiumBinOrigin::Managed.is_managed(),
+            "provision_engine must publish downloaded runtimes with managed origin"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_discovery_requires_the_exact_resolved_source_stamp() {
+        let root =
+            std::env::temp_dir().join(format!("lobster-managed-engine-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(CHROME_BIN), b"browser").unwrap();
+        let source = crate::engine_provision::EngineSource {
+            url: "https://example.invalid/lobium.zip".into(),
+            sha256: "A".repeat(64),
+            version: "152.0.7977.42".into(),
+        };
+
+        assert_eq!(
+            managed_engine_expectation(Some(&source)),
+            Some((source.version.clone(), "a".repeat(64))),
+            "the sidecar expectation must use lowercase canonical archive hex"
+        );
+        assert!(current_managed_lobium_bin(&root, None).is_none());
+        assert!(current_managed_lobium_bin(&root, Some(&source)).is_none());
+        std::fs::write(
+            root.join(".lobium-engine-version"),
+            format!("version={}\nsha256={}\n", source.version, "b".repeat(64)),
+        )
+        .unwrap();
+        assert!(current_managed_lobium_bin(&root, Some(&source)).is_none());
+        std::fs::write(
+            root.join(".lobium-engine-version"),
+            format!(
+                "version={}\nsha256={}\n",
+                source.version,
+                source.sha256.to_ascii_lowercase()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            current_managed_lobium_bin(&root, Some(&source)),
+            Some(root.join(CHROME_BIN))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn managed_origin_sidecar_marker_is_windows_only_and_origin_bound() {
+        assert_eq!(
+            managed_engine_bin_origin_value(LobiumBinOrigin::Managed),
+            Some("managed")
+        );
+        assert_eq!(
+            managed_engine_bin_origin_value(LobiumBinOrigin::NonManaged),
+            None
+        );
     }
 
     #[cfg(target_os = "linux")]

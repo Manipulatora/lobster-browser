@@ -1,8 +1,12 @@
 // Small, dependency-free guardrail for the battery's grading oracles.
 //
+// This file is also the compatibility CLI named by the Windows release runbook. Importing it exposes
+// only `fetchOracleText`; executing it delegates to the real live battery entrypoint.
+//
 // An oracle is infrastructure, not the capability under test. A hung request, an HTTP error page,
 // or an empty body must therefore produce an explicit BLOCKED attempt instead of silently turning
 // into a false agent failure (or, worse, an accidentally permissive expectation).
+import { pathToFileURL } from 'node:url';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
@@ -112,5 +116,16 @@ export async function fetchOracleText(
     throw error;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+if (process.argv[1]) {
+  if (pathToFileURL(process.argv[1]).href === import.meta.url) {
+    // Do not await this import: agent-battery -> agent-battery-tasks -> this helper is an intentional
+    // module cycle, and awaiting the battery while this module is still evaluating would deadlock it.
+    void import('./agent-battery.mjs').catch((error) => {
+      console.error(error instanceof Error ? error.stack : String(error));
+      process.exitCode = 2;
+    });
   }
 }

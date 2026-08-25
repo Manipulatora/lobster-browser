@@ -1,6 +1,18 @@
-import { copyFile, link, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  copyFile,
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { isAbsolute, join, normalize, relative, resolve } from 'node:path';
+import { basename, extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import type { OsFamily } from '@lobster/shared-types';
 
 export type FontPersona = OsFamily | 'android';
@@ -39,6 +51,11 @@ export interface FontPackManifest {
   personas: Record<FontPersona, { families: string[]; physicalFamilies?: string[] }>;
 }
 
+interface PersonaFontSelection {
+  physicalFamilies: string[];
+  files: FontPackFile[];
+}
+
 const GENERIC_PREFERENCES: Record<
   FontPersona,
   { sans: string[]; serif: string[]; mono: string[] }
@@ -57,9 +74,9 @@ const GENERIC_PREFERENCES: Record<
     mono: ['Liberation Mono', 'Noto Sans Mono', 'DejaVu Sans Mono'],
   },
   linux: {
-    sans: ['Liberation Sans', 'Noto Sans', 'DejaVu Sans', 'Carlito'],
+    sans: ['Ubuntu Sans', 'Ubuntu', 'Liberation Sans', 'Noto Sans', 'DejaVu Sans', 'Carlito'],
     serif: ['Liberation Serif', 'Noto Serif', 'DejaVu Serif', 'Caladea'],
-    mono: ['DejaVu Sans Mono', 'Liberation Mono', 'Noto Sans Mono'],
+    mono: ['Ubuntu Mono', 'DejaVu Sans Mono', 'Liberation Mono', 'Noto Sans Mono'],
   },
   android: {
     sans: ['Roboto', 'Noto Sans', 'Roboto Condensed', 'DejaVu Sans'],
@@ -80,6 +97,19 @@ function preferredFamily(
   return (
     GENERIC_PREFERENCES[os][kind].find((family) => selected.includes(family)) ?? selected[0] ?? ''
   );
+}
+
+/** Canonical native fallback priority: readable sans first, then serif/mono, then coverage. */
+export function orderFontFallbackFamilies(
+  os: FontPersona,
+  physicalFamilies: readonly string[],
+): string[] {
+  return [
+    preferredFamily(os, 'sans', physicalFamilies),
+    preferredFamily(os, 'serif', physicalFamilies),
+    preferredFamily(os, 'mono', physicalFamilies),
+    ...physicalFamilies,
+  ].filter((family, index, all) => family && all.indexOf(family) === index);
 }
 
 /**
@@ -130,6 +160,59 @@ function familyClass(name: string): 'sans' | 'serif' | 'mono' {
     return 'serif';
   }
   return 'sans';
+}
+
+export interface FontAliasPlan {
+  aliases: Record<string, string>;
+  /** Claimed names backed by a pack face with documented metric compatibility. */
+  metricCompatible: string[];
+  /** Claimed names backed only by a serif/sans/mono approximation. */
+  classFallback: string[];
+}
+
+const RESERVED_FONT_ALIAS_NAMES = new Set([
+  'sans-serif',
+  'system-ui',
+  'ui-sans-serif',
+  '-apple-system',
+  'BlinkMacSystemFont',
+  'serif',
+  'ui-serif',
+  'monospace',
+  'ui-monospace',
+  'emoji',
+  'math',
+  'cursive',
+  'fantasy',
+]);
+
+/**
+ * Build the one canonical claimed-family -> physical-family plan used by Linux fontconfig and the
+ * Windows FontDataService CSS path. This does not fabricate Local Font Access or PostScript names.
+ */
+export function planFontAliases(
+  os: FontPersona,
+  physicalFamilies: readonly string[],
+  claimedFamilies: readonly string[],
+): FontAliasPlan {
+  const preferByClass: Record<'sans' | 'serif' | 'mono', string> = {
+    sans: preferredFamily(os, 'sans', physicalFamilies),
+    serif: preferredFamily(os, 'serif', physicalFamilies),
+    mono: preferredFamily(os, 'mono', physicalFamilies),
+  };
+  const physical = new Set(physicalFamilies);
+  const aliases: Record<string, string> = {};
+  const metricCompatible: string[] = [];
+  const classFallback: string[] = [];
+  for (const family of [...new Set(claimedFamilies)].sort((a, b) => a.localeCompare(b, 'en'))) {
+    if (physical.has(family) || RESERVED_FONT_ALIAS_NAMES.has(family)) continue;
+    const clone = metricClone(family, physicalFamilies);
+    const target = clone ?? preferByClass[familyClass(family)];
+    if (!target) continue;
+    aliases[family] = target;
+    (clone ? metricCompatible : classFallback).push(family);
+  }
+  return { aliases, metricCompatible, classFallback };
 }
 
 /**
@@ -251,30 +334,9 @@ export function buildFontConfig(
     );
   }
   // Alias claimed-but-not-physical families onto the class-appropriate bundled face.
-  const skip = new Set<string>([
-    ...physicalFamilies,
-    'sans-serif',
-    'system-ui',
-    'ui-sans-serif',
-    '-apple-system',
-    'BlinkMacSystemFont',
-    'serif',
-    'ui-serif',
-    'monospace',
-    'ui-monospace',
-    'emoji',
-    'math',
-    'cursive',
-    'fantasy',
-  ]);
-  for (const family of claimedFamilies) {
-    if (skip.has(family)) continue;
-    skip.add(family);
-    // A metric clone first: matching advance widths is what a font probe actually measures, and the
-    // class fallback is only an approximation of it.
-    lines.push(
-      alias(family, metricClone(family, physicalFamilies) ?? preferByClass[familyClass(family)]),
-    );
+  const plan = planFontAliases(os, physicalFamilies, claimedFamilies);
+  for (const [family, target] of Object.entries(plan.aliases)) {
+    lines.push(alias(family, target));
   }
   const cjkRules = cjkLanguageRules(physicalFamilies);
   return `<?xml version="1.0"?>
@@ -315,7 +377,15 @@ ${cjkRules}
 }
 
 function safePackPath(base: string, path: string): string {
-  if (!path || isAbsolute(path) || path.includes('\0')) {
+  const segments = path.split('/');
+  if (
+    !path ||
+    isAbsolute(path) ||
+    /[\\\x00-\x1f<>:"|?*]/.test(path) ||
+    segments.some(
+      (segment) => !segment || segment === '.' || segment === '..' || /[. ]$/.test(segment),
+    )
+  ) {
     throw new Error(`font pack manifest contains unsafe path "${path}"`);
   }
   const root = resolve(base);
@@ -390,15 +460,288 @@ export async function loadFontPackManifest(fontsBaseDir: string): Promise<FontPa
   return { version: 1, packId: raw.packId, files, personas };
 }
 
+// Exactly the extensions the deterministic provisioner admits.
+const WINDOWS_FONT_EXTENSIONS = new Set(['.ttf', '.ttc', '.otf']);
+
+function portableRelative(root: string, path: string): string {
+  return relative(root, path).split(sep).join('/');
+}
+
+/**
+ * Verify the exact font-file ledger before Windows passes a pack directory to native DirectWrite.
+ *
+ * The native loader intentionally scans `<pack>/files` recursively so nested provisioner layouts
+ * work, but that means manifest existence alone is not an integrity boundary: a replaced file or an
+ * extra font file would otherwise be registered too. This check hashes every declared file, rejects
+ * links, and requires the discovered font-file set to equal the manifest set.
+ */
+export async function verifyFontPackFiles(fontsBaseDir: string): Promise<FontPackManifest> {
+  const root = resolve(fontsBaseDir);
+  const filesRoot = join(root, 'files');
+  const [rootStat, filesRootStat, manifestStat] = await Promise.all([
+    lstat(root),
+    lstat(filesRoot),
+    lstat(join(root, FONT_PACK_MANIFEST_FILENAME)),
+  ]);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`font pack root is not an ordinary directory: ${root}`);
+  }
+  if (!filesRootStat.isDirectory() || filesRootStat.isSymbolicLink()) {
+    throw new Error(`font pack files root is not an ordinary directory: ${filesRoot}`);
+  }
+  if (!manifestStat.isFile() || manifestStat.isSymbolicLink()) {
+    throw new Error(`font pack manifest is not an ordinary file: ${root}`);
+  }
+
+  const manifest = await loadFontPackManifest(root);
+  if (!manifest.files.length) {
+    throw new Error(`font pack ${manifest.packId} declares no files`);
+  }
+
+  const declared = new Set<string>();
+  for (const file of manifest.files) {
+    const absolute = safePackPath(root, file.path);
+    const canonical = portableRelative(root, absolute);
+    if (
+      !canonical.startsWith('files/') ||
+      !WINDOWS_FONT_EXTENSIONS.has(extname(canonical).toLowerCase())
+    ) {
+      throw new Error(`font pack manifest declares a non-font files path: ${file.path}`);
+    }
+    if (declared.has(canonical)) {
+      throw new Error(`font pack manifest declares a duplicate path: ${file.path}`);
+    }
+    declared.add(canonical);
+
+    let fileStat;
+    try {
+      fileStat = await lstat(absolute);
+    } catch {
+      throw new Error(`required font pack file is absent: ${absolute}`);
+    }
+    if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+      throw new Error(`required font pack path is not an ordinary file: ${absolute}`);
+    }
+    const sha256 = createHash('sha256')
+      .update(await readFile(absolute))
+      .digest('hex');
+    if (sha256 !== file.sha256) {
+      throw new Error(`font pack file failed SHA-256 verification: ${absolute}`);
+    }
+  }
+
+  const discovered = new Set<string>();
+  const visit = async (dir: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name, 'en'));
+    for (const entry of entries) {
+      const absolute = join(dir, entry.name);
+      const entryStat = await lstat(absolute);
+      if (entryStat.isSymbolicLink()) {
+        throw new Error(`font pack files tree contains a link: ${absolute}`);
+      }
+      if (entryStat.isDirectory()) {
+        await visit(absolute);
+      } else if (
+        entryStat.isFile() &&
+        WINDOWS_FONT_EXTENSIONS.has(extname(entry.name).toLowerCase())
+      ) {
+        discovered.add(portableRelative(root, absolute));
+      }
+    }
+  };
+  await visit(filesRoot);
+
+  const undeclared = [...discovered].filter((path) => !declared.has(path)).sort();
+  const undiscovered = [...declared].filter((path) => !discovered.has(path)).sort();
+  if (undeclared.length || undiscovered.length) {
+    throw new Error(
+      `font pack file ledger mismatch (undeclared: ${undeclared.join(', ') || 'none'}; ` +
+        `missing: ${undiscovered.join(', ') || 'none'})`,
+    );
+  }
+  return manifest;
+}
+
 /** Families physically represented by files in this provisioned pack for the requested persona. */
 export async function availableFontFamilies(
   fontsBaseDir: string,
   os: FontPersona,
 ): Promise<string[]> {
   const manifest = await loadFontPackManifest(fontsBaseDir);
+  return selectPersonaFontFiles(manifest, os).physicalFamilies;
+}
+
+function selectPersonaFontFiles(manifest: FontPackManifest, os: FontPersona): PersonaFontSelection {
   const physical = new Set(manifest.files.flatMap((file) => file.families));
   const allowlist = manifest.personas[os].physicalFamilies ?? manifest.personas[os].families;
-  return allowlist.filter((family) => physical.has(family));
+  const physicalFamilies = orderFontFallbackFamilies(
+    os,
+    allowlist.filter((family) => physical.has(family)),
+  );
+  const selected = new Set(physicalFamilies);
+  const files = manifest.files.filter((file) =>
+    file.families.some((family) => selected.has(family)),
+  );
+  for (const file of files) {
+    const outsidePersona = file.families.filter((family) => !selected.has(family));
+    if (outsidePersona.length) {
+      throw new Error(
+        `font pack file ${file.path} exposes families outside the ${os} persona: ${outsidePersona.join(', ')}`,
+      );
+    }
+  }
+  const familyRank = new Map(physicalFamilies.map((family, index) => [family, index]));
+  const manifestRank = new Map(manifest.files.map((file, index) => [file.path, index]));
+  files.sort((a, b) => {
+    const rank = (file: FontPackFile): number =>
+      Math.min(...file.families.map((family) => familyRank.get(family) ?? Number.MAX_SAFE_INTEGER));
+    return rank(a) - rank(b) || manifestRank.get(a.path)! - manifestRank.get(b.path)!;
+  });
+  return { physicalFamilies, files };
+}
+
+const NATIVE_FONT_PACKS_DIRNAME = 'native-font-packs';
+const NATIVE_FONT_PACK_STAGE_VERSION = 1;
+const NATIVE_FONT_PACK_MARKER = 'font-pack.stage.json';
+
+function stagedFontRelativePath(index: number, file: FontPackFile): string {
+  return `files/${String(index).padStart(4, '0')}-${file.sha256.slice(0, 12)}-${basename(file.path)}`;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function verifyStagedNativeFontPack(
+  root: string,
+  key: string,
+  files: readonly FontPackFile[],
+): Promise<void> {
+  const rootStat = await lstat(root);
+  const filesRoot = join(root, 'files');
+  const filesStat = await lstat(filesRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`native font-pack stage is not an ordinary directory: ${root}`);
+  }
+  if (!filesStat.isDirectory() || filesStat.isSymbolicLink()) {
+    throw new Error(`native font-pack files stage is not an ordinary directory: ${filesRoot}`);
+  }
+  const marker = JSON.parse(await readFile(join(root, NATIVE_FONT_PACK_MARKER), 'utf8'));
+  if (marker?.version !== NATIVE_FONT_PACK_STAGE_VERSION || marker?.key !== key) {
+    throw new Error(`native font-pack stage marker does not match its content key: ${root}`);
+  }
+
+  const expected = new Map(
+    files.map((file, index) => [stagedFontRelativePath(index, file), file.sha256]),
+  );
+  const discovered = new Set<string>();
+  const visit = async (dir: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name, 'en'));
+    for (const entry of entries) {
+      const absolute = join(dir, entry.name);
+      const entryStat = await lstat(absolute);
+      if (entryStat.isSymbolicLink()) {
+        throw new Error(`native font-pack stage contains a link: ${absolute}`);
+      }
+      if (entryStat.isDirectory()) {
+        await visit(absolute);
+        continue;
+      }
+      if (!entryStat.isFile()) {
+        throw new Error(`native font-pack stage contains a non-file entry: ${absolute}`);
+      }
+      const relativePath = portableRelative(root, absolute);
+      discovered.add(relativePath);
+      const sha256 = expected.get(relativePath);
+      if (!sha256)
+        throw new Error(`native font-pack stage contains an undeclared file: ${absolute}`);
+      const actual = createHash('sha256')
+        .update(await readFile(absolute))
+        .digest('hex');
+      if (actual !== sha256)
+        throw new Error(`native font-pack staged file failed SHA-256: ${absolute}`);
+    }
+  };
+  await visit(filesRoot);
+  const missing = [...expected.keys()].filter((path) => !discovered.has(path));
+  if (missing.length) {
+    throw new Error(`native font-pack stage is missing files: ${missing.join(', ')}`);
+  }
+}
+
+/**
+ * Materialize the exact persona subset the Windows engine may sideload. The source manifest is
+ * verified first; a content-keyed immutable stage then prevents pack files for another persona from
+ * entering unnamed/default matching or character fallback merely because they share one source pack.
+ */
+export async function stageNativeFontPack(
+  userDataDir: string,
+  os: FontPersona,
+  fontsBaseDir: string,
+): Promise<{ dir: string; physicalFamilies: string[] }> {
+  const manifest = await verifyFontPackFiles(fontsBaseDir);
+  const selection = selectPersonaFontFiles(manifest, os);
+  if (!selection.physicalFamilies.length || !selection.files.length) {
+    throw new Error(`font pack ${manifest.packId} exposes no physical ${os} families`);
+  }
+  const key = createHash('sha256')
+    .update(
+      JSON.stringify({
+        version: NATIVE_FONT_PACK_STAGE_VERSION,
+        packId: manifest.packId,
+        os,
+        physicalFamilies: selection.physicalFamilies,
+        files: selection.files.map((file) => [file.path, file.sha256, file.families]),
+      }),
+    )
+    .digest('hex');
+  const stagesRoot = join(userDataDir, NATIVE_FONT_PACKS_DIRNAME);
+  const destination = join(stagesRoot, key);
+  await mkdir(stagesRoot, { recursive: true, mode: 0o700 });
+  if (await pathExists(destination)) {
+    await verifyStagedNativeFontPack(destination, key, selection.files);
+    return { dir: destination, physicalFamilies: selection.physicalFamilies };
+  }
+
+  const temporary = await mkdtemp(join(stagesRoot, `${key}.tmp-`));
+  let published = false;
+  try {
+    await mkdir(join(temporary, 'files'), { recursive: true, mode: 0o700 });
+    for (const [index, file] of selection.files.entries()) {
+      const source = safePackPath(fontsBaseDir, file.path);
+      const target = join(temporary, ...stagedFontRelativePath(index, file).split('/'));
+      try {
+        await link(source, target);
+      } catch {
+        await copyFile(source, target);
+      }
+    }
+    await writeFile(
+      join(temporary, NATIVE_FONT_PACK_MARKER),
+      `${JSON.stringify({ version: NATIVE_FONT_PACK_STAGE_VERSION, key })}\n`,
+      { mode: 0o600 },
+    );
+    await verifyStagedNativeFontPack(temporary, key, selection.files);
+    try {
+      await rename(temporary, destination);
+      published = true;
+    } catch (error) {
+      if (!(await pathExists(destination))) throw error;
+      await verifyStagedNativeFontPack(destination, key, selection.files);
+    }
+    return { dir: destination, physicalFamilies: selection.physicalFamilies };
+  } finally {
+    if (!published && (await pathExists(temporary))) {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  }
 }
 
 /**
@@ -459,7 +802,8 @@ export async function writeFontConfig(
   // metric-compatible target exists for every alias. The persona's claimed families (`selectedFamilies`)
   // are the JS-visible list — they are aliased onto the pack in buildFontConfig, NOT required to be
   // physically present (they never can be for a real OS persona vs. an open pack).
-  const physicalFamilies = await availableFontFamilies(fontsBaseDir, os);
+  const selection = selectPersonaFontFiles(manifest, os);
+  const { physicalFamilies } = selection;
   if (physicalFamilies.length === 0) {
     throw new Error(`font pack ${manifest.packId} exposes no families for ${os}`);
   }
@@ -467,10 +811,7 @@ export async function writeFontConfig(
   if (claimed.length === 0) {
     throw new Error(`profile carries no font list for ${os}; refusing host-font fallback`);
   }
-  const physicalSet = new Set(physicalFamilies);
-  const requiredFiles = manifest.files.filter((file) =>
-    file.families.some((family) => physicalSet.has(family)),
-  );
+  const requiredFiles = selection.files;
   if (!requiredFiles.length) throw new Error(`font pack has no files for the ${os} open set`);
   const fontDir = join(userDataDir, 'font-files');
   const cacheDir = join(userDataDir, 'fc-cache');
@@ -508,7 +849,10 @@ export async function writeFontConfig(
       // the pack file it came from. A provision that had to fall back to copying is exempt - on a
       // filesystem without usable hard links the inodes never match and re-checking would rebuild
       // the directory on every single launch.
-      if (!record.linked || (await stillLinkedToPack(requiredFiles, fontsBaseDir, destinationFor))) {
+      if (
+        !record.linked ||
+        (await stillLinkedToPack(requiredFiles, fontsBaseDir, destinationFor))
+      ) {
         return confPath;
       }
     }

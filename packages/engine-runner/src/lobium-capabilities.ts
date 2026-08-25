@@ -6,7 +6,7 @@ import type { FingerprintLaunchPolicy } from '@lobster/shared-types';
 const execFileAsync = promisify(execFile);
 
 export const LOBIUM_CAPABILITY_SWITCH = '--lobium-fingerprint-capabilities';
-export const LOBIUM_CAPABILITY_CONTRACT_VERSION = 2;
+export const LOBIUM_CAPABILITY_CONTRACT_VERSION = 3;
 
 /**
  * Mirror of the list in `lobium/src/lobium_capabilities.cc`, which is the single source of truth —

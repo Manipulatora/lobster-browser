@@ -11,3 +11,6 @@
 /scripts/bundle-sidecar.mjs whitespace=cr-at-eol
 /apps/desktop/src-tauri/src/engine_provision.rs whitespace=cr-at-eol
 /apps/desktop/src-tauri/src/sidecar.rs whitespace=cr-at-eol
+/lobium/src/BUILD.gn whitespace=cr-at-eol
+/lobium/src/lobium_fp_config.cc whitespace=cr-at-eol
+/lobium/src/lobium_fp_config.h whitespace=cr-at-eol

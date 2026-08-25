@@ -160,7 +160,42 @@ test('resolveCdpTarget prefers a page target and falls back to the browser endpo
 
   globalThis.fetch = (() => Promise.reject(new Error('refused'))) as typeof fetch;
   assert.equal(
-    await resolveCdpTarget('ws://127.0.0.1:9/devtools/browser/x'),
+    await resolveCdpTarget('ws://127.0.0.1:9/devtools/browser/x', { pageWaitMs: 0 }),
     'ws://127.0.0.1:9/devtools/browser/x',
   );
+});
+
+test('resolveCdpTarget waits for a page target instead of falling back mid-startup', async () => {
+  // The browser serves /json/list before it has created any target: measured on Windows, a launch
+  // resolved 250 ms before the first page target appeared. Falling back to the browser endpoint in
+  // that window makes every later Runtime.evaluate / Page.navigate fail with a method-not-found
+  // error that names neither the cause nor the missing target.
+  let call = 0;
+  globalThis.fetch = (() => {
+    call += 1;
+    const targets =
+      call < 3 ? [] : [{ type: 'page', webSocketDebuggerUrl: 'ws://127.0.0.1:9/page/late' }];
+    return Promise.resolve({ json: () => Promise.resolve(targets) });
+  }) as unknown as typeof fetch;
+
+  assert.equal(
+    await resolveCdpTarget('ws://127.0.0.1:9/devtools/browser/x', { pageWaitMs: 5_000 }),
+    'ws://127.0.0.1:9/page/late',
+  );
+  assert.ok(call >= 3, `expected the empty list to be retried, saw ${call} call(s)`);
+});
+
+test('resolveCdpTarget still falls back when the browser truly has no page target', async () => {
+  // A page-less browser must not hang the caller past its deadline; browser-scoped commands
+  // (Network.*, Browser.close) legitimately run against this endpoint.
+  globalThis.fetch = (() =>
+    Promise.resolve({
+      json: () => Promise.resolve([{ type: 'browser_ui', webSocketDebuggerUrl: 'ws://x/ui' }]),
+    })) as unknown as typeof fetch;
+  const started = Date.now();
+  assert.equal(
+    await resolveCdpTarget('ws://127.0.0.1:9/devtools/browser/x', { pageWaitMs: 300 }),
+    'ws://127.0.0.1:9/devtools/browser/x',
+  );
+  assert.ok(Date.now() - started < 5_000, 'fallback must honour pageWaitMs rather than spinning');
 });

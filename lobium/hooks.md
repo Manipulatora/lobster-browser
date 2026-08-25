@@ -163,7 +163,7 @@ function is the stable anchor.
 | `fingerprint/client-rects.patch` | `core/dom/element.cc` · `getClientRects`, `GetBoundingClientRect` | sub-pixel noise keyed on the rect's **values**, so coincident geometry stays coincident. The bounding box is the **union of the farbled rects**, never a separately farbled union, so `getBoundingClientRect() == union(getClientRects())` still holds for a multi-line inline |
 | `fingerprint/media-devices.patch` | `modules/mediastream/media_devices.cc` · `DevicesEnumerated` | persona camera/mic/speaker counts, shaped by the browser's own permission answer: one all-empty entry per kind until the frame holds the capture permission, then hashed ids **with** OS-shaped labels and shared mic/speaker `groupId`s |
 | `fingerprint/mobile-persona.patch` | `modules/plugins/dom_plugin_array.cc` | suppresses the desktop PDF plugin surface when the config declares `uaMobile` |
-| `fingerprint/webrtc-policy.patch` | `modules/peerconnection/rtc_peer_connection.cc` | four observably distinct policies; `disabled` throws `NotSupportedError` |
+| `fingerprint/webrtc-policy.patch` | `modules/peerconnection/rtc_peer_connection.cc` | four observably distinct policies; `disabled` gathers/exposes no candidates or candidate errors, while `proxy_only` and `disable_non_proxied_udp` preserve relay failure details but redact the local endpoint from `icecandidateerror` |
 
 ### Branding
 

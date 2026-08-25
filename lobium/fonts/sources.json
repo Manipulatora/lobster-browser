@@ -87,6 +87,17 @@
     },
     {
       "family": "Noto Sans CJK JP",
+      "companionFamilies": [
+        "Noto Sans CJK HK",
+        "Noto Sans CJK KR",
+        "Noto Sans CJK SC",
+        "Noto Sans CJK TC",
+        "Noto Sans Mono CJK HK",
+        "Noto Sans Mono CJK JP",
+        "Noto Sans Mono CJK KR",
+        "Noto Sans Mono CJK SC",
+        "Noto Sans Mono CJK TC"
+      ],
       "filePattern": "^NotoSansCJK-(?:Regular|Bold)\\.ttc$",
       "license": "OFL-1.1",
       "licenseUrl": "https://github.com/notofonts/noto-cjk/blob/main/LICENSE"
@@ -207,6 +218,12 @@
     },
     {
       "family": "Noto Serif CJK JP",
+      "companionFamilies": [
+        "Noto Serif CJK HK",
+        "Noto Serif CJK KR",
+        "Noto Serif CJK SC",
+        "Noto Serif CJK TC"
+      ],
       "filePattern": "^NotoSerifCJK-(?:Regular|Bold)\\.ttc$",
       "license": "OFL-1.1",
       "licenseUrl": "https://github.com/notofonts/noto-cjk/blob/main/LICENSE"

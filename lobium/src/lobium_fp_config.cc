@@ -4,6 +4,7 @@
 
 #include "components/lobium_fp/lobium_fp_config.h"
 
+#include <algorithm>
 #include <string_view>
 #include <utility>
 
@@ -206,6 +207,16 @@ std::optional<LobiumFpConfig> ParseConfig(std::string_view contents) {
   if (const base::DictValue* d = root.FindDict("webgpu")) ReadWebGpu(*d, cfg.webgpu);
   if (const base::DictValue* d = root.FindDict("locale")) ReadLocale(*d, cfg.locale);
   cfg.fonts = ReadStringList(root.FindList("fonts"));
+  if (const base::DictValue* aliases = root.FindDict("fontAliases")) {
+    for (auto alias : *aliases) {
+      if (const std::string* physical = alias.second.GetIfString();
+          physical && !alias.first.empty() && !physical->empty()) {
+        cfg.font_aliases.emplace_back(alias.first, *physical);
+      }
+    }
+    std::sort(cfg.font_aliases.begin(), cfg.font_aliases.end());
+  }
+  cfg.font_fallback_families = ReadStringList(root.FindList("fontFallbackFamilies"));
   if (const std::string* p = root.FindString("fontPackDir")) cfg.font_pack_dir = *p;
   if (const base::DictValue* seeds = root.FindDict("seeds")) {
     cfg.seeds.canvas = static_cast<uint32_t>(seeds->FindDouble("canvas").value_or(0));
@@ -301,6 +312,8 @@ std::string StripBrowserOnlyKeys(const std::string& config_json) {
   }
   parsed->Remove("fonts");
   parsed->Remove("fontPackDir");
+  parsed->Remove("fontAliases");
+  parsed->Remove("fontFallbackFamilies");
 
   std::string out;
   if (!base::JSONWriter::Write(*parsed, &out)) {

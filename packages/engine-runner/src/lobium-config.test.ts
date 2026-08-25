@@ -11,6 +11,8 @@ import {
   buildLobiumConfig,
   lobiumConfigArg,
   writeLobiumConfig,
+  LOBIUM_BROWSER_ONLY_CONFIG_KEYS,
+  rendererConfigProjection,
 } from './lib.js';
 
 function fp(): Fingerprint {
@@ -67,12 +69,14 @@ test('buildLobiumConfig carries the fingerprint surfaces + a version', () => {
   // The font list reaches the engine now. It was previously held back because the browser base64s
   // this whole document onto the renderer command line, where a large catalog trips the size guard
   // and the browser drops the config entirely — a total host leak caused by a field no renderer
-  // reads. The engine now strips `fonts`/`fontPackDir` from the renderer copy, so the browser-side
-  // font hooks get the full list while the renderer payload is unchanged.
+  // reads. The engine strips `fonts`/`fontPackDir`/`fontAliases`/`fontFallbackFamilies` from the
+  // renderer copy, so browser-side font hooks get the full list while its payload stays small.
   assert.deepEqual(config.fonts, ['Arial', 'Calibri']);
   // Absent, not empty, when no pack is provisioned: the engine treats a missing key as "no pack" and
   // an empty string would be a path it then tries to enumerate.
   assert.equal(config.fontPackDir, undefined);
+  assert.equal(config.fontAliases, undefined);
+  assert.equal(config.fontFallbackFamilies, undefined);
   assert.deepEqual(config.policy.renderer, { mode: 'host' });
   assert.deepEqual(config.policy.hardwareNoise, {
     webgl: true,
@@ -87,6 +91,22 @@ test('buildLobiumConfig carries the fingerprint surfaces + a version', () => {
     stableDeviceIds: true,
   });
   assert.equal(config.seeds.clientRects, 0, 'clientRects noise off by default → seed 0');
+});
+
+test('buildLobiumConfig carries the verified Windows pack path and CSS-only aliases', () => {
+  const config = buildLobiumConfig(fp(), {
+    seed: 'font-pack',
+    fontPackDir: 'C:\\verified-font-pack',
+    fontAliases: { Calibri: 'Carlito', Cambria: 'Caladea' },
+    fontFallbackFamilies: ['Liberation Sans', 'Liberation Serif', 'Liberation Mono'],
+  });
+  assert.equal(config.fontPackDir, 'C:\\verified-font-pack');
+  assert.deepEqual(config.fontAliases, { Calibri: 'Carlito', Cambria: 'Caladea' });
+  assert.deepEqual(config.fontFallbackFamilies, [
+    'Liberation Sans',
+    'Liberation Serif',
+    'Liberation Mono',
+  ]);
 });
 
 test('buildLobiumConfig round-trips the deep WebGL surfaces the native reader consumes (HC-4)', () => {
@@ -262,5 +282,75 @@ test('writeLobiumConfig writes owner-only JSON that round-trips, and the flag po
     assert.equal(lobiumConfigArg(path), `--lobium-fp-config=${path}`);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the renderer size guard measures the stripped projection, not the browser-side file', async () => {
+  // Every font hook runs in the BROWSER process, which reads lobium-fp.json from disk and is not
+  // size-bound. Only the stripped copy is base64'd onto the renderer command line. Sizing the full
+  // document refused 25 of 50 personas (14 macOS, 11 Linux) whose oversize came entirely from
+  // `fonts` — bytes the renderer never receives. Guard against that regressing.
+  const dir = await mkdtemp(join(tmpdir(), 'lobium-cfg-projection-'));
+  try {
+    const config = buildLobiumConfig(fp(), { seed: 'fonts-heavy' });
+    // A font catalog far past the renderer budget on its own.
+    config.fonts = Array.from({ length: 4000 }, (_, i) => `Persona Font Family Number ${i}`);
+    const written = await writeLobiumConfig(dir, config);
+
+    // The file on disk keeps the complete list: that is the copy the browser consumes.
+    const onDisk = JSON.parse(await readFile(written, 'utf8'));
+    assert.equal(onDisk.fonts.length, 4000, 'the browser-side file must keep the whole catalog');
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(onDisk), 'utf8') > LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES,
+      'this fixture is only meaningful if the full document exceeds the renderer budget',
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a payload the renderer really does receive is still refused', async () => {
+  // The guard must not become permissive: oversize in a key that is NOT stripped still fails closed,
+  // because the alternative is the browser dropping --lobium-fp-data and every renderer reporting
+  // host values.
+  const dir = await mkdtemp(join(tmpdir(), 'lobium-cfg-renderer-large-'));
+  try {
+    const config = buildLobiumConfig(fp(), { seed: 'renderer-large' });
+    config.webgl.extensions = [`EXT_${'x'.repeat(LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES)}`];
+    await assert.rejects(
+      () => writeLobiumConfig(dir, config),
+      /too large for the renderer channel/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the browser-only key list mirrors the native StripBrowserOnlyKeys', async () => {
+  // Drift here is silent and expensive: the TS guard would size a document the renderer never sees,
+  // or miss bytes it does. Pin the list against the shipping C++ rather than against a copy of it.
+  const kernel = await readFile(
+    new URL('../../../lobium/src/lobium_fp_config.cc', import.meta.url),
+    'utf8',
+  );
+  const stripped = [...kernel.matchAll(/parsed->Remove\("([A-Za-z]+)"\);/g)].map((x) => x[1]);
+  assert.ok(stripped.length > 0, 'could not read StripBrowserOnlyKeys from lobium_fp_config.cc');
+  assert.deepEqual(
+    [...LOBIUM_BROWSER_ONLY_CONFIG_KEYS].sort(),
+    [...new Set(stripped)].sort(),
+    'LOBIUM_BROWSER_ONLY_CONFIG_KEYS must match the native strip exactly',
+  );
+});
+
+test('rendererConfigProjection removes exactly the browser-only keys', () => {
+  const config = buildLobiumConfig(fp(), { seed: 'projection' });
+  const projection = rendererConfigProjection(config);
+  for (const key of LOBIUM_BROWSER_ONLY_CONFIG_KEYS) {
+    assert.ok(!(key in projection), `${key} must not reach the renderer`);
+  }
+  // Everything else survives untouched.
+  for (const key of Object.keys(config)) {
+    if ((LOBIUM_BROWSER_ONLY_CONFIG_KEYS as readonly string[]).includes(key)) continue;
+    assert.ok(key in projection, `${key} must still reach the renderer`);
   }
 });

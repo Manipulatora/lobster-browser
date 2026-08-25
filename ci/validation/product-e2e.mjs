@@ -24,16 +24,21 @@ import { createServer } from 'node:http';
 import { generateSeed } from '@lobster/fingerprint';
 import {
   CompositeRunner,
+  availableFontFamilies,
   buildLaunchers,
   buildDevShmArgs,
   exportCookiesJson,
   isLobiumAvailable,
   startProfile,
 } from '@lobster/engine-runner';
+import {
+  resolveProductE2eHeadful,
+  validateWindowsFontIsolationConfig,
+} from './product-e2e-platform.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPORTS_DIR = join(here, 'reports');
-const HEADFUL = Boolean(process.env.DISPLAY) && process.env.LOBSTER_HEADFUL !== '0';
+const HEADFUL = resolveProductE2eHeadful();
 
 // A local site the profile "logs into" via an injected cookie, so we can prove cookie injection worked
 // end-to-end: the page echoes document.cookie, and we assert our injected session cookie is present.
@@ -87,8 +92,9 @@ function buildStartParams(profile, userDataDir, siteHost, includeCookieImport = 
 
 async function main() {
   const nativeLobium = isLobiumAvailable();
+  const displayLabel = process.env.DISPLAY ? ` on ${process.env.DISPLAY}` : '';
   process.stderr.write(
-    `engine: ${nativeLobium ? 'native Lobium' : 'interim Chromium (patchright)'} | mode: ${HEADFUL ? 'HEADFUL on ' + process.env.DISPLAY : 'headless=new'}\n`,
+    `engine: ${nativeLobium ? 'native Lobium' : 'interim Chromium (patchright)'} | mode: ${HEADFUL ? `HEADFUL${displayLabel}` : 'headless=new'}\n`,
   );
 
   // The live launcher registry — the SAME one the sidecar builds at startup.
@@ -203,23 +209,51 @@ async function main() {
         ua: cfg.navigator?.userAgent,
         renderer: cfg.webgl?.renderer,
         fontsChannel: cfg.fonts,
+        fontPackDir: cfg.fontPackDir,
       };
       if (cfg.version !== 1) throw new Error('native lobium-fp.json missing/!=1');
-      const fontConfig = await readFile(join(userDataDir, 'lobium-fonts.conf'), 'utf8');
-      const privateFontFiles = await readdir(join(userDataDir, 'font-files'));
-      report.steps.fontIsolation = {
-        packId: fontManifest.packId,
-        requestedFamilies: fontPersona.families,
-        privateFiles: privateFontFiles.length,
-        resetsInheritedDirs: fontConfig.includes('<reset-dirs />'),
-        referencesHostFonts: /\/etc\/fonts|\/usr\/share\/fonts/.test(fontConfig),
-      };
-      if (
-        privateFontFiles.length === 0 ||
-        !report.steps.fontIsolation.resetsInheritedDirs ||
-        report.steps.fontIsolation.referencesHostFonts
-      ) {
-        throw new Error('private open-font isolation contract was not applied');
+      if (process.platform === 'win32') {
+        // Derive the expectation from the SAME normalized manifest the launcher stages from.
+        // loadFontPackManifest() sorts every family array (asStringArray), so the runtime allowlist is
+        // alphabetical, while the pack file on disk records the provisioner order (preferred, then
+        // coverage). Recomputing from the raw JSON compared two different orderings of the same set and
+        // failed an order-sensitive check on a product that was behaving correctly.
+        const expectedFallbackFamilies = await availableFontFamilies(fontPackDir, profileOs);
+        report.steps.fontIsolation = validateWindowsFontIsolationConfig(
+          cfg,
+          fontPackDir,
+          userDataDir,
+          fontPersona.families,
+          expectedFallbackFamilies,
+          fontManifest.packId,
+        );
+      } else if (process.platform === 'linux') {
+        const fontConfig = await readFile(join(userDataDir, 'lobium-fonts.conf'), 'utf8');
+        const privateFontFiles = await readdir(join(userDataDir, 'font-files'));
+        report.steps.fontIsolation = {
+          mode: 'fontconfig',
+          packId: fontManifest.packId,
+          requestedFamilies: fontPersona.families,
+          privateFiles: privateFontFiles.length,
+          resetsInheritedDirs: fontConfig.includes('<reset-dirs />'),
+          referencesHostFonts: /\/etc\/fonts|\/usr\/share\/fonts/.test(fontConfig),
+        };
+        if (
+          privateFontFiles.length === 0 ||
+          !report.steps.fontIsolation.resetsInheritedDirs ||
+          report.steps.fontIsolation.referencesHostFonts
+        ) {
+          throw new Error('private open-font isolation contract was not applied');
+        }
+      } else {
+        // Do not demand Linux fontconfig artifacts from a platform whose Chromium font backend does
+        // not consume them. The dedicated native font gate is the runtime enforcement proof.
+        report.steps.fontIsolation = {
+          mode: 'platform-native',
+          packId: fontManifest.packId,
+          requestedFamilies: fontPersona.families,
+          configuredFamilies: cfg.fonts,
+        };
       }
     }
 

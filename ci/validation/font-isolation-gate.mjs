@@ -60,14 +60,33 @@ async function alwaysAllowedFromKernel() {
     new URL('../../lobium/src/lobium_fonts.cc', import.meta.url),
     'utf8',
   );
-  const block = /constexpr std::string_view kAlwaysAllowed\[\] = \{([\s\S]*?)\};/.exec(src);
-  if (!block) {
+  // Read the DECISION, not one symbol. The M152 restricted-collection rework removed the
+  // `kAlwaysAllowed` table entirely — the last-resort guarantee now comes from the restricted
+  // collection's explicit fallback mapping (BuildRestrictedFontFallback + font_fallback_families),
+  // not from exempting host families. Requiring the old symbol made this gate abort before measuring
+  // anything, which is worse than a stale list: it measured nothing at all.
+  const fn = /bool FontFamilyAllowed\(std::string_view family\) \{([\s\S]*?)\n\}/.exec(src);
+  if (!fn) {
     throw new Error(
-      'could not read kAlwaysAllowed from lobium/src/lobium_fonts.cc — the gate cannot tell an ' +
+      'could not read FontFamilyAllowed from lobium/src/lobium_fonts.cc — the gate cannot tell an ' +
         'expected always-allowed family from a real leak without it',
     );
   }
-  return [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  // A hard-allow table, if one is reintroduced, is consulted by name from the allow decision.
+  const table = /constexpr std::string_view (k\w+)\[\] = \{([\s\S]*?)\};/.exec(src);
+  if (table && fn[1].includes(table[1])) {
+    return [...table[2].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  }
+  // No table consulted. PROVE the decision hard-allows nothing rather than assuming it: any family
+  // literal in the body would be an exception this gate cannot enumerate, and silently returning []
+  // there would excuse a real leak.
+  if (/"/.test(fn[1])) {
+    throw new Error(
+      'FontFamilyAllowed consults family-name literals the gate cannot enumerate — the gate cannot ' +
+        'tell an expected always-allowed family from a real leak without them',
+    );
+  }
+  return [];
 }
 
 /** Stock Windows families that are NOT in ALLOWED. Any that resolves came from the host. */

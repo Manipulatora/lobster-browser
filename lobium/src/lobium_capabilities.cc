@@ -70,8 +70,14 @@ std::string CapabilityManifestJson() {
                                       std::end(kPortableCapabilities));
 
 #if BUILDFLAG(IS_WIN)
-  // The COMPLETE font-isolation set: the FontDataService family/local-font/enumeration filters, the
-  // DirectWrite proxy filters, Local Font Access, and the font-pack sideload.
+  // Native Windows font-isolation machinery: one restricted DirectWrite collection shared by
+  // FontDataService, character fallback, local(), Local Font Access, chrome.fontSettings, and the
+  // legacy proxy, plus verified-pack transport and CSS claimed-family alias plumbing.
+  //
+  // This capability says the binary has those hooks. It does NOT claim that a pack was supplied at
+  // this launch, that every claimed family has a metric-exact substitute, or that physical pack
+  // faces fabricate proprietary PostScript/full names in Local Font Access. Runtime gates prove
+  // pack registration and report alias residuals separately.
   //
   // Windows-only on purpose, and deliberately conservative. The FontDataService half also compiles
   // on Linux (kFontDataServiceLinux is enabled by default there too), so a Linux build does carry

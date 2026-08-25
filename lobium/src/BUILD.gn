@@ -6,6 +6,8 @@
 # never reject it, and under //components (a first-party root) rather than //third_party so it is not
 # swept by the third-party license/metadata scanner (tools/licenses).
 
+import("//testing/test.gni")
+
 source_set("lobium_fp") {
   sources = [
     "lobium_audio_farble.cc",
@@ -51,4 +53,15 @@ source_set("lobium_profile_icon") {
   # public interface. It re-exports //base, //skia and //cc/paint, which is everything the
   # implementation needs.
   public_deps = [ "//ui/gfx" ]
+}
+
+test("lobium_fp_unittests") {
+  sources = [ "lobium_fonts_unittest.cc" ]
+
+  deps = [
+    ":lobium_fp",
+    "//base/test:run_all_unittests",
+    "//base/test:test_support",
+    "//testing/gtest",
+  ]
 }

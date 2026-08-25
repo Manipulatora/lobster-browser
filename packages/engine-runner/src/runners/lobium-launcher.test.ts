@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readdirSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,6 +14,7 @@ import { LOBIUM_CONFIG_FILENAME } from '../lobium-config.js';
 import { CHROMIUM_BINARY_NAME, writeFakeBinary } from '../test-fake-binary.js';
 import { LOBEE_EXTENSION_ID } from '../extensions.js';
 import {
+  bindLobiumRuntimeEnvironment,
   buildLobiumLaunchArgs,
   buildNativeLobiumProcessArgs,
   createLobiumLauncher,
@@ -20,8 +22,14 @@ import {
   isLobiumAvailable,
   lobiumBinaryCandidates,
   proxySummaryFromServer,
+  resolveFontsBaseDir,
   resolveLobiumBinary,
 } from './lobium-launcher.js';
+import {
+  MANAGED_ENGINE_BIN_ORIGIN_ENV,
+  MANAGED_ENGINE_SHA256_ENV,
+  MANAGED_ENGINE_VERSION_ENV,
+} from './managed-engine.js';
 import { profileMark } from './profile-mark.js';
 import type { LaunchContext } from './types.js';
 
@@ -38,13 +46,20 @@ function ctxWith(
     proxy?: { server: string; username?: string; password?: string };
     seed?: string;
     policy?: true;
+    os?: 'windows' | 'macos' | 'linux';
+    mobile?: boolean;
+    fonts?: string[];
   } = {},
 ): LaunchContext {
+  const derived = opts.os
+    ? deriveFingerprint(`seed-lobium-test-${opts.os}`, { os: opts.os, engine: 'lobium' })
+    : fp;
   return {
     profileId: 'p',
     engine: 'lobium',
     ...(opts.policy ? { webrtcPolicy: 'disabled' } : {}),
-    fingerprint: fp,
+    fingerprint: opts.fonts ? { ...derived, fonts: opts.fonts } : derived,
+    ...(opts.mobile ? { isMobileProfile: true } : {}),
     ...(opts.policy
       ? {
           fingerprintPolicy: {
@@ -65,6 +80,60 @@ function ctxWith(
     emulation: {},
     initScript: '',
   } as unknown as LaunchContext;
+}
+
+async function writeLauncherFontPack(root: string): Promise<string> {
+  const pack = join(root, 'source-pack');
+  const families = [
+    'Liberation Sans',
+    'Liberation Serif',
+    'Liberation Mono',
+    'Noto Sans',
+    'Noto Serif',
+    'Noto Sans Mono',
+    'Ubuntu',
+    'Roboto',
+  ];
+  await mkdir(join(pack, 'files'), { recursive: true });
+  const files = [];
+  for (const [index, family] of families.entries()) {
+    const bytes = `font-${family}`;
+    const name = `${String(index).padStart(2, '0')}-${family.replaceAll(' ', '')}.ttf`;
+    await writeFile(join(pack, 'files', name), bytes);
+    files.push({
+      path: `files/${name}`,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      families: [family],
+      license: 'OFL-1.1',
+    });
+  }
+  await writeFile(
+    join(pack, 'font-pack.manifest.json'),
+    JSON.stringify({
+      version: 1,
+      packId: 'launcher-persona-pack',
+      files,
+      personas: {
+        windows: {
+          families: ['Arial', 'Consolas'],
+          physicalFamilies: ['Liberation Sans', 'Liberation Serif', 'Liberation Mono'],
+        },
+        macos: {
+          families: ['Helvetica', 'SF Mono'],
+          physicalFamilies: ['Noto Sans', 'Noto Serif', 'Noto Sans Mono'],
+        },
+        linux: {
+          families: ['Ubuntu', 'Noto Sans Mono'],
+          physicalFamilies: ['Ubuntu', 'Noto Serif', 'Noto Sans Mono'],
+        },
+        android: {
+          families: ['Roboto', 'Droid Sans'],
+          physicalFamilies: ['Roboto', 'Noto Serif', 'Noto Sans Mono'],
+        },
+      },
+    }),
+  );
+  return pack;
 }
 
 test('resolveLobiumBinary / isLobiumAvailable follow LOBSTER_LOBIUM_BIN', async () => {
@@ -129,6 +198,140 @@ test('resolveLobiumBinary can discover a built output from LOBSTER_LOBIUM_DIR', 
   }
 });
 
+test(
+  'canonical managed path needs its stamp unless LOBSTER_LOBIUM_BIN explicitly overrides it',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lobium-canonical-'));
+    const bin = join(root, 'lobster', 'lobium', 'chrome.exe');
+    const saved = {
+      bin: process.env.LOBSTER_LOBIUM_BIN,
+      dir: process.env.LOBSTER_LOBIUM_DIR,
+      auto: process.env.LOBSTER_LOBIUM_AUTO_DISCOVER,
+      local: process.env.LOCALAPPDATA,
+      version: process.env[MANAGED_ENGINE_VERSION_ENV],
+      sha: process.env[MANAGED_ENGINE_SHA256_ENV],
+      origin: process.env[MANAGED_ENGINE_BIN_ORIGIN_ENV],
+    };
+    try {
+      await mkdir(join(root, 'lobster', 'lobium'), { recursive: true });
+      await writeFile(bin, 'browser');
+      await writeFile(
+        join(root, 'lobster', 'lobium', '.lobium-engine-version'),
+        `version=152.0.7977.42\nsha256=${'b'.repeat(64)}\n`,
+      );
+      delete process.env.LOBSTER_LOBIUM_BIN;
+      delete process.env.LOBSTER_LOBIUM_DIR;
+      process.env.LOBSTER_LOBIUM_AUTO_DISCOVER = '0';
+      process.env.LOCALAPPDATA = root;
+      process.env[MANAGED_ENGINE_VERSION_ENV] = '152.0.7977.42';
+      process.env[MANAGED_ENGINE_SHA256_ENV] = 'a'.repeat(64);
+      delete process.env[MANAGED_ENGINE_BIN_ORIGIN_ENV];
+      assert.equal(resolveLobiumBinary(), undefined, 'mismatched managed archive must be denied');
+
+      process.env.LOBSTER_LOBIUM_BIN = bin;
+      assert.equal(
+        resolveLobiumBinary(),
+        bin,
+        'the exact binary env remains an intentional override',
+      );
+
+      process.env[MANAGED_ENGINE_BIN_ORIGIN_ENV] = 'managed';
+      assert.equal(
+        resolveLobiumBinary(),
+        undefined,
+        'a Rust-published managed binary cannot impersonate an explicit override',
+      );
+
+      delete process.env.LOBSTER_LOBIUM_BIN;
+      delete process.env[MANAGED_ENGINE_BIN_ORIGIN_ENV];
+      await writeFile(
+        join(root, 'lobster', 'lobium', '.lobium-engine-version'),
+        `version=152.0.7977.42\nsha256=${'a'.repeat(64)}\n`,
+      );
+      assert.equal(resolveLobiumBinary(), bin);
+
+      process.env.LOBSTER_LOBIUM_BIN = join(root, 'missing-explicit.exe');
+      assert.equal(
+        resolveLobiumBinary(),
+        undefined,
+        'a missing explicit override must not fall through to the valid managed runtime',
+      );
+      process.env.LOBSTER_LOBIUM_BIN = '';
+      assert.equal(
+        resolveLobiumBinary(),
+        undefined,
+        'an empty explicit override is still present and must fail closed like Rust',
+      );
+    } finally {
+      const restore = (name: string, value: string | undefined) => {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      };
+      restore('LOBSTER_LOBIUM_BIN', saved.bin);
+      restore('LOBSTER_LOBIUM_DIR', saved.dir);
+      restore('LOBSTER_LOBIUM_AUTO_DISCOVER', saved.auto);
+      restore('LOCALAPPDATA', saved.local);
+      restore(MANAGED_ENGINE_VERSION_ENV, saved.version);
+      restore(MANAGED_ENGINE_SHA256_ENV, saved.sha);
+      restore(MANAGED_ENGINE_BIN_ORIGIN_ENV, saved.origin);
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test('one selected runtime owns its adjacent fonts and SwiftShader resources', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'lobium-runtime-binding-'));
+  const selectedDir = join(root, 'selected');
+  const inheritedPack = join(root, 'inherited-fonts');
+  const selectedPack = join(selectedDir, 'fonts');
+  const selectedRuntime = {
+    executablePath: join(selectedDir, CHROMIUM_BINARY_NAME),
+    managed: true,
+  };
+  const previousFonts = process.env.LOBSTER_FONTS_DIR;
+  try {
+    await mkdir(selectedPack, { recursive: true });
+    await mkdir(inheritedPack, { recursive: true });
+    await writeFile(join(selectedPack, 'font-pack.manifest.json'), '{}');
+    await writeFile(join(inheritedPack, 'font-pack.manifest.json'), '{}');
+    process.env.LOBSTER_FONTS_DIR = inheritedPack;
+
+    assert.equal(resolveFontsBaseDir(selectedRuntime), selectedPack);
+    await rm(join(selectedPack, 'font-pack.manifest.json'));
+    assert.equal(
+      resolveFontsBaseDir(selectedRuntime),
+      undefined,
+      'managed engine B must not consume inherited engine A fonts',
+    );
+    assert.equal(
+      resolveFontsBaseDir({ ...selectedRuntime, managed: false }),
+      inheritedPack,
+      'an explicit development binary may still use the explicit font-pack override',
+    );
+
+    const inheritedVulkan = {
+      VK_ICD_FILENAMES: join(root, 'other-runtime', 'vk_swiftshader_icd.json'),
+      VK_DRIVER_FILES: join(root, 'other-runtime', 'vk_swiftshader_icd.json'),
+    };
+    assert.deepEqual(
+      bindLobiumRuntimeEnvironment(inheritedVulkan, selectedRuntime, 'software'),
+      {},
+      "missing adjacent SwiftShader must clear another engine runtime's inherited ICD",
+    );
+    const selectedIcd = join(selectedDir, 'vk_swiftshader_icd.json');
+    await writeFile(selectedIcd, '{}');
+    assert.deepEqual(bindLobiumRuntimeEnvironment(inheritedVulkan, selectedRuntime, 'software'), {
+      VK_ICD_FILENAMES: selectedIcd,
+      VK_DRIVER_FILES: selectedIcd,
+    });
+  } finally {
+    if (previousFonts === undefined) delete process.env.LOBSTER_FONTS_DIR;
+    else process.env.LOBSTER_FONTS_DIR = previousFonts;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('createLobiumLauncher throws when the binary is not provisioned', () => {
   const prev = process.env.LOBSTER_LOBIUM_BIN;
   const prevDir = process.env.LOBSTER_LOBIUM_DIR;
@@ -188,6 +391,106 @@ test('buildLobiumLaunchArgs writes lobium-fp.json and returns the --lobium-fp-co
     await rm(userDataDir, { recursive: true, force: true });
   }
 });
+
+test(
+  'Windows engine stages and aliases the claimed persona rather than hardcoding Windows fonts',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lobium-persona-font-pack-'));
+    const previous = process.env.LOBSTER_FONTS_DIR;
+    try {
+      const sourcePack = await writeLauncherFontPack(root);
+      process.env.LOBSTER_FONTS_DIR = sourcePack;
+      const cases = [
+        {
+          name: 'macos',
+          ctx: ctxWith(join(root, 'mac'), {
+            os: 'macos',
+            fonts: ['Helvetica', 'SF Mono'],
+          }),
+          included: ['NotoSans', 'NotoSerif', 'NotoSansMono'],
+          order: ['NotoSans.ttf', 'NotoSerif.ttf', 'NotoSansMono.ttf'],
+          fallback: ['Noto Sans', 'Noto Serif', 'Noto Sans Mono'],
+          excluded: ['Liberation', 'Ubuntu', 'Roboto'],
+          aliases: { Helvetica: 'Noto Sans', 'SF Mono': 'Noto Sans Mono' },
+        },
+        {
+          name: 'linux',
+          ctx: ctxWith(join(root, 'linux'), {
+            os: 'linux',
+            fonts: ['Ubuntu', 'Noto Sans Mono'],
+          }),
+          included: ['Ubuntu', 'NotoSerif', 'NotoSansMono'],
+          order: ['Ubuntu.ttf', 'NotoSerif.ttf', 'NotoSansMono.ttf'],
+          fallback: ['Ubuntu', 'Noto Serif', 'Noto Sans Mono'],
+          excluded: ['Liberation', 'NotoSans.ttf', 'Roboto'],
+          aliases: {},
+          absentAliases: ['Ubuntu', 'Noto Sans Mono'],
+        },
+        {
+          name: 'android',
+          ctx: ctxWith(join(root, 'android'), {
+            mobile: true,
+            fonts: ['Roboto', 'Droid Sans'],
+          }),
+          included: ['Roboto', 'NotoSerif', 'NotoSansMono'],
+          order: ['Roboto.ttf', 'NotoSerif.ttf', 'NotoSansMono.ttf'],
+          fallback: ['Roboto', 'Noto Serif', 'Noto Sans Mono'],
+          excluded: ['Liberation', 'Ubuntu', 'NotoSans.ttf'],
+          aliases: { 'Droid Sans': 'Roboto' },
+          absentAliases: ['Roboto'],
+        },
+      ];
+
+      for (const entry of cases) {
+        await buildLobiumLaunchArgs(entry.ctx);
+        const config = JSON.parse(
+          await readFile(join(entry.ctx.options.userDataDir, LOBIUM_CONFIG_FILENAME), 'utf8'),
+        );
+        assert.notEqual(config.fontPackDir, sourcePack, `${entry.name} must use a private subset`);
+        assert.match(config.fontPackDir, /native-font-packs/);
+        assert.deepEqual(config.fontFallbackFamilies.slice(0, 3), entry.fallback);
+        const stagedFiles = readdirSync(join(config.fontPackDir, 'files')).sort();
+        const staged = stagedFiles.join('|');
+        entry.order.forEach((name, index) =>
+          assert.match(stagedFiles[index] ?? '', new RegExp(name)),
+        );
+        for (const name of entry.included) assert.match(staged, new RegExp(name));
+        for (const name of entry.excluded) assert.doesNotMatch(staged, new RegExp(name));
+        for (const [claimed, physical] of Object.entries(entry.aliases)) {
+          assert.equal(config.fontAliases[claimed], physical);
+        }
+        for (const claimed of entry.absentAliases ?? []) {
+          assert.equal(config.fontAliases?.[claimed], undefined);
+        }
+      }
+    } finally {
+      if (previous === undefined) delete process.env.LOBSTER_FONTS_DIR;
+      else process.env.LOBSTER_FONTS_DIR = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'Windows engine fails before launch when a non-Windows persona has no verified font pack',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lobium-missing-persona-pack-'));
+    const previous = process.env.LOBSTER_FONTS_DIR;
+    try {
+      delete process.env.LOBSTER_FONTS_DIR;
+      await assert.rejects(
+        () => buildLobiumLaunchArgs(ctxWith(root, { os: 'macos' })),
+        /verified font pack is required to present a macos font persona on a Windows engine/,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.LOBSTER_FONTS_DIR;
+      else process.env.LOBSTER_FONTS_DIR = previous;
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test('farbling seeds are UNIQUE per profile seed even for the SAME device (distinct-per-profile, §5)', async () => {
   // Same resolved fingerprint (identical device), two different profile seeds. Without threading the
@@ -417,7 +720,7 @@ test('buildNativeLobiumProcessArgs keeps Android inside a maximized Lobium devic
     ctx.fingerprint.screen.height = 800;
     ctx.options.args = ['--window-size=640,480', '--window-position=10,20'];
 
-    const args = await buildNativeLobiumProcessArgs(ctx);
+    const args = await buildNativeLobiumProcessArgs(ctx, { extraArgsFor: () => [] });
 
     assert.ok(args.includes('--start-maximized'));
     assert.ok(args.includes('--lobium-device-frame=tablet'));

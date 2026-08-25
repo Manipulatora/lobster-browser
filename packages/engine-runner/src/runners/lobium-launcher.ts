@@ -24,7 +24,12 @@ import {
   prepareProfileExtensions,
   type PrepareExtensionsOptions,
 } from '../extensions.js';
-import { writeFontConfig } from '../fonts.js';
+import {
+  planFontAliases,
+  stageNativeFontPack,
+  writeFontConfig,
+  type FontPersona,
+} from '../fonts.js';
 import { withCdpSession } from '../cdp-client.js';
 import { buildLobiumConfig, lobiumConfigArg, writeLobiumConfig } from '../lobium-config.js';
 import {
@@ -48,6 +53,11 @@ import {
   type MobileEmulationController,
 } from '../mobile-emulation.js';
 import { profileMark } from './profile-mark.js';
+import {
+  isManagedLobiumBinPublication,
+  managedLobiumBinaryPath,
+  resolveManagedLobiumBinary,
+} from './managed-engine.js';
 // NTP branding is native (patched engine resources); no CDP start-page injection.
 import type { Launcher, LaunchContext, LaunchHandle } from './types.js';
 
@@ -68,6 +78,8 @@ export interface NativeLobiumLauncherOptions {
   extraArgs?: string[];
   /** Override the resolved binary, primarily for unit tests. */
   executablePath?: string;
+  /** Internal: the exact executable is the attested per-user runtime, so resources may not fall back. */
+  managedRuntime?: boolean;
   /** Per-launch native args provider. Defaults to writing `lobium-fp.json`. */
   extraArgsFor?: (ctx: LaunchContext) => Promise<string[]> | string[];
   /** Per-launch env provider. Defaults to per-profile fontconfig when a font pack is provisioned. */
@@ -131,25 +143,91 @@ export function lobiumBinaryCandidates(): string[] {
   return [...explicitDir, ...autoDirs.flatMap(binaryCandidatesFromDir)];
 }
 
-/** Resolve the native Lobium binary from explicit env or known dev/package locations. */
-export function resolveLobiumBinary(): string | undefined {
+export interface ResolvedLobiumRuntime {
+  executablePath: string;
+  /** True only for the canonical per-user runtime whose exact source stamp was attested. */
+  managed: boolean;
+}
+
+function sameBinaryPath(left: string, right: string): boolean {
+  const a = resolve(left);
+  const b = resolve(right);
+  return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+/**
+ * Resolve one concrete runtime. An explicit binary remains the developer/self-hosting override. The
+ * canonical Windows per-user path is never accepted through directory/auto-discovery: only its exact
+ * version+archive stamp can select it.
+ */
+export function resolveLobiumRuntime(): ResolvedLobiumRuntime | undefined {
   const p = process.env.LOBSTER_LOBIUM_BIN;
-  if (p && isExecutableFile(p)) return p;
-  for (const candidate of lobiumBinaryCandidates()) {
-    if (isExecutableFile(candidate)) return candidate;
+  if (p !== undefined) {
+    if (!isExecutableFile(p)) return undefined;
+    if (isManagedLobiumBinPublication()) {
+      const managed = resolveManagedLobiumBinary();
+      return managed && sameBinaryPath(p, managed)
+        ? { executablePath: managed, managed: true }
+        : undefined;
+    }
+    return { executablePath: p, managed: false };
+  }
+
+  const canonicalManaged = managedLobiumBinaryPath();
+  const explicitDir = process.env.LOBSTER_LOBIUM_DIR
+    ? binaryCandidatesFromDir(process.env.LOBSTER_LOBIUM_DIR)
+    : [];
+  for (const candidate of explicitDir) {
+    if (canonicalManaged && sameBinaryPath(candidate, canonicalManaged)) continue;
+    if (isExecutableFile(candidate)) return { executablePath: candidate, managed: false };
+  }
+
+  const managed = resolveManagedLobiumBinary();
+  if (managed) return { executablePath: managed, managed: true };
+
+  const autoDiscover =
+    process.env.LOBSTER_LOBIUM_AUTO_DISCOVER !== '0' &&
+    process.env.LOBSTER_LOBIUM_AUTO_DISCOVER !== 'false';
+  if (autoDiscover) {
+    const autoDirs = [
+      process.cwd(),
+      join(process.cwd(), '..'),
+      homedir(),
+      join(homedir(), 'lobium-build'),
+      join(homedir(), 'browser'),
+    ];
+    for (const candidate of autoDirs.flatMap(binaryCandidatesFromDir)) {
+      if (canonicalManaged && sameBinaryPath(candidate, canonicalManaged)) continue;
+      if (isExecutableFile(candidate)) return { executablePath: candidate, managed: false };
+    }
   }
   return undefined;
 }
 
-/** Resolve a provisioned font-pack base dir from explicit or packaged runtime locations. */
-export function resolveFontsBaseDir(): string | undefined {
+/** Resolve the native Lobium binary from explicit, attested managed, or known dev locations. */
+export function resolveLobiumBinary(): string | undefined {
+  return resolveLobiumRuntime()?.executablePath;
+}
+
+/**
+ * Resolve a provisioned font pack for one already-selected runtime. Its adjacent pack always wins.
+ * An attested managed runtime is stricter: if its own pack is absent it may not borrow an inherited
+ * LOBSTER_FONTS_DIR from a different engine archive.
+ */
+export function resolveFontsBaseDir(
+  selectedRuntime: ResolvedLobiumRuntime | undefined = resolveLobiumRuntime(),
+): string | undefined {
+  const adjacent = selectedRuntime
+    ? join(dirname(selectedRuntime.executablePath), 'fonts')
+    : undefined;
+  if (adjacent && existsSync(join(adjacent, 'font-pack.manifest.json'))) return adjacent;
+  if (selectedRuntime?.managed) return undefined;
+
   const p = process.env.LOBSTER_FONTS_DIR;
   if (p && existsSync(join(p, 'font-pack.manifest.json'))) return p;
-  const bin = resolveLobiumBinary();
   const entryDir = process.argv[1] ? dirname(resolve(process.argv[1])) : undefined;
   const nodeDir = dirname(process.execPath);
   const candidates = [
-    ...(bin ? [join(dirname(bin), 'fonts')] : []),
     // Tauri Linux bundles place the sidecar at <resources>/sidecar/index.js and the pack at
     // <resources>/fonts. This path must work even when the desktop entry was launched directly and
     // therefore did not source the optional user-local wrapper environment.
@@ -192,6 +270,7 @@ export function resolveFontsBaseDir(): string | undefined {
  */
 export async function buildLobiumLaunchEnv(
   ctx: LaunchContext,
+  selectedRuntime: ResolvedLobiumRuntime | undefined = resolveLobiumRuntime(),
 ): Promise<Record<string, string> | undefined> {
   // Dummy Google API keys so Chromium does not show the "Google API keys are missing"
   // infobar. Values are intentionally inert (we do not want profiles calling Google
@@ -220,7 +299,7 @@ export async function buildLobiumLaunchEnv(
   // the private font-directory isolation.
   env.FC_LANG = ctx.fingerprint.locale.locale;
 
-  const base = resolveFontsBaseDir();
+  const base = resolveFontsBaseDir(selectedRuntime);
   if (!base) {
     throw new Error(
       'required Lobium open-font pack is not provisioned; set LOBSTER_FONTS_DIR to a directory containing font-pack.manifest.json',
@@ -232,21 +311,6 @@ export async function buildLobiumLaunchEnv(
     base,
     ctx.fingerprint.fonts,
   );
-  // Software (SwiftShader) rendering: pin the bundled SwiftShader Vulkan ICD so ANGLE's
-  // SwANGLE backend deterministically uses it, instead of the host Vulkan loader possibly
-  // selecting a partial/incompatible ICD (which fails `eglInitialize` with "requested
-  // extension not supported" → WebGL becomes unavailable and WebGL-dependent pages render
-  // blank). Only in software mode, so a real-GPU host is never forced onto SwiftShader.
-  if (resolveGpuMode() === 'software') {
-    const bin = resolveLobiumBinary();
-    if (bin) {
-      const icd = join(dirname(bin), 'vk_swiftshader_icd.json');
-      if (existsSync(icd)) {
-        env.VK_ICD_FILENAMES = icd;
-        env.VK_DRIVER_FILES = icd; // newer Vulkan loaders read this name
-      }
-    }
-  }
   return env;
 }
 
@@ -260,10 +324,29 @@ export async function buildLobiumLaunchEnv(
  * the persona claims but never wider than the host. Degraded, not leaking. Aborting the launch would
  * trade a partial fingerprint for no browser.
  */
-export function windowsFontPackDir(): string | undefined {
+export function windowsFontPackDir(
+  selectedRuntime: ResolvedLobiumRuntime | undefined = resolveLobiumRuntime(),
+): string | undefined {
   if (process.platform !== 'win32') return undefined;
-  const base = resolveFontsBaseDir();
+  const base = resolveFontsBaseDir(selectedRuntime);
   return base ? resolve(base) : undefined;
+}
+
+async function verifiedWindowsFontPack(
+  persona: FontPersona,
+  userDataDir: string,
+  selectedRuntime: ResolvedLobiumRuntime | undefined,
+): Promise<{ dir: string; physicalFamilies: string[] } | undefined> {
+  const base = windowsFontPackDir(selectedRuntime);
+  if (!base) {
+    if (process.platform === 'win32' && persona !== 'windows') {
+      throw new Error(
+        `a verified font pack is required to present a ${persona} font persona on a Windows engine`,
+      );
+    }
+    return undefined;
+  }
+  return stageNativeFontPack(userDataDir, persona, base);
 }
 
 /** True when the native Lobium binary is provisioned in this environment. */
@@ -302,8 +385,22 @@ export function proxySummaryFromServer(
  * except for the file write (into the profile's own user-data-dir), so it is unit-testable without a
  * live browser. Used by the direct native launcher and injectable in tests.
  */
-export async function buildLobiumLaunchArgs(ctx: LaunchContext): Promise<string[]> {
+export async function buildLobiumLaunchArgs(
+  ctx: LaunchContext,
+  selectedRuntime: ResolvedLobiumRuntime | undefined = resolveLobiumRuntime(),
+): Promise<string[]> {
   const proxy = ctx.options.proxy ? proxySummaryFromServer(ctx.options.proxy.server) : undefined;
+  const fontPersona: FontPersona = ctx.isMobileProfile ? 'android' : ctx.fingerprint.os;
+  // DirectWrite reads the pack in the browser process. Verify every manifest-declared hash and the
+  // exact font-file ledger before the native config grants that process access to the directory.
+  const fontPack = await verifiedWindowsFontPack(
+    fontPersona,
+    ctx.options.userDataDir,
+    selectedRuntime,
+  );
+  const fontAliases = fontPack
+    ? planFontAliases(fontPersona, fontPack.physicalFamilies, ctx.fingerprint.fonts).aliases
+    : undefined;
   // Pass the profile seed so farbling seeds are unique per profile. Without it, buildLobiumConfig falls
   // back to a device signature, and two profiles that derive the same device class would share
   // canvas/WebGL/audio seeds → identical, linkable hashes (a distinct-per-profile violation, §5).
@@ -321,7 +418,13 @@ export async function buildLobiumLaunchArgs(ctx: LaunchContext): Promise<string[
       ? { mediaDevices: ctx.fingerprintPolicy.mediaDevices }
       : {}),
     // Windows only; elsewhere the same pack is reached through FONTCONFIG_FILE instead.
-    ...(windowsFontPackDir() ? { fontPackDir: windowsFontPackDir()! } : {}),
+    ...(fontPack && fontAliases
+      ? {
+          fontPackDir: fontPack.dir,
+          fontAliases,
+          fontFallbackFamilies: fontPack.physicalFamilies,
+        }
+      : {}),
   });
   const path = await writeLobiumConfig(ctx.options.userDataDir, config);
   return [lobiumConfigArg(path)];
@@ -333,9 +436,12 @@ export async function buildNativeLobiumProcessArgs(
   /** Already-resolved `--proxy-server` value (local shim or upstream). */
   proxyServer?: string,
 ): Promise<string[]> {
+  const selectedRuntime = opts.executablePath
+    ? { executablePath: opts.executablePath, managed: opts.managedRuntime === true }
+    : resolveLobiumRuntime();
   const dynamicArgs = opts.extraArgsFor
     ? await opts.extraArgsFor(ctx)
-    : await buildLobiumLaunchArgs(ctx);
+    : await buildLobiumLaunchArgs(ctx, selectedRuntime);
   const extensionPaths = await prepareProfileExtensions(ctx.extensions, ctx.options.userDataDir, {
     ...opts.extensions,
     // A web-store install is a network request made on this profile's behalf, so it belongs on this
@@ -435,12 +541,39 @@ export async function buildNativeLobiumProcessArgs(
   ];
 }
 
+export function bindLobiumRuntimeEnvironment(
+  env: NodeJS.ProcessEnv,
+  selectedRuntime: ResolvedLobiumRuntime | undefined,
+  gpuMode = resolveGpuMode(),
+): NodeJS.ProcessEnv {
+  const bound = { ...env };
+  if (gpuMode !== 'software' || !selectedRuntime) return bound;
+  delete bound.VK_ICD_FILENAMES;
+  delete bound.VK_DRIVER_FILES;
+  const icd = join(dirname(selectedRuntime.executablePath), 'vk_swiftshader_icd.json');
+  if (existsSync(icd)) {
+    bound.VK_ICD_FILENAMES = icd;
+    bound.VK_DRIVER_FILES = icd;
+  }
+  return bound;
+}
+
 async function buildNativeLobiumEnv(
   ctx: LaunchContext,
   opts: NativeLobiumLauncherOptions,
 ): Promise<NodeJS.ProcessEnv> {
-  const extraEnv = opts.envFor ? await opts.envFor(ctx) : await buildLobiumLaunchEnv(ctx);
-  return extraEnv ? { ...process.env, ...extraEnv } : process.env;
+  const selectedRuntime = opts.executablePath
+    ? { executablePath: opts.executablePath, managed: opts.managedRuntime === true }
+    : resolveLobiumRuntime();
+  const extraEnv = opts.envFor
+    ? await opts.envFor(ctx)
+    : await buildLobiumLaunchEnv(ctx, selectedRuntime);
+  const env: NodeJS.ProcessEnv = { ...process.env, ...(extraEnv ?? {}) };
+
+  // Never inherit a Vulkan ICD selected for another runtime. In software mode, bind ANGLE to the ICD
+  // adjacent to the exact binary this launcher closed over; if that runtime has no ICD, leave both
+  // variables unset instead of silently consuming a previous/global engine's SwiftShader package.
+  return bindLobiumRuntimeEnvironment(env, selectedRuntime);
 }
 
 /**
@@ -769,16 +902,26 @@ export async function exportCookiesFromNativeLobium(wsUrl: string): Promise<stri
 }
 
 /**
- * Build the native Lobium launcher. Throws if the binary is not provisioned — callers gate on
- * {@link isLobiumAvailable} first.
+ * Build a concrete native Lobium launcher closed over one exact runtime. The sidecar's default
+ * registry resolves this lazily; direct callers may still gate on {@link isLobiumAvailable} first.
  */
 export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): Launcher {
-  const bin = opts.executablePath ?? resolveLobiumBinary();
-  if (!bin) {
+  const selectedRuntime = opts.executablePath
+    ? { executablePath: opts.executablePath, managed: opts.managedRuntime === true }
+    : resolveLobiumRuntime();
+  if (!selectedRuntime) {
     throw new Error(
       'LOBSTER_LOBIUM_BIN is not set or does not point to an existing file — cannot launch native Lobium',
     );
   }
+  const bin = selectedRuntime.executablePath;
+  // Every downstream resource lookup receives this immutable binding. No later environment change can
+  // make a launch probe one binary and spawn it with another runtime's font pack or SwiftShader ICD.
+  const boundOpts: NativeLobiumLauncherOptions = {
+    ...opts,
+    executablePath: bin,
+    managedRuntime: selectedRuntime.managed,
+  };
   const launch: Launcher = async (ctx: LaunchContext): Promise<LaunchHandle> => {
     let adapter: LocalProxyAdapter | undefined;
     let mobileEmulation: MobileEmulationController | undefined;
@@ -809,14 +952,14 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
       await clearDevToolsActivePort(ctx.options.userDataDir);
       const args = await buildNativeLobiumProcessArgs(
         ctx,
-        opts,
+        boundOpts,
         adapter?.proxyServer ??
           (ctx.options.proxy && !needsLocalProxyAdapter(ctx.options.proxy)
             ? ctx.options.proxy.server
             : undefined),
       );
       await reportUnloadableUserExtensions(ctx, args);
-      const env = await buildNativeLobiumEnv(ctx, opts);
+      const env = await buildNativeLobiumEnv(ctx, boundOpts);
       // Resolved BEFORE the spawn: everything between the CDP endpoint appearing and the emulation
       // commands landing is time the startup tab spends at desktop metrics, so the work-area lookup
       // must not sit in that window.

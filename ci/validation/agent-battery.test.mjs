@@ -10,7 +10,9 @@
 // These tests pin the fix. They need no browser, no model and no credit, so they run in ordinary CI
 // alongside the unit suites — which is the only way grader strength stays regression-protected.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
   buildBatteryRunConfig,
@@ -35,6 +37,19 @@ import {
   providerBlockReason,
   summarizeBattery,
 } from './agent-battery-results.mjs';
+
+test('the runbook agent-battery-oracle CLI delegates to the live battery entrypoint', () => {
+  const entrypoint = fileURLToPath(new URL('./agent-battery-oracle.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [entrypoint, '__no_such_battery_task__'], {
+    encoding: 'utf8',
+    env: { ...process.env, AGENT_BATTERY_REPORT_JSON: '' },
+  });
+  assert.equal(result.status, 1);
+  assert.match(
+    `${result.stdout}\n${result.stderr}`,
+    /AGENT BATTERY: FAIL .*no battery task matched: __no_such_battery_task__/s,
+  );
+});
 
 /**
  * What a competent model produced for each task with NO web access, from the adversarial run. These

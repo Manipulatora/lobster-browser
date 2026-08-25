@@ -27,25 +27,48 @@ export interface CdpSession {
 /**
  * Resolve a page-target WebSocket from a browser DevTools endpoint via `/json/list`, falling back to
  * the browser endpoint (fine for browser-scoped commands like `Network.*` / `Browser.close`).
+ *
+ * The browser writes `DevToolsActivePort` - which is what the launcher waits for - BEFORE it has
+ * created any target, so a caller that queries `/json/list` the instant a launch resolves can see an
+ * empty list. Measured on Windows: `launchEngine` returned at 1039 ms and the first page target only
+ * appeared ~250 ms later. Falling back to the browser endpoint inside that window is silently wrong
+ * for page-scoped work: the session connects, and then every `Runtime.evaluate` / `Page.navigate`
+ * fails with "'X' wasn't found" - an error naming neither the real cause nor the missing target,
+ * several layers from where the mistake was made. So poll briefly for a page target before giving
+ * up; only a genuinely page-less browser now reaches the fallback.
  */
-export async function resolveCdpTarget(wsUrl: string): Promise<string> {
+export async function resolveCdpTarget(
+  wsUrl: string,
+  opts: { pageWaitMs?: number } = {},
+): Promise<string> {
+  let listUrl: string;
   try {
     const u = new URL(wsUrl);
-    const listUrl = `http://${u.hostname}:${u.port}/json/list`;
-    // Bounded: this runs BEFORE the session timer below exists, so an endpoint that accepts the
-    // connection and never answers would hang the caller with no deadline at all.
-    const targets = (await fetch(listUrl, { signal: AbortSignal.timeout(5_000) }).then((r) =>
-      r.json(),
-    )) as Array<{
-      type?: string;
-      webSocketDebuggerUrl?: string;
-    }>;
+    listUrl = `http://${u.hostname}:${u.port}/json/list`;
+  } catch {
+    return wsUrl;
+  }
+  // Retry ONLY the reachable-but-page-less case. That is the measured startup window: the browser
+  // answers /json/list with an empty array before it has created any target. A fetch that THROWS
+  // means the endpoint is not serving the list at all, and browser-scoped callers (Network.*,
+  // Browser.close) must keep getting their fast fallback rather than paying this deadline.
+  const deadline = Date.now() + (opts.pageWaitMs ?? 5_000);
+  for (;;) {
+    let targets: Array<{ type?: string; webSocketDebuggerUrl?: string }>;
+    try {
+      // Bounded per attempt: an endpoint that accepts the connection and never answers must not
+      // hang the caller, which at this point has no session deadline yet.
+      targets = (await fetch(listUrl, { signal: AbortSignal.timeout(5_000) }).then((r) =>
+        r.json(),
+      )) as Array<{ type?: string; webSocketDebuggerUrl?: string }>;
+    } catch {
+      return wsUrl;
+    }
     const page = targets.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
     if (page?.webSocketDebuggerUrl) return page.webSocketDebuggerUrl;
-  } catch {
-    /* browser endpoint is fine for browser-scoped commands */
+    if (Date.now() >= deadline) return wsUrl;
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return wsUrl;
 }
 
 /**

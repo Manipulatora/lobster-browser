@@ -200,8 +200,36 @@ browser.
 The engine itself is built separately (§1) and packaged with:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\package-lobium-runtime.ps1
+$version = '152.0.7977.42'
+$src = 'C:\lobium-build\src\out\Lobium'
+$fontPack = 'C:\lobster-build-inputs\lobster-open-fonts-<verified-pack-id>'
+$fontScanner = 'C:\project\tools\msys64\mingw64\bin\fc-scan.exe'
+$out = "C:\lobster\dist-win\lobium-runtime-$version"
+if (-not (Test-Path -LiteralPath (Join-Path $fontPack 'font-pack.manifest.json') -PathType Leaf)) {
+  throw "verified font pack is missing its manifest: $fontPack"
+}
+if (-not (Test-Path -LiteralPath $fontScanner -PathType Leaf)) {
+  throw "reviewed fc-scan executable is missing: $fontScanner"
+}
+if (Test-Path -LiteralPath $out) { throw "refusing existing package output: $out" }
+node scripts\verify-lobium-runtime.mjs --font-pack $fontPack --font-scanner $fontScanner
+if ($LASTEXITCODE -ne 0) { throw 'font bytes do not match the declared family inventory' }
+powershell -ExecutionPolicy Bypass -File scripts\package-lobium-runtime.ps1 `
+  -SourceDir $src -OutDir $out -FontPack $fontPack -FontScanner $fontScanner
 ```
+
+Use explicit paths and a new versioned output directory. The packager rejects source/output overlap,
+validates the source version and complete native capability manifest before touching an existing output,
+builds in a sibling staging directory, and rolls the previous output back if the final rename fails.
+`LOBSTER_ENGINE.json` schema v2 records the observed Chromium/GN/capability provenance plus an SHA-256
+ledger for every runtime file. With a font pack it also records the ordinal path/content/family
+inventory digest and the exact fc-scan version/executable SHA-256 used before and after copying. The
+external archive SHA-256 remains the trust anchor: this marker is an attestation, not a signature.
+Verify any copied/extracted tree with `node scripts\verify-lobium-runtime.mjs <runtime-directory>`;
+that no-scanner form validates the packaging attestation but explicitly says it did **not** rescan font
+bytes. On a release host, pass `--font-scanner $fontScanner` to repeat the physical family proof.
+That rescan also requires the scanner product, version, and executable SHA-256 to match the packaging
+attestation; use no-scanner attestation mode rather than silently substituting a different tool.
 
 Not a port of the Linux script — the two platforms ship genuinely different file sets, and copying the
 Linux list produces a runtime that does not start. `chrome.exe` on Windows is a ~4 MB stub and essentially
@@ -221,27 +249,89 @@ the missing file nor the real cause:
   dynamically. They are present on a developer machine and frequently absent on a user's, so this fails
   only after distribution.
 
-The script finishes by running `--lobium-fingerprint-capabilities` against the packaged binary and
-checking the hooks the product requires. A runtime that fails there would have failed at profile launch
-anyway; finding out at packaging time is cheaper.
-
-Then compress `dist-win\lobium-runtime`, upload it to the engine release, and register it:
+The script reads `chrome.exe`'s PE `VERSIONINFO.ProductVersion` and requires the exact pinned four-part
+Chromium version, then runs `--lobium-fingerprint-capabilities` against the packaged binary and checks
+the Lobium v3 hooks the product requires. These are deliberately separate attestations: Chromium's
+`--version` early-exit is POSIX-only and must not be used for a Windows executable, while PE version
+metadata alone does not prove Lobium's native privacy semantics. A runtime that fails the capability
+check would have failed at profile launch anyway; finding out at packaging time is cheaper. Compress
+only the versioned `$out` created above, then extract the archive into a new directory and verify both
+the artifact ledger and the executable:
 
 ```powershell
-node scripts\bump-engine-version.mjs 152.0.7977.42 --platform win-x64 --archive <lobium-win-x64.zip>
+$archive = "C:\lobster\dist-win\lobium-win-x64-$version.zip"
+$verifyDir = "C:\lobster\dist-win\verify-lobium-win-x64-$version"
+if (Test-Path -LiteralPath $archive) { throw "refusing existing archive: $archive" }
+if (Test-Path -LiteralPath $verifyDir) { throw "refusing existing verification directory: $verifyDir" }
+
+node scripts\verify-lobium-runtime.mjs $out --font-scanner $fontScanner
+if ($LASTEXITCODE -ne 0) { throw 'packaged runtime ledger verification failed' }
+Compress-Archive -LiteralPath $out -DestinationPath $archive -CompressionLevel Optimal
+Expand-Archive -LiteralPath $archive -DestinationPath $verifyDir
+$extracted = Join-Path $verifyDir (Split-Path -Leaf $out)
+node scripts\verify-lobium-runtime.mjs $extracted --font-scanner $fontScanner
+if ($LASTEXITCODE -ne 0) { throw 'extracted runtime ledger verification failed' }
+
+# Read the exact Windows PE version resource; use cmd.exe only to capture stdout from the
+# WINDOWS-subsystem executable's native Lobium capability probe.
+$probeTag = [guid]::NewGuid().ToString('N')
+$capsProbe = Join-Path $env:TEMP "lobium-capabilities-$probeTag.json"
+$extractedChrome = Join-Path $extracted 'chrome.exe'
+$reportedVersion = (Get-Item -LiteralPath $extractedChrome -ErrorAction Stop).VersionInfo.ProductVersion
+if ($reportedVersion -notmatch '^\d+\.\d+\.\d+\.\d+$' -or $reportedVersion -cne $version) {
+  throw "unexpected engine ProductVersion: $reportedVersion"
+}
+cmd /d /c "`"$extractedChrome`" --lobium-fingerprint-capabilities > `"$capsProbe`" 2>&1"
+if ($LASTEXITCODE -ne 0) { throw 'extracted Lobium capability probe failed' }
+$actualCaps = Get-Content -LiteralPath $capsProbe -Raw | ConvertFrom-Json
+$marker = Get-Content -LiteralPath (Join-Path $extracted 'LOBSTER_ENGINE.json') -Raw | ConvertFrom-Json
+if ($actualCaps.product -cne 'Lobium' -or $actualCaps.contractVersion -ne 3 -or
+    ((@($actualCaps.capabilities) -join "`n") -cne (@($marker.provenance.capabilities) -join "`n"))) {
+  throw 'extracted executable capability manifest differs from its verified package marker'
+}
+$archiveSha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+Write-Host "verified archive SHA-256: $archiveSha256"
+```
+
+`--url` is mandatory for the first Windows publication because there is no prior `win-x64` URL from
+which the bump tool can derive the new one. Upload `$archive`, then download that exact final URL and
+compare it with `$archiveSha256` before moving the manifest; the bump tool hashes the local archive but
+does not fetch the remote asset:
+
+```powershell
+$url = "https://github.com/Manipulatora/lobster-browser/releases/download/engine-v$version/lobium-win-x64-$version.zip"
+$publishedCopy = Join-Path $env:TEMP "published-lobium-win-x64-$probeTag.zip"
+Invoke-WebRequest $url -OutFile $publishedCopy -UseBasicParsing -TimeoutSec 1800
+$publishedSha256 = (Get-FileHash -LiteralPath $publishedCopy -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($publishedSha256 -cne $archiveSha256) { throw 'published archive differs from the verified local archive' }
+node scripts\bump-engine-version.mjs $version --platform win-x64 `
+  --archive $archive --url $url
 ```
 
 The `win-x64` entry is deliberately absent until that archive exists. A URL published ahead of its
 artifact means every Windows first run 404s after an ~840 MB download; an absent entry fails immediately
 and says why.
 
-**Fonts on Windows.** `provision-open-fonts.mjs` shells out to `fc-scan`, which does not exist on Windows,
-so the pack is provisioned on a Linux host (or any environment with fontconfig) and carried into the
-runtime directory by the packaging script above. It is consumed differently per platform: Linux points
+**Fonts on Windows.** `provision-open-fonts.mjs` shells out to `fc-scan`, so the pack must be produced in
+an environment with fontconfig. That can be Linux or a reviewed Windows/MSYS2 installation supplied via
+`--fc-scan <executable>`; this build host currently uses the explicit `$fontScanner` above. The pack is
+then carried into the runtime directory by the packaging script. It is consumed differently per
+platform: Linux points
 `FONTCONFIG_FILE` at it, while on Windows the engine sideloads the faces into its DirectWrite collection
 from the `fontPackDir` in the profile config. Both need the files physically present. Font isolation
 itself is native on Windows and works without the pack — the engine filters font lookups against the
 persona list — but filtering can only *subtract*; see [`STATUS.md`](STATUS.md) §2.
+
+Before transferring `$fontPack` to the Windows build host, independently verify manifest version 1, safe
+unique `files/` paths and supported font extensions, an exact declared-versus-present file set, every
+declared SHA-256, **exact equality** between each file's declared families and its complete `fc-scan`
+family set (including every TTC companion face), each persona's physical set closed over every family
+exposed by any selected multi-family file, and required persona/license coverage, with no symlinks or
+reparse points. Transfer it as a new archive with an external SHA-256, extract it into a fresh
+directory on Windows, and repeat the manifest/file/digest and scanner checks before using
+`-FontPack -FontScanner`. Omitting
+`-FontPack` is supported only for local diagnosis as a visibly degraded subtractive-only runtime; do not
+publish that runtime as the production `win-x64` engine.
 
 > **The packaged sidecar could not start, on any platform.** `scripts/bundle-sidecar.mjs` copies a
 > HAND-MAINTAINED list of third-party packages, and `copyPkg` only *warns* when one is absent — so when

@@ -21,7 +21,7 @@ repository up on a new machine. It records what is true today, not what is plann
 >
 > **Every existing native artifact now predates the source contract.** `engine-manifest.json` names
 > the old Linux `152.0.7928.0` artifact, while the locally built Linux and Windows binaries predate
-> the contract-v2 and native-policy fixes landed on 2026-08-23. The launcher refuses all of them.
+> the contract-v3 and native-policy privacy fixes finalized on 2026-08-24. The launcher refuses all of them.
 > Current source advertises 19 capabilities on Linux and 20 on Windows (the extra hook is Windows
 > font isolation); a clean rebuild and a new oracle run are required before either can be published.
 >
@@ -67,7 +67,7 @@ one with a published engine artifact. macOS is neither built nor configured.
 | Rust/Tauri core | Builds and runs | Builds and runs | Untested |
 | Sidecar (`engine-runner`) | Verified — bundled sidecar answers `ping`/`status` over stdio under the vendored `node.exe`, and the Lobee loopback bridge binds | Ships | Untested |
 | Vendored Node runtime | Official win-x64 `node.exe`, SHA-256 verified against nodejs.org | Ships | Not implemented |
-| Lobium engine | Prior official/PGO/ThinLTO `152.0.7977.42` build exists, but is **stale and refused** by contract v2. Clean rebuild required. | Published `152.0.7928.0` and later local build are both **stale and refused** (§5) | Does not exist |
+| Lobium engine | Prior official/PGO/ThinLTO `152.0.7977.42` build exists, but is **stale and refused** by contract v3. Clean rebuild required. | Published `152.0.7928.0` and later local build are both **stale and refused** (§5) | Does not exist |
 | Installer bundle target | `nsis` (`tauri.windows.conf.json`) | `deb` (`tauri.linux.conf.json`) | Not configured |
 | Engine archive form | `.zip` | `.tar.gz` | — |
 | Font isolation | Native (DirectWrite filter + font-pack sideload) | Environmental (`FONTCONFIG_FILE` + private pack) | Not implemented |
@@ -265,7 +265,8 @@ the full picture. The short version, because it is easy to overstate:
 - The **software gate** (`regression-gate.mjs`) runs anywhere: coherence, device-class diversity floors,
   and fingerprint unit contracts. It reads no baseline and launches no browser.
 - The **offline structural gates** run anywhere and are fast: `npm run gate:engine` (patch-series
-  structure, version coherence, source hygiene, and canonical-seed contracts — 26 tests),
+  structure, version coherence, source hygiene, canonical-seed, and Windows packaging, font-isolation,
+  and product-E2E platform contracts),
   `npm run gate:desktop-css`, and `npm run gate:migrations`. All three run in CI on every push.
   `lobium/test/run.ps1` (`npm run gate:kernels`) is a PowerShell entry point for the Windows build
   host: property tests that compile the SHIPPING canvas and audio kernels from `lobium/src/` and

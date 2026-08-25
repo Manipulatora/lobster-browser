@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 
 import type { PrismaService } from '../prisma/prisma.service';
 
@@ -28,9 +28,10 @@ export interface DesktopAuthRepository {
   /**
    * Atomically claim an unredeemed, unexpired grant by its code hash and launcher proof.
    *
-   * State and PKCE challenge belong in the claim predicate, not in checks after it. Otherwise a
-   * process that intercepts the loopback redirect can submit a wrong verifier first and consume the
-   * code, turning PKCE's theft protection into a reliable denial of service against the launcher.
+   * State and PKCE challenge must be verified before the claiming write, never in checks after it.
+   * Otherwise a process that intercepts the loopback redirect can submit a wrong verifier first and
+   * consume the code, turning PKCE's theft protection into a reliable denial of service against the
+   * launcher.
    *
    * @returns the grant if this call claimed it; null if it does not exist, the launcher proof does
    *          not match, it has expired, or it was already redeemed.
@@ -48,6 +49,24 @@ export interface DesktopAuthRepository {
 
 export const DESKTOP_AUTH_REPOSITORY = Symbol('DesktopAuthRepository');
 
+/**
+ * Compare one attacker-supplied OAuth proof with the stored value without a value-dependent string
+ * comparison. `timingSafeEqual` requires equal-size buffers, so a wrong-size input is compared
+ * against a same-size dummy before the separately recorded length result is folded in. This keeps
+ * both the state and PKCE paths on the native constant-time primitive even for malformed lengths.
+ *
+ * This protects the comparison itself; as Node documents, it cannot make the surrounding request
+ * handling constant-time.
+ */
+export function constantTimeEquals(supplied: string, expected: string): boolean {
+  const suppliedBytes = Buffer.from(supplied, 'utf8');
+  const expectedBytes = Buffer.from(expected, 'utf8');
+  const sameLength = suppliedBytes.length === expectedBytes.length;
+  const comparable = sameLength ? suppliedBytes : Buffer.alloc(expectedBytes.length);
+  const sameBytes = timingSafeEqual(comparable, expectedBytes);
+  return sameLength && sameBytes;
+}
+
 @Injectable()
 export class PrismaDesktopAuthRepository implements DesktopAuthRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -63,15 +82,27 @@ export class PrismaDesktopAuthRepository implements DesktopAuthRepository {
     now: Date,
   ): Promise<StoredGrant | null> {
     return this.prisma.$transaction(async (tx) => {
-      // The predicate does the enforcing, not a prior read: `redeemedAt: null` means exactly one
-      // of any number of concurrent exchanges can match, and `expiresAt: { gt: now }` means an
-      // expired code cannot be claimed even if it is still in the table.
+      // Fetch by the random 256-bit code hash, then verify both launcher proofs in this process.
+      // Putting state/challenge directly in the SQL equality predicate delegates their comparison
+      // to a value-dependent database string comparator and reintroduces the timing oracle that
+      // `constantTimeEquals` exists to close.
+      const grant = (await tx.desktopAuthGrant.findUnique({
+        where: { codeHash },
+      })) as StoredGrant | null;
+      if (!grant) return null;
+      const stateMatches = constantTimeEquals(state, grant.state);
+      const challengeMatches = constantTimeEquals(codeChallenge, grant.codeChallenge);
+      if (!stateMatches || !challengeMatches) return null;
+
+      // Proof checking precedes this await, but the claim itself remains atomic: any number of
+      // valid concurrent exchanges may read the row and only one can change redeemedAt from null.
+      // Expiry stays in this write predicate so crossing the deadline between read and claim fails.
       const claimed = await tx.desktopAuthGrant.updateMany({
-        where: { codeHash, state, codeChallenge, redeemedAt: null, expiresAt: { gt: now } },
+        where: { id: grant.id, redeemedAt: null, expiresAt: { gt: now } },
         data: { redeemedAt: now },
       });
       if (claimed.count === 0) return null;
-      return (await tx.desktopAuthGrant.findUnique({ where: { codeHash } })) as StoredGrant | null;
+      return { ...grant, redeemedAt: now };
     });
   }
 
@@ -99,7 +130,12 @@ export class InMemoryDesktopAuthRepository implements DesktopAuthRepository {
     if (!grant) return null;
     if (grant.redeemedAt) return null;
     if (grant.expiresAt <= now) return null;
-    if (grant.state !== state || grant.codeChallenge !== codeChallenge) return null;
+    // Compute BOTH proofs before branching: short-circuiting the second comparison would disclose
+    // whether the state alone matched. These random launcher proofs are intentionally never compared
+    // with JavaScript's value-dependent string equality.
+    const stateMatches = constantTimeEquals(state, grant.state);
+    const challengeMatches = constantTimeEquals(codeChallenge, grant.codeChallenge);
+    if (!stateMatches || !challengeMatches) return null;
     // Single-threaded and no await between the checks and this write, so the claim is atomic —
     // the same contract the Prisma implementation enforces with a predicate.
     grant.redeemedAt = now;

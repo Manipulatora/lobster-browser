@@ -374,6 +374,10 @@ test('the native capability list, its TypeScript mirror, and the series agree', 
     tsVersion[1],
     'contract version mismatch between engine and sidecar',
   );
+  assert.ok(
+    Number(nativeVersion[1]) >= 3,
+    'v2 cannot distinguish an engine that leaks local endpoints through icecandidateerror',
+  );
 });
 
 test('every fingerprint patch has an explicit mapping to emitted capabilities', () => {

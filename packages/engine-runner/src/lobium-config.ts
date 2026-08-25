@@ -33,6 +33,35 @@ export const LOBIUM_CONFIG_FILENAME = 'lobium-fp.json';
 /** Must stay equal to kMaxLobiumFpDataBytes in core/config-channel.patch. */
 export const LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES = 28 * 1024;
 
+/**
+ * Keys the engine removes before forwarding the config to the renderer.
+ *
+ * MUST mirror `StripBrowserOnlyKeys` in `lobium/src/lobium_fp_config.cc` exactly. Every font hook —
+ * DirectWrite family lookup, `local()`, Local Font Access, the pack sideload — runs in the BROWSER
+ * process, which reads the config file directly and is not size-bound. Only the renderer copy rides
+ * the command line, so only the renderer copy is subject to the size guard below.
+ */
+export const LOBIUM_BROWSER_ONLY_CONFIG_KEYS = [
+  'fonts',
+  'fontPackDir',
+  'fontAliases',
+  'fontFallbackFamilies',
+] as const;
+
+/**
+ * The exact document the renderer receives: the config minus the browser-only keys.
+ *
+ * Sizing the FULL document instead of this projection is what made a complete font catalog look
+ * oversized — measured: 25 of 50 personas (14 macOS, 11 Linux) refused to launch with
+ * "config is too large for the renderer channel" even though the bytes that pushed them over were
+ * stripped before the renderer ever saw them.
+ */
+export function rendererConfigProjection(config: LobiumConfig): Record<string, unknown> {
+  const projection: Record<string, unknown> = { ...(config as unknown as Record<string, unknown>) };
+  for (const key of LOBIUM_BROWSER_ONLY_CONFIG_KEYS) delete projection[key];
+  return projection;
+}
+
 /** The per-profile farbling seeds the native canvas/WebGL/audio patches read (stable per profile). */
 export interface LobiumFarblingSeeds {
   canvas: number;
@@ -80,12 +109,16 @@ export interface LobiumConfig {
    */
   fonts: string[];
   /**
-   * Absolute path to the profile's font pack. Windows sideloads every face in it into the
+   * Absolute path to the verified persona-specific stage. Windows sideloads every face in it into the
    * DirectWrite collection so the persona can advertise fonts the host does not have installed —
-   * filtering `fonts` can only ever subtract. Absent on platforms that isolate fonts another way
-   * (Linux uses a per-profile FONTCONFIG_FILE), or when no pack is provisioned.
+   * source-pack files outside the persona stage never enter default/character fallback. Absent on
+   * platforms using FONTCONFIG_FILE, or when no pack is provisioned.
    */
   fontPackDir?: string;
+  /** CSS-only claimed-family substitutions backed by verified physical pack families. */
+  fontAliases?: Record<string, string>;
+  /** Ordered persona-pack families eligible for native character fallback. Browser-only. */
+  fontFallbackFamilies?: string[];
   seeds: LobiumFarblingSeeds;
   policy: LobiumPolicyConfig;
   net: LobiumNetConfig;
@@ -106,6 +139,10 @@ export interface BuildLobiumConfigOptions {
    * would imply a second, non-existent mechanism.
    */
   fontPackDir?: string;
+  /** CSS-only claimed-family substitutions backed by verified physical pack families. */
+  fontAliases?: Record<string, string>;
+  /** Ordered persona-pack families eligible for native character fallback. */
+  fontFallbackFamilies?: string[];
 }
 
 const DEFAULT_HARDWARE_NOISE: HardwareNoisePolicy = {
@@ -196,6 +233,16 @@ export function buildLobiumConfig(
       'Lobium WebRTC default_public_interface_only is unsafe with a proxy because host ICE may bypass it',
     );
   }
+  if (
+    opts.fontPackDir &&
+    (!opts.fontFallbackFamilies?.length ||
+      opts.fontFallbackFamilies.some((family) => !family.trim()))
+  ) {
+    throw new Error('a configured font pack requires non-empty physical fallback families');
+  }
+  if (!opts.fontPackDir && opts.fontFallbackFamilies?.length) {
+    throw new Error('font fallback families require a configured font pack');
+  }
   const net: LobiumNetConfig = {
     webrtcPolicy,
   };
@@ -238,6 +285,12 @@ export function buildLobiumConfig(
     locale: fp.locale,
     fonts: fp.fonts,
     ...(opts.fontPackDir ? { fontPackDir: opts.fontPackDir } : {}),
+    ...(opts.fontAliases && Object.keys(opts.fontAliases).length
+      ? { fontAliases: opts.fontAliases }
+      : {}),
+    ...(opts.fontFallbackFamilies?.length
+      ? { fontFallbackFamilies: [...new Set(opts.fontFallbackFamilies)] }
+      : {}),
     seeds: {
       canvas: noise.canvas ? hashStringToUint32(`${base}:canvas`) : 0,
       webgl: noise.webgl ? hashStringToUint32(`${base}:webgl`) : 0,
@@ -265,8 +318,12 @@ export async function writeLobiumConfig(
   // Compact JSON: the browser base64-forwards this onto the renderer command line (Windows ~32K
   // CreateProcess cap). Pretty-print would waste budget for no benefit at runtime.
   const serialized = `${JSON.stringify(config)}\n`;
-  const bytes = Buffer.byteLength(serialized, 'utf8');
-  const base64Bytes = Math.ceil(bytes / 3) * 4;
+  // Size the RENDERER PROJECTION, not this file. The browser process reads the file from disk and is
+  // not size-bound; only the stripped copy is base64'd onto the renderer command line. Measuring the
+  // full document here refused 25 of 50 personas whose oversize came entirely from `fonts`, which the
+  // renderer never receives.
+  const rendererBytes = Buffer.byteLength(JSON.stringify(rendererConfigProjection(config)), 'utf8');
+  const base64Bytes = Math.ceil(rendererBytes / 3) * 4;
   if (base64Bytes > LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES) {
     // Native forwarding otherwise logs and SKIPS --lobium-fp-data, producing a mixed host/persona
     // fingerprint. Refuse before browser spawn instead of silently leaking host values.

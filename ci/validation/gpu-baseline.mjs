@@ -20,6 +20,31 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+
+/**
+ * Navigate, tolerating the browser finishing its OWN startup navigation first.
+ *
+ * The engine is launched with `about:blank`, but Chromium can still navigate to
+ * `chrome://new-tab-page/` shortly AFTER the first page target appears. A goto issued the moment the
+ * target exists then dies with "interrupted by another navigation to chrome://new-tab-page/".
+ * Measured: 3 of 38 persona launches (~8%) across windows/macos, and it is what makes
+ * gpu-baseline.mjs exit 3 intermittently. The interruption is the browser settling, not a failure of
+ * the navigation we asked for, so retry it rather than scoring the persona as broken.
+ */
+async function gotoSettled(page, url, opts) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await page.goto(url, opts);
+    } catch (err) {
+      lastError = err;
+      if (!/interrupted by another navigation/i.test(String(err && err.message))) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+  throw lastError;
+}
+
 import { deriveFingerprint, generateSeed } from '@lobster/fingerprint';
 import {
   buildDevShmArgs,
@@ -264,7 +289,7 @@ async function main() {
     try {
       const context = browser.contexts()[0];
       const page = context.pages()[0] ?? (await context.newPage());
-      await page.goto('about:blank');
+      await gotoSettled(page, 'about:blank');
       const host = await page.evaluate(buildHostCalibrationProbeScript());
       const deep = await measureDeepSurfaces(page);
       const webrtc = await measureWebrtc(page);

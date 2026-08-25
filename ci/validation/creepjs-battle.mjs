@@ -18,7 +18,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { spawnSync } from 'node:child_process';
 import { platform as nodePlatform } from 'node:os';
@@ -30,15 +30,11 @@ import {
   validateFingerprintCoherence,
 } from '@lobster/fingerprint';
 import {
-  buildGpuArgs,
-  buildLaunchOptions,
-  buildLobiumConfig,
-  lobiumConfigArg,
   normalizeHostCalibrationSnapshot,
   resolveGpuMode,
   resolveLobiumBinary,
-  writeLobiumConfig,
 } from '@lobster/engine-runner';
+import { launchNativePersona } from './e2e/native-lobium.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPORTS_DIR = join(here, 'reports');
@@ -308,56 +304,22 @@ async function scrapeCreepjs(page, cdp) {
 
 async function runSituation(sit) {
   const fp = sit.fingerprint;
-  const userDataDir = await mkdtemp(join(tmpdir(), 'creep-battle-'));
-  const cfg = buildLobiumConfig(fp, {
-    seed: sit.seed,
-    hardwareNoise: sit.noise.hardwareNoise,
-    mediaDevices: sit.media.mediaDevices,
-  });
-  const cfgPath = await writeLobiumConfig(userDataDir, cfg);
-  const launch = buildLaunchOptions({
+  // Preserve the battle's pre-derived fingerprint and policy axes while using the shipping native
+  // transport, including verified persona-specific font staging on Windows.
+  const engine = await launchNativePersona({
+    bin: LOBIUM,
     profileId: `creep-${sit.id}`,
-    engine: 'lobium',
-    userDataDir,
     fingerprint: fp,
+    fingerprintSeed: sit.seed,
+    fingerprintPolicy: {
+      hardwareNoise: sit.noise.hardwareNoise,
+      mediaDevices: sit.media.mediaDevices,
+    },
     headless: true,
   });
-  const args = [
-    '--headless=new',
-    '--no-sandbox',
-    '--disable-dev-shm-usage',
-    // Never force SwiftShader during an explicit real-GPU run. The strict gate checks the host probe,
-    // but the detector situations themselves must also exercise the physical driver; otherwise a
-    // real-GPU label can hide 120 software-rendered situations.
-    ...(GPU_MODE === 'gpu' ? [] : ['--enable-unsafe-swiftshader']),
-    `--user-data-dir=${userDataDir}`,
-    lobiumConfigArg(cfgPath),
-    '--remote-debugging-port=0',
-    '--no-first-run',
-    '--no-default-browser-check',
-    ...launch.args,
-  ];
-  if (GPU_MODE === 'gpu' && !args.some((a) => a.startsWith('--use-angle='))) {
-    args.push(...buildGpuArgs({ mode: 'gpu' }));
-  }
-  // Pure native, exactly as shipped: timezone/locale come from the child env; every fingerprint
-  // surface is applied by the engine from --lobium-fp-config. No CDP overlay — patchright only
-  // drives/reads CreepJS.
-  const localeUnix = `${fp.locale.locale.replaceAll('-', '_')}.UTF-8`;
-  const proc = spawn(LOBIUM, args, {
-    stdio: 'ignore',
-    env: {
-      ...process.env,
-      TZ: fp.locale.timezone,
-      LANG: localeUnix,
-      LC_ALL: localeUnix,
-      FC_LANG: fp.locale.locale,
-    },
-  });
   try {
-    const ws = await readCdpEndpoint(userDataDir);
     const { chromium } = await import('patchright');
-    const browser = await chromium.connectOverCDP(ws);
+    const browser = await chromium.connectOverCDP(engine.ws);
     try {
       const context = browser.contexts()[0];
       const page = context.pages()[0] ?? (await context.newPage());
@@ -378,7 +340,7 @@ async function runSituation(sit) {
         noise: sit.noise.id,
         media: sit.media.id,
         claimedRenderer: fp.webgl.unmaskedRenderer || fp.webgl.renderer,
-        softwareFallbackForced: args.includes('--enable-unsafe-swiftshader'),
+        softwareFallbackForced: GPU_MODE !== 'gpu',
         staticIssues: sit.staticIssues,
         creep,
         verdict: pass ? 'pass' : creep.available ? 'fail' : 'unavailable',
@@ -387,9 +349,7 @@ async function runSituation(sit) {
       await browser.close().catch(() => {});
     }
   } finally {
-    proc.kill('SIGKILL');
-    await new Promise((r) => setTimeout(r, 200));
-    await rm(userDataDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+    await engine.close();
   }
 }
 
@@ -584,6 +544,16 @@ async function captureHost() {
   }
 }
 
+export function classifyCreepjsBattle(counts) {
+  if ((counts.fail ?? 0) + (counts.error ?? 0) > 0) {
+    return { verdict: 'fail', exitCode: 1 };
+  }
+  if ((counts.unavailable ?? 0) > 0 || (counts.pass ?? 0) === 0) {
+    return { verdict: 'blocked', exitCode: 2 };
+  }
+  return { verdict: 'pass', exitCode: 0 };
+}
+
 async function main() {
   if (!LOBIUM || !existsSync(LOBIUM)) {
     process.stderr.write('Native Lobium binary not found (set LOBSTER_LOBIUM_BIN).\n');
@@ -671,6 +641,8 @@ async function main() {
     topLies: lieFreq.slice(0, 40),
     results,
   };
+  const outcome = classifyCreepjsBattle(report.counts);
+  report.verdict = outcome.verdict;
 
   await mkdir(REPORTS_DIR, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -684,6 +656,7 @@ async function main() {
     JSON.stringify(
       {
         outPath,
+        verdict: report.verdict,
         counts: report.counts,
         topLies: report.topLies.slice(0, 15),
         host: report.host,
@@ -692,10 +665,16 @@ async function main() {
       2,
     ) + '\n',
   );
-  process.exitCode = report.counts.fail + report.counts.error > 0 ? 1 : 0;
+  process.stderr.write(
+    `CREEPJS BATTLE: ${outcome.verdict.toUpperCase()} - ${report.counts.pass}/${report.counts.situations} passed, ` +
+      `${report.counts.fail} failed, ${report.counts.unavailable} unavailable, ${report.counts.error} errors\n`,
+  );
+  process.exitCode = outcome.exitCode;
 }
 
-main().catch((e) => {
-  process.stderr.write(String(e) + '\n');
-  process.exitCode = 2;
-});
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  main().catch((e) => {
+    process.stderr.write(String(e) + '\n');
+    process.exitCode = 2;
+  });
+}

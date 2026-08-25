@@ -199,10 +199,16 @@ struct LobiumFpConfig {
   WebGpuConfig webgpu;
   LocaleConfig locale;
   std::vector<std::string> fonts;
-  // Directory holding the profile's font pack, as an absolute native path. On Windows the browser
-  // process sideloads every face in it into the DirectWrite collection, so the persona can advertise
-  // fonts the HOST does not have installed — filtering alone can only ever subtract. Empty means no
-  // pack was provisioned and only the host's own fonts are available (still filtered by `fonts`).
+  // CSS-only claimed-family -> verified physical pack family substitutions. These preserve the
+  // persona's requested name at the service boundary while asking DirectWrite for a real pack face;
+  // they do not fabricate PostScript names or Local Font Access entries.
+  std::vector<std::pair<std::string, std::string>> font_aliases;
+  // Ordered physical pack families eligible for character/default fallback. Browser-only: the
+  // renderer never needs the pack's physical inventory.
+  std::vector<std::string> font_fallback_families;
+  // Directory holding the profile's verified persona-specific font stage, as an absolute native
+  // path. Windows sideloads every face in that stage into a pack-only DirectWrite collection. Empty
+  // means no pack was provisioned and only explicitly allowed host faces are available.
   //
   // Linux reaches the same end through FONTCONFIG_FILE, written per profile by the launcher, so this
   // field is consumed only by the Windows DWrite path.
@@ -232,7 +238,8 @@ struct LobiumFpConfig {
 // historically listed thousands, while every font hook - DirectWrite family lookup, Local Font
 // Access, the pack sideload - runs browser-side. Same for `fontPackDir`. Dropping them keeps the
 // renderer payload small enough that the guard never trips, so the font list can be complete on the
-// side that actually consumes it.
+// side that actually consumes it. `fontAliases` and `fontFallbackFamilies` are browser-only for the
+// same reason.
 //
 // Returns `config_json` unchanged if it cannot be parsed: an unparseable config is already handled
 // (and logged) downstream, and silently substituting an empty document here would turn a loud

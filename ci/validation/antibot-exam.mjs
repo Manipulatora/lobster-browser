@@ -33,24 +33,15 @@
  *   LOBSTER_EXAM_URLS    comma-separated extra (commercial-WAF) URLs to classify.
  *   LOBSTER_EXAM_NO_SANDBOX=0  keep the Chromium sandbox (default: pass --no-sandbox for CI/containers).
  */
-import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { applyGeoToFingerprint, deriveFingerprint } from '@lobster/fingerprint';
-import {
-  buildGpuArgs,
-  buildLaunchOptions,
-  buildLobiumConfig,
-  isSoftwareRenderer,
-  lobiumConfigArg,
-  resolveGpuMode,
-  resolveLobiumBinary,
-} from '@lobster/engine-runner';
+import { isSoftwareRenderer, resolveGpuMode, resolveLobiumBinary } from '@lobster/engine-runner';
 import { chromium } from 'patchright';
+import { launchNativePersona } from './e2e/native-lobium.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPORTS_DIR = join(here, 'reports');
@@ -204,18 +195,6 @@ const PROBES = [
   },
 ];
 
-async function readCdpEndpoint(userDataDir, retries = 200) {
-  const file = join(userDataDir, 'DevToolsActivePort');
-  for (let i = 0; i < retries; i++) {
-    if (existsSync(file)) {
-      const [port, path] = (await readFile(file, 'utf8')).trim().split('\n');
-      if (port && path) return `ws://127.0.0.1:${port}${path}`;
-    }
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error('timed out waiting for DevToolsActivePort');
-}
-
 async function runProbe(context, probe) {
   const page = await context.newPage();
   const started = Date.now();
@@ -279,7 +258,8 @@ async function runWafUrl(context, url) {
 async function main() {
   if (!LOBIUM || !existsSync(LOBIUM)) {
     console.error(`ANTIBOT EXAM: Lobium binary not found (LOBSTER_LOBIUM_BIN=${LOBIUM}).`);
-    process.exit(1);
+    process.exitCode = 2;
+    return;
   }
 
   let fp = deriveFingerprint(SEED, { os: OS, engine: 'lobium' });
@@ -289,42 +269,22 @@ async function main() {
     fp = applyGeoToFingerprint(fp, suppliedGeo);
   }
 
-  const userDataDir = await mkdtemp(join(tmpdir(), 'antibot-exam-'));
-  const cfg = buildLobiumConfig(fp, {});
-  const cfgPath = join(userDataDir, 'lobium-fp.json');
-  await writeFile(cfgPath, `${JSON.stringify(cfg)}\n`);
-
-  // Use the PRODUCT's launch options so the exam is a faithful integration test — same
-  // --disable-blink-features=AutomationControlled (no navigator.webdriver tell), --lang, --window-size,
-  // and WebRTC IP-handling policy the real launcher applies. Then add the direct-native binary bits.
-  const launch = buildLaunchOptions({
+  // Use the shipping launcher, not merely its static flag builder. On Windows this also verifies and
+  // stages the persona-specific DirectWrite pack before the native config is written.
+  const engine = await launchNativePersona({
+    bin: LOBIUM,
     profileId: 'antibot-exam',
-    engine: 'lobium',
-    userDataDir,
     fingerprint: fp,
+    fingerprintSeed: SEED,
     headless: HEADLESS,
+    noSandbox: process.env.LOBSTER_EXAM_NO_SANDBOX !== '0',
   });
-  const args = [
-    ...(HEADLESS ? ['--headless=new'] : []),
-    '--disable-dev-shm-usage',
-    ...(process.env.LOBSTER_EXAM_NO_SANDBOX === '0' ? [] : ['--no-sandbox']),
-    ...(GPU_MODE === 'gpu' ? [] : ['--enable-unsafe-swiftshader']),
-    `--user-data-dir=${userDataDir}`,
-    lobiumConfigArg(cfgPath),
-    '--remote-debugging-port=0',
-    ...launch.args,
-  ];
-  if (GPU_MODE === 'gpu' && !args.some((a) => a.startsWith('--use-angle='))) {
-    args.push(...buildGpuArgs({ mode: 'gpu' }));
-  }
 
   console.error(`Anti-bot exam: binary=${LOBIUM} gpuMode=${GPU_MODE} os=${OS} seed=${SEED}`);
-  const proc = spawn(LOBIUM, args, { stdio: 'ignore' });
   const results = [];
   let observedRenderer = null;
   try {
-    const ws = await readCdpEndpoint(userDataDir);
-    const browser = await chromium.connectOverCDP(ws);
+    const browser = await chromium.connectOverCDP(engine.ws);
     try {
       const context = browser.contexts()[0] || (await browser.newContext());
       // Do not overlay the native config with CDP emulation. Doing so can hide a broken native hook and
@@ -359,9 +319,7 @@ async function main() {
       await browser.close().catch(() => {});
     }
   } finally {
-    proc.kill('SIGKILL');
-    await new Promise((r) => setTimeout(r, 300));
-    await rm(userDataDir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
+    await engine.close();
   }
 
   const softwareRenderer = isSoftwareRenderer(observedRenderer);

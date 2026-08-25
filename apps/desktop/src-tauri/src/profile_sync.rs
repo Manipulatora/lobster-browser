@@ -306,6 +306,9 @@ pub async fn pull(
 
 // --- The server's own profile row ----------------------------------------------------------------
 
+/// Existing local identities use the import DTO; ordinary POST /profiles is canonical-new only.
+const PROFILE_IDENTITY_IMPORT_PATH: &str = "/profiles/import";
+
 /// One profile as the server lists it. Only the fields this machine can act on.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -361,19 +364,37 @@ fn remote_row_body(row: &PortableRow, include_seed: bool) -> serde_json::Value {
     body
 }
 
+/// POST /profiles is intentionally reserved for NEW identities and accepts only a canonical
+/// 128-bit seed. A local row being attached to sync is a transfer of an EXISTING identity, however,
+/// and older Lobster releases issued valid lowercase-hex seeds from 8 through 256 characters. Route
+/// that operation through the backend's identity-preserving import contract so a legacy profile is
+/// not trapped locally or silently re-seeded.
+fn remote_row_import_body(row: &PortableRow) -> serde_json::Value {
+    serde_json::json!({
+        "version": 1,
+        "profiles": [remote_row_body(row, /* include_seed = */ true)],
+    })
+}
+
 /// Create the account's row for a profile that has never been synced, returning the server's id.
 ///
 /// This is the step that has to happen before anything else: the blob is keyed by the server id, so
 /// a push against a profile the server has never heard of is a 404 with nothing to explain it.
 pub async fn create_remote_row(row: &PortableRow) -> Result<RemoteProfile> {
-    let created: RemoteProfile = api_call(
+    let mut created: Vec<RemoteProfile> = api_call(
         reqwest::Method::POST,
-        "/profiles",
-        Some(remote_row_body(row, /* include_seed = */ true)),
+        PROFILE_IDENTITY_IMPORT_PATH,
+        Some(remote_row_import_body(row)),
     )
     .await
     .context("creating this profile on the account")?;
-    Ok(created)
+    if created.len() != 1 {
+        bail!(
+            "the account import returned {} profiles for one local profile",
+            created.len()
+        );
+    }
+    Ok(created.remove(0))
 }
 
 /// Update the account's row after a local edit. The seed is never sent: it is immutable, and the
@@ -1334,5 +1355,39 @@ mod tests {
         assert!(remote_row_body(&row, false)
             .get("fingerprintSeed")
             .is_none());
+    }
+
+    /// Sync is identity transfer, not creation of a fresh browser identity. In particular, a seed
+    /// minted by an older release must use the backend's legacy-compatible import DTO while the
+    /// ordinary POST /profiles contract remains free to require a new canonical 128-bit seed.
+    #[test]
+    fn a_legacy_seed_uses_the_identity_preserving_import_contract() {
+        assert_eq!(PROFILE_IDENTITY_IMPORT_PATH, "/profiles/import");
+        let mut row = row_fixture();
+        row.fingerprint_seed = "deadbeef".into();
+
+        let body = remote_row_import_body(&row);
+        assert_eq!(
+            body.get("version").and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        let profiles = body
+            .get("profiles")
+            .and_then(serde_json::Value::as_array)
+            .expect("the import envelope carries a profiles array");
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(
+            profiles[0]
+                .get("fingerprintSeed")
+                .and_then(serde_json::Value::as_str),
+            Some("deadbeef"),
+            "sync must preserve the legacy identity byte-for-byte"
+        );
+        assert!(
+            profiles[0].get("proxy").is_none()
+                && profiles[0].get("notes").is_none()
+                && profiles[0].get("cookiesImport").is_none(),
+            "the import envelope must remain a secret-free server row"
+        );
     }
 }

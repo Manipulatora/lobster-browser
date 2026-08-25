@@ -35,16 +35,13 @@
  */
 
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { deriveFingerprint, generateSeed } from '@lobster/fingerprint';
 import {
   buildLobiumConfig,
-  writeLobiumConfig,
-  lobiumConfigArg,
   probeLobiumBuildCapabilities,
   requiredLobiumCapabilities,
   resolveLobiumBinary,
@@ -54,7 +51,7 @@ import {
   resolveGpuMode,
 } from '@lobster/engine-runner';
 
-import { launchEngine } from './e2e/engine.mjs';
+import { launchNativePersona } from './e2e/native-lobium.mjs';
 import {
   ASPECTS,
   aspectOf,
@@ -1820,17 +1817,15 @@ async function measurePersona({
     stunUrl,
   };
 
-  // The config must exist before the browser starts — the browser process reads it once during
-  // startup — so write it to its own directory rather than the profile's, and launch once.
-  const configDir = await mkdtemp(join(tmpdir(), 'lobium-oracles-cfg-'));
-  const configPath = await writeLobiumConfig(configDir, config);
-
+  // Preserve the audit's exact pre-derived persona, but use the shipping transport around it. On
+  // Windows that verifies and stages the persona-specific DirectWrite pack before browser startup.
   const rows = [];
-  const engine = await launchEngine({
+  const engine = await launchNativePersona({
     bin,
+    profileId: `oracle-${personaOs}`,
+    fingerprint: persona,
+    fingerprintSeed: seed,
     headless: !headful,
-    extraArgs: [lobiumConfigArg(configPath), ...buildGpuArgs()],
-    env: { TZ: persona.locale.timezone },
   });
   try {
     await withCdpSession(engine.ws, async (session) => {
@@ -1896,7 +1891,6 @@ async function measurePersona({
     });
   } finally {
     await engine.close().catch(() => {});
-    await rm(configDir, { recursive: true, force: true }).catch(() => {});
   }
   return { rows, config };
 }

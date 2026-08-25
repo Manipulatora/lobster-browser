@@ -188,6 +188,43 @@ export function verifyCrx3(buffer: Buffer, expectedId: string): VerifiedCrx3 {
   return { id: expectedId, zip };
 }
 
+/**
+ * Flatten an error and its `cause` chain into one line.
+ *
+ * undici reports every transport failure as the same opaque `TypeError: fetch failed` and carries the
+ * actual reason — `ECONNREFUSED`, a SOCKS5 authentication rejection, a TLS failure, DNS — on
+ * `error.cause`. Reporting only `.message` turned "your proxy refused these credentials" into
+ * "fetch failed", which is indistinguishable from "the store is down" and leaves the user nothing to
+ * act on. Walk the chain so the surfaced message names the thing that actually went wrong.
+ */
+function describeErrorChain(error: unknown): string {
+  const seen = new Set<unknown>();
+  const parts: string[] = [];
+  let current: unknown = error;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    if (current instanceof Error) {
+      const code = (current as NodeJS.ErrnoException).code;
+      parts.push(code && !current.message.includes(code) ? `${current.message} (${code})` : current.message);
+      current = (current as { cause?: unknown }).cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+  return parts.join(': ');
+}
+
+/** Proxy URL with its credentials removed: these strings reach logs and the UI. */
+function redactProxyUrl(raw: string): string {
+  try {
+    const url = new URL(raw);
+    return `${url.protocol}//${url.hostname}:${url.port}`;
+  } catch {
+    return '<unparseable proxy url>';
+  }
+}
+
 function officialDownloadUrl(id: string): string {
   const x = encodeURIComponent(`id=${id}&installsource=ondemand&uc`);
   return `https://clients2.google.com/service/update2/crx?response=redirect&prodversion=152.0.0.0&acceptformat=crx3&x=${x}`;
@@ -284,7 +321,15 @@ export async function downloadChromeWebStoreCrx(
       if (controller.signal.aborted) {
         throw new Error(`Chrome Web Store download timed out after ${timeoutMs} ms`);
       }
-      throw error;
+      // Name the route. A profile with a proxy downloads THROUGH it by design (see above), so a
+      // failure here is usually the proxy, not the store — and "fetch failed" alone never says so.
+      const via = options.proxyUrl
+        ? `through this profile's proxy (${redactProxyUrl(options.proxyUrl)})`
+        : 'directly';
+      throw new Error(
+        `Chrome Web Store download ${via} failed: ${describeErrorChain(error)}`,
+        { cause: error },
+      );
     } finally {
       clearTimeout(timer);
     }
@@ -648,11 +693,9 @@ export async function prepareProfileExtensions(
     } catch (error) {
       const label =
         extension.name || extension.id || extension.url || extension.path || `#${index + 1}`;
-      throw new Error(
-        `extension ${label} could not be installed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      throw new Error(`extension ${label} could not be installed: ${describeErrorChain(error)}`, {
+        cause: error,
+      });
     }
   }
   await recordInstalled(root, installed);

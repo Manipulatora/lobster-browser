@@ -37,10 +37,12 @@ function importBody(seed: string): ImportProfilesDto {
 test('create rejects every non-canonical fingerprint seed', async () => {
   const invalid = [
     '',
+    'deadbeef',
     'g123456789abcdef0123456789abcdef',
     '0123456789ABCDEF0123456789ABCDEF',
     '0123456789abcdef0123456789abcde',
     '0123456789abcdef0123456789abcdef0',
+    'a'.repeat(256),
     'a'.repeat(1024 * 1024),
   ];
 
@@ -80,11 +82,22 @@ test('create may generate an omitted seed, while an exact seed survives create/i
     'import identity must be preserved',
   );
 
-  const legacy = importBody('deadbeef');
-  assert.deepEqual(await validate(legacy), []);
-  assert.equal(
-    legacy.profiles[0]?.fingerprintSeed,
-    'deadbeef',
-    'legacy import identity must be preserved without reseeding',
-  );
+  for (const legacySeed of ['deadbeef', 'a'.repeat(256)]) {
+    const legacy = importBody(legacySeed);
+    assert.deepEqual(
+      await validate(legacy),
+      [],
+      `identity-preserving import rejected a valid legacy seed of length ${legacySeed.length}`,
+    );
+    assert.equal(
+      legacy.profiles[0]?.fingerprintSeed,
+      legacySeed,
+      'legacy import identity must be preserved without reseeding',
+    );
+    assert.notEqual(
+      (await validate(createBody(legacySeed))).length,
+      0,
+      'ordinary profile creation must retain the canonical 128-bit seed requirement',
+    );
+  }
 });

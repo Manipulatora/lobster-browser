@@ -243,3 +243,79 @@ test('the Windows product build cannot reuse a source-stale sidecar', () => {
   assert.match(sidecarBundler, /spawnSync\(process\.execPath, \[join\(outDir, 'index\.js'\)\]/);
   assert.match(sidecarBundler, /pong\.ok !== true \|\| pong\.result\?\.pong !== true/);
 });
+
+test('the Windows product build verifies its exact host and vendored runtimes', () => {
+  const productBuild = read('scripts/build-windows-product.ps1');
+  const nodeStep =
+    /Step "\[2\/4\] Vendor the Windows Node runtime[\s\S]*?Step '\[3\/4\] Build/.exec(
+      productBuild,
+    )?.[0] ?? '';
+
+  assert.match(productBuild, /Assert-SupportedNodeVersion \$hostNodeVersion 'host Node'/);
+  assert.match(productBuild, /\$major -lt 22/);
+  assert.match(productBuild, /\$major -ge 25/);
+  assert.match(productBuild, /\$major -eq 22 -and \$minor -lt 12/);
+  assert.match(productBuild, /\$hostTriple -ne 'x86_64-pc-windows-msvc'/);
+
+  assert.ok(nodeStep, 'could not isolate the vendored Node staging step');
+  assert.match(nodeStep, /Assert-SupportedNodeVersion \$requestedNodeVersion 'vendored Node'/);
+  assert.match(nodeStep, /https:\/\/nodejs\.org\/dist\/\$requestedNodeVersion\/SHASUMS256\.txt/);
+  assert.match(nodeStep, /Get-FileHash -LiteralPath \$zip -Algorithm SHA256/);
+  assert.match(nodeStep, /if \(\$actual -ne \$expected\)/);
+  assert.doesNotMatch(nodeStep, /signed SHASUMS256/);
+  assert.doesNotMatch(nodeStep, /resources\\node already staged/);
+
+  const checksumVerified = nodeStep.indexOf('if ($actual -ne $expected)');
+  const stagedRuntimeRemoved = nodeStep.indexOf('Remove-Item -LiteralPath $nodeDst');
+  const archiveOpened = nodeStep.indexOf('[IO.Compression.ZipFile]::OpenRead($zip)');
+  assert.ok(
+    checksumVerified >= 0 &&
+      checksumVerified < stagedRuntimeRemoved &&
+      stagedRuntimeRemoved < archiveOpened,
+    'the cached archive must be authenticated before it can replace the staged runtime',
+  );
+  assert.match(nodeStep, /\$stagedNodeVersion -ne \$requestedNodeVersion/);
+});
+
+test('the Windows product build locks Cargo and accepts only exact fresh artifacts', () => {
+  const productBuild = read('scripts/build-windows-product.ps1');
+  const buildStep = productBuild.slice(productBuild.indexOf("Step '[4/4] Build"));
+
+  assert.match(buildStep, /npm run tauri -- build --bundles nsis -- --locked/);
+  assert.match(buildStep, /Join-Path \$releaseDir 'lobster-desktop\.exe'/);
+  assert.match(
+    buildStep,
+    /'bundle\\nsis\\\{0\}_\{1\}_x64-setup\.exe' -f \$tauriConfig\.productName, \$tauriConfig\.version/,
+  );
+  assert.match(buildStep, /Join-Path \$releaseDir 'nsis\\x64\\installer\.nsi'/);
+  assert.doesNotMatch(buildStep, /Get-ChildItem[\s\S]*?bundle\\nsis/);
+
+  const removeOld = buildStep.indexOf('foreach ($oldArtifact');
+  const start = buildStep.indexOf('$buildStartedUtc = [DateTime]::UtcNow');
+  const invoke = buildStep.indexOf('npm run tauri -- build --bundles nsis -- --locked');
+  const validate = buildStep.indexOf("Assert-FreshArtifact 'desktop executable'");
+  assert.ok(
+    removeOld >= 0 && removeOld < start && start < invoke && invoke < validate,
+    'exact stale outputs must be removed, then the build timed, then all outputs validated',
+  );
+
+  assert.match(productBuild, /if \(\$artifact\.Length -le 0\)/);
+  assert.match(productBuild, /\$artifact\.LastWriteTimeUtc -lt \$BuildStartedUtc/);
+  for (const label of ['desktop executable', 'NSIS installer', 'generated installer.nsi']) {
+    assert.match(buildStep, new RegExp(`Assert-FreshArtifact '${label.replace('.', '\\.')}' `));
+  }
+});
+
+test('the engine gate keeps every offline Windows integration contract in CI', () => {
+  const packageJson = JSON.parse(read('package.json'));
+  const gate = packageJson.scripts?.['gate:engine'];
+  assert.equal(typeof gate, 'string', 'package.json must define gate:engine');
+  for (const contract of [
+    'ci/validation/windows-packager-contract.test.mjs',
+    'ci/validation/windows-font-isolation-contract.test.mjs',
+    'ci/validation/product-e2e-platform.test.mjs',
+    'ci/validation/font-provisioner-contract.test.mjs',
+  ]) {
+    assert.match(gate, new RegExp(`(?:^|\\s)${contract.replaceAll('.', '\\.')}(?=\\s|$)`));
+  }
+});

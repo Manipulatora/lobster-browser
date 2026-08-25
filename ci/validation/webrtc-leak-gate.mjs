@@ -28,6 +28,7 @@
  */
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { deriveFingerprint } from '../../packages/fingerprint/dist/index.js';
@@ -46,6 +47,33 @@ if (!bin) {
   process.exit(2);
 }
 
+async function startFailingTurnTlsEndpoint() {
+  // Accept and immediately close a TURN-over-TLS connection. This produces a
+  // prompt relay failure without third-party timing. TLS is intentional:
+  // disable_non_proxied_udp still permits page-supplied TURN TCP/TLS, and
+  // WebRTC's private-server special case clears local endpoints only for raw
+  // TCP, not TLS. The control therefore proves the exact pre-fix leak path.
+  const server = createServer((socket) => socket.destroy());
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  server.unref();
+  const { port } = server.address();
+  return {
+    url: `turns:127.0.0.1:${port}?transport=tcp`,
+    close: () =>
+      new Promise((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      ),
+  };
+}
+
+const failingTurn = await startFailingTurnTlsEndpoint();
+
 const GATE_SEED = '0123456789abcdef0123456789abcdef';
 const gateFingerprint = deriveFingerprint(GATE_SEED, { os: 'windows', engine: 'lobium' });
 const REQUESTED_ICE_SERVERS = [
@@ -54,6 +82,11 @@ const REQUESTED_ICE_SERVERS = [
     urls: 'turn:openrelay.metered.ca:80',
     username: 'openrelayproject',
     credential: 'openrelayproject',
+  },
+  {
+    urls: failingTurn.url,
+    username: 'lobium-probe',
+    credential: 'lobium-probe',
   },
 ];
 
@@ -114,8 +147,25 @@ const GATHER = `(async () => {
 
   pc.createDataChannel('probe');
   const eventCandidates = [];
+  const candidateErrors = [];
+  const targetErrorUrl = ${JSON.stringify(failingTurn.url)};
+  let resolveTargetError;
+  const targetErrorSeen = new Promise((resolve) => {
+    resolveTargetError = resolve;
+  });
   pc.onicecandidate = (event) => {
     if (event.candidate) eventCandidates.push(event.candidate.candidate);
+  };
+  pc.onicecandidateerror = (event) => {
+    candidateErrors.push({
+      address: event.address,
+      port: event.port,
+      hostCandidate: event.hostCandidate,
+      url: event.url,
+      errorCode: event.errorCode,
+      errorText: event.errorText,
+    });
+    if (event.url === targetErrorUrl) resolveTargetError();
   };
   const gatheringComplete = new Promise((resolve) => {
     const onState = () => {
@@ -129,6 +179,15 @@ const GATHER = `(async () => {
   });
   await pc.setLocalDescription(await pc.createOffer());
   await Promise.race([gatheringComplete, new Promise((resolve) => setTimeout(resolve, 10_000))]);
+  // icegatheringstatechange and icecandidateerror arrive through separate task
+  // chains. If policy retained the synthetic TURN URL, give its error callback
+  // a bounded opportunity to drain before sampling the result.
+  const retainsTargetServer = applied.iceServers.some((server) =>
+    (Array.isArray(server.urls) ? server.urls : [server.urls]).includes(targetErrorUrl),
+  );
+  if (retainsTargetServer) {
+    await Promise.race([targetErrorSeen, new Promise((resolve) => setTimeout(resolve, 1_000))]);
+  }
 
   const sdp = pc.localDescription ? pc.localDescription.sdp : '';
   const sdpCandidates = sdp.match(/^a=candidate:.*$/gm) || [];
@@ -136,6 +195,7 @@ const GATHER = `(async () => {
   out.eventTypes = candidateTypes(eventCandidates);
   out.sdpTotal = sdpCandidates.length;
   out.sdpTypes = candidateTypes(sdpCandidates);
+  out.candidateErrors = candidateErrors;
 
   // bundlePolicy is immutable after construction, so this reaches native SetConfiguration and is
   // rejected with INVALID_MODIFICATION. The attempted ICE values must not replace the successful echo.
@@ -249,7 +309,7 @@ async function gather(
   }
 }
 
-let control, browserPolicy, disabled, proxyOnly;
+let control, browserPolicy, disabled, proxyOnly, nativeDisableUdp;
 try {
   // The control proves the probe can SEE a leak on this host. Without it, a network that simply
   // cannot reach STUN would make every guarded run look like a pass.
@@ -257,16 +317,22 @@ try {
   browserPolicy = await gather('browser', { launchPolicy: 'disable_non_proxied_udp' });
   disabled = await gather('disabled', { nativePolicy: 'disabled' });
   proxyOnly = await gather('proxy_only', { nativePolicy: 'proxy_only' });
+  nativeDisableUdp = await gather('disable_udp', {
+    nativePolicy: 'disable_non_proxied_udp',
+  });
 } catch (err) {
+  await failingTurn.close();
   console.error(`BLOCKED: ${err.message}`);
   process.exit(2);
 }
+await failingTurn.close();
 
 const show = (name, r) =>
   console.log(
     `  ${name.padEnd(24)} constructs=${r.constructs} reconfigured=${r.reconfigured} ` +
       `event=${r.eventTotal ?? '-'} ${JSON.stringify(r.eventTypes ?? {})} ` +
       `sdp=${r.sdpTotal ?? '-'} ${JSON.stringify(r.sdpTypes ?? {})} ` +
+      `errors=${r.candidateErrors?.length ?? '-'} ` +
       `echo=${r.echoedPolicy ?? '-'}/${r.echoedServers?.length ?? '-'} ` +
       `rejectedSet=${r.rejectedSetName ?? r.rejectedSet}`,
   );
@@ -274,13 +340,30 @@ show('control (no policy)', control);
 show('--webrtc-ip-handling', browserPolicy);
 show('native disabled', disabled);
 show('native proxy_only', proxyOnly);
+show('native disable_udp', nativeDisableUdp);
 
 const stunOracleReady = (control.eventTypes?.srflx ?? 0) > 0 && (control.sdpTypes?.srflx ?? 0) > 0;
 const turnOracleReady = (control.eventTypes?.relay ?? 0) > 0 && (control.sdpTypes?.relay ?? 0) > 0;
+const syntheticError = (result) =>
+  (result.candidateErrors ?? []).find((event) => event.url === failingTurn.url);
 if (!stunOracleReady) {
   console.error(
     'BLOCKED: the control did not expose a STUN/srflx candidate through both the event and SDP, ' +
       'so this host cannot demonstrate the public-IP leak',
+  );
+  process.exit(2);
+}
+const rawSyntheticError = syntheticError(control);
+if (
+  !rawSyntheticError ||
+  !rawSyntheticError.address ||
+  !Number.isInteger(rawSyntheticError.port) ||
+  rawSyntheticError.port <= 0 ||
+  !rawSyntheticError.hostCandidate
+) {
+  console.error(
+    'BLOCKED: the local TURN responder did not produce a control icecandidateerror with a raw ' +
+      'address, port, and hostCandidate, so endpoint redaction cannot be demonstrated',
   );
   process.exit(2);
 }
@@ -342,9 +425,37 @@ const check = (name, r, candidateMode) => {
   checkCandidateChannel(name, 'icecandidate event', r.eventTotal ?? 0, r.eventTypes, candidateMode);
   checkCandidateChannel(name, 'localDescription.sdp', r.sdpTotal ?? 0, r.sdpTypes, candidateMode);
 };
+const checkCandidateErrorPrivacy = (name, result) => {
+  const event = syntheticError(result);
+  if (!event) {
+    failures.push(`${name}: synthetic TURN failure did not reach icecandidateerror`);
+    return;
+  }
+  if (event.address !== null || event.port !== null || event.hostCandidate !== '') {
+    failures.push(
+      `${name}: icecandidateerror exposed endpoint ${JSON.stringify({
+        address: event.address,
+        port: event.port,
+        hostCandidate: event.hostCandidate,
+      })}`,
+    );
+  }
+  for (const field of ['url', 'errorCode', 'errorText']) {
+    if (event[field] !== rawSyntheticError[field]) {
+      failures.push(`${name}: redaction changed legitimate icecandidateerror.${field}`);
+    }
+  }
+};
 check('--webrtc-ip-handling', browserPolicy, 'relay_only');
 check('native disabled', disabled, 'none');
 check('native proxy_only', proxyOnly, 'relay_only');
+checkCandidateErrorPrivacy('native proxy_only', proxyOnly);
+checkCandidateErrorPrivacy('native disable_non_proxied_udp', nativeDisableUdp);
+if ((disabled.candidateErrors?.length ?? 0) !== 0) {
+  failures.push(
+    `native disabled: exposed ${disabled.candidateErrors.length} icecandidateerror event(s)`,
+  );
+}
 
 if (failures.length) {
   console.error('WEBRTC LEAK GATE: FAIL');
@@ -360,5 +471,6 @@ if (!turnOracleReady) {
 }
 console.log(
   'WEBRTC LEAK GATE: PASS - reconfiguration stays policy-constrained in events and SDP, ' +
-    'successful values echo exactly, and rejected updates preserve prior echo state',
+    'candidate errors hide local endpoints without losing relay failure details, successful values ' +
+    'echo exactly, and rejected updates preserve prior echo state',
 );

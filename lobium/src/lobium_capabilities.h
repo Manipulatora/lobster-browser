@@ -28,7 +28,7 @@ namespace lobium {
 // implementing weaker semantics; otherwise a stale runtime can pass the launch gate. A bump requires
 // the matching change to LOBIUM_CAPABILITY_CONTRACT_VERSION in the sidecar, which rejects every
 // other version.
-inline constexpr int kCapabilityContractVersion = 2;
+inline constexpr int kCapabilityContractVersion = 3;
 
 // The JSON document printed for --lobium-fingerprint-capabilities, on one line, stdout only.
 std::string CapabilityManifestJson();
