@@ -184,8 +184,20 @@ test('unknown engine (no launcher registered) throws', async () => {
 });
 
 test('default launchers report engine-not-provisioned (no binaries here)', async () => {
-  const runner = new CompositeRunner(defaultLaunchers);
-  await assert.rejects(() => runner.launch(params('np', 'lobium')), /not provisioned/);
+  // Auto-discovery walks ~/lobium-build, ~/browser and cwd looking for a built chrome, so on the
+  // machine this project is actually developed on it FINDS one and the launcher rejects with an
+  // incompatible-capability-contract error instead of "not provisioned". The test then passes or
+  // fails depending on whether the person running it happens to have a Chromium checkout - it was
+  // green on the Windows host for exactly that reason. Pin the condition the test is named after.
+  const prior = process.env.LOBSTER_LOBIUM_AUTO_DISCOVER;
+  process.env.LOBSTER_LOBIUM_AUTO_DISCOVER = '0';
+  try {
+    const runner = new CompositeRunner(defaultLaunchers);
+    await assert.rejects(() => runner.launch(params('np', 'lobium')), /not provisioned/);
+  } finally {
+    if (prior === undefined) delete process.env.LOBSTER_LOBIUM_AUTO_DISCOVER;
+    else process.env.LOBSTER_LOBIUM_AUTO_DISCOVER = prior;
+  }
 });
 
 test('a second start of the same profile is refused while the first is still launching', async () => {

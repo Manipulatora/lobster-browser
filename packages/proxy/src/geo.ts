@@ -1,9 +1,7 @@
 import { performance } from 'node:perf_hooks';
-import { request as httpRequest } from 'node:http';
-import { request as httpsRequest } from 'node:https';
 import type { GeoInfo, ProxyConfig, ProxyTestResult } from '@lobster/shared-types';
 import { ProxyAgent, request } from 'undici';
-import { SocksProxyAgent } from 'socks-proxy-agent';
+import { proxyDispatcher } from './dispatcher.js';
 import { formatProxyUrl } from './parse.js';
 
 /**
@@ -95,50 +93,40 @@ export function parseGeoResponse(raw: unknown): GeoInfo {
   return geo;
 }
 
-/** Fetch JSON through a SOCKS5 proxy (remote DNS via socks5h) using socks-proxy-agent. */
+/**
+ * Fetch JSON through a SOCKS5 proxy, remote-DNS (socks5h).
+ *
+ * This used to build a `SocksProxyAgent` and hand it to node's http/https `request`. That import was
+ * removed from packages/proxy when the dispatcher was rewritten to tunnel through `socks` directly,
+ * but this call site was missed - so on a clean install the package stopped compiling
+ * (`Cannot find module 'socks-proxy-agent'`), taking @lobster/proxy and @lobster/engine-runner's
+ * suites and one gate:engine check down with it. It only passed locally because a stale
+ * node_modules still carried the removed package.
+ *
+ * Routing through {@link proxyDispatcher} also means the geo lookup and every other proxied fetch
+ * now share ONE tunnelling implementation, so the socks5h guarantee - the destination NAME goes to
+ * the proxy, never a local DNS lookup - is stated in exactly one place.
+ */
 async function fetchJsonViaSocks(
   endpoint: string,
   proxy: ProxyConfig,
   timeoutMs: number,
 ): Promise<unknown> {
-  // socks5h = resolve DNS on the proxy side (PROX-4 / PROX-7).
-  const uri = formatProxyUrl(proxy).replace(/^socks5:\/\//i, 'socks5h://');
-  const agent = new SocksProxyAgent(uri);
-  const url = new URL(endpoint);
-  const transport = url.protocol === 'https:' ? httpsRequest : httpRequest;
-
-  return new Promise((resolve, reject) => {
-    const req = transport(
-      endpoint,
-      {
-        method: 'GET',
-        agent,
-        timeout: timeoutMs,
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => {
-          const status = res.statusCode ?? 0;
-          if (status < 200 || status >= 300) {
-            reject(new Error(`deriveGeoFromExitIp: geo endpoint returned HTTP ${status}`));
-            return;
-          }
-          try {
-            resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-          } catch (err) {
-            reject(err);
-          }
-        });
-      },
-    );
-    req.on('error', reject);
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error(`deriveGeoFromExitIp: SOCKS geo lookup timed out after ${timeoutMs}ms`));
+  const dispatcher = proxyDispatcher(proxy);
+  try {
+    const res = await request(endpoint, {
+      method: 'GET',
+      dispatcher,
+      headersTimeout: timeoutMs,
+      bodyTimeout: timeoutMs,
     });
-    req.end();
-  });
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw new Error(`deriveGeoFromExitIp: geo endpoint returned HTTP ${res.statusCode}`);
+    }
+    return (await res.body.json()) as unknown;
+  } finally {
+    await dispatcher.close().catch(() => {});
+  }
 }
 
 /**
