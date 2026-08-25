@@ -1,0 +1,136 @@
+Lobium — a browser-process API to rescale a live device-metrics emulation session.
+
+The Android device frame (branding/device-frame.patch) lays the real WebContents inside a centered
+phone/tablet stage. It learns the exact scale that fits the aperture only from its own live views
+layout — after startup, and again on every resize and whole-device zoom — which is far too late for
+the renderer's emulation session, whose metrics were fixed when Emulation.setDeviceMetricsOverride
+first ran. Nothing in content/ could adjust just the scale afterwards.
+
+Re-sending the whole DeviceEmulationParams block from the browser process is not a substitute: it
+races the DevTools session's own values, and SetDeviceEmulationParams clears the page cache whenever
+any field differs, so a drag-resize would flush the cache once per layout frame.
+
+So this adds the one narrow operation that was missing:
+
+  EmulationHandler::SetDeviceEmulationScale(float)   — mutate DeviceEmulationParams::scale alone,
+                                                       leaving screen size and device scale factor
+                                                       untouched. False when no outermost main frame
+                                                       is attached yet, which is the caller's signal
+                                                       to retry on the next layout pass.
+  content::SetLobiumDeviceEmulationScale(WebContents*, float)
+                                                     — the //content public entry point the views
+                                                       layer calls, fanning out to every emulation
+                                                       handler attached to that WebContents.
+
+Split out of device-frame.patch on purpose. That patch is chrome/browser/ui/views only; this one is
+the //content API it consumes, and the two rebase against completely different upstream code. Build
+wiring for both new files lives in core/build-gn.patch, which owns the GN graph.
+
+diff --git a/content/browser/devtools/lobium_device_emulation.cc b/content/browser/devtools/lobium_device_emulation.cc
+new file mode 100644
+--- /dev/null
++++ b/content/browser/devtools/lobium_device_emulation.cc
+@@ -0,0 +1,32 @@
++// Copyright 2026 The Lobster Browser Authors.
++
++#include "content/public/browser/lobium_device_emulation.h"
++
++#include "content/browser/devtools/devtools_agent_host_impl.h"
++#include "content/browser/devtools/protocol/emulation_handler.h"
++#include "content/public/browser/devtools_agent_host.h"
++
++namespace content {
++
++bool SetLobiumDeviceEmulationScale(WebContents* web_contents, float scale) {
++  if (!web_contents || scale <= 0.0f) {
++    return false;
++  }
++
++  scoped_refptr<DevToolsAgentHost> agent_host =
++      DevToolsAgentHost::GetOrCreateFor(web_contents);
++  if (!agent_host) {
++    return false;
++  }
++
++  bool updated = false;
++  auto* agent_host_impl =
++      static_cast<DevToolsAgentHostImpl*>(agent_host.get());
++  for (protocol::EmulationHandler* handler :
++       protocol::EmulationHandler::ForAgentHost(agent_host_impl)) {
++    updated = handler->SetDeviceEmulationScale(scale) || updated;
++  }
++  return updated;
++}
++
++}  // namespace content
+diff --git a/content/browser/devtools/protocol/emulation_handler.cc b/content/browser/devtools/protocol/emulation_handler.cc
+--- a/content/browser/devtools/protocol/emulation_handler.cc
++++ b/content/browser/devtools/protocol/emulation_handler.cc
+@@ -1052,6 +1052,21 @@ blink::DeviceEmulationParams EmulationHandler::GetDeviceEmulationParams() {
+   return device_emulation_params_;
+ }
+ 
++bool EmulationHandler::SetDeviceEmulationScale(float scale) {
++  if (scale <= 0.f)
++    return false;
++  // Emulation state lives on the outermost main frame only; before one is
++  // attached there is no session to scale.
++  if (!host_ || host_->GetParentOrOuterDocument())
++    return false;
++  blink::DeviceEmulationParams params = GetDeviceEmulationParams();
++  if (params.scale == scale)
++    return true;
++  params.scale = scale;
++  SetDeviceEmulationParams(params);
++  return true;
++}
++
+ void EmulationHandler::SetDeviceEmulationParams(
+     const blink::DeviceEmulationParams& params) {
+   DCHECK(host_);
+diff --git a/content/browser/devtools/protocol/emulation_handler.h b/content/browser/devtools/protocol/emulation_handler.h
+--- a/content/browser/devtools/protocol/emulation_handler.h
++++ b/content/browser/devtools/protocol/emulation_handler.h
+@@ -130,6 +130,16 @@ class EmulationHandler : public DevToolsDomainHandler,
+   blink::DeviceEmulationParams GetDeviceEmulationParams();
+   void SetDeviceEmulationParams(const blink::DeviceEmulationParams& params);
+ 
++  // Lobium: update ONLY the compositor scale of an already-running device-metrics
++  // emulation session, leaving the emulated screen size and device scale factor
++  // alone. The device-frame view needs this because it learns the exact aperture
++  // fit only from live layout, long after Emulation.setDeviceMetricsOverride ran;
++  // re-sending the whole param block from the browser process would race the
++  // session's own values and clear the page cache on every resize frame.
++  // Returns false when there is nothing to scale (no outermost main frame yet),
++  // which is the caller's signal to retry on the next layout pass.
++  bool SetDeviceEmulationScale(float scale);
++
+   bool device_emulation_enabled() { return device_emulation_enabled_; }
+ 
+   // Applies the network request header overrides on `headers`.  If the
+diff --git a/content/public/browser/lobium_device_emulation.h b/content/public/browser/lobium_device_emulation.h
+new file mode 100644
+--- /dev/null
++++ b/content/public/browser/lobium_device_emulation.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 The Lobster Browser Authors.
++
++#ifndef CONTENT_PUBLIC_BROWSER_LOBIUM_DEVICE_EMULATION_H_
++#define CONTENT_PUBLIC_BROWSER_LOBIUM_DEVICE_EMULATION_H_
++
++#include "content/common/content_export.h"
++
++namespace content {
++
++class WebContents;
++
++// Updates only the compositor scale of an already enabled device-metrics
++// emulation session. The emulated screen/view dimensions and device scale
++// factor are intentionally left unchanged. Returns true when at least one
++// attached DevTools emulation session was updated.
++CONTENT_EXPORT bool SetLobiumDeviceEmulationScale(WebContents* web_contents,
++                                                  float scale);
++
++}  // namespace content
++
++#endif  // CONTENT_PUBLIC_BROWSER_LOBIUM_DEVICE_EMULATION_H_

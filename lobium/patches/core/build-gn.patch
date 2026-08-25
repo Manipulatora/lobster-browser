@@ -16,7 +16,6 @@ is_official_build credits step). COMPILE-VERIFIED on Chromium 152.0.7928.0.
   • content/renderer/BUILD.gn — renderer startup applies configured ICU locale before Blink/V8 init.
   • chrome/browser/ui/BUILD.gn — the separate :lobium_profile_icon target (browser-process Skia, //ui/gfx),
     kept out of the Blink-facing :lobium_fp so no renderer target inherits the views drawing stack.
-
 diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
 --- a/chrome/BUILD.gn
 +++ b/chrome/BUILD.gn
@@ -35,7 +34,7 @@ diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
 diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
 --- a/chrome/browser/ui/BUILD.gn
 +++ b/chrome/browser/ui/BUILD.gn
-@@ -793,6 +793,9 @@ static_library("ui") {
+@@ -816,6 +816,9 @@ static_library("ui") {
      "//components/lens:enterprise_policy",
      "//components/live_caption:constants",
      "//components/live_caption:utils",
@@ -45,6 +44,15 @@ diff --git a/chrome/browser/ui/BUILD.gn b/chrome/browser/ui/BUILD.gn
      "//components/local_state",
      "//components/lookalikes/core",
      "//components/media_router/common/providers/cast/certificate",
+@@ -3962,6 +3965,8 @@ static_library("ui") {
+       "views/frame/layout/browser_view_popup_layout_impl.h",
+       "views/frame/layout/browser_view_tabbed_layout_impl.cc",
+       "views/frame/layout/browser_view_tabbed_layout_impl.h",
++      "views/frame/lobium_device_frame_view.cc",
++      "views/frame/lobium_device_frame_view.h",
+       "views/frame/main_background_region_view.cc",
+       "views/frame/main_background_region_view.h",
+       "views/frame/multi_contents_background_view.cc",
 diff --git a/components/embedder_support/BUILD.gn b/components/embedder_support/BUILD.gn
 --- a/components/embedder_support/BUILD.gn
 +++ b/components/embedder_support/BUILD.gn
@@ -83,6 +91,25 @@ diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
      "//components/metrics",
      "//components/metrics:single_sample_metrics",
      "//components/metrics/dwa:dwa_builders",
+@@ -855,6 +858,7 @@ source_set("browser") {
+     "devtools/forwarding_agent_host.h",
+     "devtools/frame_auto_attacher.cc",
+     "devtools/frame_auto_attacher.h",
++    "devtools/lobium_device_emulation.cc",
+     "devtools/mojom_devtools_agent_host.cc",
+     "devtools/mojom_devtools_agent_host.h",
+     "devtools/network_service_devtools_observer.cc",
+diff --git a/content/public/browser/BUILD.gn b/content/public/browser/BUILD.gn
+--- a/content/public/browser/BUILD.gn
++++ b/content/public/browser/BUILD.gn
+@@ -241,6 +241,7 @@ source_set("browser_sources") {
+     "keyboard_event_processing_result.h",
+     "legacy_tech_cookie_issue_details.cc",
+     "legacy_tech_cookie_issue_details.h",
++    "lobium_device_emulation.h",
+     "login_delegate.h",
+     "manifest_icon_downloader.h",
+     "media_capture_devices.h",
 diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
 --- a/content/renderer/BUILD.gn
 +++ b/content/renderer/BUILD.gn

@@ -40,6 +40,11 @@ core/capability-contract.patch
 core/config-channel.patch
 # navigator.* + User-Agent header + Sec-CH-UA, in all contexts including workers.
 core/navigator-ua-ch.patch
+# The //content API that lets the browser process rescale a LIVE device-metrics emulation session
+# (DeviceEmulationParams::scale alone). Consumed by branding/device-frame.patch, which learns the
+# aperture fit only from its own views layout and so cannot supply it up front, so it must precede
+# that patch. Its two new files are GN-wired by core/build-gn.patch.
+core/device-emulation-scale.patch
 
 # =================================================================================================
 # Fingerprint surfaces (the native moat)
@@ -146,18 +151,24 @@ branding/signin-disable.patch
 # generate_grd input_files, and gn/ninja fail if the files are absent.
 branding/ntp-branding.patch
 branding/profile-lockdown.patch
+# The Android phone/tablet workspace drawn behind the real WebContents, with the renderer's
+# emulation scale kept locked to the aperture through startup, resize and whole-device zoom. Cut
+# against pristine browser_view.cc, so it comes AFTER branding/profile-window-icon.patch (which
+# hooks the same file) and after core/device-emulation-scale.patch, whose
+# content::SetLobiumDeviceEmulationScale it calls.
+branding/device-frame.patch
 
 # Present on disk but deliberately NOT in the series:
 #   branding/suppress-sandbox-infobar.patch - only needed for --no-sandbox dev runs.
-#   branding/device-frame.patch - the Android phone/tablet workspace behind the real WebContents.
-#     REMOVED FROM THE SERIES 2026-08-21 because it does not link on Linux, which is the only
-#     platform it targets. Its own note claimed it "applies cleanly and changes nothing"; that is
-#     true only on Windows, where every hook is excluded by #if BUILDFLAG(IS_LINUX). On Linux the
-#     hooks DO compile, they reference LobiumDeviceFrameView, and its implementation file is in no
-#     GN target - so `chrome` fails at the final link with seven undefined symbols:
-#         ld.lld: error: undefined symbol: LobiumDeviceFrameView::IsEnabled()   (+6 more)
-#     Measured on 152.0.7977.42 after a full 8h21m compile: 56069 of 56070 steps succeeded and the
-#     link was the single failure. Finishing the feature needs lobium_device_frame_view.cc added to
-#     a GN target AND content/{public/browser,browser/devtools}/lobium_device_emulation.* carried in
-#     lobium/src/ (they exist only as untracked files on one build host today). Until then it must
-#     stay out, or no Linux engine can be produced. See ../hooks.md "device frame".
+#
+# branding/device-frame.patch was OUT of the series from 2026-08-21 to 2026-08-25 because it did not
+# link on Linux, the only platform it targets: its hooks compile there and reference
+# LobiumDeviceFrameView, whose implementation was in no GN target, so `chrome` failed at the final
+# link with seven undefined symbols (56069 of 56070 steps had succeeded, on 152.0.7977.42). It is
+# back because the two pieces it was missing are now in the series instead of being untracked files
+# on a single build host: core/build-gn.patch adds views/frame/lobium_device_frame_view.{cc,h} to
+# the chrome ui target, and core/device-emulation-scale.patch carries
+# content/{public/browser,browser/devtools}/lobium_device_emulation.* together with the
+# EmulationHandler::SetDeviceEmulationScale it calls - a method that until then existed in no file
+# at all, which is why the feature could never have linked however it was wired.
+# See ../hooks.md "device frame".
