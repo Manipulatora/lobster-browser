@@ -21,7 +21,7 @@ export interface NavGroup {
 }
 
 export const PRIMARY_NAV: readonly NavLink[] = [
-  { label: 'Product', path: '/', fragment: 'devices' },
+  { label: 'Download', path: '/download' },
   { label: 'Platforms', path: '/', fragment: 'platforms' },
   { label: 'Pricing', path: '/pricing' },
   { label: 'FAQ', path: '/', fragment: 'faq' },

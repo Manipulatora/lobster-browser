@@ -60,15 +60,23 @@ export const routes: Routes = [
         title: 'Signed in — Lobster Browser',
       },
 
-      // Where someone lands after paying: the product itself. Gated like billing because it is
-      // account furniture — the installers behind it are public release assets.
+      // PUBLIC, and deliberately so. The installers are public release assets, the landing nav
+      // points here, and someone evaluating the product should not have to create an account to
+      // see that it exists for their platform. Account context still reaches this page — the
+      // signed-in header links to the same route.
       {
-        path: 'account/downloads',
-        canActivate: [authGuard],
+        path: 'download',
         loadComponent: () =>
           import('./features/downloads/downloads-page').then((m) => m.DownloadsPage),
-        title: 'Downloads — Lobster Browser',
+        title: 'Download — Lobster Browser',
+        data: {
+          description:
+            'Download Lobster Browser for Windows or Linux. Every profile gets a coherent device identity applied natively inside our Chromium engine.',
+        },
       },
+      // The page used to live here and the signed-in header linked to it; keep the old path working
+      // rather than 404ing anyone who bookmarked it.
+      { path: 'account/downloads', redirectTo: 'download', pathMatch: 'full' },
 
       {
         path: 'account/billing',
