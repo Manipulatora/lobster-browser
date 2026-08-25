@@ -45,7 +45,7 @@ import {
   upstreamProxyUrl,
   type LocalProxyAdapter,
 } from '../proxy-auth-adapter.js';
-import { resolveGpuMode } from '../gpu.js';
+import { buildGpuArgs, resolveGpuMode } from '../gpu.js';
 import { signalProcessTree } from '../process-tree.js';
 import { deviceFrameGeometry, resolveDesktopWorkArea } from '../device-frame.js';
 import {
@@ -475,6 +475,12 @@ export async function buildNativeLobiumProcessArgs(
           await resolveDesktopWorkArea(),
         )
       : undefined;
+  // Never emit a GPU flag the caller already set: Chromium takes the LAST occurrence of a switch, so
+  // an unconditional append would silently shadow an explicit override rather than defer to it.
+  const callerGpuFlags = new Set(
+    [...ctx.options.args, ...(opts.extraArgs ?? [])].map((arg) => arg.split('=', 1)[0]),
+  );
+  const gpuArgs = buildGpuArgs().filter((arg) => !callerGpuFlags.has(arg.split('=', 1)[0]));
   return [
     `--user-data-dir=${ctx.options.userDataDir}`,
     '--remote-debugging-port=0',
@@ -521,6 +527,29 @@ export async function buildNativeLobiumProcessArgs(
           // native consumer.
         ]
       : []),
+    // GPU policy. THE PRODUCT PATH MUST ASK FOR IT EXPLICITLY. Chromium permits the software GL
+    // fallback in headless but REFUSES it headful unless told otherwise, and this launcher is the only
+    // path a real user takes. Measured on this build with the exact flag set above, headful, no GPU
+    // flags:
+    //
+    //     canvas.getContext('webgl')    null
+    //     canvas.getContext('webgl2')   null
+    //     navigator.gpu                 undefined
+    //
+    // and with these args added, on the same host, both contexts come back and the page reads the
+    // persona's renderer. So every profile on a host whose GPU Chromium cannot use - a VM, an RDP or
+    // remote-desktop session, a blocklisted driver, a container with no /dev/dri - had NO WebGL at
+    // all. Two consequences, and the second is the serious one: 3D content silently fails to render,
+    // and a browser with no WebGL is not a quieter fingerprint but a far louder headless/VM tell than
+    // any renderer string, which also makes the whole native WebGL moat (webgl-surfaces,
+    // host-gpu-profile, webgl2-surfaces, webgpu-adapter) inert - every one hooks a context that is
+    // never created. See the note on SOFTWARE_GL_FALLBACK in gpu.ts.
+    //
+    // ci/validation/webgl-availability-gate.mjs was written to catch exactly this and still passes,
+    // because it supplies its own buildGpuArgs() through extraArgs - so it proved the FLAG worked and
+    // never observed that the launcher does not emit it. Emitted BEFORE the caller's own args so an
+    // explicit --use-gl/--use-angle from ctx.options.args or opts.extraArgs still wins.
+    ...gpuArgs,
     ...ctx.options.args.filter(
       (arg) =>
         !deviceFrame ||
