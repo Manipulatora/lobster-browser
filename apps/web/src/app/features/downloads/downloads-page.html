@@ -1,90 +1,81 @@
-<!-- One centred column, same measure as the billing page: this is account furniture, not a landing
-     page, and the two should feel like the same room. -->
-<div class="container-page py-10 sm:py-14">
+<!-- Deliberately bare. Everything this page used to explain - install requirements, an unsigned-
+     installer warning, checksums and the command to check them - was text standing between someone
+     who already decided to install and the installer. -->
+<div class="container-page py-14 sm:py-20">
   <div class="mx-auto w-full max-w-2xl">
-    <section>
-      <h1 class="text-[0.9375rem] text-muted">Downloads</h1>
-      <p class="mt-1 text-4xl tracking-[-0.03em] text-ink sm:text-5xl">Lobster Browser</p>
+    <section class="text-center">
+      <h1 class="text-4xl tracking-[-0.03em] text-ink sm:text-5xl">Lobster Browser</h1>
       <p class="mt-3 text-[0.9375rem] text-muted">
         Version {{ version }} · engine {{ engineVersion }}
       </p>
     </section>
 
-    @if (nothingPublished()) {
-      <!-- Said plainly rather than shown as two dead buttons. Someone who just paid needs to know
-           the product exists and when it lands, not to click something that 404s. -->
-      <div class="mt-8 rounded-xl border border-line bg-surface-2 p-5">
-        <p class="text-[0.9375rem] text-ink">The installers are not published yet.</p>
-        <p class="mt-2 text-[0.875rem] text-muted">
-          Your account and Credit are ready now. The builds are in final release validation and will
-          appear on this page as soon as they pass — nothing else is needed from you.
-        </p>
-      </div>
-    }
-
-    <div class="mt-8 grid gap-4">
+    <div class="mt-10 grid gap-4 sm:grid-cols-2">
       @for (item of artifacts(); track item.platform) {
-        <article class="rounded-xl border border-line bg-surface-2 p-5">
-          <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-            <h2 class="text-lg text-ink">{{ item.name }}</h2>
-            @if (detected() === item.platform) {
-              <span class="text-[0.8125rem] text-accent">For this computer</span>
+        <article class="card flex flex-col items-center gap-5 p-8 text-center">
+          <!-- Drawn inline in currentColor rather than fetched: one box always renders unpublished,
+               and an icon that arrives late or not at all makes that box look broken. -->
+          @switch (item.platform) {
+            @case ('windows') {
+              <svg
+                class="size-12 text-ink-soft"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="3" y="4" width="8" height="7.2" rx="1" />
+                <rect x="13" y="4" width="8" height="7.2" rx="1" />
+                <rect x="3" y="12.8" width="8" height="7.2" rx="1" />
+                <rect x="13" y="12.8" width="8" height="7.2" rx="1" />
+              </svg>
             }
-          </div>
-          <p class="mt-1 text-[0.875rem] text-muted">{{ item.requirement }}</p>
-
-          @if (item.notice) {
-            <p class="mt-4 rounded-lg border border-line bg-surface-1 p-3 text-[0.875rem] text-muted">
-              {{ item.notice }}
-            </p>
+            @case ('linux') {
+              <svg
+                class="size-12 text-ink-soft"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path
+                  d="M12 2.5C9.9 2.5 8.5 4.1 8.5 6.2C8.5 7.3 8.6 8.2 8.1 9.1C7.2 10.6 5.8 12.9 5.8 15.6C5.8 19.1 8.6 21.3 12 21.3C15.4 21.3 18.2 19.1 18.2 15.6C18.2 12.9 16.8 10.6 15.9 9.1C15.4 8.2 15.5 7.3 15.5 6.2C15.5 4.1 14.1 2.5 12 2.5Z"
+                />
+                <path
+                  d="M12 10.4C10.3 10.4 9.2 12.9 9.2 15.6C9.2 18.2 10.4 19.7 12 19.7C13.6 19.7 14.8 18.2 14.8 15.6C14.8 12.9 13.7 10.4 12 10.4Z"
+                />
+                <circle cx="10.5" cy="5.6" r="0.55" fill="currentColor" stroke="none" />
+                <circle cx="13.5" cy="5.6" r="0.55" fill="currentColor" stroke="none" />
+                <path
+                  d="M12 6.6C11.3 6.6 10.8 7.1 10.8 7.7C10.8 8.3 11.3 8.7 12 8.7C12.7 8.7 13.2 8.3 13.2 7.7C13.2 7.1 12.7 6.6 12 6.6Z"
+                />
+                <path d="M9.4 20.9C8.8 22 7.5 22.4 6.7 21.8" />
+                <path d="M14.6 20.9C15.2 22 16.5 22.4 17.3 21.8" />
+              </svg>
+            }
           }
 
-          <div class="mt-5 flex flex-wrap items-center gap-3">
-            @if (item.published) {
-              <a
-                [href]="item.url"
-                [attr.download]="item.file"
-                class="btn btn-md btn-primary"
-                rel="noopener"
-              >
-                Download for {{ item.name }}
-              </a>
-              @if (item.size) {
-                <span class="text-[0.8125rem] text-muted">{{ item.size }}</span>
-              }
-            } @else {
-              <!-- Disabled, not hidden: the platform list is itself information. -->
-              <button type="button" class="btn btn-md btn-secondary" disabled>Coming soon</button>
-            }
-          </div>
+          <h2 class="text-lg text-ink">{{ item.name }}</h2>
 
-          @if (item.sha256) {
-            <div class="mt-5 border-t border-line pt-4">
-              <p class="text-[0.8125rem] text-muted">SHA-256</p>
-              <p class="mt-1 break-all font-mono text-[0.8125rem] text-ink">{{ item.sha256 }}</p>
-              <div class="mt-2 flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  class="btn btn-sm btn-secondary"
-                  (click)="copyHash(item)"
-                >
-                  {{ copied() === item.platform ? 'Copied' : 'Copy hash' }}
-                </button>
-                <code class="text-[0.8125rem] text-muted">{{ item.verifyCommand }}</code>
-              </div>
-            </div>
+          @if (item.published) {
+            <a
+              [href]="item.url"
+              [attr.download]="item.file"
+              class="btn btn-md btn-primary"
+              rel="noopener"
+            >
+              Download
+            </a>
+          } @else {
+            <button type="button" class="btn btn-md btn-secondary" disabled>Coming soon</button>
           }
         </article>
       }
     </div>
-
-    <section class="mt-10 border-t border-line pt-6">
-      <p class="text-[0.875rem] text-muted">
-        Need Credit or a larger package?
-        <a routerLink="/account/billing" class="text-ink underline underline-offset-4">
-          Go to billing
-        </a>
-      </p>
-    </section>
   </div>
 </div>

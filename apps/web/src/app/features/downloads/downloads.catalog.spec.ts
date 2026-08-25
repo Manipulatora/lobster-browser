@@ -1,19 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  DOWNLOADS,
-  RELEASE_TAG,
-  detectPlatform,
-  noArtifactsPublished,
-  orderedForPlatform,
-} from './downloads.catalog';
+import { DOWNLOADS, RELEASE_TAG, detectPlatform, orderedForPlatform } from './downloads.catalog';
 
 describe('downloads catalog', () => {
   it('offers exactly the platforms the product ships, each with a resolvable URL', () => {
     expect(DOWNLOADS.map((d) => d.platform).sort()).toEqual(['linux', 'windows']);
     for (const item of DOWNLOADS) {
-      // The URL must end in the same file name the card shows, or "verify this SHA-256 of
-      // <file>" describes a different file than the one the button fetches.
+      // The URL must end in the same file name the box saves as, or the `download` attribute names
+      // one installer while the release serves another.
       expect(item.url.endsWith(`/${item.file}`)).toBe(true);
       expect(item.url).toContain(RELEASE_TAG);
       expect(item.url.startsWith('https://')).toBe(true);
@@ -21,21 +15,13 @@ describe('downloads catalog', () => {
   });
 
   it('never advertises a download whose artifact is not published', () => {
-    // The failure this prevents: flipping `published` on release day but forgetting the hash, so
-    // the page offers a button and an empty integrity check.
+    // The failure this prevents: flipping `published` on release day before the asset is actually
+    // on the release, so the box offers a button that 404s.
     for (const item of DOWNLOADS) {
       if (item.published) {
-        expect(item.sha256, `${item.platform} is published without a SHA-256`).toMatch(
-          /^[0-9a-f]{64}$/,
-        );
         expect(item.size, `${item.platform} is published without a size`).not.toBe('');
       }
     }
-  });
-
-  it('states the SmartScreen warning on Windows while the installer is unsigned', () => {
-    const windows = DOWNLOADS.find((d) => d.platform === 'windows');
-    expect(windows?.notice ?? '').toMatch(/SmartScreen/i);
   });
 
   it('detects the visitor platform without mistaking Android for Linux', () => {
@@ -52,10 +38,5 @@ describe('downloads catalog', () => {
     // People download the Windows installer from Linux to put it on a stick.
     expect(ordered).toHaveLength(DOWNLOADS.length);
     expect(orderedForPlatform(null)).toHaveLength(DOWNLOADS.length);
-  });
-
-  it('reports the pre-release state so the page can say so once, plainly', () => {
-    expect(noArtifactsPublished([{ ...DOWNLOADS[0]!, published: false }])).toBe(true);
-    expect(noArtifactsPublished([{ ...DOWNLOADS[0]!, published: true }])).toBe(false);
   });
 });

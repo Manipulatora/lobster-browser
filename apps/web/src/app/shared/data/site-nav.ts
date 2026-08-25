@@ -7,6 +7,10 @@
  * (`#devices`, `#platforms`, `#faq`). An earlier version pointed at `#features`, `#automation`,
  * `#how-it-works` and `#security`, none of which were ever rendered, so nine links navigated to
  * `/` and then sat still — looking broken rather than going anywhere.
+ *
+ * `#platforms` is reached from the footer only: the header carries the decisions a visitor is here
+ * to make, and the section reads well enough on the way down that a top-level link earned nothing.
+ * The section and its `id` therefore stay exactly where they are.
  */
 export interface NavLink {
   readonly label: string;
@@ -22,7 +26,6 @@ export interface NavGroup {
 
 export const PRIMARY_NAV: readonly NavLink[] = [
   { label: 'Download', path: '/download' },
-  { label: 'Platforms', path: '/', fragment: 'platforms' },
   { label: 'Pricing', path: '/pricing' },
   { label: 'FAQ', path: '/', fragment: 'faq' },
 ];

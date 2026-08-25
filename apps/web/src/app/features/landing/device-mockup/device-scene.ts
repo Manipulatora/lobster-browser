@@ -52,8 +52,13 @@ const ease = (t: number): number => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 *
  * The editor's camera views frame each device tightly for a click-to-focus interaction. Here the
  * sequence plays across a full-viewport stage and both devices need to stay in shot throughout, so
  * every view is pulled back along its own axis.
+ *
+ * `MODEL_DISPLAY_SCALE` is the only knob to turn here: the model itself is never rescaled (poses
+ * carry the GLB's own scales), so apparent size is purely a function of camera distance, and
+ * distance is `FRAMING` — which is derived below. Editing both would cancel out or double up.
+ * Kept low enough that the pair sits inside the section rather than crowding its edges.
  */
-const MODEL_DISPLAY_SCALE = 1.5;
+const MODEL_DISPLAY_SCALE = 1.3;
 const FRAMING = 1.72 / MODEL_DISPLAY_SCALE;
 
 /**
