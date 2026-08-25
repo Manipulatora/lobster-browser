@@ -58,10 +58,10 @@ export const DOWNLOADS: readonly DownloadArtifact[] = [
     requirement: 'Windows 10 or 11 · 64-bit',
     file: 'Lobster-Browser-Setup-1.0.0-x64.exe',
     url: `${RELEASE_BASE}/Lobster-Browser-Setup-1.0.0-x64.exe`,
-    size: '',
-    sha256: '',
+    size: '29.3 MB',
+    sha256: '2ef982236deb9aee3f2e1522576f481dea89147287fceb482e1f167f7ea80523',
     verifyCommand: 'Get-FileHash .\\Lobster-Browser-Setup-1.0.0-x64.exe -Algorithm SHA256',
-    published: false,
+    published: true,
     // Stated up front rather than discovered at the SmartScreen prompt. A user who is warned
     // expects the dialog; a user who is not assumes the download is malicious and stops.
     notice:
