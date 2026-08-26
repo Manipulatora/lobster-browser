@@ -28,6 +28,17 @@
  * true of one real device (colorDepth 30 beside a CSS `(color: 8)`; a Chrome brand that rejects
  * Widevine; a macOS persona advertising Dolby Vision, which only a Windows build has).
  *
+ * WHICH RENDERER PATH THIS MEASURES. Personas here come from the catalog (deriveFingerprint), which
+ * is the path a profile takes when no host calibration exists. The product's DEFAULT renderer policy
+ * is `host`, and start-profile then derives the persona from the machine's real GPU, so its caps are
+ * ones the host can actually execute. That difference shows up directly in the results: on a host
+ * whose GPU cannot back the catalog persona, webgl-runtime-safety clamps MAX_TEXTURE_SIZE and
+ * friends down to what the backend can do, and the profile then reports caps that contradict the GPU
+ * it names. That is a true finding for the uncalibrated path and NOT evidence about the calibrated
+ * one, so do not read a clamp here as a product-wide defect - read it as the cost of shipping a
+ * catalog GPU onto a host that cannot back it, which is exactly what happens on a GPU-less VPS when
+ * calibration is unavailable.
+ *
  *   node ci/validation/fingerprint-conformance.mjs                 # 24 personas
  *   node ci/validation/fingerprint-conformance.mjs --count 40
  *   node ci/validation/fingerprint-conformance.mjs --only windows,macos_arm
