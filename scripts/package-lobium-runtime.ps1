@@ -167,17 +167,67 @@ function Read-ProbeStream {
   return $raw.Trim()
 }
 
+# Kill one process TREE by PID, with the stderr hazard handled.
+#
+# PowerShell 5.1 promotes a native command's stderr to an ErrorRecord, and under
+# $ErrorActionPreference = 'Stop' (set at the top of this file) that becomes TERMINATING. taskkill
+# writes to stderr routinely - "the process ... not found" when the tree already exited in the
+# window before the kill, or an access-denied on one member - so a bare `taskkill ... 2>&1` in the
+# timeout path threw NativeCommandError and replaced the diagnostic it was written to deliver. The
+# same hazard is handled at Assert-FontPack below; this is the same remedy.
+#
+# PID-TARGETED ONLY. /T takes the tree of THIS pid. Never taskkill /IM or Stop-Process -Name: a
+# remote-desktop session runs on this host and an image-name kill would disconnect the operator.
+function Stop-ProcessTree {
+  param([int]$ProcessId)
+  $saved = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & taskkill.exe /PID $ProcessId /T /F 2>&1 | Out-Null
+  } catch {
+    # Best effort: the caller is already reporting a more useful failure than this one.
+  } finally {
+    $ErrorActionPreference = $saved
+  }
+}
+
 function Invoke-BrowserProbe {
-  param([string]$Chrome, [string]$Argument, [string]$Label)
+  param([string]$Chrome, [string]$Argument, [string]$Label, [int]$TimeoutSeconds = 60)
   $token = "$PID-$([Guid]::NewGuid().ToString('N'))"
   $stdout = Join-Path ([System.IO.Path]::GetTempPath()) "lobium-$Label-$token.out"
   $stderr = Join-Path ([System.IO.Path]::GetTempPath()) "lobium-$Label-$token.err"
+  $proc = $null
   try {
     # chrome.exe is a WINDOWS-subsystem binary. PowerShell 5.1 does not reliably capture its stdout,
     # while cmd redirection is inherited by the child and does. The argument is a fixed string owned
     # by this script; no caller-controlled command fragment is interpolated here.
-    cmd /d /c "`"$Chrome`" $Argument > `"$stdout`" 2> `"$stderr`""
-    $exit = $LASTEXITCODE
+    #
+    # BOUNDED, because the failure this probe exists to catch is exactly the one that used to hang it.
+    # A Lobium binary prints its manifest and exits before browser startup. A stock or unpatched
+    # Chromium does NOT recognise --lobium-fingerprint-capabilities, ignores it, and starts a normal
+    # browser that never exits - so pointing -SourceDir at a mis-set GN out dir made packaging wait
+    # forever instead of saying "this is not a Lobium build", which is the single most likely way to
+    # get here by mistake.
+    # The whole redirection is ONE argument to cmd /c, so it needs the outer pair of quotes cmd
+    # strips plus the inner pairs that survive for the path. Built into a variable rather than
+    # inlined: the nesting is hard enough to read that a stray backtick would silently change which
+    # quotes cmd sees, and this form is the one that was verified against a real binary.
+    $probeCommand = "`"`"$Chrome`" $Argument > `"$stdout`" 2> `"$stderr`"`""
+    $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d', '/c', $probeCommand) `
+      -NoNewWindow -PassThru
+    # Touching .Handle forces the process object to cache it. Without this, .ExitCode reads back
+    # empty after the process ends and every probe would record success.
+    $null = $proc.Handle
+    if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+      # PID-TARGETED KILL ONLY. /T takes the tree of THIS pid; never taskkill /IM or Stop-Process
+      # -Name, which would match unrelated chrome.exe processes - including, on a remotely
+      # administered host, the ones carrying the operator's session.
+      Stop-ProcessTree $proc.Id
+      throw ("$Label probe timed out after ${TimeoutSeconds}s for '$Chrome'. A Lobium build prints " +
+             'its capability manifest and exits immediately; a binary that instead starts a browser ' +
+             'is not a Lobium build (check -SourceDir points at the patched output directory).')
+    }
+    $exit = $proc.ExitCode
     $value = Read-ProbeStream $stdout
     $errorText = Read-ProbeStream $stderr
     if ($exit -ne 0 -or -not $value) {
@@ -185,6 +235,9 @@ function Invoke-BrowserProbe {
     }
     return $value
   } finally {
+    if ($proc -and -not $proc.HasExited) {
+      Stop-ProcessTree $proc.Id
+    }
     Remove-Item -LiteralPath $stdout -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $stderr -Force -ErrorAction SilentlyContinue
   }
@@ -240,7 +293,13 @@ function Assert-CapabilityManifest {
     'media-devices',
     'webgpu-adapter',
     'native-timezone',
-    'font-isolation'
+    'font-isolation',
+    # The Android phone/tablet stage. Added 2026-08-26, when it turned out a Windows build compiled
+    # LobiumDeviceFrameView and then dropped it at link time - every BrowserView call site was
+    # #if BUILDFLAG(IS_LINUX) - so an Android profile opened as a plain desktop window. Nothing
+    # caught it: the contract did not cover the feature and Chromium silently ignores switches it
+    # does not know. Required here so such a runtime cannot be packaged at all.
+    'device-frame'
   )
   $actual = @($Manifest.capabilities)
   foreach ($required in $requiredCapabilities) {
@@ -510,6 +569,31 @@ foreach ($dir in @('locales', 'resources', 'angledata', 'MEIPreload',
   if (Test-Path -LiteralPath $path) {
     Copy-Item -LiteralPath $path -Destination (Join-Path $staging $dir) -Recurse -Force
   }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Drop the Vulkan DEBUGGING artifacts that the angledata copy above pulls in.
+#
+# The recursive copy is right for angledata as a whole, but a build tree's angledata\ also contains
+# Vulkan loader manifests for a validation layer and a mock ICD:
+#
+#     angledata\VkLayer_khronos_validation.json    registers a debugging layer
+#     angledata\VkICD_mock_icd.json                registers a TEST driver
+#
+# Real Chrome ships neither. A Vulkan layer manifest naming a validation layer, sitting beside the
+# executable, is an unusual environment for a browser to be running in - which is precisely the kind
+# of ambient tell this product exists not to emit. Measured on 152.0.7977.42: the DLLs themselves are
+# already absent from the staged set, so only these manifests leak (the Linux side had the worse
+# version of the same bug, where a blanket *.so glob shipped libVkLayer_khronos_validation.so at
+# 27.9 MB plus libVkICD_mock_icd.so).
+#
+# vk_swiftshader.dll and vk_swiftshader_icd.json are deliberately NOT touched: SwiftShader is the
+# software backend the product actually falls back to, and stock Chrome ships it too.
+$vulkanDebugArtifacts = Get-ChildItem -LiteralPath $staging -Recurse -File -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -match '^Vk(Layer_.*|ICD_mock_icd)\.json$' -and $_.Name -ne 'vk_swiftshader_icd.json' }
+foreach ($artifact in $vulkanDebugArtifacts) {
+  Remove-Item -LiteralPath $artifact.FullName -Force
+  Write-Host "    removed Vulkan debug artifact: $($artifact.Name)" -ForegroundColor DarkGray
 }
 if (-not (Test-Path -LiteralPath (Join-Path $staging 'locales\en-US.pak'))) {
   # Chromium resolves every UI string through the locale paks. Without them the browser starts but
