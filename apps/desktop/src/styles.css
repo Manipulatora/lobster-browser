@@ -2473,8 +2473,12 @@ code {
   }
 }
 /* The number rides ON the bar, centred over the whole track rather than over the filled part, so it
-   does not move as the fill grows. `mix-blend-mode: difference` keeps it legible against both the
-   filled and unfilled halves without a shadow or a second copy of the glyphs. */
+   does not move as the fill grows.
+   Plain white over a soft dark shadow, NOT mix-blend-mode: difference. Difference was tried first
+   and looks broken at exactly the moment the bar is most watched: as the fill edge crosses the
+   glyphs, each character inverts halfway through, so the number appears to tear. White reads on both
+   the dark track and the light end of the purple fill, and the shadow carries it over the pale
+   middle of the gradient. */
 .engine-gate__pct {
   position: absolute;
   inset: 0;
@@ -2484,9 +2488,10 @@ code {
   font-size: 0.8125rem;
   font-weight: 600;
   letter-spacing: 0.02em;
+  /* Tabular so the bar does not jitter as the number changes width. */
   font-variant-numeric: tabular-nums;
   color: #fff;
-  mix-blend-mode: difference;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 55%);
 }
 .engine-gate__retry {
   min-width: 140px;
