@@ -77,6 +77,17 @@ export interface BillingOverview {
 export interface DepositInstruction {
   depositId: string;
   address: string;
+  /**
+   * The memo / destination tag that MUST be sent with the transfer, on the chains that use one.
+   *
+   * Not optional detail — it is the second half of the destination. XRP, Stellar and Cosmos-style
+   * chains issue ONE shared deposit address for every payment the processor takes and tell
+   * depositors apart by this tag alone, so a transfer that arrives on the address without it
+   * credits nobody and is not recoverable. Absent, never empty, on chains that issue a real
+   * per-payment address; the page must render nothing tag-shaped when it is missing, because a
+   * blank tag field on a chain that has no tag is its own way of losing a payment.
+   */
+  paymentTag?: string;
   amountCrypto: string;
   asset: string;
   chain: string;
@@ -225,12 +236,17 @@ export class BillingService {
       chain: chain.chain,
       asset: created.asset,
       address: created.address,
+      // Stored beside the address, not just handed to the client: on a shared-address chain this
+      // tag is the only thing that attributes the incoming transfer to this user, so it is what a
+      // missing-deposit dispute has to compare the sender's transaction against.
+      paymentTag: created.paymentTag,
       amountCrypto: created.amountCrypto,
     });
 
     return {
       depositId: deposit.id,
       address: created.address,
+      paymentTag: created.paymentTag,
       amountCrypto: created.amountCrypto,
       asset: created.asset,
       chain: chain.chain,

@@ -6,6 +6,16 @@ export interface CreatedDeposit {
   providerPaymentId: string;
   /** The address the user sends to. */
   address: string;
+  /**
+   * The memo / destination tag that must accompany the transfer, on the chains that use one.
+   *
+   * ONE NAME FOR A THING EVERY CHAIN CALLS SOMETHING ELSE — XRP a destination tag, Stellar and
+   * Cosmos a memo, the processor an "extra id". Whatever it is called, it is what identifies the
+   * depositor on a SHARED deposit address: those chains reuse one address for every payment and
+   * separate them by this value alone, so a transfer that arrives without it credits nobody and
+   * cannot be recovered. Absent — not empty — on chains that issue a real per-payment address.
+   */
+  paymentTag?: string;
   /** Exact decimal string of the amount to send in `asset`. */
   amountCrypto: string;
   asset: string;

@@ -170,6 +170,14 @@ export interface BillingRepository {
     chain: string;
     asset: string;
     address?: string;
+    /**
+     * The memo / destination tag issued with the address, on the chains that use one.
+     *
+     * Persisted rather than only shown, because it is what identifies the depositor: those chains
+     * share one deposit address across every payment and separate them by this tag alone, so when
+     * a transfer goes missing this is the value the sender's transaction has to be checked against.
+     */
+    paymentTag?: string;
     amountCrypto?: string;
   }): Promise<Deposit>;
 

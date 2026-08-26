@@ -131,6 +131,16 @@ export interface CreditTransaction {
 export interface DepositInstruction {
   depositId: string;
   address: string;
+  /**
+   * The memo / destination tag that must be sent WITH the transfer, on the chains that use one.
+   *
+   * The second half of the destination, not a detail: XRP, Stellar and Cosmos-style chains issue
+   * one shared deposit address for every payment the processor takes and identify the depositor by
+   * this tag alone, so a transfer that lands without it credits nobody and cannot be recovered.
+   * Absent — never an empty string — on chains that issue a real per-payment address, and the page
+   * must then render nothing tag-shaped at all.
+   */
+  paymentTag?: string;
   amountCrypto: string;
   asset: string;
   chain: string;
@@ -143,6 +153,18 @@ export interface Deposit {
   status: 'pending' | 'confirming' | 'confirmed' | 'failed' | 'expired';
   chain: string;
   asset: string;
+  /**
+   * The address the transfer was to be sent to.
+   *
+   * Serialized so an open deposit survives a reload. Without it the tag below has nothing to be
+   * beside, and the user is left holding an address in their wallet with no way to see the tag
+   * that has to travel with it.
+   */
+  address?: string;
+  /** What was invoiced, in USD cents, so a restored instruction shows the real figure. */
+  amountCents?: number;
+  /** The memo / destination tag the transfer had to carry, on the chains that use one. */
+  paymentTag?: string;
   amountCrypto?: string;
   creditedCents?: number;
   createdAt: string;

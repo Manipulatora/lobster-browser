@@ -119,6 +119,7 @@
                   <span class="relative shrink-0">
                     <img
                       [src]="'/coins/' + c.icon + '.svg'"
+                      (error)="onIconError($event)"
                       alt=""
                       width="24"
                       height="24"
@@ -127,6 +128,7 @@
                     @if (c.networkIcon) {
                       <img
                         [src]="'/coins/' + c.networkIcon + '.svg'"
+                        (error)="onIconError($event)"
                         alt=""
                         width="14"
                         height="14"
@@ -201,6 +203,17 @@
                 height="180"
                 class="mx-auto mt-5 size-[180px] rounded-xl border-[0.5px] border-hairline bg-white p-2"
               />
+            } @else if (inst.paymentTag) {
+              <!-- No QR here, deliberately. A deposit QR encodes the address ALONE, so on a chain
+                 that identifies the depositor by a tag, scanning it produces exactly the untagged
+                 transfer that credits nobody and cannot be recovered — offered as the quickest
+                 path on the page. Both fields get copied by hand instead. -->
+              <p
+                class="mx-auto mt-5 max-w-sm text-center text-[0.8125rem] leading-relaxed text-muted"
+              >
+                No QR code on this network: it would carry the address without the tag, and that
+                transfer cannot be recovered. Copy both fields below.
+              </p>
             }
 
             <div class="mt-5">
@@ -224,6 +237,44 @@
               </div>
             </div>
 
+            <!-- ── The memo / destination tag ──────────────────────────────────
+               NOT an optional extra beside the address — the other half of the destination. Chains
+               like XRP, Stellar and Cosmos give every payment the SAME deposit address and tell
+               depositors apart by this tag alone, so a transfer that arrives without it credits
+               nobody and there is nothing left on-chain to attribute it by: it is gone. It sits
+               directly under the address, above the amount, because that is the order the values
+               are pasted in and copying the address must not be the last thing that happens here.
+               Nothing renders at all when the chain has no tag — an empty tag field is its own way
+               to lose a payment. -->
+            @if (inst.paymentTag; as tag) {
+              <div class="mt-4">
+                <p class="field-label">Memo / destination tag — required</p>
+                <div class="flex items-stretch gap-2">
+                  <code
+                    class="min-w-0 flex-1 truncate rounded-xl border-[0.5px] border-amber-300 bg-amber-50 px-3.5 py-3 text-[0.8125rem] text-ink"
+                  >
+                    {{ tag }}
+                  </code>
+                  <button
+                    type="button"
+                    class="btn btn-md btn-secondary shrink-0 !px-3"
+                    [attr.aria-label]="'Copy memo / destination tag'"
+                    (click)="copy(tag, 'tag')"
+                  >
+                    <span class="icon text-[20px]" aria-hidden="true">{{
+                      copied() === 'tag' ? 'check' : 'content_copy'
+                    }}</span>
+                  </button>
+                </div>
+                <p class="mt-2 text-[0.8125rem] leading-relaxed text-amber-900">
+                  Put this in your wallet's memo or tag field as well as the address.
+                  {{ inst.chain }} uses one deposit address for everyone, so this tag is the only
+                  thing that says the payment is yours — sent without it, it cannot be credited and
+                  cannot be recovered.
+                </p>
+              </div>
+            }
+
             <div class="mt-4">
               <p class="field-label">Amount</p>
               <div class="flex items-stretch gap-2">
@@ -245,12 +296,22 @@
               </div>
             </div>
 
-            <!-- The one mistake that actually loses money. Kept, because it is not decoration. -->
+            <!-- The mistakes that actually lose money. Kept, because it is not decoration — and it
+               names BOTH of them now: the wrong network, and, on a shared-address chain, a
+               transfer with no tag to say whose payment it is. It used to claim that ground while
+               listing only the first, which read as "the network is the only way to lose this"
+               on the exact chains where it is not. -->
             <p
               class="mt-5 rounded-xl bg-amber-50 p-3 text-[0.8125rem] leading-relaxed text-amber-900"
             >
-              Send {{ inst.asset }} on {{ inst.chain }} only. Another coin, or this coin on another
-              network, will not arrive and cannot be recovered.
+              @if (inst.paymentTag) {
+                Send {{ inst.asset }} on {{ inst.chain }} only, and with the tag above. Another
+                coin, this coin on another network, or a transfer sent without the tag will not
+                reach you and cannot be recovered.
+              } @else {
+                Send {{ inst.asset }} on {{ inst.chain }} only. Another coin, or this coin on
+                another network, will not arrive and cannot be recovered.
+              }
             </p>
 
             <button
@@ -583,6 +644,7 @@
                     <span class="relative shrink-0">
                       <img
                         [src]="'/coins/' + c.icon + '.svg'"
+                        (error)="onIconError($event)"
                         alt=""
                         width="32"
                         height="32"
@@ -591,6 +653,7 @@
                       @if (c.networkIcon) {
                         <img
                           [src]="'/coins/' + c.networkIcon + '.svg'"
+                          (error)="onIconError($event)"
                           alt=""
                           width="16"
                           height="16"

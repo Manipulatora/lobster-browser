@@ -1,0 +1,18 @@
+-- The memo / destination tag a deposit had to be sent with.
+--
+-- On XRP, Stellar, Cosmos and chains like them the processor does not issue a fresh address per
+-- payment: it hands out ONE shared deposit address for the whole merchant account and tells
+-- depositors apart by a tag carried alongside the transfer (`payin_extra_id` in the NOWPayments
+-- response — XRP calls it a destination tag, Stellar and Cosmos a memo). That tag is the only
+-- thing on the transaction that says which payment, and so which user, the funds belong to. A
+-- transfer that lands on the shared address without it credits nobody and cannot be recovered.
+--
+-- Until now the value was read off the API response and thrown away, so the user was shown half of
+-- what they had to send — and xrp and xlm are both already in the shipping deposit catalogue. This
+-- column is the persisted half: the issued tag, kept beside the issued address, so a payment that
+-- goes missing can be checked against what the sender was actually told to use.
+--
+-- NULLABLE, and it will stay largely null: chains that issue a real per-payment address have no
+-- tag at all, and every row written before this migration has none recorded whether it needed one
+-- or not.
+ALTER TABLE "deposits" ADD COLUMN "paymentTag" TEXT;

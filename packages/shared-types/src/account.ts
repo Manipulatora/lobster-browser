@@ -399,8 +399,24 @@ export interface Deposit {
   chain: string;
   asset: string;
   /** Exact decimal string — crypto amounts exceed float precision and must not round-trip a Number. */
+  /**
+   * What the user asked to deposit, in USD cents, at the moment the address was issued.
+   *
+   * Serialized so an open deposit can be shown again after a reload without inventing a figure.
+   * Nullable on rows written before the column existed.
+   */
+  amountCents?: number;
   amountCrypto?: string;
   address?: string;
+  /**
+   * The memo / destination tag the transfer had to carry, on the chains that use one.
+   *
+   * Beside `address` because on those chains it is not extra detail, it is the other half of the
+   * destination: XRP, Stellar and Cosmos reuse ONE shared deposit address for every payment and
+   * identify the depositor by this tag alone, so a transfer that arrives without it credits nobody
+   * and cannot be recovered. Absent on chains that issue a real per-payment address.
+   */
+  paymentTag?: string;
   txHash?: string;
   /** USD cents credited; absent until confirmed. */
   creditedCents?: number;

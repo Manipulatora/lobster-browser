@@ -577,6 +577,15 @@ model Deposit {
   address      String?
   txHash       String?
 
+  // The memo / destination tag that had to accompany the transfer, when the chain uses one (XRP
+  // calls it a destination tag, Stellar and Cosmos a memo). Kept because on those chains the
+  // processor issues ONE shared deposit address for every payment and tells depositors apart by
+  // this value alone — it is what identifies the depositor, so when a payment goes missing it is
+  // the first thing a dispute has to be able to check the sender's transaction against. Nullable:
+  // chains that issue a real per-payment address have none, and neither do rows written before it
+  // was captured.
+  paymentTag String?
+
   // What it became, in USD cents, after the processor's conversion and fees. Null until confirmed.
   creditedCents Int?
   creditedAt    DateTime?

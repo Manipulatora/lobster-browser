@@ -138,6 +138,7 @@ export class InMemoryBillingRepository implements BillingRepository {
     chain: string;
     asset: string;
     address?: string;
+    paymentTag?: string;
     amountCrypto?: string;
   }): Promise<Deposit> {
     const row: StoredDeposit = {
@@ -150,6 +151,7 @@ export class InMemoryBillingRepository implements BillingRepository {
       chain: deposit.chain,
       asset: deposit.asset,
       address: deposit.address,
+      paymentTag: deposit.paymentTag,
       amountCrypto: deposit.amountCrypto,
       createdAt: new Date().toISOString(),
     };

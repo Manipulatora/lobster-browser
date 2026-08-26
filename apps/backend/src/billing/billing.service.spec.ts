@@ -66,7 +66,7 @@ function mailStub(): MailStub {
   } as unknown as MailStub;
 }
 
-function paymentsStub(): PaymentProvider {
+function paymentsStub(paymentTag?: string): PaymentProvider {
   let n = 0;
   return {
     name: 'stub',
@@ -77,6 +77,9 @@ function paymentsStub(): PaymentProvider {
       return {
         providerPaymentId: `pay-${n}`,
         address: '0xabc',
+        // Absent unless a test asks for one — the ordinary chain has no tag, and a stub that
+        // always carried one would let a plain `paymentTag: 'x'` pass for threading it through.
+        paymentTag,
         amountCrypto: '10.0',
         asset: 'USDT',
         chain: 'usdtbsc',
@@ -87,10 +90,14 @@ function paymentsStub(): PaymentProvider {
   };
 }
 
-function makeService(): { svc: BillingService; repo: InMemoryBillingRepository; mail: MailStub } {
+function makeService(paymentTag?: string): {
+  svc: BillingService;
+  repo: InMemoryBillingRepository;
+  mail: MailStub;
+} {
   const repo = new InMemoryBillingRepository();
   const mail = mailStub();
-  const svc = new BillingService(repo, teamsStub(), paymentsStub(), usersStub(), mail);
+  const svc = new BillingService(repo, teamsStub(), paymentsStub(paymentTag), usersStub(), mail);
   return { svc, repo, mail };
 }
 
@@ -459,6 +466,26 @@ test('a caller cannot spend a team they do not belong to', async () => {
 });
 
 // --- Deposits ----------------------------------------------------------------
+
+test('a memo chain hands the destination tag to the user and keeps it on the row', async () => {
+  // The tag is what identifies the depositor: those chains share ONE deposit address across every
+  // payment, so a transfer that arrives without it credits nobody and cannot be recovered. It has
+  // to reach the page the user pays from, and it has to survive on the row a dispute is settled
+  // against — losing it at either end loses the money.
+  const { svc, repo } = makeService('648105598');
+  const instruction = await svc.createDeposit(USER, 5_000, 'usdtbsc');
+
+  assert.equal(instruction.paymentTag, '648105598');
+  assert.equal((await repo.listDeposits(TEAM, 10))[0].paymentTag, '648105598');
+});
+
+test('a chain without a tag carries none, so the page has nothing to render', async () => {
+  const { svc, repo } = makeService();
+  const instruction = await svc.createDeposit(USER, 5_000, 'usdtbsc');
+
+  assert.equal(instruction.paymentTag, undefined);
+  assert.equal((await repo.listDeposits(TEAM, 10))[0].paymentTag, undefined);
+});
 
 test('a deposit credits once, and duplicate webhook deliveries are no-ops', async () => {
   const { svc, repo } = makeService();

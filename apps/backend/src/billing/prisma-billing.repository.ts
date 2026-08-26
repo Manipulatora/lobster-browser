@@ -169,6 +169,7 @@ export class PrismaBillingRepository implements BillingRepository {
     chain: string;
     asset: string;
     address?: string;
+    paymentTag?: string;
     amountCrypto?: string;
   }): Promise<Deposit> {
     const row = await this.prisma.deposit.create({
@@ -180,6 +181,7 @@ export class PrismaBillingRepository implements BillingRepository {
         chain: deposit.chain,
         asset: deposit.asset,
         address: deposit.address,
+        paymentTag: deposit.paymentTag,
         amountCrypto: deposit.amountCrypto,
       },
     });
@@ -641,7 +643,9 @@ function toDeposit(row: any): Deposit {
     asset: row.asset,
     // Decimal → string, never Number: a wei-precision value loses its low digits as a float.
     amountCrypto: row.amountCrypto ? row.amountCrypto.toString() : undefined,
+    amountCents: row.amountCents ?? undefined,
     address: row.address ?? undefined,
+    paymentTag: row.paymentTag ?? undefined,
     txHash: row.txHash ?? undefined,
     creditedCents: row.creditedCents ?? undefined,
     createdAt: row.createdAt.toISOString(),

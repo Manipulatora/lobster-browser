@@ -26,6 +26,9 @@ import type {
 /** How often to re-check a pending deposit while the address is on screen. */
 const POLL_MS = 15_000;
 
+/** Neutral coin glyph substituted when a coin's own icon file is missing. */
+const FALLBACK_COIN_ICON = '/coins/generic.svg';
+
 /**
  * Fraction knocked off when twelve months are paid up front.
  *
@@ -77,7 +80,7 @@ export class BillingPage {
   protected readonly instruction = signal<DepositInstruction | null>(null);
   protected readonly depositError = signal<string | null>(null);
   protected readonly creatingDeposit = signal(false);
-  protected readonly copied = signal<'address' | 'amount' | null>(null);
+  protected readonly copied = signal<'address' | 'amount' | 'tag' | null>(null);
 
   /**
    * The pre-pay confirmation step. Holds the exact figures the user is about to commit to, frozen
@@ -225,6 +228,7 @@ export class BillingPage {
       return;
     }
     await this.billing.load();
+    this.restoreOpenDeposit();
     // Preselect the first recommended (cheapest) rail.
     const first = this.recommendedChains()[0];
     if (first && !this.chainCode()) this.chainCode.set(first.code);
@@ -427,14 +431,64 @@ export class BillingPage {
     this.creatingDeposit.set(true);
     try {
       const instruction = await this.billing.createDeposit(amountCents, code);
+      // CLEARED BEFORE THE NEW INSTRUCTION IS SHOWN, not after the new code is ready. `renderQr`
+      // resolves a dynamic import first, so without this the previous deposit's code stays on
+      // screen across that gap — and on a memo chain, where renderQr is deliberately never called,
+      // it would stay forever: the template prefers the QR branch, so a stale code for a DIFFERENT
+      // chain's address would render as the fastest path on the page and the "no QR on this
+      // network" notice would never appear.
+      this.qr.set(null);
       this.instruction.set(instruction);
-      void this.renderQr(instruction.address);
+      // NO QR ON A CHAIN THAT NEEDS A MEMO/TAG. The code encodes the address and nothing else, so
+      // scanning it on a chain where the tag is what identifies the depositor produces precisely
+      // the untagged transfer that credits nobody and cannot be recovered — and it would be the
+      // fastest, most inviting path on the page. There is no address-and-tag encoding that every
+      // wallet reads, so the pair is copied by hand instead of one half being made effortless.
+      if (!instruction.paymentTag) void this.renderQr(instruction.address);
       this.startPolling();
     } catch (err) {
       this.depositError.set(err instanceof Error ? err.message : 'could not create a deposit');
     } finally {
       this.creatingDeposit.set(false);
     }
+  }
+
+  /**
+   * Put a still-open deposit back on screen after a reload.
+   *
+   * The instruction only ever lived in memory, so closing the tab erased it — and on a memo chain
+   * that is asymmetric in the worst possible way: the ADDRESS is already in the user's wallet or
+   * clipboard, while the tag that has to travel with it is gone from every pixel in the product.
+   * The obvious next action is to send to the address alone, which on a shared-address chain
+   * credits nobody and cannot be reversed. The row already carries both halves, so the fix is to
+   * render them again rather than to warn harder.
+   *
+   * Only a deposit still waiting on funds is restored; a confirmed or expired one is history, and
+   * showing its address invites a second transfer to an address that is no longer being watched.
+   */
+  private restoreOpenDeposit(): void {
+    if (this.instruction()) return;
+    const open = this.deposits().find(
+      (d) =>
+        (d.status === 'pending' || d.status === 'confirming') &&
+        !!d.address &&
+        !!d.amountCrypto &&
+        d.amountCents !== undefined,
+    );
+    if (!open) return;
+    this.instruction.set({
+      depositId: open.id,
+      address: open.address!,
+      paymentTag: open.paymentTag,
+      amountCrypto: open.amountCrypto!,
+      asset: open.asset,
+      chain: open.chain,
+      amountCents: open.amountCents!,
+    });
+    // Same rule as a fresh deposit: no scannable address-only code on a chain whose tag is half
+    // the destination.
+    if (!open.paymentTag) void this.renderQr(open.address!);
+    this.startPolling();
   }
 
   protected dismissInstruction(): void {
@@ -452,7 +506,29 @@ export class BillingPage {
     this.pickerOpen.update((open) => !open);
   }
 
-  /** Encode the address locally. A failure leaves the address text, which is the payable thing. */
+  /**
+   * A coin icon that fails to load degrades to a neutral glyph instead of nothing.
+   *
+   * A slug with no file behind it renders as a bare empty box, and on the network badge that is
+   * worse than ugly: the badge is the only thing separating USDT-on-Tron from USDT-on-BNB, and a
+   * blank one reads as "this asset has no network" rather than "this icon is missing". Sending on
+   * the wrong chain loses the deposit, so the failure has to stay visible.
+   *
+   * The guard is what stops a loop: if the fallback itself is ever missing, its own error event
+   * arrives with `src` already pointing at it and the handler leaves it alone.
+   */
+  protected onIconError(event: Event): void {
+    const img = event.target as HTMLImageElement | null;
+    if (!img || img.getAttribute('src') === FALLBACK_COIN_ICON) return;
+    img.src = FALLBACK_COIN_ICON;
+  }
+
+  /**
+   * Encode the address locally. A failure leaves the address text, which is the payable thing.
+   *
+   * Only reached for chains with no memo/tag — see `createDeposit` for why a bare-address QR is a
+   * money-loss hazard on the others.
+   */
   private async renderQr(address: string): Promise<void> {
     try {
       const { toDataURL } = await import('qrcode');
@@ -462,7 +538,7 @@ export class BillingPage {
     }
   }
 
-  protected async copy(text: string, what: 'address' | 'amount'): Promise<void> {
+  protected async copy(text: string, what: 'address' | 'amount' | 'tag'): Promise<void> {
     try {
       await this.document.defaultView?.navigator.clipboard.writeText(text);
       this.copied.set(what);
@@ -527,6 +603,9 @@ export class BillingPage {
           asset: mine.asset,
         });
         this.instruction.set(null);
+        // The instruction is gone, so its code must go with it: `dismissSettled` returns to step 1
+        // with these signals intact, and a leftover code is what the next deposit would inherit.
+        this.qr.set(null);
         this.stopPolling();
       });
     }, POLL_MS);

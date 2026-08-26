@@ -27,7 +27,20 @@ import type { DepositChainOption } from '@lobster/shared-types';
  * ADDING AN ENTRY MEANS CONFIRMING ITS NETWORK, not just that the code resolves. The code alone
  * does not say which chain the address will be on — NOWPayments has a bare `usdc` whose network is
  * only visible through the authenticated `/v1/full-currencies` — and a wrong `chain` label here
- * tells the user to send on a chain the address cannot receive, which loses the deposit.
+ * tells the user to send on a chain the address cannot receive, which loses the deposit. Two codes
+ * below are actively misleading and were each read off `/v1/full-currencies` one at a time:
+ * `usdcarc20` reads like Arbitrum and its network is `avaxc`, the AVALANCHE C-CHAIN (`usdtarb` is
+ * the real Arbitrum one), and bare `avax` is the X-CHAIN asset, not the C-Chain most people mean.
+ *
+ * ADDING AN ENTRY ALSO MEANS CHECKING IT IS PAYABLE. `/v1/full-currencies` carries both `enable`
+ * and `available_for_payment`, and a currency can be enabled while refusing payments — `busd` is
+ * enabled with `available_for_payment: false` today, so it is deliberately absent.
+ *
+ * AND IT MEANS SHIPPING ITS ICONS. `icon` and `networkIcon` are slugs resolved as
+ * `apps/web/public/coins/<slug>.svg`. A slug with no file behind it no longer vanishes — the picker
+ * swaps in the neutral `generic.svg` — but that fallback makes an omission visible, not harmless:
+ * a grey disc where a network badge belongs still fails to tell USDT-on-Tron from USDT-on-BNB, and
+ * the badge is the only thing on the row that does. Ship the icon.
  */
 export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
   // --- Stablecoins on cheap rails: what most people should use --------------
@@ -101,15 +114,106 @@ export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
     recommended: true,
     stable: true,
   },
+  {
+    code: 'usdtop',
+    chain: 'Optimism',
+    asset: 'USDT',
+    icon: 'usdt',
+    networkIcon: 'op',
+    networkFeeUsd: 0.01,
+    recommended: true,
+    stable: true,
+  },
+  {
+    code: 'usdcop',
+    chain: 'Optimism',
+    asset: 'USDC',
+    icon: 'usdc',
+    networkIcon: 'op',
+    networkFeeUsd: 0.01,
+    recommended: true,
+    stable: true,
+  },
+  {
+    code: 'usdtton',
+    chain: 'TON',
+    asset: 'USDT',
+    icon: 'usdt',
+    networkIcon: 'ton',
+    networkFeeUsd: 0.01,
+    recommended: true,
+    stable: true,
+  },
+  {
+    // The Arbitrum USDT. Not to be confused with `usdcarc20` below, which is Avalanche.
+    code: 'usdtarb',
+    chain: 'Arbitrum One',
+    asset: 'USDT',
+    icon: 'usdt',
+    networkIcon: 'arbitrum',
+    networkFeeUsd: 0.02,
+    recommended: true,
+    stable: true,
+  },
+  {
+    // `arc20` reads like Arbitrum and is not: `/v1/full-currencies` gives this code the network
+    // `avaxc`, the Avalanche C-Chain. An Arbitrum address cannot receive it.
+    code: 'usdcarc20',
+    chain: 'Avalanche C-Chain',
+    asset: 'USDC',
+    icon: 'usdc',
+    networkIcon: 'avax',
+    networkFeeUsd: 0.03,
+    recommended: true,
+    stable: true,
+  },
 
-  // --- Native coins ---------------------------------------------------------
-  // No `networkIcon`: the asset IS the chain, so a badge would repeat the icon underneath it.
+  // --- Native coins and other non-pegged assets -----------------------------
+  // A native coin carries no `networkIcon`: the asset IS the chain, so a badge would repeat the
+  // icon underneath it. Tokens down here (LINK, SHIB) do carry one, because their chain is a
+  // separate fact from the coin.
   {
     code: 'sol',
     chain: 'Solana',
     asset: 'SOL',
     icon: 'sol',
     networkFeeUsd: 0.001,
+    recommended: false,
+    stable: false,
+  },
+  {
+    code: 'xlm',
+    chain: 'Stellar',
+    asset: 'XLM',
+    icon: 'xlm',
+    networkFeeUsd: 0.001,
+    recommended: false,
+    stable: false,
+  },
+  {
+    code: 'near',
+    chain: 'NEAR',
+    asset: 'NEAR',
+    icon: 'near',
+    networkFeeUsd: 0.001,
+    recommended: false,
+    stable: false,
+  },
+  {
+    code: 'apt',
+    chain: 'Aptos',
+    asset: 'APT',
+    icon: 'apt',
+    networkFeeUsd: 0.001,
+    recommended: false,
+    stable: false,
+  },
+  {
+    code: 'sui',
+    chain: 'Sui',
+    asset: 'SUI',
+    icon: 'sui',
+    networkFeeUsd: 0.002,
     recommended: false,
     stable: false,
   },
@@ -132,15 +236,6 @@ export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
     stable: false,
   },
   {
-    code: 'xlm',
-    chain: 'Stellar',
-    asset: 'XLM',
-    icon: 'xlm',
-    networkFeeUsd: 0.001,
-    recommended: false,
-    stable: false,
-  },
-  {
     code: 'xrp',
     chain: 'XRP Ledger',
     asset: 'XRP',
@@ -154,6 +249,25 @@ export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
     chain: 'Bitcoin Cash',
     asset: 'BCH',
     icon: 'bch',
+    networkFeeUsd: 0.01,
+    recommended: false,
+    stable: false,
+  },
+  {
+    // NOWPayments names this one "Gram (ex Ton/TonCoin)"; the asset users know is TON.
+    code: 'ton',
+    chain: 'TON',
+    asset: 'TON',
+    icon: 'ton',
+    networkFeeUsd: 0.01,
+    recommended: false,
+    stable: false,
+  },
+  {
+    code: 'atom',
+    chain: 'Cosmos Hub',
+    asset: 'ATOM',
+    icon: 'atom',
     networkFeeUsd: 0.01,
     recommended: false,
     stable: false,
@@ -181,6 +295,17 @@ export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
     chain: 'Monero',
     asset: 'XMR',
     icon: 'xmr',
+    networkFeeUsd: 0.02,
+    recommended: false,
+    stable: false,
+  },
+  {
+    // The bare `avax` code is the X-Chain asset — `/v1/full-currencies` gives it the network
+    // `xchain`, not `avaxc`. A C-Chain (0x…) address cannot receive it.
+    code: 'avax',
+    chain: 'Avalanche X-Chain',
+    asset: 'AVAX',
+    icon: 'avax',
     networkFeeUsd: 0.02,
     recommended: false,
     stable: false,
@@ -240,6 +365,16 @@ export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
     recommended: false,
     stable: false,
   },
+  {
+    code: 'shib',
+    chain: 'Ethereum (ERC20)',
+    asset: 'SHIB',
+    icon: 'shib',
+    networkIcon: 'eth',
+    networkFeeUsd: 2.5,
+    recommended: false,
+    stable: false,
+  },
 
   // --- Stablecoins on rails that are popular but genuinely expensive --------
   {
@@ -262,6 +397,16 @@ export const DEPOSIT_CHAINS: readonly DepositChainOption[] = [
     recommended: false,
     stable: true,
   },
+  {
+    code: 'dai',
+    chain: 'Ethereum (ERC20)',
+    asset: 'DAI',
+    icon: 'dai',
+    networkIcon: 'eth',
+    networkFeeUsd: 3.0,
+    recommended: false,
+    stable: true,
+  },
 ];
 
 /** Look up a chain by its processor code. Unknown codes are rejected, never forwarded. */
@@ -275,6 +420,14 @@ export function depositChainByCode(code: string): DepositChainOption | undefined
  * Below this the economics stop working for the user rather than for us: the processor enforces its
  * own per-currency minimum, and on an expensive chain the network fee alone can approach the
  * deposit. $5 keeps a Light package (one deposit, $10) two deposits away at worst.
+ *
+ * IT IS NOT THE ONLY FLOOR, and on some coins it is not the binding one. The processor's own
+ * per-currency minimum is quoted by `/v1/min-amount` and varies by orders of magnitude: measured in
+ * USD it was ~$0.02 on `usdcbase` but $11.46 on `usdttrc20` and $20.62 on `btc`. A $5–$20 BTC
+ * deposit therefore passes this check and is rejected by the processor with AMOUNT_MINIMAL_ERROR
+ * only after the user has picked a coin, which the production journal shows happening for real.
+ * Fixing it means surfacing the live per-currency minimum in the picker, not raising this constant
+ * to the worst coin's floor — that would price everyone out of the cheap rails to protect BTC.
  */
 export const MIN_DEPOSIT_CENTS = 500;
 
