@@ -23,9 +23,6 @@
         "startMenuFolder": "Lobster Browser",
         "installerHooks": "installer/hooks.nsh"
       }
-    },
-    "resources": {
-      "resources/lobium": "lobium"
     }
   }
 }

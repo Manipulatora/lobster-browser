@@ -533,23 +533,20 @@ fn explicit_lobium_bin() -> Result<Option<PathBuf>, String> {
     explicit_lobium_bin_from(configured, LOBIUM_BIN_IS_MANAGED.load(Ordering::Acquire))
 }
 
-/// Whether the Lobium engine is installed, and where it was expected.
+/// Whether the Lobium engine is installed, and where it is expected.
 ///
-/// The package now CARRIES the engine on both platforms, so `present: false` no longer means "first
-/// run, fetch it" — it means the installation is incomplete, and that is what EngineGate says. The
-/// reported directory therefore has to be the one a user should go and look at: `<resources>/lobium`
-/// for an embedded install, not the per-user runtime the downloader model used. Naming the latter
-/// while the copy says "files removed from the installation folder" sent people to a directory that,
-/// on an embedded install, was never created and never involved.
+/// The installer does NOT carry the engine — it is ~37 MB and the engine is ~300 MB compressed — so
+/// `present: false` is the ordinary first-run state, not damage, and EngineGate responds by
+/// downloading rather than by telling the user to reinstall.
+///
+/// The reported directory is therefore the per-user runtime the download installs into. A build
+/// that still embeds a runtime beside the app is honoured first by `ensure_lobium_env`, and reports
+/// as present through the `explicit` branch below without ever reaching this path.
 #[tauri::command]
 fn engine_status(app: tauri::AppHandle) -> EngineStatus {
-    // Where the engine BELONGS in this build: the bundled runtime beside the app. Falls back to the
-    // per-user runtime only when there is no resource dir to name, so the message always points at a
-    // real place rather than at an empty string.
+    // Where a downloaded engine goes, which is the only place `provision_engine` writes.
     let expected_dir = || {
-        app_resource_dir(&app)
-            .map(|resources| resources.join("lobium"))
-            .or_else(user_engine_runtime_dir)
+        user_engine_runtime_dir()
             .map(|dir| dir.to_string_lossy().into_owned())
             .unwrap_or_default()
     };

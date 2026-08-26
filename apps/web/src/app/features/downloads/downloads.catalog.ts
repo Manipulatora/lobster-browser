@@ -20,8 +20,12 @@
  * to prevent. Flipping `published` stays manual, because only a human knows the asset is uploaded.
  *
  * Stated rather than fetched, so the page renders identically on the server (it is prerendered) and
- * on the client, and so a GitHub API outage cannot blank the one page whose whole job is handing
- * someone an installer.
+ * on the client, and so an API outage cannot blank the one page whose whole job is handing someone
+ * an installer.
+ *
+ * DEPLOY ORDER MATTERS. The artifacts are uploaded to the server BEFORE this page is deployed.
+ * Publishing the page first points every visitor at a 404, and the `published` flag below is the
+ * only thing standing between a release and exactly that.
  */
 
 /** Product version shown to the user. Matches the Tauri package version. The ONLY thing to bump. */
@@ -68,15 +72,18 @@ export const DOWNLOADS: readonly DownloadArtifact[] = [
     name: 'Windows',
     file: WINDOWS_INSTALLER,
     url: `${DOWNLOAD_BASE}/${WINDOWS_INSTALLER}`,
-    size: '29.3 MB',
-    published: true,
+    size: '',
+    // The Windows installer must be rebuilt before it can be published: the last one embedded the
+    // engine (~230 MB) and its manifest points at the old GitHub engine URLs. See
+    // docs/qa/2026-08-26-windows-engine-rebuild.md.
+    published: false,
   },
   {
     platform: 'linux',
     name: 'Linux',
     file: LINUX_INSTALLER,
     url: `${DOWNLOAD_BASE}/${LINUX_INSTALLER}`,
-    size: '159 MB',
+    size: '53.4 MB',
     published: true,
   },
 ];

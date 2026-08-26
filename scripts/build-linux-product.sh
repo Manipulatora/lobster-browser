@@ -107,28 +107,33 @@ rm -rf "$ROOT/apps/desktop/src-tauri/resources/fonts"
 # Keep dynamic linker happy for a copied system node (usually fine on same distro).
 "$NODE_DST/bin/node" -e "console.log('vendored node ok', process.version)"
 
-# THE ENGINE RIDES IN THE PACKAGE, and the app finds it before it ever consults the manifest:
-# ensure_lobium_env probes <resources>/lobium/chrome first, then the user runtime dir. Staging it
-# here is what makes EngineGate's "a missing engine means the install is damaged" true on Linux —
-# without it the .deb carries no engine at all, the gate reports one missing, and the only remedy it
-# offers (reinstall) can never supply one. The manifest entry stays as the update path and as the
-# fallback for a runtime deleted after install.
-LOBIUM_DST="$ROOT/apps/desktop/src-tauri/resources/lobium"
-rm -rf "$LOBIUM_DST"
-# Verified BEFORE it is embedded. An installer is the worst place to discover a bad engine: every
-# user gets the same broken bytes and only finds out at their first profile launch.
+# THE ENGINE DOES NOT RIDE IN THE PACKAGE. It is ~300 MB compressed against a ~37 MB app, and
+# embedding it made the .deb 330 MB for a product whose competitors ship under 50 MB. It is
+# downloaded on first run instead (provision_engine -> EngineGate), from the URL and SHA-256 pinned
+# in resources/engine-manifest.json, into a per-user runtime directory.
+#
+# What IS still verified here is the runtime this host just packaged, because that is the artifact
+# uploaded for clients to download - a broken one must fail on the build host, not on a user's first
+# launch after a 300 MB transfer.
+#
+# Any engine a previous embedded build left in the resource tree is removed, or tauri would keep
+# bundling a stale 800 MB runtime that nothing declares any more.
+rm -rf "$ROOT/apps/desktop/src-tauri/resources/lobium"
 if [[ ! -x "$DIST/lobium-runtime/chrome" ]]; then
-  echo "error: no packaged Lobium runtime at $DIST/lobium-runtime/chrome to embed" >&2
+  echo "error: no packaged Lobium runtime at $DIST/lobium-runtime/chrome to publish" >&2
   exit 1
 fi
 "$DIST/lobium-runtime/chrome" --version >/dev/null 2>&1 || {
   echo "error: the packaged runtime at $DIST/lobium-runtime/chrome does not execute" >&2; exit 1; }
 if [[ ! -f "$DIST/lobium-runtime/fonts/font-pack.manifest.json" ]]; then
-  echo "error: the packaged runtime has no font pack; refusing to embed it" >&2
+  echo "error: the packaged runtime has no font pack; refusing to publish it" >&2
   exit 1
 fi
-cp -a "$DIST/lobium-runtime" "$LOBIUM_DST"
-echo "    resources/lobium  $(du -sh "$LOBIUM_DST" | cut -f1)"
+if file "$DIST/lobium-runtime/chrome" | grep -q "not stripped"; then
+  echo "error: the packaged runtime is not stripped; it would ship ~237 MB of symbol table" >&2
+  exit 1
+fi
+echo "    engine (downloaded on first run)  $(du -sh "$DIST/lobium-runtime" | cut -f1)"
 
 # Lobee: the first-party in-browser agent side-panel extension (React/TS/Tailwind, MV3), auto-loaded
 # into every profile. Rebuild it from source (packages/lobee-app → packages/lobee) so the shipped

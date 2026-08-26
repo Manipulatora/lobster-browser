@@ -9,14 +9,16 @@
 
     WHAT THIS PRODUCES
     The installer contains the UI, the Rust core, the local automation API, the profile/proxy/template
-    SQLite stores, the bundled sidecar, the Lobee extension AND the Lobium engine (~840 MB unpacked),
-    staged into resources\lobium by step 3b. The app resolves the engine at startup from, in order,
-    LOBSTER_LOBIUM_BIN, <resources>\lobium\chrome.exe, then %LOCALAPPDATA%\lobster\lobium\chrome.exe,
-    and exports LOBSTER_LOBIUM_BIN/_DIR so the sidecar inherits them - so the embedded copy wins on a
-    normal install and first run needs no network at all.
-    The win-x64 engine-manifest entry is no longer what makes the installer work. It remains the
-    fallback for a runtime deleted or quarantined after setup, which ensure_lobium_env adopts only
-    when it matches the manifest stamp.
+    SQLite stores, the bundled sidecar and the Lobee extension. It does NOT contain the Lobium engine:
+    that is ~300 MB compressed against a ~35 MB app, and embedding it produced an installer six times
+    the size of what competitors in this category ship. The engine is downloaded on first run from the
+    URL and SHA-256 pinned in resources\engine-manifest.json.
+    The app resolves the engine at startup from, in order, LOBSTER_LOBIUM_BIN,
+    <resources>\lobium\chrome.exe (honoured if some build does embed one), then
+    %LOCALAPPDATA%\lobster\lobium\chrome.exe, and exports LOBSTER_LOBIUM_BIN/_DIR so the sidecar
+    inherits them.
+    The win-x64 engine-manifest entry is therefore what makes the installer USABLE. A missing or
+    unreachable one means every Windows first run fails after the user has already installed.
 
     THE FONT PACK SHIPS INSIDE THE ENGINE, so it is in the installer too.
     Isolation is native (the engine filters DirectWrite / FontDataService lookups against the persona
@@ -159,66 +161,42 @@ try { node scripts\build-lobee.mjs; if ($LASTEXITCODE -ne 0) { Die 'build-lobee.
 finally { Pop-Location }
 Ok 'resources\lobee'
 
-Step '[3b/4] Stage the Lobium engine into resources'
-# THE INSTALLER CARRIES THE ENGINE. It used to ship without one and download ~840 MB on first run,
-# which put a "download the browser" gate in front of a browser the user had just installed, and made
-# the product's one core action depend on a URL, a release asset and the user's network at exactly the
-# moment they had no reason to expect any of that. Embedding it makes the install self-contained: the
-# app resolves <resources>/lobium/chrome.exe (ensure_lobium_env) before it ever consults the manifest,
-# so there is no first-run fetch and no gate.
+Step '[3b/4] The engine is NOT staged into resources'
+# THE INSTALLER DOES NOT CARRY THE ENGINE. It briefly did, and the result was an installer six times
+# the size of what this category ships - the engine is ~300 MB compressed against a ~35 MB app. It is
+# downloaded on first run instead, from the URL and SHA-256 in resources\engine-manifest.json, into
+# %LOCALAPPDATA%\lobster\lobium.
 #
-# The cost is an installer that carries the engine, and it is stated rather than discovered: the
-# runtime is ~0.6 GB on disk and NSIS lzma brings the installer to a few hundred MB.
-$engineSource = $env:LOBSTER_ENGINE_RUNTIME_DIR
-if (-not $engineSource) {
-    # Newest packaged runtime that actually has a chrome.exe, then the unversioned dev output.
-    $candidates = @(
-        (Get-ChildItem (Join-Path $Root 'dist-win') -Directory -EA SilentlyContinue |
-            Where-Object { $_.Name -like 'lobium-runtime-*' } |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName),
-        (Join-Path $Root 'dist-win\lobium-runtime')
-    ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'chrome.exe')) }
-    $engineSource = $candidates | Select-Object -First 1
-}
-if (-not $engineSource) {
-    Die ('no packaged Lobium runtime found to embed. Build one first:' + [Environment]::NewLine +
-         '  powershell -File scripts\package-lobium-runtime.ps1 -SourceDir <out\Lobium> ' +
-         '-FontPack <verified-pack> -FontScanner <fc-scan.exe> -OutDir dist-win\lobium-runtime-<version>' +
-         [Environment]::NewLine + 'or set LOBSTER_ENGINE_RUNTIME_DIR to an existing one.')
-}
-# Verify the runtime BEFORE embedding it: an installer is the worst place to discover a bad engine,
-# because every user gets the same broken bytes and the failure surfaces at first profile launch.
-Push-Location $Root
-try {
-    node scripts\verify-lobium-runtime.mjs $engineSource
-    if ($LASTEXITCODE -ne 0) { Die "the runtime at $engineSource did not verify; refusing to embed it" }
-} finally { Pop-Location }
+# Any runtime an earlier embedded build left behind is removed here: tauri bundles whatever is in the
+# resource tree, so a leftover directory would silently put 800 MB back into the installer.
 $engineDest = Join-Path $Resources 'lobium'
-if (Test-Path $engineDest) { Remove-Item -LiteralPath $engineDest -Recurse -Force }
-Write-Host "    copying $engineSource -> resources\lobium ..."
-Copy-Item -LiteralPath $engineSource -Destination $engineDest -Recurse -Force
-$engineBytes = (Get-ChildItem $engineDest -Recurse -File | Measure-Object -Property Length -Sum).Sum
-Ok ('resources\lobium  ({0:N1} GB)' -f ($engineBytes / 1GB))
+if (Test-Path $engineDest) {
+    Write-Host '    removing a runtime left by an earlier embedded build ...'
+    Remove-Item -LiteralPath $engineDest -Recurse -Force
+}
+Ok 'engine excluded (downloaded on first run)'
 
 Step 'Resource inventory (tauri.conf.json bundle.resources)'
-foreach ($r in @('sidecar', 'node', 'lobee', 'lobium', 'engine-manifest.json')) {
+foreach ($r in @('sidecar', 'node', 'lobee', 'engine-manifest.json')) {
     $p = Join-Path $Resources $r
     if (Test-Path $p) { Ok $r } else { Die "resources\$r is missing - tauri-build will refuse to bundle" }
 }
 Write-Host '    --  fonts: intentionally absent on Windows (see the header comment)' -ForegroundColor DarkGray
 
-# The installer CARRIES the engine (staged above), so a user can launch a profile with no network at
-# all. The manifest entry is now only a fallback for a runtime that is somehow missing from the
-# install, and for updating an engine without reinstalling - it is no longer what makes the installer
-# usable, so its absence is a note rather than a release blocker.
+# The installer does NOT carry the engine, so this entry is what makes it usable: without a reachable
+# win-x64 URL every Windows first run fails after the user has already installed. That is a release
+# blocker, not a note.
 $manifest = Get-Content (Join-Path $Resources 'engine-manifest.json') -Raw | ConvertFrom-Json
 $winEntry = $manifest.platforms.'win-x64'
-if ($winEntry -and $winEntry.url) {
-    Ok "engine manifest serves win-x64 ($($winEntry.version))"
-} else {
-    Write-Host '    --  engine manifest has no win-x64 entry: the embedded engine still makes this' -ForegroundColor Yellow
-    Write-Host '        installer fully usable; only out-of-band engine updates are unavailable.' -ForegroundColor DarkGray
+if (-not ($winEntry -and $winEntry.url -and $winEntry.sha256)) {
+    Die ('engine-manifest.json has no usable win-x64 entry (url + sha256). The installer does not ' +
+         'carry an engine, so every first run would fail. Publish the engine and run ' +
+         'scripts\bump-engine-version.mjs before building a release.')
 }
+if ($winEntry.stale) {
+    Write-Host "    !!  win-x64 entry is marked stale: $($winEntry.stale)" -ForegroundColor Yellow
+}
+Ok "engine manifest serves win-x64 ($($winEntry.version))"
 
 # ---------------------------------------------------------------------------------------------------
 if ($SkipBuild) { Step 'Stopping before the build (-SkipBuild)'; exit 0 }

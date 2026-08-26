@@ -35,6 +35,44 @@
   SetDetailsPrint none
 !macroend
 
+; ---------------------------------------------------------------------------
+; Leave nothing behind that the user did not make.
+;
+; The browser engine is downloaded on first run into %LOCALAPPDATA%\lobster\lobium rather than
+; shipped in the installer, so NSIS has no uninstall log entry for it. Without this, uninstalling
+; leaves ~800 MB on disk with no visible owner and no way for the user to know what it was. It is a
+; pure cache - re-downloadable, identical for everyone, containing nothing the user created - so it
+; is removed unconditionally and silently.
+;
+; PROFILES ARE DIFFERENT and are never removed without being asked. They are cookies, sessions,
+; saved logins and configured fingerprints - the user's actual work, often not reproducible. Plenty
+; of people uninstall to reinstall a fixed build and would be destroyed by a silent wipe. So the
+; question is asked once, defaults to NO, and is skipped entirely in a silent uninstall, where
+; there is nobody to answer it and consent cannot be assumed.
+; ---------------------------------------------------------------------------
 !macro NSIS_HOOK_POSTUNINSTALL
   SetDetailsPrint both
+
+  ; The engine cache: always.
+  RMDir /r "$LOCALAPPDATA\lobster\lobium"
+  RMDir "$LOCALAPPDATA\lobster"
+
+  ; Profiles and settings: only on an explicit yes from a real person.
+  ;
+  ; Plain NSIS branches rather than LogicLib's ${If}/${FileExists}: this macro is injected into a
+  ; generated installer.nsi whose include list is Tauri's to change, and a missing !include breaks
+  ; the whole installer build rather than just this block. IfFileExists/MessageBox are core
+  ; instructions that are always available.
+  ;
+  ; Note $APPDATA, not $LOCALAPPDATA: Tauri's app_data_dir() is dirs::data_dir()/<identifier>, which
+  ; on Windows is Roaming. The engine above genuinely is under Local - the two are different
+  ; directories and deleting the wrong one would either miss 800 MB or destroy the profiles.
+  IfSilent lobster_keep_data
+  IfFileExists "$APPDATA\com.lobster.browser\*.*" 0 lobster_keep_data
+  MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 \
+    "Also delete your Lobster profiles and settings?$\r$\n$\r$\nThis removes every profile, its cookies and its saved logins. It cannot be undone.$\r$\n$\r$\nChoose No to keep them for a future reinstall." \
+    IDYES lobster_purge_data IDNO lobster_keep_data
+  lobster_purge_data:
+    RMDir /r "$APPDATA\com.lobster.browser"
+  lobster_keep_data:
 !macroend

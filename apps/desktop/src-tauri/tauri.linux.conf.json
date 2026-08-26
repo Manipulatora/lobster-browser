@@ -4,8 +4,10 @@
     "targets": [
       "deb"
     ],
-    "resources": {
-      "resources/lobium": "lobium"
+    "linux": {
+      "deb": {
+        "postRemoveScript": "installer/deb-postrm.sh"
+      }
     }
   }
 }

@@ -2389,62 +2389,121 @@ code {
   padding: 24px;
   background: var(--bg, #0f1117);
 }
-.engine-gate__card {
+/* No card. A bordered panel is the frame you put around a QUESTION, and this screen asks nothing —
+   it is the product opening. The mark and the bar sit directly on the app background, which is also
+   what makes the transition into the app itself read as continuous rather than as a dialog closing. */
+.engine-gate__stage {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 16px;
-  max-width: 460px;
+  gap: 40px;
   width: 100%;
-  padding: 32px;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--surface);
-  text-align: center;
+  max-width: 340px;
 }
 .engine-gate__logo {
-  height: 40px;
+  height: 56px;
   width: auto;
+  /* Breathe, so a bar that may sit here for a minute is not static. */
+  animation: engine-gate-breathe 3.2s ease-in-out infinite;
 }
-.engine-gate__desc {
-  color: var(--text-soft);
-  font-size: var(--fs-sm);
-  line-height: 1.5;
-  margin: 0;
-}
-.engine-gate__status {
-  color: var(--text-muted);
-  font-size: var(--fs-sm);
-  font-variant-numeric: tabular-nums;
-  margin: 0;
+@keyframes engine-gate-breathe {
+  0%,
+  100% {
+    opacity: 0.92;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.03);
+  }
 }
 .engine-gate__bar {
+  position: relative;
   width: 100%;
-  height: 8px;
+  height: 30px;
   border-radius: 999px;
-  background: var(--active-muted);
+  background: color-mix(in srgb, var(--accent, #7c3aed) 12%, transparent);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 28%);
   overflow: hidden;
 }
 .engine-gate__fill {
   height: 100%;
   border-radius: 999px;
-  background: var(--accent, #7c3aed);
-  transition: width 0.2s ease;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent, #7c3aed) 78%, #fff 22%),
+    var(--accent, #7c3aed)
+  );
+  /* Longer than a normal control transition: chunked HTTP progress arrives in bursts, and easing
+     over them is what turns a twitching bar into a moving one. */
+  transition: width 0.45s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+/* A slow sheen travelling the filled part, so the bar is alive even while a large chunk is in
+   flight and `width` has not changed for a second or two. */
+.engine-gate__fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 26%), transparent);
+  transform: translateX(-100%);
+  animation: engine-gate-sheen 1.9s ease-in-out infinite;
 }
 .engine-gate__fill--indet {
-  width: 40%;
-  animation: engine-gate-indet 1.1s ease-in-out infinite;
+  width: 42%;
+  animation: engine-gate-indet 1.3s ease-in-out infinite;
+}
+.engine-gate__fill--indet::after {
+  animation: none;
 }
 @keyframes engine-gate-indet {
   0% {
-    margin-left: -40%;
+    margin-left: -42%;
   }
   100% {
     margin-left: 100%;
   }
 }
-.engine-gate__error {
-  width: 100%;
+@keyframes engine-gate-sheen {
+  0% {
+    transform: translateX(-100%);
+  }
+  60%,
+  100% {
+    transform: translateX(100%);
+  }
+}
+/* The number rides ON the bar, centred over the whole track rather than over the filled part, so it
+   does not move as the fill grows. `mix-blend-mode: difference` keeps it legible against both the
+   filled and unfilled halves without a shadow or a second copy of the glyphs. */
+.engine-gate__pct {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  mix-blend-mode: difference;
+}
+.engine-gate__retry {
+  min-width: 140px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .engine-gate__logo,
+  .engine-gate__fill::after,
+  .engine-gate__fill--indet {
+    animation: none;
+  }
+  .engine-gate__fill {
+    transition: none;
+  }
+  .engine-gate__fill--indet {
+    width: 100%;
+    opacity: 0.5;
+  }
 }
 
 /* Render-time crash fallback (ui/ErrorBoundary). Deliberately the same centred card as the engine

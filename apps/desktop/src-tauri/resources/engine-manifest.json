@@ -1,16 +1,17 @@
 {
   "engine": "lobium",
-  "note": "Per-platform engine artifacts. The installer ships WITHOUT the ~840MB engine (downloader model) and provisions the entry matching the running build. LOBSTER_ENGINE_URL/LOBSTER_ENGINE_SHA256 override this for testing/self-hosting. A platform with no entry fails provisioning with a clear error rather than downloading another OS's archive.",
+  "note": "Per-platform engine artifacts, downloaded on first run. The installer is ~37 MB and does NOT carry the engine: it is ~300 MB compressed, and embedding it made the installer 330 MB against competitors shipping under 50 MB. Served from lobrowser.com rather than GitHub so the whole install path stays on one origin we control. LOBSTER_ENGINE_URL/LOBSTER_ENGINE_SHA256 override this for testing/self-hosting. A platform with no entry fails provisioning with a clear error rather than downloading another OS's archive.",
   "platforms": {
     "linux-x64": {
       "version": "152.0.7977.42",
-      "url": "https://github.com/Manipulatora/lobster-browser/releases/download/engine-v152.0.7977.42/lobium-linux-x64-152.0.7977.42.tar.gz",
-      "sha256": "2fbc18bcfc734adaaabe99429d7a10185de986b6acb168ee168e324cbed025f7"
+      "url": "https://lobrowser.com/download/engine/lobium-linux-x64-152.0.7977.42.tar.gz",
+      "sha256": "9b35fbc782a26b9e01fade119acabf81a943833cc359e69584490d2e80998e8a"
     },
     "win-x64": {
       "version": "152.0.7977.42",
-      "url": "https://github.com/Manipulatora/lobster-browser/releases/download/engine-v152.0.7977.42/lobium-win-x64-152.0.7977.42.zip",
-      "sha256": "1c9c95a6b70a0b53ac46183778bf064e169dae6443f041f16a7cf71449059e7e"
+      "url": "https://lobrowser.com/download/engine/lobium-win-x64-152.0.7977.42.zip",
+      "sha256": "1c9c95a6b70a0b53ac46183778bf064e169dae6443f041f16a7cf71449059e7e",
+      "stale": "REBUILD REQUIRED before this entry is correct. This hash is the pre-strip binary published on 2026-08-25 20:11, which also predates the 23:14 commit that made the mobile device frame link - so it contains no device-frame code and an Android profile opens with no phone stage. See docs/qa/2026-08-26-windows-engine-rebuild.md. The archive must also be uploaded to the URL above before Windows first-run provisioning can succeed."
     }
   }
 }
