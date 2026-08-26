@@ -194,6 +194,69 @@ async function assertReleased(target) {
  * Finalizing one platform never touches another's entry — they are built on different hosts and are
  * routinely at different versions.
  */
+/**
+ * Derive the new artifact URL from the previous one, or REFUSE.
+ *
+ * This used to be `previous.url.replace(/engine-v[0-9.]+\//, ...)`, written when artifacts lived at
+ * GitHub release URLs containing an `engine-v<version>/` path segment. Artifacts now come from
+ * lobrowser.com — `https://lobrowser.com/download/engine/lobium-linux-x64-152.0.7977.42.tar.gz` —
+ * which has no such segment, so `.replace()` matched nothing and returned the string UNCHANGED.
+ *
+ * That is the worst possible shape for this bug: the script exited 0, printed
+ * "version+url+sha256 updated", and wrote a NEW version and a NEW sha256 alongside the OLD artifact's
+ * URL. The manifest then promises bytes that either do not exist at that URL or, worse, are the
+ * PREVIOUS release — and first-run provisioning would download the old engine and reject it against
+ * the new digest, on the user's machine, after they had already installed.
+ *
+ * So: derive by substituting the version wherever it appears, and then PROVE the result changed and
+ * names the target. If it cannot be proven, refuse and make the operator pass --url. A publish step
+ * that cannot say which bytes it is publishing must not guess.
+ */
+function deriveArtifactUrl(previousUrl, platform, target) {
+  if (!previousUrl) {
+    return die(
+      `${platform} has no existing url to derive from; pass --url explicitly the first time a ` +
+        'platform is published',
+    );
+  }
+  const previousVersion = previousUrl.match(/(\d+\.\d+\.\d+\.\d+)/)?.[1];
+  if (!previousVersion) {
+    return die(
+      `cannot derive a ${platform} url from ${previousUrl}: it contains no version to substitute. ` +
+        'Pass --url explicitly.',
+    );
+  }
+  if (previousVersion === target) {
+    // Re-publishing the same version at the same URL is legitimate (a rebuilt archive of an
+    // unchanged version), so this is not an error — but say so, because the sha256 is about to
+    // change under a URL that did not.
+    console.log(`    url unchanged (already names ${target}); only the digest moves`);
+    return previousUrl;
+  }
+  const derived = previousUrl.split(previousVersion).join(target);
+  // `derived === previousUrl || !derived.includes(target)` would be DEAD: previousVersion came out of
+  // previousUrl, so the split/join always replaces at least once and both operands are constants.
+  //
+  // The condition that actually earns its place is that the derived URL names the target version and
+  // NOTHING ELSE version-shaped. A URL carrying more than one dotted quad — say
+  // `.../engine/2026.08.26.1/lobium-win-x64-152.0.7977.42.zip` — matches the FIRST at the regex
+  // above, so substituting it rewrites the date segment and leaves the artifact FILENAME still naming
+  // the previous release. That is exactly the "new digest, old artifact" pairing this function exists
+  // to prevent, and version-coherence.test.mjs cannot catch it either: it only asserts
+  // `entry.url.includes(entry.version)`, which such a URL satisfies through the rewritten path
+  // segment. When the URL is ambiguous, refuse and make the operator say which bytes they mean.
+  const remaining = [...new Set(derived.match(/\d+\.\d+\.\d+\.\d+/g) ?? [])];
+  if (remaining.length !== 1 || remaining[0] !== target) {
+    return die(
+      `refusing to publish ${platform} ${target}: cannot unambiguously derive its url from ` +
+        `${previousUrl}. After substitution it still names ${remaining.join(', ') || 'no version'}, ` +
+        'so more than one version-shaped segment is present. Pass --url explicitly rather than ' +
+        'pairing a new digest with the previous artifact.',
+    );
+  }
+  return derived;
+}
+
 async function finalizeManifest(target) {
   const tarball = value('tarball') ?? value('archive');
   const suppliedSha = value('sha256');
@@ -237,14 +300,14 @@ async function finalizeManifest(target) {
   const manifest = JSON.parse(await readFile(path, 'utf8'));
   manifest.platforms ??= {};
   const previous = manifest.platforms[platform];
-  const url =
-    urlOverride ??
-    (previous?.url
-      ? previous.url.replace(/engine-v[0-9.]+\//, `engine-v${target}/`)
-      : die(
-          `${platform} has no existing url to derive from; pass --url explicitly the first time a ` +
-            'platform is published',
-        ));
+  const url = urlOverride ?? deriveArtifactUrl(previous?.url, platform, target);
+  // Replacing the whole entry drops any `stale` marker it carried, which is the correct meaning of
+  // publishing — but say so out loud. A marker that disappears silently is one nobody can audit,
+  // and this one is the only thing standing between a known-bad engine and an installer.
+  if (previous?.stale) {
+    console.log(`    clearing the ${platform} 'stale' marker, which said:`);
+    console.log(`      ${String(previous.stale).replace(/\s+/g, ' ').slice(0, 160)}`);
+  }
   manifest.platforms[platform] = { version: target, url, sha256: sha.toLowerCase() };
 
   // The artifact now exists, so the markers describing its absence are no longer true. Only the

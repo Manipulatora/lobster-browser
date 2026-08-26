@@ -20,15 +20,19 @@
     The win-x64 engine-manifest entry is therefore what makes the installer USABLE. A missing or
     unreachable one means every Windows first run fails after the user has already installed.
 
-    THE FONT PACK SHIPS INSIDE THE ENGINE, so it is in the installer too.
-    Isolation is native (the engine filters DirectWrite / FontDataService lookups against the persona
-    list), so buildLobiumLaunchEnv() no longer throws on Windows. The pack is not assembled here: it
-    rides with the ENGINE, because production packaging must prove every declared family against the
-    bytes with an explicit reviewed fc-scan executable, and that proof belongs where the runtime is
-    built. package-lobium-runtime.ps1 -FontPack <dir> -FontScanner <fc-scan.exe> writes it beside chrome.exe,
-    which is where the app looks - and step 3b copies that whole tree in. Without a pack, isolation
-    is subtractive only: the measurable set is host-intersect-persona, narrower than claimed but
-    never wider than the host, which is why step 3b refuses a runtime that has no pack.
+    THE FONT PACK SHIPS INSIDE THE ENGINE, so it arrives with the first-run download, NOT with this
+    installer. Isolation is native (the engine filters DirectWrite / FontDataService lookups against
+    the persona list), so buildLobiumLaunchEnv() no longer throws on Windows. The pack is not
+    assembled here: it rides with the ENGINE, because production packaging must prove every declared
+    family against the bytes with an explicit reviewed fc-scan executable, and that proof belongs
+    where the runtime is built. package-lobium-runtime.ps1 -FontPack <dir> -FontScanner <fc-scan.exe>
+    writes it beside chrome.exe, which is where the app looks.
+
+    A pack is not optional on Windows. Measured 2026-08-26: a persona whose claimed families are
+    absent from the host and which names no pack makes the engine fail to build its restricted
+    DirectWrite fallback (lobium_fonts.cc:535) and the browser then never produces a page target at
+    all - it starts and does nothing. So the pack's presence is verified where the runtime is
+    packaged, not here, and this installer simply never sees it.
 #>
 [CmdletBinding()]
 param(
@@ -37,10 +41,11 @@ param(
     [string] $NodeVersion = 'v22.23.2',
     [switch] $Force,
     [switch] $SkipBuild
-    # -Release was removed with the check it gated. Its only job was to refuse a build when the engine
-    # manifest had no win-x64 entry, which mattered while the installer could not function without one.
-    # The engine ships inside the installer now, so that check protected nothing and the switch would
-    # have advertised release-gating while validating nothing at all.
+    # -Release is gone, but the check it used to gate is NOT optional any more, which is why there is
+    # no switch for it. Its job was to refuse a build whose engine manifest had no usable win-x64
+    # entry. Under the download-on-first-run model that entry is the only thing that makes the
+    # installer work at all, so the refusal is unconditional (see the Die in the resource-inventory
+    # step). A switch here would only offer the operator a way to turn off the one check that matters.
 )
 
 $ErrorActionPreference = 'Stop'
@@ -233,17 +238,40 @@ Write-Host '======== Windows product ========' -ForegroundColor Green
 Write-Host ('  exe       : {0}  ({1:N1} MB)' -f $exe.FullName, ($exe.Length / 1MB))
 Write-Host ('  installer : {0}  ({1:N1} MB)' -f $installer.FullName, ($installer.Length / 1MB))
 Write-Host ('  NSIS script: {0}' -f $nsi.FullName)
-# The engine now ships INSIDE the installer, so what matters is that the bundle carries it - not
-# whether this build host happens to have a runtime lying around for LOBSTER_LOBIUM_BIN. Reporting
-# the old per-user download path here told the reader the product was broken when it was complete.
-$embedded = Join-Path (Join-Path $Resources 'lobium') 'chrome.exe'
-if (Test-Path $embedded) {
-    $embeddedBytes = (Get-ChildItem (Join-Path $Resources 'lobium') -Recurse -File |
-        Measure-Object -Property Length -Sum).Sum
-    Write-Host ('  engine    : embedded in the installer  ({0:N2} GB on disk)' -f ($embeddedBytes / 1GB)) -ForegroundColor Green
-    Write-Host '        first run needs no download and works offline' -ForegroundColor DarkGray
+# WHERE THE ENGINE COMES FROM, reported truthfully for the model this script actually builds.
+#
+# This block used to test for an EMBEDDED runtime at <resources>\lobium\chrome.exe and print a red
+# two-line alarm when it was absent. That was correct for exactly one day. 511481d embedded the
+# engine and added this check; 0e0831d reverted to download-on-first-run and rewrote step 3b to
+# DELETE that very directory - but left this block behind. So every successful build ended by
+# announcing "this installer does NOT carry an engine / every install will report a damaged
+# installation", which is false under the current model and is the last thing the operator sees:
+# a correct build looked like a broken one.
+#
+# Do not reintroduce a presence check here. Step 3b removes resources\lobium on purpose, so any test
+# for it can only ever fail. What matters now is the manifest entry the app resolves at runtime.
+$manifestPath = Join-Path $Resources 'engine-manifest.json'
+$winEntry = $null
+if (Test-Path $manifestPath) {
+    try {
+        $winEntry = (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json).platforms.'win-x64'
+    } catch {
+        Write-Host '  engine    : engine-manifest.json is present but could not be parsed' -ForegroundColor Red
+    }
+}
+if ($winEntry -and $winEntry.url -and $winEntry.sha256) {
+    Write-Host ('  engine    : downloaded on first run  (v{0})' -f $winEntry.version) -ForegroundColor Green
+    Write-Host ('        from   {0}' -f $winEntry.url) -ForegroundColor DarkGray
+    Write-Host ('        sha256 {0}' -f $winEntry.sha256) -ForegroundColor DarkGray
+    Write-Host '        into   %LOCALAPPDATA%\lobster\lobium' -ForegroundColor DarkGray
+    # A `stale` marker means the repo itself says these bytes must not be shipped. Say so loudly:
+    # engine_provision.rs ignores unknown manifest keys, so nothing downstream will catch it.
+    if ($winEntry.PSObject.Properties.Name -contains 'stale') {
+        Write-Host '  WARNING: the win-x64 manifest entry is marked STALE - do not ship this installer' -ForegroundColor Red
+        Write-Host ('        {0}' -f $winEntry.stale) -ForegroundColor Red
+    }
 } else {
-    Write-Host '  WARNING: the staged engine is missing - this installer does NOT carry an engine' -ForegroundColor Red
-    Write-Host '        every install from it will report a damaged installation at first launch' -ForegroundColor Red
+    Write-Host '  WARNING: engine-manifest.json has no usable win-x64 entry' -ForegroundColor Red
+    Write-Host '        first run cannot provision an engine and will fail after installation' -ForegroundColor Red
 }
 Write-Host '=================================' -ForegroundColor Green
