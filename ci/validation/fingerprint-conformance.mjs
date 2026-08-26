@@ -158,7 +158,15 @@ const PROBE = `
 
   P.webgpu = await safe(async () => {
     if (!navigator.gpu) return { present: false };
-    const a = await navigator.gpu.requestAdapter();
+    // Retried: the adapter is created behind GPU-process startup, so a single inline call races it
+    // and reports a null adapter on a browser that has one moments later. Measured across a fleet
+    // that showed as 6-of-8 adapters missing while the same binary and persona resolved an adapter
+    // every time when asked with a delay.
+    let a = null;
+    for (let i = 0; i < 12 && !a; i++) {
+      a = await navigator.gpu.requestAdapter();
+      if (!a) await new Promise((r) => setTimeout(r, 400));
+    }
     if (!a) return { present: true, adapter: null };
     const info = a.info ?? (a.requestAdapterInfo ? await a.requestAdapterInfo() : null);
     return { present: true, adapter: info ? { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description } : {} };
@@ -484,6 +492,11 @@ async function probeWith(bin, url, persona) {
     fingerprintPolicy: DEFAULT_CAPABILITY_PROBE_POLICY,
     ...(persona.android ? { isMobileProfile: true, mobileFormFactor: persona.formFactor } : {}),
     headless: HEADLESS,
+    // The product passes none of the hermetic-probe switches, and one of them decides this run:
+    // the Widevine CDM is delivered by the component updater, so --disable-component-update makes
+    // com.widevine.alpha unresolvable no matter what the build supports. Measuring that would report
+    // a defect the product does not have - the same mistake as probing headless.
+    hermeticNetwork: false,
   });
   try {
     const browser = await chromium.connectOverCDP(engine.ws);
@@ -603,7 +616,11 @@ async function main() {
             : 'ok  ';
       console.error(`  ${flag.padEnd(7)} ${f.field.padEnd(34)} match ${String(f.match).padStart(3)}  mismatch ${String(f.mismatch).padStart(3)}  vacuous ${String(f.vacuous).padStart(3)}${f.knownOpen ? `  known-open ${String(f.knownOpen).padStart(3)}` : ''}`);
       if (f.knownOpen && f.knownOpenReason) console.error(`          known open: ${f.knownOpenReason}`);
-      if ((f.mismatch || f.knownOpen) && f.examples[0]) console.error(`          e.g. ${f.examples[0].persona}: intended ${JSON.stringify(f.examples[0].intended).slice(0, 70)} · actual ${JSON.stringify(f.examples[0].actual).slice(0, 70)}`);
+      // `show` rather than JSON.stringify directly: an ABSENT observed value stringifies to the
+      // undefined VALUE, not the string "undefined", and .slice on it threw - killing the whole
+      // report at the exact moment a surface was missing, which is when the report matters most.
+      const show = (v) => (v === undefined ? '(absent)' : JSON.stringify(v) ?? String(v)).slice(0, 70);
+      if ((f.mismatch || f.knownOpen) && f.examples[0]) console.error(`          e.g. ${f.examples[0].persona}: intended ${show(f.examples[0].intended)} · actual ${show(f.examples[0].actual)}`);
     }
     if (contraCounts.size) {
       console.error('\n──────── contradictions ────────');

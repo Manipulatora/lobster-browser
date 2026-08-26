@@ -32,6 +32,7 @@ import {
 } from '../fonts.js';
 import { withCdpSession } from '../cdp-client.js';
 import { DEFAULT_CAPABILITY_PROBE_POLICY } from '../launch-policy.js';
+import { captureWidevineToCache, seedWidevineFromCache } from '../widevine-cache.js';
 import { buildLobiumConfig, lobiumConfigArg, writeLobiumConfig } from '../lobium-config.js';
 import {
   assertLobiumBuildCapabilities,
@@ -987,6 +988,10 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
         // That gives HTTP/HTTPS/SOCKS one monitored, remote-DNS-capable, no-direct-fallback boundary.
         adapter = await startLocalProxyAdapter(ctx.options.proxy);
       }
+      // Give a brand-new profile the CDM this machine already downloaded, before the browser reads
+      // its CDM registry at startup. Without it every profile's FIRST session fails a Widevine
+      // probe that its later sessions pass - see widevine-cache.ts.
+      seedWidevineFromCache(ctx.options.userDataDir);
       ensureChromiumLaunchPreferences(ctx);
       // Always scrub, so a restored legacy data: tab cannot win the omnibox.
       scrubLegacyBrandingSessions(ctx.options.userDataDir);
@@ -1093,6 +1098,9 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
             mobileEmulation?.close();
             await closeProcess(child, ws);
             await shutdownAdapter();
+            // AFTER the process has exited, so the CDM being copied is complete rather than a
+            // download in flight. No-op once the machine cache is populated.
+            captureWidevineToCache(ctx.options.userDataDir);
           },
           onClose: (listener) => {
             closeListeners.add(listener);

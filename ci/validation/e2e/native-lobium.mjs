@@ -46,6 +46,16 @@ export async function launchNativePersona({
   mobileFormFactor,
   noSandbox = true,
   extraArgs = [],
+  /**
+   * Keep the probe hermetic by cutting background networking, component updates and sync.
+   *
+   * DEFAULT TRUE, because most harnesses want a browser that does not talk to Google mid-measurement.
+   * But those switches CHANGE THE SURFACE UNDER TEST, and the product passes none of them: the
+   * Widevine CDM is delivered by the component updater, so a probe that disables it can never observe
+   * Widevine working no matter what the build does. Any harness asserting product behaviour must pass
+   * false here.
+   */
+  hermeticNetwork = true,
 }) {
   if (!bin) throw new Error('a Lobium binary is required');
   const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-native-probe-'));
@@ -78,9 +88,9 @@ export async function launchNativePersona({
     extraArgs: [
       ...(noSandbox ? ['--no-sandbox'] : []),
       ...buildDevShmArgs(),
-      '--disable-background-networking',
-      '--disable-component-update',
-      '--disable-sync',
+      ...(hermeticNetwork
+        ? ['--disable-background-networking', '--disable-component-update', '--disable-sync']
+        : []),
       ...extraArgs,
     ],
   });
