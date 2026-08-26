@@ -3,19 +3,14 @@
   "note": "Per-platform engine artifacts. The installer ships WITHOUT the ~840MB engine (downloader model) and provisions the entry matching the running build. LOBSTER_ENGINE_URL/LOBSTER_ENGINE_SHA256 override this for testing/self-hosting. A platform with no entry fails provisioning with a clear error rather than downloading another OS's archive.",
   "platforms": {
     "linux-x64": {
-      "version": "152.0.7928.0",
-      "url": "https://github.com/Manipulatora/lobster-browser/releases/download/engine-v152.0.7928.0/lobium-linux-x64.tar.gz",
-      "sha256": "92bf2724fa4d48c7876b84ab617d74ff24c849846f80db5f5736202babf33e1a"
+      "version": "152.0.7977.42",
+      "url": "https://github.com/Manipulatora/lobster-browser/releases/download/engine-v152.0.7977.42/lobium-linux-x64-152.0.7977.42.tar.gz",
+      "sha256": "2fbc18bcfc734adaaabe99429d7a10185de986b6acb168ee168e324cbed025f7"
     },
     "win-x64": {
       "version": "152.0.7977.42",
       "url": "https://github.com/Manipulatora/lobster-browser/releases/download/engine-v152.0.7977.42/lobium-win-x64-152.0.7977.42.zip",
       "sha256": "1c9c95a6b70a0b53ac46183778bf064e169dae6443f041f16a7cf71449059e7e"
     }
-  },
-  "rebuildPending": {
-    "targetVersion": "152.0.7977.42",
-    "why": "The repo repinned from 152.0.7928.0 (a CANARY nightly, near-unique in fullVersionList) to the M152 beta-frozen release build. The linux-x64 entry still names the OLD artifact on purpose: version/url/sha256 may only move once a rebuilt tarball actually exists, or first-run provisioning breaks for every user. Until then the installer provisions the previous engine and ENGINE_CHROME claims one patch newer within the same milestone.",
-    "howToClear": "On the Linux build host: lobium/rebase.sh 152.0.7977.42 --run && lobium/build.sh --run && scripts/package-lobium-runtime.sh, then `node scripts/bump-engine-version.mjs 152.0.7977.42 --tarball <lobium-linux-x64.tar.gz>` to rewrite version/url/sha256 and drop this block."
   }
 }
