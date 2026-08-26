@@ -74,6 +74,16 @@ fingerprint/webgl2-surfaces.patch
 # skipped when WebGL is spoofed: an unhooked WebGPU adapter reports the real card next to a spoofed
 # WebGL renderer, and the mismatch is a stronger signal than either surface alone.
 fingerprint/webgpu-adapter.patch
+# WebGPU AVAILABILITY, as distinct from the adapter identity above. On a host with no usable GPU -
+# a VPS, a container, an RDP session, which is the normal anti-detect deployment - Dawn hands out no
+# fallback adapter unless gpu_preferences.enable_unsafe_webgpu is set, so navigator.gpu exists (the
+# IDL gates it only on [SecureContext]) and requestAdapter() resolves to null. A persona naming a
+# discrete GPU in WebGL beside a WebGPU that has no adapter describes no real machine; it fired on
+# 24 of 24 personas. Set inside ParseGpuPreferences rather than by passing --enable-unsafe-webgpu,
+# which is on Chromium's bad-flags list and would raise the unsupported-flag infobar.
+# ORDER: before webgpu-adapter has nothing to hook if no adapter exists, so this must apply with it;
+# they touch different files (gpu/ vs blink) and do not chain textually.
+fingerprint/webgpu-availability.patch
 # Web Audio farbling (seeds.audio): OfflineAudioContext result + AnalyserNode float AND byte paths.
 fingerprint/audio-context.patch
 # The upstream sample taps a page can read BEFORE the farbled offline result:

@@ -38,6 +38,9 @@ const FINGERPRINT_PATCH_CAPABILITIES = new Map([
   ['fingerprint/webgl-bypass-closures.patch', ['webgl-deep', 'webgl2-deep', 'webgl-farbling']],
   ['fingerprint/webgl2-surfaces.patch', ['webgl2-deep']],
   ['fingerprint/webgpu-adapter.patch', ['webgpu-adapter']],
+  // Availability rather than identity: without it Dawn returns no adapter for the patch above
+  // to rewrite, so the two are one capability in two files.
+  ['fingerprint/webgpu-availability.patch', ['webgpu-adapter']],
   ['fingerprint/audio-context.patch', ['audio-farbling']],
   ['fingerprint/audio-worklet-tap.patch', ['audio-farbling']],
   ['fingerprint/screen-dpr.patch', ['screen-metrics']],

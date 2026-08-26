@@ -1,0 +1,41 @@
+diff --git a/gpu/command_buffer/service/service_utils.cc b/gpu/command_buffer/service/service_utils.cc
+--- a/gpu/command_buffer/service/service_utils.cc
++++ b/gpu/command_buffer/service/service_utils.cc
+@@ -270,11 +270,35 @@
+       }
+     }
+   }
++  // Lobium: a profile launched with a fingerprint config gets WebGPU on hosts where Chromium would
++  // otherwise refuse it, WITHOUT --enable-unsafe-webgpu appearing on the command line.
++  //
++  // Measured on a GPU-less host, secure origin, headful: navigator.gpu is defined (the IDL gates it
++  // only on [SecureContext]) but requestAdapter() resolves to null, because Dawn will not hand out a
++  // fallback adapter unless enable_unsafe_webgpu is set. A persona that names a discrete GPU in
++  // WEBGL_debug_renderer_info while WebGPU has no adapter at all describes a machine that does not
++  // exist, and the pair is read together by every library that reads either. It fired on 24 of 24
++  // personas in the conformance fleet.
++  //
++  // Done HERE rather than by adding the switch, because switches::kEnableUnsafeWebGPU is on
++  // Chromium's own bad-flags list (chrome/browser/ui/startup/bad_flags_prompt.cc), which raises the
++  // yellow "unsupported command-line flag" infobar and names the flag on chrome://version - two
++  // tells bought to hide one. This is the same trade fingerprint/navigator-webdriver.patch was
++  // written to avoid, and the same shape: answer it inside the engine, not with a flag.
++  //
++  // ParseGpuPreferences runs in the BROWSER process (content::GetGpuPreferencesFromCommandLine),
++  // which is the process that carries --lobium-fp-config; the resulting preferences are marshalled
++  // to the GPU process over mojom, so the GPU process does not need the switch itself.
++  //
++  // With this set, requestAdapter() returns a real adapter and
++  // fingerprint/webgpu-adapter.patch rewrites its identity to the persona's GPU - verified on this
++  // host: vendor "google"/architecture "swiftshader" without a config, "intel"/"xe" with one.
++  const bool lobium_fp_profile = command_line->HasSwitch("lobium-fp-config");
+   gpu_preferences.enable_webgpu =
+-      command_line->HasSwitch(switches::kEnableUnsafeWebGPU) ||
++      command_line->HasSwitch(switches::kEnableUnsafeWebGPU) || lobium_fp_profile ||
+       base::FeatureList::IsEnabled(features::kWebGPUService);
+   gpu_preferences.enable_unsafe_webgpu =
+-      command_line->HasSwitch(switches::kEnableUnsafeWebGPU);
++      command_line->HasSwitch(switches::kEnableUnsafeWebGPU) || lobium_fp_profile;
+   gpu_preferences.enable_webgpu_developer_features =
+       command_line->HasSwitch(switches::kEnableWebGPUDeveloperFeatures);
+   gpu_preferences.use_webgpu_adapter = ParseWebGPUAdapterName(command_line);
