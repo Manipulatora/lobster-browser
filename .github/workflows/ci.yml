@@ -460,12 +460,24 @@ jobs:
       # github-hosted runner. BLOCKED must not read as a pass and must not redden the job — the same
       # distinction gate:oracles draws — so translate the code explicitly rather than using `|| true`,
       # which would swallow a genuine failure along with it.
+      #
+      # Run under Xvfb, because the harness is HEADFUL by default and that is deliberate: measured on
+      # the same binary and persona, headless reports navigator.gpu present with a null adapter while
+      # headful does not define navigator.gpu at all, and only the headful answer is what a user
+      # ships. Passing --headless here would make the gate green on a browser the product never runs.
+      # Without a display the launch fails for want of an X server, which this step would then report
+      # as FAIL - an environment gap dressed up as a fingerprint defect.
       - name: Fingerprint conformance (BLOCKED without an engine)
         env:
           LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
         run: |
           set +e
-          npm run gate:conformance
+          if [ -n "$LOBSTER_LOBIUM_BIN" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+            xvfb-run -a --server-args="-screen 0 1600x1000x24" npm run gate:conformance
+          else
+            npm run gate:conformance
+          fi
           status=$?
           set -e
           case "$status" in
