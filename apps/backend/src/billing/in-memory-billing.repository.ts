@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import { FREE_PLAN_PROFILE_LIMIT } from '@lobster/shared-types';
 import type {
   BillingPeriod,
   CreditTransaction,
@@ -416,6 +417,47 @@ export class InMemoryBillingRepository implements BillingRepository {
       )
       .sort((a, b) => (a.currentPeriodEnd ?? '').localeCompare(b.currentPeriodEnd ?? ''))
       .slice(0, limit);
+  }
+
+  async findDueForExpiry(now: Date, limit: number): Promise<Subscription[]> {
+    // Complement of findDueForRenewal — see the interface docstring. Same ISO string comparison the
+    // renewal query uses, so the two predicates cannot drift apart.
+    const iso = now.toISOString();
+    return [...this.subscriptions.values()]
+      .filter(
+        (s) =>
+          !s.autoRenew &&
+          s.tier !== 'free' &&
+          (s.status === 'active' || s.status === 'past_due' || s.status === 'trialing') &&
+          s.currentPeriodEnd !== undefined &&
+          s.currentPeriodEnd !== null &&
+          s.currentPeriodEnd <= iso,
+      )
+      .sort((a, b) => (a.currentPeriodEnd ?? '').localeCompare(b.currentPeriodEnd ?? ''))
+      .slice(0, limit);
+  }
+
+  async expireSubscription(args: {
+    teamId: string;
+    expectedPeriodEnd: string;
+  }): Promise<'expired' | 'not_due'> {
+    const sub = this.subscriptions.get(args.teamId);
+    if (!sub || sub.autoRenew) return 'not_due';
+    if (sub.currentPeriodEnd !== args.expectedPeriodEnd) return 'not_due';
+    // Same reason as the Prisma implementation: expiry leaves currentPeriodEnd where it is, so the
+    // live-set membership is what makes this a claim rather than a repeatable write.
+    if (sub.tier === 'free') return 'not_due';
+    if (sub.status !== 'active' && sub.status !== 'past_due' && sub.status !== 'trialing') {
+      return 'not_due';
+    }
+    this.subscriptions.set(args.teamId, {
+      ...sub,
+      status: 'canceled',
+      tier: 'free',
+      profileLimit: FREE_PLAN_PROFILE_LIMIT,
+      priceCents: 0,
+    });
+    return 'expired';
   }
 }
 

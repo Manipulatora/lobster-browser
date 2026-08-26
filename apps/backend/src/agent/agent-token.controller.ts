@@ -11,7 +11,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { IsOptional, IsString, MaxLength } from 'class-validator';
-import { planAllowsAgent, type PlanTier } from '@lobster/shared-types';
+import { planAllowsAgent, planEntitledTier, type PlanTier } from '@lobster/shared-types';
 
 import { AuthService } from '../auth/auth.service';
 import { EmailVerifiedGuard } from '../auth/email-verified.guard';
@@ -70,9 +70,10 @@ export class AgentTokenController {
     if (!user) throw new UnauthorizedException();
 
     const teamId = await this.resolveTeamId(user.id, dto.teamId);
-    const subscription = await this.billing.getSubscription(teamId);
-    const tier: PlanTier =
-      subscription && subscription.status === 'active' ? subscription.tier : 'free';
+    // Same rule as AgentAuthGuard.resolveTier and entitledProfileLimit: a status of 'active' does
+    // not mean the paid window is still open. Minting a token from `status` alone would hand a
+    // lapsed package a fresh agent token that the guard then honours for its whole lifetime.
+    const tier: PlanTier = planEntitledTier(await this.billing.getSubscription(teamId));
     if (!planAllowsAgent(tier)) throw planRequired(tier);
 
     const { token, expiresInSeconds } = this.auth.issueAgentToken({

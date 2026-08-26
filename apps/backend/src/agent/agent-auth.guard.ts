@@ -6,7 +6,7 @@ import {
   type ExecutionContext,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { planAllowsAgent, type PlanTier } from '@lobster/shared-types';
+import { planAllowsAgent, planEntitledTier, type PlanTier } from '@lobster/shared-types';
 
 import { AuthService, type JwtPayload } from '../auth/auth.service';
 import { BILLING_REPOSITORY, type BillingRepository } from '../billing/billing.repository';
@@ -90,9 +90,12 @@ export class AgentAuthGuard implements CanActivate {
    * package is not a reduced package — an expired Plus buys no agent time.
    */
   private async resolveTier(teamId: string): Promise<PlanTier> {
-    const subscription = await this.billing.getSubscription(teamId);
-    if (!subscription || subscription.status !== 'active') return 'free';
-    return subscription.tier;
+    // Delegated to planEntitledTier rather than checking `status` here, because `status` alone
+    // cannot express the lapse this docstring promises: nothing in the codebase ever writes
+    // 'canceled', and the renewal sweep only selects autoRenew rows, so a package with auto-renew
+    // off keeps status='active' at its paid tier forever once its period ends. The period end is
+    // the only field that tells the truth, and it is the same rule entitledProfileLimit uses.
+    return planEntitledTier(await this.billing.getSubscription(teamId));
   }
 }
 

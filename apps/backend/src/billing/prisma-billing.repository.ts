@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { FREE_PLAN_PROFILE_LIMIT } from '@lobster/shared-types';
 import type {
   BillingPeriod,
   CreditTransaction,
@@ -593,6 +594,49 @@ export class PrismaBillingRepository implements BillingRepository {
       take: limit,
     });
     return rows.map(toSubscription);
+  }
+
+  async findDueForExpiry(now: Date, limit: number): Promise<Subscription[]> {
+    const rows = await this.prisma.subscription.findMany({
+      where: {
+        // The exact complement of findDueForRenewal: nothing will ever charge these again, so the
+        // sweep has to end them rather than wait for a renewal that cannot come.
+        autoRenew: false,
+        currentPeriodEnd: { lte: now },
+        status: { in: ['active', 'past_due', 'trialing'] },
+        tier: { not: 'free' },
+      },
+      orderBy: { currentPeriodEnd: 'asc' },
+      take: limit,
+    });
+    return rows.map(toSubscription);
+  }
+
+  async expireSubscription(args: {
+    teamId: string;
+    expectedPeriodEnd: string;
+  }): Promise<'expired' | 'not_due'> {
+    // Compare-and-swap. Unlike renewSubscription, the claim CANNOT be made on currentPeriodEnd
+    // alone: expiry does not move the period, so that field still matches afterwards and a second
+    // caller would re-apply. The fields this transition actually changes are status and tier, so
+    // they are what the guard tests — whichever call commits first takes the row out of the live
+    // set and the loser matches nothing. No money moves, so there is nothing to roll back.
+    const claimed = await this.prisma.subscription.updateMany({
+      where: {
+        teamId: args.teamId,
+        currentPeriodEnd: new Date(args.expectedPeriodEnd),
+        autoRenew: false,
+        status: { in: ['active', 'past_due', 'trialing'] },
+        tier: { not: 'free' },
+      },
+      data: {
+        status: 'canceled',
+        tier: 'free',
+        profileLimit: FREE_PLAN_PROFILE_LIMIT,
+        priceCents: 0,
+      },
+    });
+    return claimed.count === 0 ? 'not_due' : 'expired';
   }
 }
 

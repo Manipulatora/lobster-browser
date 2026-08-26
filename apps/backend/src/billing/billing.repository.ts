@@ -351,6 +351,25 @@ export interface BillingRepository {
 
   /** Subscriptions whose period has ended and are eligible for an auto-renew attempt. */
   findDueForRenewal(now: Date, limit: number): Promise<Subscription[]>;
+
+  /**
+   * Subscriptions whose paid window has closed and which will NEVER be renewed, because auto-renew
+   * is off. The complement of {@link findDueForRenewal}, and the half of the lifecycle that was
+   * missing: with only the renewal query, such a row kept `status='active'` at its paid tier
+   * forever with a period end in the past.
+   */
+  findDueForExpiry(now: Date, limit: number): Promise<Subscription[]>;
+
+  /**
+   * Move a lapsed subscription to `canceled` / `free`, compare-and-swapped on the period end so two
+   * sweeps cannot both act on one row.
+   *
+   * @returns `expired` when this call performed the transition, `not_due` when another already did.
+   */
+  expireSubscription(args: {
+    teamId: string;
+    expectedPeriodEnd: string;
+  }): Promise<'expired' | 'not_due'>;
 }
 
 /** Nest DI token for the active `BillingRepository`. */

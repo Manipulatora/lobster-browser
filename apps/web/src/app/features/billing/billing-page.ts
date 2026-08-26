@@ -290,10 +290,18 @@ export class BillingPage {
   }
 
   protected planIsCurrent(plan: PlanDefinition): boolean {
+    const subscription = this.subscription();
+    if (!subscription) return false;
+    // The period end decides, not the status. Nothing ever writes 'canceled', and the renewal sweep
+    // only touches auto-renew rows, so a package whose auto-renew is off keeps status='active' at
+    // its paid tier indefinitely once the window closes. Calling that "Current" tells the user they
+    // still have a plan the API has already stopped honouring, and hides the button to buy it back.
+    const periodEnd = subscription.currentPeriodEnd;
+    if (periodEnd && new Date(periodEnd).getTime() <= Date.now()) return false;
     return (
       this.currentTier() === plan.tier &&
-      this.subscription()?.status === 'active' &&
-      (this.subscription()?.billingPeriod ?? 'monthly') === this.planPeriod()
+      subscription.status === 'active' &&
+      (subscription.billingPeriod ?? 'monthly') === this.planPeriod()
     );
   }
 

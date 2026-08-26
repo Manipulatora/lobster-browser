@@ -347,6 +347,32 @@ export function entitledProfileLimit(
   return subscription.profileLimit;
 }
 
+/**
+ * The tier a team is ACTUALLY entitled to right now — `entitledProfileLimit`'s rule, applied to the
+ * other thing a plan buys.
+ *
+ * The profile cap already lapsed correctly when a period elapsed; the agent gate did not. It read
+ * `status === 'active'` alone, and nothing ever writes `canceled`: `findDueForRenewal` selects only
+ * `autoRenew: true` rows, so a package with auto-renew OFF keeps `status='active'` and `tier='pro'`
+ * forever with `currentPeriodEnd` in the past. That is not a subscription that has not been swept
+ * yet — it is one that will never be swept, so the expiry cannot be left to a background job to
+ * express. Deriving the tier from the period end makes the lapse true the moment it happens, no
+ * matter what the row says, and keeps the agent gate and the profile cap on one rule instead of two.
+ *
+ * `trialing` counts as live for the same reason it does above: a trial is a granted period.
+ */
+export function planEntitledTier(
+  subscription: Pick<Subscription, 'status' | 'tier' | 'currentPeriodEnd'> | null,
+  now: Date = new Date(),
+): PlanTier {
+  if (!subscription) return 'free';
+  if (subscription.status !== 'active' && subscription.status !== 'trialing') return 'free';
+  if (subscription.currentPeriodEnd && new Date(subscription.currentPeriodEnd) <= now) {
+    return 'free';
+  }
+  return subscription.tier;
+}
+
 // --- Credit / wallet -------------------------------------------------------
 
 /**

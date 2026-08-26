@@ -17,6 +17,8 @@ export interface RenewalSweepResult {
   renewed: number;
   lapsed: number;
   skipped: number;
+  /** Packages ended because their window closed and auto-renew was off. */
+  expired: number;
 }
 
 const BATCH_LIMIT = 200;
@@ -83,7 +85,28 @@ export class RenewalService implements OnModuleInit, OnModuleDestroy {
       renewed: 0,
       lapsed: 0,
       skipped: 0,
+      expired: 0,
     };
+
+    // END the packages nothing will ever renew. findDueForRenewal only selects autoRenew rows, so
+    // before this existed a package with auto-renew off kept status='active' at its paid tier
+    // forever once its window closed - the API went on honouring a plan the team had stopped
+    // paying for, and the dashboard went on calling it "Current". Done before the renewal loop so a
+    // row can never be examined by both passes in one sweep.
+    for (const sub of await this.repo.findDueForExpiry(now, BATCH_LIMIT)) {
+      if (!sub.currentPeriodEnd) {
+        result.skipped += 1;
+        continue;
+      }
+      const outcome = await this.repo.expireSubscription({
+        teamId: sub.teamId,
+        expectedPeriodEnd: sub.currentPeriodEnd,
+      });
+      if (outcome === 'expired') {
+        result.expired += 1;
+        this.logger.log(`subscription expired: team=${sub.teamId} tier=${sub.tier}`);
+      }
+    }
 
     for (const sub of due) {
       // `free` is filtered out by the query, and a row without a period end cannot be

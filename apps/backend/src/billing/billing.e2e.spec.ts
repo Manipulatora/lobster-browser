@@ -70,7 +70,13 @@ test('the admin sweep runs with the configured token and reports what it did', a
   assert.equal(res.body.code, 0);
   // Nothing is subscribed in this suite, so the interesting part is that a sweep ran and answered
   // with counts a cron can log rather than an empty 200.
-  assert.deepEqual(res.body.data, { examined: 0, renewed: 0, lapsed: 0, skipped: 0 });
+  assert.deepEqual(res.body.data, {
+    examined: 0,
+    renewed: 0,
+    lapsed: 0,
+    skipped: 0,
+    expired: 0,
+  });
 });
 
 test('the sweep refuses a wrong token, and a missing one', async () => {
