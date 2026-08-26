@@ -533,17 +533,32 @@ fn explicit_lobium_bin() -> Result<Option<PathBuf>, String> {
     explicit_lobium_bin_from(configured, LOBIUM_BIN_IS_MANAGED.load(Ordering::Acquire))
 }
 
-/// Whether the Lobium engine is installed. Drives the first-run download gate: the `.deb` ships without
-/// the engine (DOWNLOADER distribution model), so a fresh install reports `present: false`.
+/// Whether the Lobium engine is installed, and where it was expected.
+///
+/// The package now CARRIES the engine on both platforms, so `present: false` no longer means "first
+/// run, fetch it" — it means the installation is incomplete, and that is what EngineGate says. The
+/// reported directory therefore has to be the one a user should go and look at: `<resources>/lobium`
+/// for an embedded install, not the per-user runtime the downloader model used. Naming the latter
+/// while the copy says "files removed from the installation folder" sent people to a directory that,
+/// on an embedded install, was never created and never involved.
 #[tauri::command]
 fn engine_status(app: tauri::AppHandle) -> EngineStatus {
+    // Where the engine BELONGS in this build: the bundled runtime beside the app. Falls back to the
+    // per-user runtime only when there is no resource dir to name, so the message always points at a
+    // real place rather than at an empty string.
+    let expected_dir = || {
+        app_resource_dir(&app)
+            .map(|resources| resources.join("lobium"))
+            .or_else(user_engine_runtime_dir)
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
     let explicit = match explicit_lobium_bin() {
         Ok(explicit) => explicit,
         Err(_) => {
-            let dir = user_engine_runtime_dir().unwrap_or_default();
             return EngineStatus {
                 present: false,
-                runtime_dir: dir.to_string_lossy().into_owned(),
+                runtime_dir: expected_dir(),
             };
         }
     };
@@ -556,13 +571,21 @@ fn engine_status(app: tauri::AppHandle) -> EngineStatus {
                 .unwrap_or_default(),
         };
     }
+    // No explicit binary means ensure_lobium_env found neither an embedded runtime nor a managed one
+    // matching the manifest, so the manifest check below is the last thing that could say "present".
     let dir = user_engine_runtime_dir().unwrap_or_default();
     let manifest = app_resource_dir(&app).map(|resources| resources.join("engine-manifest.json"));
     let present = engine_provision::resolve_source(manifest.as_deref())
         .is_ok_and(|source| engine_provision::engine_matches_source(&dir, &source));
     EngineStatus {
         present,
-        runtime_dir: dir.to_string_lossy().into_owned(),
+        // Present here means a managed runtime satisfied the manifest, so that IS the directory in
+        // use; absent, point at where the package should have put one.
+        runtime_dir: if present {
+            dir.to_string_lossy().into_owned()
+        } else {
+            expected_dir()
+        },
     }
 }
 

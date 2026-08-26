@@ -7,24 +7,26 @@
     that a fresh clone does not contain, then builds. Re-running always rebuilds source-derived
     resources; -Force also refreshes cached platform dependencies such as the Node runtime.
 
-    WHAT THIS PRODUCES, AND WHAT IT DOES NOT
+    WHAT THIS PRODUCES
     The installer contains the UI, the Rust core, the local automation API, the profile/proxy/template
-    SQLite stores, the bundled sidecar and the Lobee extension. It does NOT contain the Lobium engine
-    (~350 MB) - that is the downloader model. The app resolves the engine at startup from, in order,
+    SQLite stores, the bundled sidecar, the Lobee extension AND the Lobium engine (~840 MB unpacked),
+    staged into resources\lobium by step 3b. The app resolves the engine at startup from, in order,
     LOBSTER_LOBIUM_BIN, <resources>\lobium\chrome.exe, then %LOCALAPPDATA%\lobster\lobium\chrome.exe,
-    and exports LOBSTER_LOBIUM_BIN/_DIR so the sidecar inherits them. For local validation before a
-    win-x64 release exists, package/install the engine and set LOBSTER_LOBIUM_BIN to its chrome.exe
-    BEFORE starting the app. A distributable build instead needs a win-x64 engine-manifest entry so
-    first-run provisioning can verify and download the published archive.
+    and exports LOBSTER_LOBIUM_BIN/_DIR so the sidecar inherits them - so the embedded copy wins on a
+    normal install and first run needs no network at all.
+    The win-x64 engine-manifest entry is no longer what makes the installer work. It remains the
+    fallback for a runtime deleted or quarantined after setup, which ensure_lobium_env adopts only
+    when it matches the manifest stamp.
 
-    FONTS ARE NOT BUNDLED IN THE INSTALLER ON WINDOWS - but font isolation still works.
-    It is native now (the engine filters DirectWrite / FontDataService lookups against the persona
-    list), so buildLobiumLaunchEnv() no longer throws on Windows. What the installer cannot carry is
-    the font PACK: production packaging must separately prove every declared family against the bytes
-    with an explicit reviewed fc-scan executable. The pack rides with the ENGINE instead:
-    package-lobium-runtime.ps1 -FontPack <dir> -FontScanner <fc-scan.exe> writes it beside chrome.exe,
-    which is where the app looks. Without a pack, isolation is subtractive only - the
-    measurable set is host-intersect-persona, narrower than claimed but never wider than the host.
+    THE FONT PACK SHIPS INSIDE THE ENGINE, so it is in the installer too.
+    Isolation is native (the engine filters DirectWrite / FontDataService lookups against the persona
+    list), so buildLobiumLaunchEnv() no longer throws on Windows. The pack is not assembled here: it
+    rides with the ENGINE, because production packaging must prove every declared family against the
+    bytes with an explicit reviewed fc-scan executable, and that proof belongs where the runtime is
+    built. package-lobium-runtime.ps1 -FontPack <dir> -FontScanner <fc-scan.exe> writes it beside chrome.exe,
+    which is where the app looks - and step 3b copies that whole tree in. Without a pack, isolation
+    is subtractive only: the measurable set is host-intersect-persona, narrower than claimed but
+    never wider than the host, which is why step 3b refuses a runtime that has no pack.
 #>
 [CmdletBinding()]
 param(
@@ -32,11 +34,11 @@ param(
     # bundled sidecar on the user's machine.
     [string] $NodeVersion = 'v22.23.2',
     [switch] $Force,
-    [switch] $SkipBuild,
-    # Build an installer that is meant to be handed to a user. Adds the checks a developer build does
-    # not need but a release cannot ship without - today, that the engine manifest can actually serve
-    # this platform.
-    [switch] $Release
+    [switch] $SkipBuild
+    # -Release was removed with the check it gated. Its only job was to refuse a build when the engine
+    # manifest had no win-x64 entry, which mattered while the installer could not function without one.
+    # The engine ships inside the installer now, so that check protected nothing and the switch would
+    # have advertised release-gating while validating nothing at all.
 )
 
 $ErrorActionPreference = 'Stop'
