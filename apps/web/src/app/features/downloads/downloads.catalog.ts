@@ -41,7 +41,11 @@ export const ENGINE_VERSION = '152.0.7977.42';
  */
 export const DOWNLOAD_BASE = 'https://lobrowser.com/download';
 
-const WINDOWS_INSTALLER = `Lobster-Browser-Setup-${RELEASE_VERSION}-x64.exe`;
+// The exact name the Windows packager emits, so publishing is a copy and never a rename. It used to
+// read `Lobster-Browser-Setup-${RELEASE_VERSION}-x64.exe`, which matched nothing any build produced
+// - every release would have needed a manual rename on the server, and forgetting it serves a 404
+// from a well-formed URL, which is the failure `published` exists to prevent.
+const WINDOWS_INSTALLER = `Lobster-Browser-${RELEASE_VERSION}-x64-setup.exe`;
 const LINUX_INSTALLER = `lobster-browser_${RELEASE_VERSION}_amd64.deb`;
 
 export type PlatformId = 'windows' | 'linux';
@@ -72,11 +76,8 @@ export const DOWNLOADS: readonly DownloadArtifact[] = [
     name: 'Windows',
     file: WINDOWS_INSTALLER,
     url: `${DOWNLOAD_BASE}/${WINDOWS_INSTALLER}`,
-    size: '',
-    // The Windows installer must be rebuilt before it can be published: the last one embedded the
-    // engine (~230 MB) and its manifest points at the old GitHub engine URLs. See
-    // docs/qa/2026-08-26-windows-engine-rebuild.md.
-    published: false,
+    size: '29.3 MB',
+    published: true,
   },
   {
     platform: 'linux',

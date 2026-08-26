@@ -11,8 +11,7 @@
     "win-x64": {
       "version": "152.0.7977.42",
       "url": "https://lobrowser.com/download/engine/lobium-win-x64-152.0.7977.42.zip",
-      "sha256": "1c9c95a6b70a0b53ac46183778bf064e169dae6443f041f16a7cf71449059e7e",
-      "stale": "REBUILD REQUIRED before this entry is correct, and the archive is NOT uploaded: this URL returned HTTP 404 when checked from the Windows host on 2026-08-26, so Windows first-run provisioning cannot succeed today. These bytes are also wrong on their own terms - verified by inspecting the published archive, chrome.dll contains 11 of the 13 lobium-* switch strings and is missing exactly 'lobium-device-frame' and 'lobium-device-screen', so an Android profile opens with no phone stage. The cause is NOT that the build predates the fix (the publishing commit's tree already contained it; the two timestamps in the older write-up were in different timezones): the archive was built from an older tree than the commit that published it. The device frame was additionally Linux-only in source until 2026-08-26, so a rebuild alone would not have fixed it - branding/device-frame.patch now compiles its BrowserView call sites on Windows too. See docs/qa/2026-08-26-windows-understanding.md."
+      "sha256": "adcbb43d7cc33c2f5ca1b42fc059e2971259f0f05aa3e2701bf5d0e8e3c797bd"
     }
   }
 }
