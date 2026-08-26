@@ -211,9 +211,35 @@ const get = (obj, path) => path.split('.').reduce((o, k) => (o == null ? undefin
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 /**
+ * Fields whose MISMATCH is a KNOWN, OPEN, DOCUMENTED defect rather than a regression.
+ *
+ * These are still measured and still reported — silencing them would hide the very thing this
+ * harness exists to surface — but they do not gate the run, because a gate that can never go green
+ * is a gate nobody looks at.
+ *
+ * `css.colorBits` is here because it CANNOT pass today on an ordinary display. derive.ts:234 gives
+ * every arm64/Apple-Silicon persona screen.colorDepth = 30, Screen::colorDepth IS hooked, and the
+ * CSS `(color:)` media feature is NOT hooked by any patch in the series — so the page reads the
+ * host's 8 bits/component next to a claimed 30-bit depth. Until a patch hooks
+ * MediaValues::CalculateColorBitsPerComponent, any run including a macos_arm persona would fail on
+ * this one field alone and drag every other result down with it.
+ *
+ * Removing a name from this set is how the fix gets enforced: hook the surface, delete the entry,
+ * and the gate starts requiring it.
+ */
+const KNOWN_OPEN_MISMATCHES = new Map([
+  [
+    'css.colorBits',
+    'the CSS (color:) media feature is unhooked while screen.colorDepth is hooked — ' +
+      'see docs/subsystems/engine-audit.md and derive.ts:234',
+  ],
+]);
+
+/**
  * One row per surface we claim to control. `intent` reads the persona, `actual` reads the probe.
  * `critical` fields fail the run; non-critical are reported but do not gate, because they describe
- * realism rather than a broken hook.
+ * realism rather than a broken hook. A field named in KNOWN_OPEN_MISMATCHES is reported under its
+ * own verdict and never gates, whatever its `critical` flag says.
  */
 const FIELDS = [
   ['navigator.userAgent', (f) => f.navigator.userAgent, (o) => get(o, 'navigator.userAgent'), true],
@@ -259,7 +285,20 @@ const FIELDS = [
 function contradictions(fp, o) {
   const out = [];
   const isApple = fp.os === 'macos';
-  const claimsChrome = /Chrome\//.test(String(get(o, 'navigator.userAgent') ?? ''));
+  // The Chrome BRAND lives in the Sec-CH-UA brand list, not in the UA string.
+  //
+  // This used to be /Chrome\//.test(navigator.userAgent). Every persona's UA contains
+  // "Chrome/152.0.0.0" — that is the whole point of the product — so the test was always true and
+  // the Widevine contradiction below fired for every persona regardless of what brand it claimed,
+  // which made the signal worthless. Chromium-derived browsers that do NOT claim to be Google Chrome
+  // still carry "Chrome/" in the UA while advertising a different brand entry, and it is the brand
+  // claim that creates the Widevine expectation.
+  const brands = get(o, 'uaCh.brands');
+  const claimsChrome = Array.isArray(brands)
+    ? brands.some((b) => /^Google Chrome$/i.test(String(b?.brand ?? '').trim()))
+    // No userAgentData at all (a non-secure context, or a build without UA-CH): fall back to the UA
+    // string rather than skipping the check, but this is the weaker signal.
+    : /Chrome\//.test(String(get(o, 'navigator.userAgent') ?? ''));
 
   const bits = get(o, 'css.colorBits');
   const depth = get(o, 'screen.colorDepth');
@@ -269,9 +308,36 @@ function contradictions(fp, o) {
   if (claimsChrome && get(o, 'eme.widevine') === false) {
     out.push({ id: 'chrome-without-widevine', detail: 'the persona claims the Chrome brand but rejects com.widevine.alpha; every real Chrome resolves it' });
   }
+  // Dolby Vision is baked to the BUILD OS, not to the persona: no patch hooks canPlayType and the
+  // persona config carries no codec field, so the answer is a pure function of the GN args of the
+  // binary, not the persona: `enable_platform_dolby_vision = proprietary_codecs &&
+  // (is_cast_media_device || is_win)` (media/media_options.gni), and no Lobium patch touches media/.
+  // So the tell is one-directional — a NON-WINDOWS persona that advertises Dolby Vision is unmasked,
+  // because real Chrome on macOS or Linux reports "" for it. See engine-audit.md
+  // `dolby-vision-baked-to-build-os`.
+  //
+  // Direction matters and was briefly wrong here: an inverted version fired on the personas that
+  // were CORRECT and stayed silent on the one case that is actually contradicted.
+  //
+  // It is also only meaningful when the build advertises Dolby Vision AT ALL. Measured 2026-08-26 on
+  // a Windows QA host: this build reports "" for every dvh1/dvhe/dva1 string — and so does stock
+  // Chrome 152.0.7977.42 on the same machine, because platform Dolby Vision additionally needs a
+  // host decoder that VM has not got. A run there cannot distinguish "correctly absent" from "never
+  // checked", so say so rather than reporting a clean pass.
   const dv = get(o, 'codecs.dolbyVision');
-  if (dv && isApple) {
-    out.push({ id: 'dolby-vision-on-non-windows', detail: `a ${fp.os} persona reports Dolby Vision support ("${dv}"), which only a Windows build has` });
+  if (!dv) {
+    out.push({
+      id: 'dolby-vision-not-exercised',
+      vacuous: true,
+      detail:
+        'this build advertises no Dolby Vision on any persona, so the is_win-only codec tell could ' +
+        'not be exercised. Confirm against a host with a Dolby Vision decoder before treating it as absent.',
+    });
+  } else if (fp.os !== 'windows') {
+    out.push({
+      id: 'dolby-vision-persona-mismatch',
+      detail: `a ${fp.os} persona reports Dolby Vision support ("${dv}"), which only a Windows build has; real Chrome on ${fp.os} reports ""`,
+    });
   }
   const nulls = get(o, 'webgl.extensionsNull') ?? [];
   if (nulls.length) {
@@ -324,7 +390,19 @@ function comparePersona(fp, observed, hostObserved) {
     const match = eq(intended, actual);
     // Agreeing with the persona AND with the host proves nothing about the hook.
     const vacuous = match && hostValue !== undefined && eq(intended, hostValue);
-    fields.push({ field: name, critical, intended, actual, verdict: match ? (vacuous ? 'VACUOUS' : 'MATCH') : 'MISMATCH' });
+    // A known-open defect is reported as its own verdict so it stays visible in every run, but it is
+    // not counted as a regression. If one ever starts passing, it reports MATCH and the entry in
+    // KNOWN_OPEN_MISMATCHES can be deleted to lock the fix in.
+    const knownOpen = KNOWN_OPEN_MISMATCHES.get(name);
+    const verdict = match ? (vacuous ? 'VACUOUS' : 'MATCH') : knownOpen ? 'KNOWN-OPEN' : 'MISMATCH';
+    fields.push({
+      field: name,
+      critical,
+      intended,
+      actual,
+      verdict,
+      ...(verdict === 'KNOWN-OPEN' ? { knownOpen } : {}),
+    });
   }
   return { fields, contradictions: contradictions(fp, observed) };
 }
@@ -482,13 +560,19 @@ async function main() {
 
     // --- aggregate: which FIELD is broken, not which profile ---
     const byField = new Map();
+    // Verdict -> counter key. Spelled out rather than derived from the verdict string: 'KNOWN-OPEN'
+    // lower-cased is not a valid identifier, and an unmapped verdict would silently increment
+    // `undefined` into NaN and take the whole per-field row with it.
+    const COUNTER = { MATCH: 'match', MISMATCH: 'mismatch', VACUOUS: 'vacuous', 'KNOWN-OPEN': 'knownOpen' };
     for (const r of results) for (const f of r.fields) {
-      const e = byField.get(f.field) ?? { field: f.field, critical: f.critical, match: 0, mismatch: 0, vacuous: 0, examples: [] };
-      e[f.verdict.toLowerCase()] += 1;
-      if (f.verdict === 'MISMATCH' && e.examples.length < 3) e.examples.push({ persona: r.id, intended: f.intended, actual: f.actual });
+      const e = byField.get(f.field) ?? { field: f.field, critical: f.critical, match: 0, mismatch: 0, vacuous: 0, knownOpen: 0, examples: [], knownOpenReason: null };
+      const key = COUNTER[f.verdict];
+      if (key) e[key] += 1;
+      if (f.verdict === 'KNOWN-OPEN') e.knownOpenReason ??= f.knownOpen ?? null;
+      if ((f.verdict === 'MISMATCH' || f.verdict === 'KNOWN-OPEN') && e.examples.length < 3) e.examples.push({ persona: r.id, intended: f.intended, actual: f.actual });
       byField.set(f.field, e);
     }
-    const fieldRows = [...byField.values()].sort((a, b) => b.mismatch - a.mismatch || a.field.localeCompare(b.field));
+    const fieldRows = [...byField.values()].sort((a, b) => b.mismatch - a.mismatch || b.knownOpen - a.knownOpen || a.field.localeCompare(b.field));
     const contraCounts = new Map();
     for (const r of results) for (const c of r.contradictions) {
       const e = contraCounts.get(c.id) ?? { id: c.id, count: 0, detail: c.detail };
@@ -501,9 +585,16 @@ async function main() {
 
     console.error('\n──────── per-field conformance ────────');
     for (const f of fieldRows) {
-      const flag = f.mismatch ? (f.critical ? 'FAIL' : 'warn') : f.vacuous === f.match + f.vacuous && f.vacuous > 0 ? 'VACUOUS' : 'ok  ';
-      console.error(`  ${flag.padEnd(7)} ${f.field.padEnd(34)} match ${String(f.match).padStart(3)}  mismatch ${String(f.mismatch).padStart(3)}  vacuous ${String(f.vacuous).padStart(3)}`);
-      if (f.mismatch && f.examples[0]) console.error(`          e.g. ${f.examples[0].persona}: intended ${JSON.stringify(f.examples[0].intended).slice(0, 70)} · actual ${JSON.stringify(f.examples[0].actual).slice(0, 70)}`);
+      const flag = f.mismatch
+        ? (f.critical ? 'FAIL' : 'warn')
+        : f.knownOpen
+          ? 'KNOWN'
+          : f.vacuous === f.match + f.vacuous && f.vacuous > 0
+            ? 'VACUOUS'
+            : 'ok  ';
+      console.error(`  ${flag.padEnd(7)} ${f.field.padEnd(34)} match ${String(f.match).padStart(3)}  mismatch ${String(f.mismatch).padStart(3)}  vacuous ${String(f.vacuous).padStart(3)}${f.knownOpen ? `  known-open ${String(f.knownOpen).padStart(3)}` : ''}`);
+      if (f.knownOpen && f.knownOpenReason) console.error(`          known open: ${f.knownOpenReason}`);
+      if ((f.mismatch || f.knownOpen) && f.examples[0]) console.error(`          e.g. ${f.examples[0].persona}: intended ${JSON.stringify(f.examples[0].intended).slice(0, 70)} · actual ${JSON.stringify(f.examples[0].actual).slice(0, 70)}`);
     }
     if (contraCounts.size) {
       console.error('\n──────── contradictions ────────');
@@ -512,12 +603,15 @@ async function main() {
         console.error(`          ${c.detail}`);
       }
     }
-    console.error(`\nVERDICT: ${verdict.toUpperCase()} — ${results.length - errored}/${results.length} personas probed, ${brokenFields.length} critical field(s) broken, ${contraCounts.size} contradiction kind(s)`);
+    // Known-open fields are named in the verdict line, not just buried in the table. A run that says
+    // PASS while a documented defect is still live should say so on the line people actually read.
+    const knownOpenFields = fieldRows.filter((f) => f.knownOpen > 0);
+    console.error(`\nVERDICT: ${verdict.toUpperCase()} — ${results.length - errored}/${results.length} personas probed, ${brokenFields.length} critical field(s) broken, ${contraCounts.size} contradiction kind(s)${knownOpenFields.length ? `, ${knownOpenFields.length} known-open (${knownOpenFields.map((f) => f.field).join(', ')})` : ''}`);
 
     await mkdir(REPORTS, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const out = join(REPORTS, `fingerprint-conformance-${stamp}.json`);
-    await writeFile(out, JSON.stringify({ when: stamp, binary: bin, gpuMode: GPU_MODE, verdict, host, fields: fieldRows, contradictions: [...contraCounts.values()], personas: results }, null, 2));
+    await writeFile(out, JSON.stringify({ when: stamp, binary: bin, gpuMode: GPU_MODE, verdict, host, fields: fieldRows, knownOpen: knownOpenFields.map((f) => ({ field: f.field, count: f.knownOpen, reason: f.knownOpenReason })), contradictions: [...contraCounts.values()], personas: results }, null, 2));
     console.error(`report → ${out}`);
     if (verdict !== 'pass') process.exitCode = 1;
   } finally {

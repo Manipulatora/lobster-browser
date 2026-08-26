@@ -448,6 +448,31 @@ jobs:
       # evidence is reported, never failed — an empty ledger is an accurate statement, and reddening PRs
       # for it would only teach people to delete rows.
       - run: node ci/validation/detector-checklist.mjs --check
+      # End-to-end conformance: launch a profile and assert the PAGE reports what the config asked for.
+      #
+      # This is the only check of its kind, and it was wired into nothing — no npm script, no workflow —
+      # until 2026-08-26. That matters more here than it would elsewhere: every fingerprint hook in the
+      # fork fails OPEN by construction (lobium/patches/series), so an unreadable or undersized config
+      # produces a browser that launches happily and reports the HOST on every surface. The capability
+      # contract proves the hooks are PRESENT; only this proves they are WORKING.
+      #
+      # It exits 2 = BLOCKED when no engine is provisioned, which is the normal state on a
+      # github-hosted runner. BLOCKED must not read as a pass and must not redden the job — the same
+      # distinction gate:oracles draws — so translate the code explicitly rather than using `|| true`,
+      # which would swallow a genuine failure along with it.
+      - name: Fingerprint conformance (BLOCKED without an engine)
+        env:
+          LOBSTER_LOBIUM_BIN: ${{ vars.LOBSTER_LOBIUM_BIN }}
+        run: |
+          set +e
+          npm run gate:conformance
+          status=$?
+          set -e
+          case "$status" in
+            0) echo "conformance: PASS" ;;
+            2) echo "conformance: BLOCKED (no Lobium binary on this runner) — not a pass, not a failure" ;;
+            *) echo "conformance: FAIL (exit $status)"; exit "$status" ;;
+          esac
       # Offline W4 guard: the build ref, the UA-claimed version, and the engine manifest must agree,
       # and the pin must not be a canary/branch-point build. This is what would have caught the repo
       # sitting on canary 152.0.7928.0. The ONLINE half (is the pin behind stable / still a real

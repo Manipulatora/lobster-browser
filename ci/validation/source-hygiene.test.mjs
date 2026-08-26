@@ -132,6 +132,37 @@ test('production tooling contains no developer-specific checkout or report path'
   );
 });
 
+test('no tracked file contains a real profile id', () => {
+  // This one deliberately does NOT exempt docs/, unlike the check above.
+  //
+  // docs/qa is where pasted runtime output lands, and a QA write-up quoting a live `profile list` is
+  // the natural way for operator data to reach a public commit. It nearly did: a 2026-08-26 Windows
+  // report included two real profile display names beside their durable ids. In an anti-detect
+  // product that pairing is the exact linkage the whole thing exists to prevent — a persona name is
+  // an account, and the id is what that account is stored under across every launch.
+  //
+  // Real ids are `prf_` + 32 hex (crypto.randomUUID with the dashes stripped). The repo's synthetic
+  // fixtures are deliberately shorter (prf_6d04dd17, prf_c30fea6b) or all-zero
+  // (prf_00000000000000000000000000000000), so none of them match and no test data needs changing.
+  // Redact as `prf_<redacted>` — the count and the OS target carry the evidence, the id never does.
+  const REAL_PROFILE_ID = /prf_(?!0{32})[0-9a-f]{32}/i;
+  const offenders = [];
+  for (const path of TRACKED_SOURCE) {
+    const text = readFileSync(path, 'utf8');
+    const match = REAL_PROFILE_ID.exec(text);
+    if (match) {
+      offenders.push(
+        `${relative(ROOT, path).split('\\').join('/')} (${match[0].slice(0, 12)}…)`,
+      );
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    'a real profile id reached a tracked file; redact it as prf_<redacted> rather than publishing it',
+  );
+});
+
 /**
  * JSONC by convention, and legitimately so: TypeScript and VS Code both document comment support in
  * these, and the toolchain that reads them is comment-aware. Applying strict JSON.parse to them would

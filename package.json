@@ -41,6 +41,7 @@
     "gate:font-pack": "node ci/validation/font-pack-registration-gate.mjs",
     "gate:webgl": "node ci/validation/webgl-availability-gate.mjs",
     "gate:webrtc": "node ci/validation/webrtc-leak-gate.mjs",
+    "gate:conformance": "node ci/validation/fingerprint-conformance.mjs",
     "e2e:desktop": "playwright test --config ci/playwright.desktop.config.ts"
   },
   "devDependencies": {
