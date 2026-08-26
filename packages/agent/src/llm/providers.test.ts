@@ -604,3 +604,78 @@ test('a tool-calling step never streams, because a forced call has no prose to r
     globalThis.fetch = original;
   }
 });
+
+/**
+ * Usage attribution. The backend has always read `x-lobster-profile-id` / `x-lobster-session-id`
+ * and had AgentUsage columns for them, but no client ever sent the headers, so every usage row was
+ * written with both NULL and per-profile spend could not be reported. These two tests pin both
+ * halves: that the managed endpoint now gets them, and that a BYOK provider never does.
+ */
+test('the managed endpoint receives per-profile usage attribution', async () => {
+  const original = globalThis.fetch;
+  let seen: Record<string, string> = {};
+  globalThis.fetch = (async (_input, init) => {
+    seen = (init?.headers ?? {}) as Record<string, string>;
+    return new Response(
+      JSON.stringify({
+        choices: [{ finish_reason: 'stop', message: { content: 'ok' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+  try {
+    // `managed: true` is what routes through the backend proxy; the provider name is incidental.
+    const client = createLlmClient({
+      provider: 'openrouter',
+      managed: true,
+      model: 'model-test',
+      apiKey: 'agent-token',
+      baseUrl: 'https://api.lobrowser.com/agent/llm',
+    });
+    await client.complete({
+      ...request,
+      attribution: { profileId: 'prf_abc', sessionId: 'run_123' },
+    });
+    assert.equal(seen['x-lobster-profile-id'], 'prf_abc');
+    assert.equal(seen['x-lobster-session-id'], 'run_123');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a BYOK provider is never told which profile is running', async () => {
+  const original = globalThis.fetch;
+  let seen: Record<string, string> = {};
+  globalThis.fetch = (async (_input, init) => {
+    seen = (init?.headers ?? {}) as Record<string, string>;
+    return new Response(
+      JSON.stringify({
+        choices: [{ finish_reason: 'stop', message: { content: 'ok' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+  try {
+    // OpenRouter shares the managed wire format, so it is the case most likely to leak by accident.
+    const client = createLlmClient({
+      provider: 'openrouter',
+      model: 'model-test',
+      apiKey: 'sk-user-own-key',
+    });
+    await client.complete({
+      ...request,
+      attribution: { profileId: 'prf_abc', sessionId: 'run_123' },
+    });
+    assert.equal(seen['x-lobster-profile-id'], undefined);
+    assert.equal(seen['x-lobster-session-id'], undefined);
+    assert.equal(
+      JSON.stringify(seen).includes('prf_abc'),
+      false,
+      'a profile id must not reach a third-party provider by any header',
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});

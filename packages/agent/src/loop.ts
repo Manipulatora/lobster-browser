@@ -877,6 +877,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         maxTokens: overrides.maxTokens ?? requestMaxTokens,
         cachePrefix: true,
         sessionId: runId,
+        attribution: { profileId, sessionId: runId },
         ...(llmConfig.effort ? { effort: llmConfig.effort } : {}),
         // A silent retry is indistinguishable from a hang: three BYOK attempts plus backoff is minutes
         // of a panel showing only "thinking", which invites killing a run that was recovering fine.

@@ -102,6 +102,16 @@ export class OpenAiCompatibleClient implements LlmClient {
           authorization: `Bearer ${this.apiKey}`,
           'content-type': 'application/json',
           ...(wantsStream ? { accept: 'text/event-stream' } : {}),
+          // Usage attribution, managed endpoint only — see LlmRequest.attribution for why it is not
+          // sent to BYOK providers. Advisory rather than authoritative: the guard trusts the token
+          // for the team and these headers only to split that team's own spend between its own
+          // profiles, so a forged value can misreport a team to itself and nothing more.
+          ...(this.provider === 'managed' && req.attribution
+            ? {
+                'x-lobster-profile-id': req.attribution.profileId,
+                'x-lobster-session-id': req.attribution.sessionId,
+              }
+            : {}),
         },
         body: JSON.stringify(wantsStream ? { ...body, stream: true } : body),
       },

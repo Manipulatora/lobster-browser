@@ -61,6 +61,19 @@ export interface LlmRequest {
   sessionId?: string;
   /** Reasoning effort → OpenRouter `reasoning: { effort }` (cross-provider). Omit for the default. */
   effort?: 'low' | 'medium' | 'high';
+  /**
+   * Who to bill this call to, beyond the team the token already names.
+   *
+   * The backend has always been ready for it — AgentAuthGuard reads `x-lobster-profile-id` and
+   * `x-lobster-session-id` into the principal and agent-llm.service charges with them, and
+   * AgentUsage has the columns — but nothing ever sent the headers, so every row was written with
+   * both NULL and per-profile spend could not be reported at all.
+   *
+   * Sent ONLY to the managed endpoint. A profile id is an internal identifier of the user's own
+   * infrastructure; forwarding it to OpenRouter or an Anthropic BYOK key would hand a third party a
+   * stable per-profile correlator for no benefit.
+   */
+  attribution?: { profileId: string; sessionId: string };
   /** Abort the in-flight HTTP request when the run is stopped. */
   signal?: AbortSignal;
   /** Receive assistant text as it arrives. Adapters that stream call this; others never do. */
