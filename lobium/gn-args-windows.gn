@@ -62,3 +62,19 @@ use_remoteexec = false
 # Windows (30 on Linux), which is exactly the "don't overlap two huge links on a small box"
 # reasoning this line was written for — with the real per-platform numbers rather than a guess.
 # A 16 GB host therefore already gets one link at a time without being told.
+
+# ---- EME / Widevine ----
+# Every persona claims the "Google Chrome" brand in Sec-CH-UA, and every real Chrome resolves
+# navigator.requestMediaKeySystemAccess('com.widevine.alpha'). A Chromium build defaults
+# enable_widevine to false (widevine.gni gates it on is_chrome_branded), so without this the key
+# system is not even registered and one call unmasks every profile. Measured on the 24-persona
+# conformance fleet: chrome-without-widevine fired 24/24.
+#
+# The CDM is NOT bundled. bundle_widevine_cdm would require shipping Google's binary, and
+# third_party/widevine/LICENSE is explicit: "You may not use, modify, sell, or otherwise distribute
+# the Software without a separate license agreement with Google." Leaving it unset makes
+# enable_widevine_cdm_component true instead, so the CDM is fetched by Chromium's own component
+# updater from Google, to the user's machine, exactly as it is for every other Chromium-derived
+# browser. perf/skip-heavy-components.patch suppresses only SODA/TranslateKit/WasmTts, so this
+# component still registers.
+enable_widevine = true

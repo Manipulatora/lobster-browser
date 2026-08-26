@@ -86,6 +86,13 @@ fingerprint/screen-dpr.patch
 # matchMedia('(device-width/height)') must agree with screen.width/height (CreepJS Screen lie).
 # CHAIN: after screen-dpr; both hook media_values.cc.
 fingerprint/media-values-device-size.patch
+# The COLOUR half of the same surface: (color: N), (dynamic-range:) and (color-gamut:), which the
+# screen hooks left on the host. Every Apple-Silicon persona is given colorDepth 30 (P3 panels
+# really do report it), so a page could read screen.colorDepth 30, ask for (color: 10) and be told
+# 8 by an 8-bit host - a contradiction no real device produces, measured on 6 of 24 personas.
+# CHAIN: after media-values-device-size; both hook media_values.cc, so this is cut against its
+# output and cannot be validated in isolation.
+fingerprint/media-values-color.patch
 # navigator.webdriver, answered in Blink rather than by --disable-blink-features. The flag kept it
 # false but raised Chromium's "unsupported command-line flag" infobar and named itself on
 # chrome://version - two tells bought to hide one.

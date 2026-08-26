@@ -1,0 +1,62 @@
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -231,6 +231,13 @@
+ bool MediaValues::CalculateDeviceSupportsHDR(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetPage());
++  // Lobium: a persona claiming a 30-bit panel must also answer (dynamic-range: high). Reporting a
++  // deep colour depth beside a standard dynamic range describes no shipping display, and the pair
++  // is read together by every fingerprinting library that looks at either.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->screen.color_depth > 0) {
++    return cfg->screen.color_depth > 24;
++  }
+   return frame->GetPage()
+       ->GetChromeClient()
+       .GetScreenInfo(*frame)
+@@ -240,6 +247,22 @@
+ int MediaValues::CalculateColorBitsPerComponent(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetPage());
++  // Lobium: keep matchMedia('(color: N)') coherent with screen.colorDepth.
++  //
++  // fingerprint/screen-dpr.patch hooks Screen::colorDepth, but this is the CSS side of the same
++  // claim and was left on the host. The two disagree deterministically for every Apple-Silicon
++  // persona, which the catalog gives colorDepth 30 (P3 displays really do report 30): the page
++  // reads screen.colorDepth 30, asks for (color: 10), and is told 8 by an 8-bit host. That is a
++  // one-line contradiction no real device can produce, and it fired on 6 of 24 personas in the
++  // conformance fleet.
++  //
++  // Derived from the same field rather than given its own config entry, so the two can never be
++  // configured into disagreement: CSS reports bits PER COMPONENT and screen.colorDepth is the sum
++  // across three components.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->screen.color_depth > 0) {
++    return cfg->screen.color_depth / 3;
++  }
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   if (screen_info.is_monochrome) {
+@@ -421,8 +444,19 @@
+       frame->GetPage()->GetMediaFeatureOverrides();
+   std::optional<ColorSpaceGamut> override_value =
+       overrides ? overrides->GetColorGamut() : std::nullopt;
+-  return override_value.value_or(color_space_utilities::GetColorSpaceGamut(
+-      frame->GetPage()->GetChromeClient().GetScreenInfo(*frame)));
++  if (override_value.has_value()) {
++    return *override_value;
++  }
++  // Lobium: the third member of the same claim. A 30-bit persona is a wide-gamut panel and must
++  // answer (color-gamut: p3); a 24-bit one is sRGB. Checked after the DevTools override so
++  // emulation still wins, exactly as it does upstream.
++  if (const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++      cfg && cfg->screen.color_depth > 0) {
++    return cfg->screen.color_depth > 24 ? ColorSpaceGamut::P3
++                                        : ColorSpaceGamut::SRGB;
++  }
++  return color_space_utilities::GetColorSpaceGamut(
++      frame->GetPage()->GetChromeClient().GetScreenInfo(*frame));
+ }
+ 
+ mojom::blink::PreferredColorScheme MediaValues::CalculatePreferredColorScheme(

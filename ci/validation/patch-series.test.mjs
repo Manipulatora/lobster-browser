@@ -42,6 +42,9 @@ const FINGERPRINT_PATCH_CAPABILITIES = new Map([
   ['fingerprint/audio-worklet-tap.patch', ['audio-farbling']],
   ['fingerprint/screen-dpr.patch', ['screen-metrics']],
   ['fingerprint/media-values-device-size.patch', ['screen-metrics']],
+  // The colour half of the same surface: (color:), (dynamic-range:), (color-gamut:), all
+  // derived from screen.colorDepth so they cannot be configured into disagreeing with it.
+  ['fingerprint/media-values-color.patch', ['screen-metrics']],
   ['fingerprint/navigator-webdriver.patch', ['navigator-webdriver']],
   [
     'fingerprint/locale-geolocation.patch',
