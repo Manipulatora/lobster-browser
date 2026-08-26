@@ -1,76 +1,49 @@
 import type { ReactNode } from 'react';
 import { useEffect, useState } from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 
 import siteLogo from '../../assets/brand/site-logo.png';
-import { Button } from '../../ui';
 
 interface EngineStatus {
   present: boolean;
   runtimeDir: string;
 }
 
-interface DownloadProgress {
-  received: number;
-  total: number | null;
-}
-
-const mb = (n: number): string => (n / (1024 * 1024)).toFixed(0);
-
 /**
- * First-run gate for the DOWNLOADER distribution model. The shipped package does not carry the ~840 MB
- * Lobium engine; on first launch this gate detects the missing engine and downloads + verifies it (once)
- * before the app is usable. In the dev/browser runtime (no Tauri) it is a pass-through.
+ * First-run check for the EMBEDDED engine.
+ *
+ * The installer carries the Lobium runtime, so by the time this renders the engine is already on
+ * disk and this gate is a pass-through. It used to be a download screen: the package shipped without
+ * an engine and fetched ~840 MB on first launch, which put a "Download engine" button in front of a
+ * browser the user had just finished installing, and made the product's one core action depend on a
+ * release URL and the user's network at the moment they had least reason to expect either.
+ *
+ * What remains is a check, not a prompt. A missing engine now means the INSTALL is damaged - files
+ * removed, an antivirus quarantine, a half-extracted upgrade - and the honest response is to say so
+ * and point at reinstalling. Offering to download an engine from here would paper over a broken
+ * install with a several-hundred-megabyte workaround, and would appear to succeed on exactly the
+ * machines where the real problem is that something is deleting files.
  */
 export function EngineGate({ children }: { children: ReactNode }): JSX.Element {
   const desktop = isTauri();
   const [ready, setReady] = useState(!desktop);
   const [checking, setChecking] = useState(desktop);
-  const [downloading, setDownloading] = useState(false);
-  const [progress, setProgress] = useState<DownloadProgress>({ received: 0, total: null });
-  const [error, setError] = useState<string | null>(null);
+  const [runtimeDir, setRuntimeDir] = useState<string>('');
 
   useEffect(() => {
     if (!desktop) return;
     invoke<EngineStatus>('engine_status')
       .then((status) => {
         setReady(status.present);
+        setRuntimeDir(status.runtimeDir);
         setChecking(false);
       })
+      // A failed status call is not evidence the engine is missing, but it is evidence we cannot
+      // confirm it. Stop checking and let the message below describe an install worth repairing.
       .catch(() => setChecking(false));
   }, [desktop]);
 
-  useEffect(() => {
-    if (!downloading) return undefined;
-    const unlisten = listen<DownloadProgress>('engine-download-progress', (event) =>
-      setProgress(event.payload),
-    );
-    return () => {
-      void unlisten.then((off) => off());
-    };
-  }, [downloading]);
-
-  async function startDownload(): Promise<void> {
-    setError(null);
-    setProgress({ received: 0, total: null });
-    setDownloading(true);
-    try {
-      await invoke('provision_engine');
-      setReady(true);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setDownloading(false);
-    }
-  }
-
   if (ready) return <>{children}</>;
-
-  const pct =
-    progress.total && progress.total > 0
-      ? Math.min(100, Math.round((progress.received / progress.total) * 100))
-      : null;
 
   return (
     <div className="engine-gate">
@@ -80,44 +53,18 @@ export function EngineGate({ children }: { children: ReactNode }): JSX.Element {
           <p className="engine-gate__status">Checking browser engine…</p>
         ) : (
           <>
-            <h1>Set up the browser engine</h1>
+            <h1>The browser engine is missing</h1>
             <p className="engine-gate__desc">
-              Lobster downloads the Lobium browser engine once before you can create profiles. It is
-              verified by checksum and installed locally.
+              Lobster ships its browser engine inside the installer, so this should not happen on a
+              complete installation. The usual causes are antivirus quarantine, or files removed from
+              the installation folder after setup.
             </p>
-            {downloading ? (
-              <>
-                <div
-                  className="engine-gate__bar"
-                  role="progressbar"
-                  aria-valuenow={pct ?? undefined}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                >
-                  <div
-                    className={
-                      pct === null
-                        ? 'engine-gate__fill engine-gate__fill--indet'
-                        : 'engine-gate__fill'
-                    }
-                    style={pct === null ? undefined : { width: `${pct}%` }}
-                  />
-                </div>
-                <p className="engine-gate__status">
-                  {pct !== null
-                    ? `${pct}% · ${mb(progress.received)} / ${mb(progress.total ?? 0)} MB`
-                    : `Downloading… ${mb(progress.received)} MB`}
-                </p>
-              </>
-            ) : (
-              <Button variant="primary" onClick={() => void startDownload()}>
-                Download engine
-              </Button>
-            )}
-            {error ? (
-              <p className="notice notice--error engine-gate__error" role="alert">
-                {error}
-              </p>
+            <p className="engine-gate__desc">
+              Reinstall Lobster Browser to restore it. If it recurs, check whether your antivirus is
+              removing files from the installation folder.
+            </p>
+            {runtimeDir ? (
+              <p className="engine-gate__status engine-gate__path">Expected at: {runtimeDir}</p>
             ) : null}
           </>
         )}
