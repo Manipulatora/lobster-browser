@@ -98,8 +98,41 @@ function connect(wsUrl) {
   return { ws, send, ex, events, ready };
 }
 
-const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-const page = connect(list.find((t) => t.type === 'page').webSocketDebuggerUrl);
+/**
+ * Wait for a PAGE target, not merely for the endpoint to answer.
+ *
+ * /json/version responds as soon as the browser opens its DevTools socket, which happens BEFORE the
+ * browser has created any page target — and on a loaded machine that gap is easily seconds. Reading
+ * /json/list once at that moment returns only `browser_ui` entries, so `.find(t => t.type ===
+ * 'page')` is undefined and the script dies with "Cannot read properties of undefined". Being a
+ * race, it passes on an idle host and fails on a busy one, which is the worst way for a diagnostic
+ * to be wrong: the crash reads as though the engine misbehaved.
+ *
+ * This is the same readiness race resolveCdpTarget already handles in the sidecar
+ * (packages/engine-runner/src/cdp-client.ts); the fix is the same — poll until a page exists, and
+ * report the engine's own stderr if it never does.
+ */
+async function waitForPageTarget(deadlineMs = 60_000) {
+  const started = Date.now();
+  let last = [];
+  while (Date.now() - started < deadlineMs) {
+    try {
+      last = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
+      const target = Array.isArray(last) ? last.find((t) => t.type === 'page') : undefined;
+      if (target?.webSocketDebuggerUrl) return target;
+    } catch {
+      // The network service restarts moments after launch; a refusal here is not an answer.
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const seen = Array.isArray(last) ? last.map((t) => t.type).join(', ') : 'none';
+  throw new Error(
+    `no page target after ${deadlineMs}ms (targets seen: ${seen || 'none'}).\n` +
+      `Engine stderr tail:\n${stderr.split('\n').slice(-10).join('\n')}`,
+  );
+}
+
+const page = connect((await waitForPageTarget()).webSocketDebuggerUrl);
 await page.ready;
 await page.send('Runtime.enable'); await page.send('Page.enable'); await page.send('Log.enable');
 

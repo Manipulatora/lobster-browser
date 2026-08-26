@@ -25,6 +25,23 @@ repository up on a new machine. It records what is true today, not what is plann
 > Current source advertises 19 capabilities on Linux and 20 on Windows (the extra hook is Windows
 > font isolation); a clean rebuild and a new oracle run are required before either can be published.
 >
+> **Superseded on 2026-08-26, measured on the Windows host.** The two paragraphs above are stale and
+> are kept because the reasoning around them still holds:
+>
+> * `engine-manifest.json` no longer names `152.0.7928.0` and no longer carries a `rebuildPending`
+>   block. Both platforms are at `152.0.7977.42`, and the `win-x64` entry carries a `stale` marker
+>   explaining why its bytes must not be shipped.
+> * Artifacts are served from `lobrowser.com`, not GitHub. **Measured from the Windows host:** the
+>   Linux archive is live (`HTTP 200`, 270,688,368 bytes); the Windows archive returns **`HTTP 404`**
+>   and has never been uploaded, so Windows first-run provisioning cannot succeed today.
+> * The capability counts are confirmed by probing the shipped Windows runtime: contract version 3,
+>   **20 names** (19 portable plus `font-isolation`). Adding `device-frame` on 2026-08-26 makes it
+>   **21 on Windows and 20 on Linux** once the current rebuild lands.
+> * `branding/device-frame.patch` was **Linux-only in source** until 2026-08-26 — 11
+>   `BUILDFLAG(IS_LINUX)` guards, zero `IS_WIN` — so the Windows binary compiled `LobiumDeviceFrameView`
+>   and then dropped it at link time, and an Android profile opened with no phone stage. The guards
+>   now cover Windows. See `docs/qa/2026-08-26-windows-understanding.md`.
+>
 > The audit itself (2026-08-14) returned **79 findings — 10 critical, 19 high**. Most remain open.
 > This is a solid native foundation with real, documented gaps, not a finished anti-detect product.
 
@@ -132,6 +149,22 @@ collection from `fontPackDir`. The pack rides with the **engine archive**, not t
 installer can never be out of step with the engine over it. Without a pack the measurable set is
 host ∩ persona: narrower than claimed, never wider than the host — degraded, not leaking, which is why
 this path fails open where the Linux one fails closed.
+
+> **Correction, 2026-08-26, measured on the Windows host: the "fails open" half of that last sentence
+> is not what the engine does.** The *privacy* claim is right — the set is never wider than the host —
+> but the *availability* claim is wrong. Launched with a persona whose claimed families are absent
+> from the host and no pack (an Android persona claiming Roboto / Noto Sans / Droid Sans / Google
+> Sans on a stock Windows host), the engine logs
+> `lobium_fonts.cc:535 Lobium: restricted Windows character fallback could not be built` and then
+> **never produces a page target at all** — `/json/list` returns only `browser_ui` entries
+> indefinitely. That is not a degraded launch; it is a browser that starts and does nothing,
+> explained only by one line in a log.
+>
+> The product does not normally reach this state, because `buildLobiumLaunchArgs` stages and verifies
+> a pack before writing the config. But nothing *prevents* reaching it — a quarantined, deleted or
+> corrupt pack at runtime lands exactly here — and the honest behaviour would be to refuse the launch
+> with a message naming the pack rather than to hang. Recorded rather than fixed: the fix belongs in
+> the engine, not the launcher.
 
 One consequence worth recording: populating `fonts` in the native config was previously refused because
 the browser base64s the whole config document onto the renderer command line, Windows caps that line at

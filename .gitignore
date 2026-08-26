@@ -24,6 +24,12 @@ apps/desktop/src-tauri/resources/
 packages/lobee/
 # Validation screenshots/reports (local GPU runs)
 ci/validation/reports/
+# QA working output: generated persona configs (each stages its own font pack, so this gets large),
+# diagnostic JSON, mascot screenshots, engine build logs. Local evidence, same status as reports/
+# above - the docs/qa write-ups cite these paths, but the bytes are reproducible from the scripts
+# and are not source. Also keeps host-specific checkout paths in scratch notes out of the
+# source-hygiene scan, which reads tracked files.
+qa-out/
 
 # Engines (downloaded on first run, never committed)
 engines/bin/
