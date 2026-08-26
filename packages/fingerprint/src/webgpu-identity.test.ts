@@ -125,3 +125,34 @@ test('a derived persona s WebGPU identity names the same GPU as its WebGL render
     }
   }
 });
+
+test('mobile GPUs resolve a real architecture instead of falling through to the host', () => {
+  // REGRESSION. ARM and Qualcomm architectures were named in the VENDORS comments and never mapped
+  // in ARCHITECTURES, so every Android persona resolved to the vendor fallback of ''. An empty
+  // architecture is what the engine treats as "no override", so the adapter reported the HOST's
+  // instead: measured on a GPU-less box, a Mali-G68 persona answered architecture "swiftshader"
+  // beside a spoofed "ANGLE (ARM, Mali-G68, OpenGL ES 3.2)" WebGL renderer - the software backend
+  // named on the very surface the WebGL hook exists to hide.
+  const arch = (renderer: string): string =>
+    webgpuIdentityFor({ unmaskedRenderer: renderer, renderer } as never).architecture;
+
+  assert.equal(arch('ANGLE (ARM, Mali-G68, OpenGL ES 3.2)'), 'valhall');
+  assert.equal(arch('ANGLE (ARM, Mali-G78, OpenGL ES 3.2)'), 'valhall');
+  // Longest-digits-first: G710 must not be captured by the G71 (Bifrost) pattern.
+  assert.equal(arch('ANGLE (ARM, Mali-G710, OpenGL ES 3.2)'), 'valhall');
+  assert.equal(arch('ANGLE (ARM, Mali-G715, OpenGL ES 3.2)'), 'valhall');
+  assert.equal(arch('ANGLE (ARM, Mali-G76, OpenGL ES 3.2)'), 'bifrost');
+  assert.equal(arch('ANGLE (ARM, Mali-T880, OpenGL ES 3.2)'), 'midgard');
+
+  assert.equal(arch('ANGLE (Qualcomm, Adreno (TM) 619, OpenGL ES 3.2)'), 'adreno-6xx');
+  assert.equal(arch('ANGLE (Qualcomm, Adreno (TM) 660, OpenGL ES 3.2)'), 'adreno-6xx');
+  assert.equal(arch('ANGLE (Qualcomm, Adreno (TM) 730, OpenGL ES 3.2)'), 'adreno-7xx');
+  assert.equal(arch('ANGLE (Qualcomm, Adreno (TM) 750, OpenGL ES 3.2)'), 'adreno-7xx');
+
+  // Never the product family, which is what a naive mapping would emit and no adapter reports.
+  for (const r of ['ANGLE (ARM, Mali-G68, OpenGL ES 3.2)', 'ANGLE (Qualcomm, Adreno (TM) 660, OpenGL ES 3.2)']) {
+    const a = arch(r);
+    assert.ok(a !== 'mali' && a !== 'adreno', `${r} resolved to a product family: ${a}`);
+    assert.ok(a.length > 0, `${r} resolved to an empty architecture, which the engine treats as no-override`);
+  }
+});

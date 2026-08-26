@@ -50,6 +50,26 @@ const ARCHITECTURES: ReadonlyArray<readonly [RegExp, string]> = [
   [/Arc\s/i, 'gen-12hp'],
   [/Iris\s+Xe/i, 'gen-12lp'],
   [/UHD\s+Graphics|HD\s+Graphics/i, 'gen-9'],
+  // ARM Mali. The vendor table's comment already names Dawn's three: midgard/bifrost/valhall. They
+  // were documented there and never mapped here, so every Mali persona fell through to the vendor
+  // fallback of '' - and an EMPTY architecture is what the engine treats as "no override", so the
+  // adapter reported the HOST's architecture instead. Measured before this: a Mali-G68 persona
+  // answered architecture "swiftshader" next to a spoofed "ANGLE (ARM, Mali-G68, OpenGL ES 3.2)"
+  // WebGL renderer - the software backend named on the surface the WebGL hook exists to hide.
+  //
+  // Generation split follows ARM's own: G57/G68/G7xx are Valhall, G71-G76 Bifrost, T-series Midgard.
+  // Ordered longest-digits-first so Mali-G710 cannot be matched by the G71 pattern.
+  [/Mali-G7\d\d/i, 'valhall'],
+  [/Mali-G(5[27]|6[18]|77|78)\b/i, 'valhall'],
+  [/Mali-G(51|52|71|72|76)\b/i, 'bifrost'],
+  [/Mali-T\d/i, 'midgard'],
+  // Qualcomm Adreno. Dawn's names are adreno-4xx..adreno-8xx, per the vendor table's own comment,
+  // never a bare 'adreno'. Same failure as Mali above: documented, unmapped, so it resolved to ''.
+  [/Adreno[^0-9]*8\d\d/i, 'adreno-8xx'],
+  [/Adreno[^0-9]*7\d\d/i, 'adreno-7xx'],
+  [/Adreno[^0-9]*6\d\d/i, 'adreno-6xx'],
+  [/Adreno[^0-9]*5\d\d/i, 'adreno-5xx'],
+  [/Adreno[^0-9]*4\d\d/i, 'adreno-4xx'],
   // Apple. Apple GPUs report no Metal deviceID, so Dawn cannot pattern-match them and instead
   // reports the highest supported family: on macOS 13+ - which is every Mac that runs Chrome 152 -
   // that is 'metal-3'. There is no 'apple-silicon' anywhere in Dawn.
