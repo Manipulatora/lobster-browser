@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { DOWNLOADS, RELEASE_TAG, detectPlatform, orderedForPlatform } from './downloads.catalog';
+import {
+  DOWNLOAD_BASE,
+  DOWNLOADS,
+  RELEASE_VERSION,
+  detectPlatform,
+  orderedForPlatform,
+} from './downloads.catalog';
 
 describe('downloads catalog', () => {
   it('offers exactly the platforms the product ships, each with a resolvable URL', () => {
@@ -9,8 +15,13 @@ describe('downloads catalog', () => {
       // The URL must end in the same file name the box saves as, or the `download` attribute names
       // one installer while the release serves another.
       expect(item.url.endsWith(`/${item.file}`)).toBe(true);
-      expect(item.url).toContain(RELEASE_TAG);
+      // Served from our own origin. A github.com URL here is the regression this asserts against:
+      // it puts a third party in front of the customer at the moment they install.
+      expect(item.url.startsWith(`${DOWNLOAD_BASE}/`)).toBe(true);
       expect(item.url.startsWith('https://')).toBe(true);
+      // The version has to survive into the file name, or a release bump serves the old installer
+      // from a well-formed new URL.
+      expect(item.file).toContain(RELEASE_VERSION);
     }
   });
 

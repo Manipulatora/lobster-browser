@@ -1,11 +1,16 @@
 /**
  * What the download page offers, and where the bytes actually come from.
  *
- * THE ARTIFACTS ARE PUBLIC, AND SO IS THE PAGE. Installers are published as GitHub Release assets
- * on a public repository, so the URLs below need no credential — which is what makes them
- * installable by a machine that is not signed in, and what lets an antivirus vendor or a mirror
- * fetch them. Proxying the download through the API would buy nothing and cost every user a slow
- * hop.
+ * SERVED FROM OUR OWN HOST, NOT GITHUB. The installers used to be GitHub Release assets, which put
+ * `github.com/...` in front of every prospective customer at the exact moment they decide to
+ * install — it names the source repository, ties the product's availability to a third party's
+ * policy on large binaries, and reads as a hobby project rather than a product. They are now served
+ * from lobrowser.com/download/<file>, alongside the page that offers them, so the whole flow stays
+ * on one origin.
+ *
+ * Still public and still credential-free: that is what lets an unauthenticated machine install, and
+ * what lets an antivirus vendor or a mirror fetch a copy to scan. nginx serves them straight from
+ * disk (see deploy/nginx/lobster-site.conf), so there is no API hop in the path.
  *
  * ONE VERSION, DERIVED EVERYWHERE. `RELEASE_VERSION` is the only value that moves between
  * releases: the tag, both installer file names and both URLs are built from it. They used to be
@@ -22,13 +27,15 @@
 /** Product version shown to the user. Matches the Tauri package version. The ONLY thing to bump. */
 export const RELEASE_VERSION = '1.0.0';
 
-/** The GitHub release these artifacts belong to; the repo tags releases `v<version>`. */
-export const RELEASE_TAG = `v${RELEASE_VERSION}`;
-
 /** The Chromium milestone the bundled engine is built from, shown so support can match reports. */
 export const ENGINE_VERSION = '152.0.7977.42';
 
-const RELEASE_BASE = `https://github.com/Manipulatora/lobster-browser/releases/download/${RELEASE_TAG}`;
+/**
+ * Public origin for both the page and the artifacts. Absolute rather than a bare `/download/` path
+ * because this page is PRERENDERED and is also read by people who arrive at a mirror or a cached
+ * copy; a relative URL there would resolve against the wrong host.
+ */
+export const DOWNLOAD_BASE = 'https://lobrowser.com/download';
 
 const WINDOWS_INSTALLER = `Lobster-Browser-Setup-${RELEASE_VERSION}-x64.exe`;
 const LINUX_INSTALLER = `lobster-browser_${RELEASE_VERSION}_amd64.deb`;
@@ -60,7 +67,7 @@ export const DOWNLOADS: readonly DownloadArtifact[] = [
     platform: 'windows',
     name: 'Windows',
     file: WINDOWS_INSTALLER,
-    url: `${RELEASE_BASE}/${WINDOWS_INSTALLER}`,
+    url: `${DOWNLOAD_BASE}/${WINDOWS_INSTALLER}`,
     size: '29.3 MB',
     published: true,
   },
@@ -68,7 +75,7 @@ export const DOWNLOADS: readonly DownloadArtifact[] = [
     platform: 'linux',
     name: 'Linux',
     file: LINUX_INSTALLER,
-    url: `${RELEASE_BASE}/${LINUX_INSTALLER}`,
+    url: `${DOWNLOAD_BASE}/${LINUX_INSTALLER}`,
     size: '159 MB',
     published: true,
   },

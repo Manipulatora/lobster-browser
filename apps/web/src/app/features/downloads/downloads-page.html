@@ -17,45 +17,49 @@
                and an icon that arrives late or not at all makes that box look broken. -->
           @switch (item.platform) {
             @case ('windows') {
-              <svg
-                class="size-12 text-ink-soft"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.2"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <rect x="3" y="4" width="8" height="7.2" rx="1" />
-                <rect x="13" y="4" width="8" height="7.2" rx="1" />
-                <rect x="3" y="12.8" width="8" height="7.2" rx="1" />
-                <rect x="13" y="12.8" width="8" height="7.2" rx="1" />
+              <svg class="size-12 text-ink-soft" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M2.6 5.3 10.6 4.2v7.3H2.6z" />
+                <path d="M11.8 4.05 21.4 2.7v8.8h-9.6z" />
+                <path d="M2.6 12.5h8v7.3L2.6 18.7z" />
+                <path d="M11.8 12.5h9.6v8.8l-9.6-1.35z" />
               </svg>
             }
             @case ('linux') {
-              <svg
-                class="size-12 text-ink-soft"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path
-                  d="M12 2.5C9.9 2.5 8.5 4.1 8.5 6.2C8.5 7.3 8.6 8.2 8.1 9.1C7.2 10.6 5.8 12.9 5.8 15.6C5.8 19.1 8.6 21.3 12 21.3C15.4 21.3 18.2 19.1 18.2 15.6C18.2 12.9 16.8 10.6 15.9 9.1C15.4 8.2 15.5 7.3 15.5 6.2C15.5 4.1 14.1 2.5 12 2.5Z"
+              <svg class="size-12 text-ink-soft" viewBox="0 0 24 24" aria-hidden="true">
+                <!-- Feet first, so the body overlaps them. -->
+                <ellipse
+                  cx="8.7"
+                  cy="20.6"
+                  rx="3"
+                  ry="1.45"
+                  fill="currentColor"
+                  transform="rotate(-17 8.7 20.6)"
                 />
-                <path
-                  d="M12 10.4C10.3 10.4 9.2 12.9 9.2 15.6C9.2 18.2 10.4 19.7 12 19.7C13.6 19.7 14.8 18.2 14.8 15.6C14.8 12.9 13.7 10.4 12 10.4Z"
+                <ellipse
+                  cx="15.3"
+                  cy="20.6"
+                  rx="3"
+                  ry="1.45"
+                  fill="currentColor"
+                  transform="rotate(17 15.3 20.6)"
                 />
-                <circle cx="10.5" cy="5.6" r="0.55" fill="currentColor" stroke="none" />
-                <circle cx="13.5" cy="5.6" r="0.55" fill="currentColor" stroke="none" />
+                <!-- One evenodd path: the silhouette, with the belly and both eyes as HOLES rather
+                     than lighter fills. A hole shows whatever the card is painted in, so the mark
+                     reads correctly in either theme; a hard-coded pale belly would go black-on-black
+                     the moment the page is viewed in dark mode. -->
                 <path
-                  d="M12 6.6C11.3 6.6 10.8 7.1 10.8 7.7C10.8 8.3 11.3 8.7 12 8.7C12.7 8.7 13.2 8.3 13.2 7.7C13.2 7.1 12.7 6.6 12 6.6Z"
+                  fill="currentColor"
+                  fill-rule="evenodd"
+                  d="M12 2.2C9.6 2.2 7.9 4 7.9 6.3c0 1-.2 1.7-.2 2.5C6.6 10.8 5.2 13.3 5.2 16.2c0 3.4 2.8 5.4 6.8 5.4s6.8-2 6.8-5.4c0-2.9-1.4-5.4-2.5-7.4-.4-.8-.2-1.5-.2-2.5C16.1 4 14.4 2.2 12 2.2ZM8.4 15.3a3.6 5 0 1 0 7.2 0 3.6 5 0 1 0-7.2 0ZM9.3 5.9a1 1.35 0 1 0 2 0 1 1.35 0 1 0-2 0ZM12.7 5.9a1 1.35 0 1 0 2 0 1 1.35 0 1 0-2 0Z"
                 />
-                <path d="M9.4 20.9C8.8 22 7.5 22.4 6.7 21.8" />
-                <path d="M14.6 20.9C15.2 22 16.5 22.4 17.3 21.8" />
+                <ellipse cx="10.55" cy="6.05" rx="0.5" ry="0.72" fill="currentColor" />
+                <ellipse cx="13.45" cy="6.05" rx="0.5" ry="0.72" fill="currentColor" />
+                <!-- The one literal colour on the page: a currentColor beak would vanish into the
+                     head it sits on. -->
+                <path
+                  fill="#f0a028"
+                  d="M12 7.35c1.28 0 2.2.6 2.2 1.3s-.92 1.2-2.2 1.2-2.2-.5-2.2-1.2.92-1.3 2.2-1.3Z"
+                />
               </svg>
             }
           }
