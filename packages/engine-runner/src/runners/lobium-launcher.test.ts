@@ -480,8 +480,23 @@ test(
     const previous = process.env.LOBSTER_FONTS_DIR;
     try {
       delete process.env.LOBSTER_FONTS_DIR;
+      // Clearing LOBSTER_FONTS_DIR is NOT enough to mean "no pack on this machine".
+      // resolveFontsBaseDir falls through several machine-dependent candidates, among them
+      // %LOCALAPPDATA%\lobster\lobium\fonts — so on any box with the product actually installed a
+      // pack WAS found, no rejection happened, and this test quietly stopped testing anything. It
+      // passed only where the product had never run. Caught 2026-08-26, minutes after provisioning
+      // an engine on the Windows QA host.
+      //
+      // Pin the runtime instead of trusting the environment: a MANAGED runtime with no adjacent
+      // fonts/ directory resolves to "no pack" and stops there — resolveFontsBaseDir returns
+      // undefined for a managed runtime rather than consulting any fallback — which is precisely the
+      // state this test is about, and is now independent of what the host has installed.
+      const runtimeWithoutPack = {
+        executablePath: join(root, 'engine', CHROMIUM_BINARY_NAME),
+        managed: true,
+      };
       await assert.rejects(
-        () => buildLobiumLaunchArgs(ctxWith(root, { os: 'macos' })),
+        () => buildLobiumLaunchArgs(ctxWith(root, { os: 'macos' }), runtimeWithoutPack),
         /verified font pack is required to present a macos font persona on a Windows engine/,
       );
     } finally {

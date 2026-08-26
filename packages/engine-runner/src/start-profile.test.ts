@@ -480,6 +480,65 @@ test('startProfile refuses host renderer mode when persisted calibration is inco
   }
 });
 
+test('a persisted host calibration that is invalid falls back instead of wedging every launch', async () => {
+  // Regression. The persisted file used to be ADOPTED on an os/arch match alone and only validated
+  // much later — by a check that throws. Adopting it skipped both the auto-recapture and the
+  // defaulted-policy catalog fallback, so the throw was reached with no way out, and every launch of
+  // a same-OS profile failed until the user found and deleted the file by hand.
+  //
+  // The realistic trigger is not corruption: it is a capture written while
+  // LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION was set and read back when it is not — the ordinary case
+  // on a VM or RDP host whose only renderer is SwiftShader. loadHostCalibration already handles an
+  // unreadable or unparseable file; this covers the file that parses but is not usable.
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'hc-invalid-'));
+  const file = join(dir, 'host-calibration.json');
+  const host = hostCalibration();
+  // Same OS and arch as the profile, so it passes the compatibility check and is adopted, but it
+  // names a software renderer, which is what makes it invalid without the allow-flag.
+  host.webgl = {
+    ...host.webgl,
+    renderer: 'ANGLE (Google, SwiftShader Device (Subzero), SwiftShader driver)',
+  };
+  await writeFile(file, JSON.stringify(host));
+  const prevFile = process.env.LOBSTER_HOST_CALIBRATION_FILE;
+  const prevAllow = process.env.LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION;
+  const prevAuto = process.env.LOBSTER_AUTO_HOST_CALIBRATION;
+  process.env.LOBSTER_HOST_CALIBRATION_FILE = file;
+  delete process.env.LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION;
+  // Off, so this exercises the fallback rather than a recapture that would need a real binary.
+  process.env.LOBSTER_AUTO_HOST_CALIBRATION = '0';
+  try {
+    const runner = new RecordingRunner();
+    await startProfile(runner, withoutHostCalibration());
+    const launched = runner.launched.at(-1);
+    assert.ok(
+      launched,
+      'an invalid persisted calibration must not stop a defaulted policy from launching',
+    );
+    assert.notEqual(
+      launched.fingerprint.webgl.renderer,
+      host.webgl.renderer,
+      'the invalid software renderer must never reach the persona',
+    );
+    assert.doesNotMatch(
+      launched.fingerprint.webgl.renderer,
+      /SwiftShader|llvmpipe/i,
+      'the catalog fallback must supply a real renderer',
+    );
+  } finally {
+    if (prevFile === undefined) delete process.env.LOBSTER_HOST_CALIBRATION_FILE;
+    else process.env.LOBSTER_HOST_CALIBRATION_FILE = prevFile;
+    if (prevAllow === undefined) delete process.env.LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION;
+    else process.env.LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION = prevAllow;
+    if (prevAuto === undefined) delete process.env.LOBSTER_AUTO_HOST_CALIBRATION;
+    else process.env.LOBSTER_AUTO_HOST_CALIBRATION = prevAuto;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('startProfile rejects a host calibration for the wrong desktop OS', async () => {
   const runner = new RecordingRunner();
   const host = hostCalibration();

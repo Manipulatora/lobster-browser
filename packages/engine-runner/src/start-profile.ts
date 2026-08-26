@@ -122,7 +122,33 @@ export async function startProfile(
       persisted.os === params.os &&
       (!params.arch || persisted.arch === params.arch)
     ) {
-      hostCalibration = persisted;
+      // VALIDATE BEFORE ADOPTING, and treat an invalid file exactly as if it were absent.
+      //
+      // Adopting first and validating later (the check further down, which throws) produced a stuck
+      // state no amount of retrying could clear: setting `hostCalibration` here skips BOTH the
+      // auto-recapture below and the defaulted-policy catalog fallback, so the later validation was
+      // reached with no way out and every launch of a same-OS profile failed until the user found
+      // and deleted the file by hand. loadHostCalibration already treats an unreadable or
+      // unparseable file as absent; the gap was a file that parses but is not a usable calibration —
+      // an install interrupted mid-write, or a capture whose renderer is no longer acceptable
+      // because LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION was set when it was written and is not now,
+      // which is the ordinary case on a VM or RDP host whose only renderer is SwiftShader.
+      //
+      // Falling through instead lets the recapture replace it, and a defaulted policy still reaches
+      // the catalog. An EXPLICIT host policy still fails closed further down — that refusal is
+      // deliberate and unchanged.
+      const persistedIssues = hostCalibrationIssues(persisted, {
+        allowSoftwareRenderer: allowProvisionalSoftwareGpu(),
+      });
+      if (persistedIssues.length === 0) {
+        hostCalibration = persisted;
+      } else {
+        // Not silent: a discarded calibration should be explainable without reading the file.
+        console.warn(
+          `[start-profile] ignoring the persisted host calibration (${persistedIssues.length} ` +
+            `issue${persistedIssues.length === 1 ? '' : 's'}): ${persistedIssues.join('; ')}`,
+        );
+      }
     }
   }
   // Why the capture failure is context and not the thrown error: this step is opportunistic (it only
