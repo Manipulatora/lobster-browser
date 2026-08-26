@@ -1,8 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "targets": ["deb"],
+    "targets": [
+      "deb"
+    ],
     "resources": {
+      "resources/lobium": "lobium",
       "resources/fonts": "fonts"
     }
   }

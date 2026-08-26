@@ -103,6 +103,29 @@ cp -a "$DIST/lobium-runtime/fonts" "$FONTS_DST"
 # Keep dynamic linker happy for a copied system node (usually fine on same distro).
 "$NODE_DST/bin/node" -e "console.log('vendored node ok', process.version)"
 
+# THE ENGINE RIDES IN THE PACKAGE, and the app finds it before it ever consults the manifest:
+# ensure_lobium_env probes <resources>/lobium/chrome first, then the user runtime dir. Staging it
+# here is what makes EngineGate's "a missing engine means the install is damaged" true on Linux —
+# without it the .deb carries no engine at all, the gate reports one missing, and the only remedy it
+# offers (reinstall) can never supply one. The manifest entry stays as the update path and as the
+# fallback for a runtime deleted after install.
+LOBIUM_DST="$ROOT/apps/desktop/src-tauri/resources/lobium"
+rm -rf "$LOBIUM_DST"
+# Verified BEFORE it is embedded. An installer is the worst place to discover a bad engine: every
+# user gets the same broken bytes and only finds out at their first profile launch.
+if [[ ! -x "$DIST/lobium-runtime/chrome" ]]; then
+  echo "error: no packaged Lobium runtime at $DIST/lobium-runtime/chrome to embed" >&2
+  exit 1
+fi
+"$DIST/lobium-runtime/chrome" --version >/dev/null 2>&1 || {
+  echo "error: the packaged runtime at $DIST/lobium-runtime/chrome does not execute" >&2; exit 1; }
+if [[ ! -f "$DIST/lobium-runtime/fonts/font-pack.manifest.json" ]]; then
+  echo "error: the packaged runtime has no font pack; refusing to embed it" >&2
+  exit 1
+fi
+cp -a "$DIST/lobium-runtime" "$LOBIUM_DST"
+echo "    resources/lobium  $(du -sh "$LOBIUM_DST" | cut -f1)"
+
 # Lobee: the first-party in-browser agent side-panel extension (React/TS/Tailwind, MV3), auto-loaded
 # into every profile. Rebuild it from source (packages/lobee-app → packages/lobee) so the shipped
 # bundle is always current, then stage the self-contained output.
