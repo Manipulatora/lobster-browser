@@ -69,8 +69,8 @@ export const DOWNLOADS: readonly DownloadArtifact[] = [
     name: 'Linux',
     file: LINUX_INSTALLER,
     url: `${RELEASE_BASE}/${LINUX_INSTALLER}`,
-    size: '',
-    published: false,
+    size: '159 MB',
+    published: true,
   },
 ];
 
