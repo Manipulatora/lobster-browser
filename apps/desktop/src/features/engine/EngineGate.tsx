@@ -88,7 +88,7 @@ export function EngineGate({ children }: { children: ReactNode }): JSX.Element {
         <img className="engine-gate__logo" src={siteLogo} alt="Lobster Browser" />
 
         {failed ? (
-          <button type="button" className="btn btn-primary engine-gate__retry" onClick={provision}>
+          <button type="button" className="engine-gate__retry" onClick={provision}>
             Retry
           </button>
         ) : (

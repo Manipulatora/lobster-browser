@@ -22,6 +22,61 @@
 ; ---------------------------------------------------------------------------
 !macro NSIS_HOOK_PREINSTALL
   SetDetailsPrint none
+
+  ; ---------------------------------------------------------------------------
+  ; Remove an engine left in the install directory by an older, EMBEDDED build.
+  ;
+  ; For one release the installer carried the Lobium runtime and Tauri unpacked it to
+  ; $INSTDIR\lobium. The engine is downloaded on first run again, so this installer never writes
+  ; that directory - and NSIS only removes what its own uninstall log records, so upgrading from
+  ; that release leaves ~580 MB behind with nothing owning it.
+  ;
+  ; Leaving it is not merely wasteful, it is WRONG, and silently so. ensure_lobium_env's first
+  ; candidate is <resources>\lobium\chrome.exe; Tauri's resource directory on Windows IS $INSTDIR;
+  ; and that candidate is accepted on the file merely EXISTING - unlike the managed cache, which is
+  ; used only when its version stamp matches the manifest. So the upgraded app binds the OLD engine,
+  ; skips the first-run download entirely, and keeps running the very binary the upgrade was
+  ; published to replace. Measured 2026-08-26: the orphan left by the embedded build contains no
+  ; device-frame code at all, so an Android profile still opens with no phone stage on an
+  ; installation that looks completely up to date.
+  ;
+  ; Safe unconditionally: this runs BEFORE extraction, so a future build that does embed an engine
+  ; simply writes its own afterwards.
+  ; ---------------------------------------------------------------------------
+  ; VERIFY THE REMOVAL. RMDir /r skips files it cannot open and only sets the error flag, so an
+  ; unchecked call silently succeeds when the old engine is still RUNNING - chrome.exe survives, the
+  ; installer exits 0, and the app binds the stale engine anyway. Tested: with chrome.exe held open,
+  ; every other file under lobium\ was deleted, chrome.exe remained, and the install reported success.
+  ; That is the precise failure this block exists to prevent, so it must not be the one it produces.
+  ;
+  ; Tauri's own CheckIfAppIsRunning only ever targets ${MAINBINARYNAME}.exe, and it runs AFTER this
+  ; hook, so nothing else releases an engine lock. chrome.exe is the file that decides binding
+  ; (ensure_lobium_env accepts <resources>\lobium\chrome.exe on existence alone), so that is the one
+  ; to re-test.
+  ;
+  ; Deliberately NOT an image-name kill of chrome.exe: this machine is administered over a remote
+  ; desktop session and killing by image name would take the operator's session with it. Ask the user
+  ; to close it instead, and abort rather than install something that will silently run the old engine.
+  IfFileExists "$INSTDIR\lobium\*.*" 0 lobster_no_stale_engine
+    SetDetailsPrint both
+    DetailPrint "Removing a browser engine left by a previous version..."
+    SetDetailsPrint none
+    RMDir /r "$INSTDIR\lobium"
+    IfFileExists "$INSTDIR\lobium\chrome.exe" 0 lobster_no_stale_engine
+      IfSilent lobster_stale_engine_silent
+      MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION \
+        "Setup could not remove the browser engine from the previous version, because it is still in use.$\r$\n$\r$\nClose Lobster Browser and any open profile windows, then choose Retry.$\r$\n$\r$\nContinuing would leave the old engine in place and this update would keep using it." \
+        IDRETRY lobster_retry_stale_engine
+      Abort "Setup cannot continue while the previous browser engine is in use."
+      lobster_retry_stale_engine:
+        RMDir /r "$INSTDIR\lobium"
+        IfFileExists "$INSTDIR\lobium\chrome.exe" 0 lobster_no_stale_engine
+        Abort "The previous browser engine is still in use. Close Lobster Browser and run Setup again."
+      lobster_stale_engine_silent:
+        ; No one to ask. Failing loudly beats installing an update that silently runs the old engine.
+        SetErrorLevel 2
+        Abort "Setup cannot continue: the previous browser engine is in use."
+  lobster_no_stale_engine:
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

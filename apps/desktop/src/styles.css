@@ -2493,8 +2493,44 @@ code {
   color: #fff;
   text-shadow: 0 1px 3px rgb(0 0 0 / 55%);
 }
+/* The one control on this screen, so it has to carry its own appearance.
+   It used to be `class="btn btn-primary engine-gate__retry"` with only the min-width below, but
+   neither .btn nor .btn-primary exists in this stylesheet — ci/validation/desktop-css-contract.mjs
+   reports both as used-with-no-definition. The Retry button therefore rendered as an unstyled native
+   button on a screen whose whole point is that it is quiet and considered, and it appears only in the
+   failure case, which is the one time nobody is looking at it during development. Styled to match the
+   bar it replaces: same height, same pill radius, same accent gradient. */
 .engine-gate__retry {
   min-width: 140px;
+  height: 30px;
+  padding: 0 24px;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--accent, #7c3aed) 78%, #fff 22%),
+    var(--accent, #7c3aed)
+  );
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 28%);
+  transition:
+    filter 0.15s ease,
+    transform 0.15s ease;
+}
+.engine-gate__retry:hover {
+  filter: brightness(1.08);
+}
+.engine-gate__retry:active {
+  transform: translateY(1px);
+}
+.engine-gate__retry:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent, #7c3aed) 60%, #fff 40%);
+  outline-offset: 3px;
 }
 @media (prefers-reduced-motion: reduce) {
   .engine-gate__logo,

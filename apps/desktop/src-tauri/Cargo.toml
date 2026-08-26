@@ -130,6 +130,13 @@ windows-sys = { version = "0.59", features = [
   "Win32_Security_Cryptography",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
+  # Job objects, so the Node sidecar dies with this process even on a hard exit. Without it the app
+  # left orphaned node.exe processes behind (three at once, measured 2026-08-26), each still holding
+  # its loopback agent bridge and the installed node.exe open — which then defeated the uninstaller.
+  # See sidecar.rs `mod job`. Threading comes with it: JOBOBJECT_EXTENDED_LIMIT_INFORMATION is
+  # declared under that feature even though it is a JobObjects type.
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
 ] }
 
 # macOS OSCrypt v10 key custody (`snapshot::oscrypt::macos`): the v10 key is

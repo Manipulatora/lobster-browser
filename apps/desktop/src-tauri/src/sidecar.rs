@@ -27,8 +27,95 @@ pub struct SidecarClient {
     // agent's live AgentEvents. Subscribers (the Tauri event forwarder) receive each notification's
     // JSON; a lagged/absent subscriber never blocks the sidecar reader.
     notifications: broadcast::Sender<Value>,
-    // Kept alive for the process lifetime; dropping it kills the sidecar.
+    // Kept alive for the process lifetime. Dropping it kills the sidecar ONLY because
+    // `kill_on_drop(true)` is set in spawn_command — tokio's default is false, so this comment used
+    // to describe a guarantee nothing provided. See the note there.
     _child: Child,
+}
+
+/// Kill the sidecar when THIS process dies, however it dies (Windows).
+///
+/// `kill_on_drop` covers the orderly case: the client is dropped and tokio reaps the child. It
+/// cannot cover the disorderly ones — `std::process::exit`, a panic-abort, or the user ending the
+/// app from Task Manager all skip destructors, and the sidecar simply keeps running.
+///
+/// Measured 2026-08-26: after the app was closed, three orphaned `node.exe` processes were still
+/// alive, each running the INSTALLED `node.exe` and holding it open. The uninstaller then removed
+/// everything else — including the 0.57 GB engine — and left `node\node.exe` behind, 87 MB, in a
+/// directory it could not delete. Each orphan also still owned its loopback agent bridge and the
+/// per-profile secrets it was started with, which matters more than the disk.
+///
+/// A Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is the OS-level form of the guarantee:
+/// when the last handle to the job closes — which the kernel does for us when this process exits, by
+/// any route — every process assigned to it is terminated. It is the same mechanism Chromium uses
+/// for its own children.
+#[cfg(windows)]
+mod job {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    /// `HANDLE` is a raw pointer. It is only ever read here, and the job lives for the whole process
+    /// lifetime, so sharing it across threads is sound.
+    struct JobHandle(HANDLE);
+    unsafe impl Send for JobHandle {}
+    unsafe impl Sync for JobHandle {}
+
+    static JOB: OnceLock<Option<JobHandle>> = OnceLock::new();
+
+    fn job() -> Option<HANDLE> {
+        JOB.get_or_init(|| {
+            // SAFETY: a null name creates an anonymous job owned by this process.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                tracing::warn!(
+                    "could not create a job object; the sidecar will not be reaped on a hard exit"
+                );
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: `info` is a fully initialised structure of exactly the class named, and the
+            // size passed is its own.
+            let ok = unsafe {
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::addr_of!(info).cast(),
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )
+            };
+            if ok == 0 {
+                tracing::warn!(
+                    "could not set KILL_ON_JOB_CLOSE; the sidecar will not be reaped on a hard exit"
+                );
+                // SAFETY: a live handle this function created, not used again.
+                unsafe { CloseHandle(handle) };
+                return None;
+            }
+            Some(JobHandle(handle))
+        })
+        .as_ref()
+        .map(|handle| handle.0)
+    }
+
+    /// Assign a spawned child to the kill-on-close job.
+    ///
+    /// Never fatal. A failure here means the sidecar may outlive a hard exit — which is the state
+    /// the product was already in — so it is logged rather than allowed to stop the app starting.
+    pub fn adopt(raw_handle: HANDLE) {
+        let Some(job) = job() else { return };
+        // SAFETY: `raw_handle` is the live process handle tokio owns for the child just spawned.
+        if unsafe { AssignProcessToJobObject(job, raw_handle) } == 0 {
+            tracing::warn!(
+                "could not assign the sidecar to the job object; it may outlive a hard exit"
+            );
+        }
+    }
 }
 
 impl SidecarClient {
@@ -61,7 +148,12 @@ impl SidecarClient {
             // a console window to put them in — which is what users saw: a terminal appearing beside
             // the app, printing the local API's 127.0.0.1 address. It is also better behaviour
             // everywhere else: sidecar stderr now reaches `tracing` instead of a stream nobody reads.
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // Tokio's default is FALSE, and the `_child` field used to claim the opposite. Nothing
+            // killed the sidecar, so every app exit left a `node.exe` running: measured 2026-08-26,
+            // three of them at once, each still holding its loopback agent bridge and the installed
+            // node.exe binary open. See the `job` module above for the hard-exit half.
+            .kill_on_drop(true);
 
         // Belt and braces on Windows. `node.exe` is a CONSOLE-subsystem binary, so launching it
         // from a windows-subsystem process allocates a fresh console for the child regardless of
@@ -75,6 +167,15 @@ impl SidecarClient {
         }
 
         let mut child = command.spawn()?;
+
+        // Adopt into the kill-on-close job before anything else can fail, so a sidecar that is alive
+        // is always a sidecar the OS will reap with us.
+        #[cfg(windows)]
+        {
+            if let Some(handle) = child.raw_handle() {
+                job::adopt(handle as _);
+            }
+        }
 
         // Drain stderr into the log. Without a reader the pipe's buffer fills and the sidecar blocks
         // on its next write — a deadlock that only appears once it has logged a few kilobytes, which
