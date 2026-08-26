@@ -57,6 +57,16 @@ const argOf = (name, fallback) => {
   return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
 };
 const COUNT = Number(argOf('count', '24'));
+/**
+ * Headful by default, because that is what the product runs.
+ *
+ * The first fleet probed headless and mis-measured WebGPU: headless reports navigator.gpu PRESENT
+ * with requestAdapter() returning null, while the same binary headful does not define navigator.gpu
+ * at all. Those are different tells, and only the second one is what a user ships. A benchmark that
+ * measures a configuration nobody runs is worse than no benchmark, because it reports green for the
+ * wrong build. Pass --headless to compare the two deliberately.
+ */
+const HEADLESS = argv.includes('--headless');
 const ONLY = argOf('only', '')
   .split(',')
   .map((s) => s.trim())
@@ -254,7 +264,12 @@ function contradictions(fp, o) {
   }
   const gpuPresent = get(o, 'webgpu.present');
   const adapter = get(o, 'webgpu.adapter');
-  if (get(o, 'webgl.unmaskedRenderer') && gpuPresent && adapter === null) {
+  const renderer = get(o, 'webgl.unmaskedRenderer');
+  if (renderer && gpuPresent === false) {
+    // Chrome 152 defines navigator.gpu on every desktop platform it ships to. A persona that names a
+    // discrete GPU in WebGL and has no WebGPU object at all is claiming a machine that cannot exist.
+    out.push({ id: 'webgpu-absent-entirely', detail: `WebGL names "${String(renderer).slice(0, 48)}" but navigator.gpu is undefined; every real Chrome 152 desktop defines it` });
+  } else if (renderer && gpuPresent && adapter === null) {
     out.push({ id: 'webgl-gpu-without-webgpu-adapter', detail: 'WebGL names a discrete GPU while navigator.gpu.requestAdapter() returns null' });
   }
   if (/SwiftShader|llvmpipe|Software/i.test(String(get(o, 'webgl.unmaskedRenderer') ?? ''))) {
@@ -346,7 +361,7 @@ async function probeWith(bin, url, persona) {
     fingerprintSeed: persona.seed,
     fingerprintPolicy: DEFAULT_CAPABILITY_PROBE_POLICY,
     ...(persona.android ? { isMobileProfile: true, mobileFormFactor: persona.formFactor } : {}),
-    headless: true,
+    headless: HEADLESS,
   });
   try {
     const browser = await chromium.connectOverCDP(engine.ws);
@@ -371,7 +386,7 @@ async function probeHost(bin, url) {
   const userDataDir = await mkdtemp(join(tmpdir(), 'conformance-host-'));
   const browser = await chromium.launchPersistentContext(userDataDir, {
     executablePath: bin,
-    headless: true,
+    headless: HEADLESS,
     args: ['--no-sandbox', '--enable-unsafe-swiftshader'],
   });
   try {
