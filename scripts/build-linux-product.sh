@@ -93,13 +93,17 @@ LOBSTER_LOBIUM_DIR="$LOBSTER_LOBIUM_SRC" bash scripts/package-lobium-runtime.sh 
 
 echo "==> [3/6] Vendor Node into Tauri resources"
 NODE_DST="$ROOT/apps/desktop/src-tauri/resources/node"
-FONTS_DST="$ROOT/apps/desktop/src-tauri/resources/fonts"
 rm -rf "$NODE_DST"
 mkdir -p "$NODE_DST/bin"
 cp -a "$NODE_BIN" "$NODE_DST/bin/node"
 chmod +x "$NODE_DST/bin/node"
-rm -rf "$FONTS_DST"
-cp -a "$DIST/lobium-runtime/fonts" "$FONTS_DST"
+# The font pack is NOT staged into resources/fonts. It already rides inside the engine runtime that
+# step [3/6] copies wholesale to resources/lobium, and staging it twice put 150.6 MB of identical
+# TTFs in the package twice — 109.2 MB of the .deb for nothing. Both consumers already look inside
+# the runtime: ensure_lobium_env falls through to <resources>/lobium/fonts (lib.rs), and the font
+# picker reads LOBSTER_FONTS_DIR, which that same function sets. Windows never had the duplicate —
+# tauri.windows.conf.json declares only resources/lobium.
+rm -rf "$ROOT/apps/desktop/src-tauri/resources/fonts"
 # Keep dynamic linker happy for a copied system node (usually fine on same distro).
 "$NODE_DST/bin/node" -e "console.log('vendored node ok', process.version)"
 

@@ -678,6 +678,11 @@ fn list_font_families(app: tauri::AppHandle, os: String) -> Result<Vec<String>, 
     }
     if let Some(resources) = app_resource_dir(&app) {
         candidates.push(resources.join("fonts"));
+        // The packaged pack lives INSIDE the engine runtime, not beside it. It used to be staged to
+        // resources/fonts as well, which shipped 150.6 MB of identical faces twice; that duplicate
+        // is gone, so this is now the path that actually resolves in an installed build. Listed
+        // after resources/fonts so an explicitly staged pack still wins if one is ever added back.
+        candidates.push(resources.join("lobium").join("fonts"));
     }
     // The engine runtime carries its own pack beside chrome.exe, which is where
     // package-lobium-runtime.ps1 -FontPack writes it. Checking here too means a pack provisioned

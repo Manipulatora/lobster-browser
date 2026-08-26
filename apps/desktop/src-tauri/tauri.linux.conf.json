@@ -5,8 +5,7 @@
       "deb"
     ],
     "resources": {
-      "resources/lobium": "lobium",
-      "resources/fonts": "fonts"
+      "resources/lobium": "lobium"
     }
   }
 }
