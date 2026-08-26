@@ -228,11 +228,20 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
  * and the gate starts requiring it.
  */
 const KNOWN_OPEN_MISMATCHES = new Map([
-  [
-    'css.colorBits',
-    'the CSS (color:) media feature is unhooked while screen.colorDepth is hooked — ' +
-      'see docs/subsystems/engine-audit.md and derive.ts:234',
-  ],
+  // Empty on purpose, and that is the point of the mechanism.
+  //
+  // `css.colorBits` was the first entry: screen.colorDepth was hooked and the CSS (color:) feature
+  // was not, so every Apple-Silicon persona claimed a 30-bit panel that the CSS layer answered as 8,
+  // and — because the field is critical — a fleet containing one could never go green on an ordinary
+  // display. It was exempted so the rest of the gate stayed usable.
+  //
+  // fingerprint/media-values-color.patch now hooks MediaValues::CalculateColorBitsPerComponent along
+  // with the gamut and dynamic-range siblings, so the entry is retired and the gate requires the
+  // field again. Deleting the entry IS how the fix gets enforced; leaving it would quietly keep
+  // accepting the defect it was written to survive.
+  //
+  // NOTE the engine must be rebuilt for this to pass: a binary built before that patch still reports
+  // the host's 8 bits, and will now MISMATCH rather than being waved through.
 ]);
 
 /**

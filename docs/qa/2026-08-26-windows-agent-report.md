@@ -223,6 +223,37 @@ in this build" looks like from outside.
 applies the series with GNU patch, and `-Force` is the Windows equivalent of
 `quilt pop -a; quilt push -a`. The brief's procedure is corrected in the rebuild doc.
 
+### SUPERSEDED — do not publish the archive above
+
+You pushed `a7a1fad`, `fb1729a` and their siblings while this was being written, and they land
+exactly the three contradictions I measured: `enable_widevine = true`,
+`fingerprint/webgpu-availability.patch` and `fingerprint/media-values-color.patch`. Our numbers
+agree — Widevine fired 20/20 here and 24/24 there; WebGPU 18/18 and 24/24; the colour one 3/3 of the
+applicable personas here and 6/24 there.
+
+**So the engine I built is already behind.** It was built from the 33-patch series; the series is now
+35 patches, and the two new ones are fingerprint fixes. The archive
+(`5225c67a…`) still has the device-frame port and is still proof that the port works — but it also
+still has all three contradictions, so it must **not** be published. It needs rebuilding on top of
+your patches, and the sha256 below will change.
+
+This is precisely the sequencing the brief's "wait for Phase 3" rule existed to prevent, and it
+happened anyway because the patches landed after the build started. Not a complaint — the build was
+worth running, because it is what proved the Windows device-frame port renders — just a fact about
+which bytes are current.
+
+**`gate:series` is red on this host for the same reason** and will be until the checkout is
+re-staged: the series applies cleanly at 35 patches, but `C:lobium-buildsrc` still holds the
+33-patch output, so `gpu/command_buffer/service/service_utils.cc` and
+`third_party/blink/renderer/core/css/media_values.cc` drift. `build.ps1 -Run -Force` fixes it and is
+the first step of the rebuild anyway.
+
+I have also retired the `css.colorBits` KNOWN-OPEN exemption I added to the conformance harness,
+because `media-values-color.patch` hooks `CalculateColorBitsPerComponent` — deleting the entry is
+what makes the gate require the field again. It will MISMATCH against any engine built before your
+patch, which is correct and is another reason the rebuild has to happen before that gate means
+anything.
+
 ### I need you to publish this — I cannot
 
 `https://lobrowser.com/download/engine/lobium-win-x64-152.0.7977.42.zip` returns **HTTP 404** and
