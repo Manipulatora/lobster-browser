@@ -6,15 +6,16 @@
       "version": "152.0.7928.0",
       "url": "https://github.com/Manipulatora/lobster-browser/releases/download/engine-v152.0.7928.0/lobium-linux-x64.tar.gz",
       "sha256": "92bf2724fa4d48c7876b84ab617d74ff24c849846f80db5f5736202babf33e1a"
+    },
+    "win-x64": {
+      "version": "152.0.7977.42",
+      "url": "https://github.com/Manipulatora/lobster-browser/releases/download/engine-v152.0.7977.42/lobium-win-x64-152.0.7977.42.zip",
+      "sha256": "1c9c95a6b70a0b53ac46183778bf064e169dae6443f041f16a7cf71449059e7e"
     }
   },
   "rebuildPending": {
     "targetVersion": "152.0.7977.42",
     "why": "The repo repinned from 152.0.7928.0 (a CANARY nightly, near-unique in fullVersionList) to the M152 beta-frozen release build. The linux-x64 entry still names the OLD artifact on purpose: version/url/sha256 may only move once a rebuilt tarball actually exists, or first-run provisioning breaks for every user. Until then the installer provisions the previous engine and ENGINE_CHROME claims one patch newer within the same milestone.",
     "howToClear": "On the Linux build host: lobium/rebase.sh 152.0.7977.42 --run && lobium/build.sh --run && scripts/package-lobium-runtime.sh, then `node scripts/bump-engine-version.mjs 152.0.7977.42 --tarball <lobium-linux-x64.tar.gz>` to rewrite version/url/sha256 and drop this block."
-  },
-  "win-x64Pending": {
-    "why": "The prior Windows 152.0.7977.42 official/PGO/ThinLTO binary predates the current patch series and capability-contract v3, so the launcher correctly refuses it. No win-x64 entry is listed because publishing that stale binary would silently omit current native protections, while naming an artifact that does not exist would make first-run provisioning fail after a large download.",
-    "howToClear": "On the Windows build host: force-clean the exact 152.0.7977.42 checkout, rerun lobium/build.ps1 with official/PGO/ThinLTO settings, and pass the capability and real-browser gates. Obtain a separately verified production font pack following docs/OPERATIONS.md; a no-pack runtime is local/degraded only and must not be published. Require exact declared-versus-scanned family sets with an explicit reviewed fc-scan executable, and require each persona to include every family exposed by any selected multi-family TTC. Package with explicit -SourceDir, -FontPack <verified-font-pack>, -FontScanner <fc-scan.exe>, and the new versioned -OutDir dist-win/lobium-runtime-152.0.7977.42 (refuse it if it already exists), verify that exact tree with scripts/verify-lobium-runtime.mjs --font-scanner <fc-scan.exe>, compress only that directory to the new archive dist-win/lobium-win-x64-152.0.7977.42.zip, extract into a new verification directory, and repeat the artifact ledger, physical font-family scan, and executable version/capability probes. Upload the verified archive, download its final public URL and require the same SHA-256, then run `node scripts/bump-engine-version.mjs 152.0.7977.42 --platform win-x64 --archive dist-win/lobium-win-x64-152.0.7977.42.zip --url <published-url>`."
   }
 }

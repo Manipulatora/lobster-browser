@@ -1888,7 +1888,14 @@ async function measurePersona({
           detail,
         });
       }
-    });
+    },
+      // The session deadline must outlast everything it wraps. It defaulted to 15s while the
+      // commands INSIDE it were given 45s each - one navigate, up to 100 readiness polls, and
+      // every oracle - so the whole run died with "CDP operation timed out" as soon as the
+      // total crossed 15s, writing no report at all. A session bound tighter than its own
+      // commands can only ever truncate them.
+      { timeoutMs: 15 * 60_000 },
+    );
   } finally {
     await engine.close().catch(() => {});
   }

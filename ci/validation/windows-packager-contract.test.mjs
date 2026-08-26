@@ -265,20 +265,42 @@ test('pending Windows publication guidance cannot select the stale unversioned r
     read('apps/desktop/src-tauri/resources/engine-manifest.json').then(JSON.parse),
     read('docs/OPERATIONS.md'),
   ]);
-  const guidance = manifest['win-x64Pending']?.howToClear;
-  assert.equal(typeof guidance, 'string');
-  assert.match(guidance, /-FontPack <verified-font-pack>/);
-  assert.match(guidance, /-FontScanner <fc-scan\.exe>/);
-  assert.match(guidance, /exact declared-versus-scanned family sets/);
-  assert.match(guidance, /each persona[\s\S]*selected multi-family TTC/);
-  assert.match(guidance, /verify-lobium-runtime\.mjs --font-scanner <fc-scan\.exe>/);
-  assert.match(guidance, /no-pack runtime is local\/degraded only and must not be published/);
-  assert.match(guidance, /-OutDir dist-win\/lobium-runtime-152\.0\.7977\.42/);
-  assert.match(guidance, /verify-lobium-runtime\.mjs/);
-  assert.match(guidance, /lobium-win-x64-152\.0\.7977\.42\.zip/);
-  assert.match(guidance, /extract into a new verification directory/);
-  assert.match(guidance, /download its final public URL and require the same SHA-256/);
-  assert.doesNotMatch(guidance, /compress dist-win\/lobium-runtime to lobium-win-x64\.zip/);
+  // Two legal states, and the test must pin whichever one the manifest is actually in. A test that
+  // only understands the pending state starts failing the moment the artifact ships, which trains
+  // people to delete it rather than read it.
+  const pending = manifest['win-x64Pending'];
+  const published = manifest.platforms?.['win-x64'];
+  assert.ok(
+    Boolean(pending) !== Boolean(published),
+    'win-x64 must be either pending or published, never both and never neither: a pending block' +
+      ' left beside a published entry tells the reader to go and do what has already been done.',
+  );
+
+  if (published) {
+    // Published: the entry has to stand on its own terms.
+    assert.ok(/^[0-9]+([.][0-9]+){3}$/.test(published.version), published.version);
+    assert.match(published.sha256, /^[0-9a-f]{64}$/);
+    assert.ok(published.url.startsWith('https://'));
+    assert.ok(
+      published.url.includes(published.version),
+      'the URL must name its own version, or a later bump can silently serve the old archive',
+    );
+  } else {
+    const guidance = manifest['win-x64Pending']?.howToClear;
+    assert.equal(typeof guidance, 'string');
+    assert.match(guidance, /-FontPack <verified-font-pack>/);
+    assert.match(guidance, /-FontScanner <fc-scan\.exe>/);
+    assert.match(guidance, /exact declared-versus-scanned family sets/);
+    assert.match(guidance, /each persona[\s\S]*selected multi-family TTC/);
+    assert.match(guidance, /verify-lobium-runtime\.mjs --font-scanner <fc-scan\.exe>/);
+    assert.match(guidance, /no-pack runtime is local\/degraded only and must not be published/);
+    assert.match(guidance, /-OutDir dist-win\/lobium-runtime-152\.0\.7977\.42/);
+    assert.match(guidance, /verify-lobium-runtime\.mjs/);
+    assert.match(guidance, /lobium-win-x64-152\.0\.7977\.42\.zip/);
+    assert.match(guidance, /extract into a new verification directory/);
+    assert.match(guidance, /download its final public URL and require the same SHA-256/);
+    assert.doesNotMatch(guidance, /compress dist-win\/lobium-runtime to lobium-win-x64\.zip/);
+  }
 
   const packaging = operations.slice(
     operations.indexOf('#### Packaging the Windows engine runtime'),
