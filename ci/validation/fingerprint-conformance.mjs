@@ -38,7 +38,11 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { deriveFingerprint } from '@lobster/fingerprint';
+import {
+  applyGeoToFingerprint,
+  deriveAndroidFingerprint,
+  deriveFingerprint,
+} from '@lobster/fingerprint';
 import { resolveGpuMode, resolveLobiumBinary } from '@lobster/engine-runner';
 import { DEFAULT_CAPABILITY_PROBE_POLICY } from '@lobster/engine-runner';
 import { launchNativePersona } from './e2e/native-lobium.mjs';
@@ -276,21 +280,58 @@ function comparePersona(fp, observed, hostObserved) {
 }
 
 // --- personas --------------------------------------------------------------------------------
+/**
+ * Exit geographies, applied as the overlay the product applies once a proxy's exit IP is known.
+ *
+ * Without this every persona keeps the seed default of en-US, which is also the build host's
+ * language — so `navigator.languages` and `locale.resolvedLocale` came back VACUOUS for all 24
+ * personas in the first run: correct, and proving nothing, because agreement with a persona that
+ * agrees with the host is not evidence of a hook. Diversity here is what converts those fields from
+ * unprovable into tested.
+ */
+const GEOS = [
+  { ip: '203.0.113.10', countryCode: 'DE', timezone: 'Europe/Berlin', latitude: 52.52, longitude: 13.405 },
+  { ip: '203.0.113.11', countryCode: 'JP', timezone: 'Asia/Tokyo', latitude: 35.68, longitude: 139.69 },
+  { ip: '203.0.113.12', countryCode: 'BR', timezone: 'America/Sao_Paulo', latitude: -23.55, longitude: -46.63 },
+  { ip: '203.0.113.13', countryCode: 'FR', timezone: 'Europe/Paris', latitude: 48.86, longitude: 2.35 },
+  { ip: '203.0.113.14', countryCode: 'PL', timezone: 'Europe/Warsaw', latitude: 52.23, longitude: 21.01 },
+  { ip: '203.0.113.15', countryCode: 'KR', timezone: 'Asia/Seoul', latitude: 37.57, longitude: 126.98 },
+];
+
 function buildPersonas(count) {
-  const targets = [
+  const desktop = [
     { os: 'windows', arch: 'x86_64' }, { os: 'macos', arch: 'x86_64' },
     { os: 'macos', arch: 'arm64' }, { os: 'linux', arch: 'x86_64' },
-  ].filter((t) => !ONLY.length || ONLY.includes(t.os) || ONLY.includes(`${t.os}_${t.arch === 'arm64' ? 'arm' : 'x64'}`));
+  ];
+  // Android carries the only non-zero maxTouchPoints and the only uaCh.mobile=true in the product,
+  // so without it those two fields can never be anything but VACUOUS.
+  const mobile = [{ os: 'android', formFactor: 'phone' }, { os: 'android', formFactor: 'tablet' }];
+  const all = [...desktop, ...mobile].filter(
+    (t) => !ONLY.length || ONLY.includes(t.os) || ONLY.includes(`${t.os}_${t.arch === 'arm64' ? 'arm' : 'x64'}`),
+  );
   const out = [];
-  for (let i = 0; out.length < count; i++) {
-    const t = targets[i % targets.length];
-    const seed = `conformance-${t.os}-${t.arch}-${String(i).padStart(3, '0')}`;
+  for (let i = 0; out.length < count && i < count * 4; i++) {
+    const t = all[i % all.length];
+    const geo = GEOS[i % GEOS.length];
+    const seed = `conformance-${t.os}-${t.arch ?? t.formFactor}-${String(i).padStart(3, '0')}`;
     try {
-      out.push({ id: seed, seed, os: t.os, arch: t.arch, fingerprint: deriveFingerprint(seed, { os: t.os, arch: t.arch, engine: 'lobium' }) });
+      const base =
+        t.os === 'android'
+          ? deriveAndroidFingerprint(seed, { engine: 'lobium', deviceType: t.formFactor })
+          : deriveFingerprint(seed, { os: t.os, arch: t.arch, engine: 'lobium' });
+      out.push({
+        id: seed,
+        seed,
+        os: t.os,
+        arch: t.arch ?? t.formFactor,
+        android: t.os === 'android',
+        ...(t.formFactor ? { formFactor: t.formFactor } : {}),
+        geo,
+        fingerprint: applyGeoToFingerprint(base, geo),
+      });
     } catch (e) {
       console.error(`  ! persona ${seed} could not be derived: ${e.message}`);
     }
-    if (i > count * 4) break;
   }
   return out;
 }
@@ -304,6 +345,7 @@ async function probeWith(bin, url, persona) {
     fingerprint: persona.fingerprint,
     fingerprintSeed: persona.seed,
     fingerprintPolicy: DEFAULT_CAPABILITY_PROBE_POLICY,
+    ...(persona.android ? { isMobileProfile: true, mobileFormFactor: persona.formFactor } : {}),
     headless: true,
   });
   try {
