@@ -14,3 +14,19 @@
 /lobium/src/BUILD.gn whitespace=cr-at-eol
 /lobium/src/lobium_fp_config.cc whitespace=cr-at-eol
 /lobium/src/lobium_fp_config.h whitespace=cr-at-eol
+
+# Release artifacts are Git LFS, and ONLY under release/.
+#
+# The engine archive is 277 MB. GitHub hard-rejects any single file over 100 MB on push, so plain
+# git cannot carry it at all, and committing it as ordinary blobs would also put a quarter-gigabyte
+# into history permanently for every rebuild - history cannot shed that without a rewrite.
+#
+# This is a TRANSFER mechanism between the two build hosts, not the product's distribution path.
+# Users get the engine from lobrowser.com via engine-manifest.json; see that file's note. Keep the
+# glob scoped to release/ so a stray .zip elsewhere in the tree is never silently turned into a
+# pointer file, and scoped to BINARY extensions so the README and SHA256SUMS beside them stay
+# ordinary git objects - a checksum file you cannot read on the web page without an LFS client is
+# not much of a checksum file.
+release/**/*.zip    filter=lfs diff=lfs merge=lfs -text
+release/**/*.tar.gz filter=lfs diff=lfs merge=lfs -text
+release/**/*.exe    filter=lfs diff=lfs merge=lfs -text

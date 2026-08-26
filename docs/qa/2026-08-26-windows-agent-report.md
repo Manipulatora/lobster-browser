@@ -223,7 +223,49 @@ in this build" looks like from outside.
 applies the series with GNU patch, and `-Force` is the Windows equivalent of
 `quilt pop -a; quilt push -a`. The brief's procedure is corrected in the rebuild doc.
 
-### SUPERSEDED — do not publish the archive above
+### Rebuilt on your patches — and two of the three fixes do not take on Windows
+
+The rebuild finished (2h13m, 35 patches, clean). Artifacts are in `release/win-x64/` via Git LFS,
+because the archive is 277 MB and GitHub rejects anything over 100 MB on push; see that directory's
+README for the quota math and why this is a transfer path rather than a distribution one.
+
+```
+lobium-win-x64-152.0.7977.42.zip      290,775,298 B  sha256 adcbb43d7cc33c2f5ca1b42fc059e2971259f0f05aa3e2701bf5d0e8e3c797bd
+Lobster-Browser-1.0.0-x64-setup.exe    30,696,111 B  sha256 e41aa3cf7e6b87c0c3831b9643f8385be206e8d67cb1b9f5d74d5e8105b856fd
+```
+
+Measured against that exact build, with the macarm-01 persona:
+
+* **`media-values-color.patch` WORKS.** `screen.colorDepth 30` and CSS `(color: 10)` now agree,
+  `color-gamut: p3`, `dynamic-range: high`. That contradiction is closed on Windows. It was 3/3 of
+  the applicable personas before.
+* **Widevine still rejects `com.widevine.alpha`** on a fresh profile, despite `enable_widevine = true`
+  reaching `args.gn` and 16 widevine strings landing in `chrome.dll`. Your own gn comment explains
+  why and I think it is expected rather than broken: the CDM is not bundled, it is fetched by
+  Chromium's component updater, so a profile that has never fetched it has no key system yet. Worth
+  confirming what a detector sees on a *first* run, because that is when the tell is loudest.
+* **`webgpu-availability.patch` does not take effect on this host, and it is NOT the patch's fault.**
+  The patch is applied (`service_utils.cc:296` has `lobium_fp_profile`) and the build is clean, but
+  `requestAdapter()` still returns null with a config attached. The discriminator: I ran it with the
+  **explicit `--enable-unsafe-webgpu` switch** — the exact thing the patch emulates — and with
+  `requestAdapter({ forceFallbackAdapter: true })`. Both return null too:
+
+  ```
+  no config, no flag               {"gpu":"present","adapter":null,"fallbackAdapter":null}
+  explicit --enable-unsafe-webgpu  {"gpu":"present","adapter":null,"fallbackAdapter":null}
+  --lobium-fp-config (the patch)   {"gpu":"present","adapter":null,"fallbackAdapter":null}
+  ```
+
+  So on this Windows VM the preference is not the limiting factor — Dawn has no backend it can hand
+  out at all, fallback included. Your Linux verification (vendor "google"/"swiftshader" without a
+  config, "intel"/"xe" with one) stands; the fix simply does not reach the Windows case, so
+  `webgl-gpu-without-webgpu-adapter` still fires here and needs a different remedy on Windows.
+
+  Worth noting your commit message says headful Windows leaves `navigator.gpu` UNDEFINED; I measure
+  it **defined** with a null adapter, headful, on a secure origin. Whatever the difference is, it is
+  worth pinning down before the contradiction is scored either way.
+
+### The EARLIER archive (5225c67a…) is superseded
 
 You pushed `a7a1fad`, `fb1729a` and their siblings while this was being written, and they land
 exactly the three contradictions I measured: `enable_widevine = true`,

@@ -36,6 +36,11 @@ engines/bin/
 engines/cache/
 *.dmg
 *.exe
+
+# ...except the release artifacts, which are carried through Git LFS (see .gitattributes). This is a
+# transfer path between the Windows and Linux build hosts; the product's own download path is
+# lobrowser.com via engine-manifest.json, and nothing here changes that.
+!release/**
 *.AppImage
 
 # Claude Code local settings
