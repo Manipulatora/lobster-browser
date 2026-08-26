@@ -191,3 +191,5 @@ export type {
 } from './host-calibration-probe.js';
 export type { EngineRunner } from './runner.js';
 export type { Launcher, LaunchContext, LaunchHandle, LauncherRegistry } from './runners/types.js';
+
+export { DEFAULT_CAPABILITY_PROBE_POLICY } from './launch-policy.js';

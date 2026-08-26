@@ -31,6 +31,22 @@ const DEFAULT_MEDIA_DEVICES: MediaDeviceProfile = {
 
 const DEFAULT_RENDERER_POLICY: RendererPolicy = { mode: 'host' };
 
+/**
+ * The policy a launch is judged against when the caller supplied none.
+ *
+ * Only `requiredLobiumCapabilities` reads it, and only to decide which native hooks the build must
+ * have. It names the DEFAULTS a real profile gets, so a policy-less launch is held to the same
+ * standard as a product one rather than to the whole capability contract — the contract includes
+ * font-isolation, which is Windows-only by design, so requiring all of it made a policy-less launch
+ * impossible on Linux and macOS.
+ */
+export const DEFAULT_CAPABILITY_PROBE_POLICY: FingerprintLaunchPolicy = {
+  renderer: DEFAULT_RENDERER_POLICY,
+  webrtc: 'disable_non_proxied_udp',
+  hardwareNoise: DEFAULT_HARDWARE_NOISE,
+  mediaDevices: DEFAULT_MEDIA_DEVICES,
+};
+
 export function resolveWebRtcPolicy(params: StartProfileParams): WebRtcPolicy {
   const requested = params.fingerprintOverrides?.webrtc;
   const mode = params.fingerprintOverrides?.webrtcMode;

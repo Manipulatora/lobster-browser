@@ -31,10 +31,10 @@ import {
   type FontPersona,
 } from '../fonts.js';
 import { withCdpSession } from '../cdp-client.js';
+import { DEFAULT_CAPABILITY_PROBE_POLICY } from '../launch-policy.js';
 import { buildLobiumConfig, lobiumConfigArg, writeLobiumConfig } from '../lobium-config.js';
 import {
   assertLobiumBuildCapabilities,
-  LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
   probeLobiumBuildCapabilities,
   requiredLobiumCapabilities,
 } from '../lobium-capabilities.js';
@@ -965,7 +965,20 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
               process.platform,
               ctx.isMobileProfile === true,
             )
-          : LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES,
+          : // No explicit policy: require everything the CURRENT PLATFORM can have, not the whole
+            // contract. The full list includes font-isolation, which is Windows-only by design
+            // (Linux and macOS reach the same isolation through the launcher's per-profile
+            // FONTCONFIG_FILE, so it is never compiled in), so demanding it unconditionally made
+            // every policy-less launch impossible on those platforms. Product launches always pass
+            // a policy — resolveLaunchPolicy in start-profile / start-android-emulated-profile — so
+            // this path is reached only by harnesses and direct callers, which is exactly where a
+            // launch that cannot succeed is hardest to explain.
+            requiredLobiumCapabilities(
+              DEFAULT_CAPABILITY_PROBE_POLICY,
+              ctx.fingerprint.locale.geolocation !== undefined,
+              process.platform,
+              ctx.isMobileProfile === true,
+            ),
       );
       if (ctx.options.proxy) {
         // Fail closed before spawn when the upstream is dead — clearer than a blank Lobium window.
