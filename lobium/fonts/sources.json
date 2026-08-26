@@ -236,13 +236,13 @@
     },
     {
       "family": "Roboto",
-      "filePattern": "^Roboto-(?:Black|BlackItalic|Bold|BoldItalic|Italic|Light|LightItalic|Medium|MediumItalic|Regular|Thin|ThinItalic)\\.(?:ttf|otf)$",
+      "filePattern": "^Roboto-(?:Bold|BoldItalic|Italic|Regular)\\.(?:ttf|otf)$",
       "license": "Apache-2.0",
       "licenseUrl": "https://github.com/googlefonts/roboto-3-classic/blob/main/LICENSE"
     },
     {
       "family": "Roboto Condensed",
-      "filePattern": "^RobotoCondensed-(?:Bold|BoldItalic|Italic|Light|LightItalic|Medium|MediumItalic|Regular)\\.(?:ttf|otf)$",
+      "filePattern": "^RobotoCondensed-(?:Bold|BoldItalic|Italic|Regular)\\.(?:ttf|otf)$",
       "license": "Apache-2.0",
       "licenseUrl": "https://github.com/googlefonts/roboto-3-classic/blob/main/LICENSE"
     },
