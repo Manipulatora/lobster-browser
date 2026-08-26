@@ -41,6 +41,11 @@ export const LOBIUM_NATIVE_FINGERPRINT_CAPABILITIES = [
   'native-timezone',
   /** Windows-only: the engine reports it just on win64 builds, so never require it elsewhere. */
   'font-isolation',
+  /**
+   * The Android phone/tablet stage. Reported on Linux and Windows only - macOS compiles no
+   * BrowserView call sites for it - and required only for an emulated Android launch.
+   */
+  'device-frame',
 ] as const;
 
 export type LobiumNativeFingerprintCapability =
@@ -165,6 +170,13 @@ export function requiredLobiumCapabilities(
   // same isolation through the launcher's per-profile FONTCONFIG_FILE, which is not a property of
   // the binary. Requiring it everywhere would fail launches on platforms that never compile it.
   if (platform === 'win32') required.push('font-isolation');
+  // The phone stage, for an Android persona on a platform that draws one. Without this the
+  // launcher's --lobium-device-frame reaches a binary that may not know the switch, Chromium
+  // ignores it, and the profile opens as a desktop-shaped window while still claiming Android -
+  // which is how the frame silently vanished from the Windows build for days.
+  if (isMobilePersona && (platform === 'win32' || platform === 'linux')) {
+    required.push('device-frame');
+  }
   if (policy.hardwareNoise.canvas) required.push('canvas-farbling');
   if (policy.hardwareNoise.webgl) required.push('webgl-farbling');
   if (policy.hardwareNoise.audio) required.push('audio-farbling');

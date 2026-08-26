@@ -34,6 +34,15 @@ export const WINDOWS_REQUIRED_CAPABILITIES = Object.freeze([
   'webgpu-adapter',
   'native-timezone',
   'font-isolation',
+  // The Android phone/tablet stage. Windows-relevant since 2026-08-26: branding/device-frame.patch
+  // was Linux-only, so a Windows build compiled LobiumDeviceFrameView and then dropped it at link
+  // time because every BrowserView call site was #if BUILDFLAG(IS_LINUX). Nothing caught that,
+  // because the capability contract did not cover the feature and Chromium ignores switches it does
+  // not recognise — the launcher kept sending --lobium-device-frame to a binary that had no idea
+  // what it meant, and every Android profile opened as a plain desktop window while reporting
+  // success. Requiring it here makes a runtime without the frame unpackageable rather than
+  // shippable.
+  'device-frame',
 ]);
 
 const SHA256 = /^[0-9a-f]{64}$/;

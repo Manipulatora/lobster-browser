@@ -169,7 +169,13 @@ branding/signin-disable.patch
 branding/ntp-branding.patch
 branding/profile-lockdown.patch
 # The Android phone/tablet workspace drawn behind the real WebContents, with the renderer's
-# emulation scale kept locked to the aperture through startup, resize and whole-device zoom. Cut
+# emulation scale kept locked to the aperture through startup, resize and whole-device zoom.
+# LINUX AND WINDOWS. It was Linux-only until 2026-08-26, which is why an Android profile opened
+# flush-left with no phone stage on Windows: lobium_device_frame_view.cc is unconditionally in the
+# chrome ui target and compiled fine there, but every CALL SITE in browser_view.cc was
+# #if BUILDFLAG(IS_LINUX), so nothing referenced the class, the linker dropped the whole object, and
+# even its two switch strings were absent from chrome.dll. The view is 406 lines of portable
+# views/gfx code with no platform includes, so the fix was the guards, not the implementation. Cut
 # against pristine browser_view.cc, so it comes AFTER branding/profile-window-icon.patch (which
 # hooks the same file) and after core/device-emulation-scale.patch, whose
 # content::SetLobiumDeviceEmulationScale it calls.
@@ -179,7 +185,7 @@ branding/device-frame.patch
 #   branding/suppress-sandbox-infobar.patch - only needed for --no-sandbox dev runs.
 #
 # branding/device-frame.patch was OUT of the series from 2026-08-21 to 2026-08-25 because it did not
-# link on Linux, the only platform it targets: its hooks compile there and reference
+# link on Linux, then the only platform it targeted: its hooks compile there and reference
 # LobiumDeviceFrameView, whose implementation was in no GN target, so `chrome` failed at the final
 # link with seven undefined symbols (56069 of 56070 steps had succeeded, on 152.0.7977.42). It is
 # back because the two pieces it was missing are now in the series instead of being untracked files

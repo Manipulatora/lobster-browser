@@ -47,8 +47,26 @@ constexpr std::string_view kPortableCapabilities[] = {
     // screen.*, window.devicePixelRatio, and the CSS device-size media values, which must agree with
     // each other and with the persona's claimed display.
     "screen-metrics",
-    // Touch points, pointer/hover media features and the rest of the mobile-shaped surfaces. Only
-    // required for an Android persona, but always compiled.
+    // Android persona parity in Blink: suppression of the desktop PDF plugin surface when the config
+    // declares uaMobile. Only required for an Android persona, but always compiled.
+    //
+    // NARROWED 2026-08-26. This used to read "Touch points, pointer/hover media features and the
+    // rest of the mobile-shaped surfaces", which over-claimed by a wide margin:
+    // fingerprint/mobile-persona.patch hooks exactly one upstream file,
+    // third_party/blink/renderer/modules/plugins/dom_plugin_array.cc, and nothing else.
+    //
+    // Where those surfaces actually come from:
+    //   * navigator.maxTouchPoints -> navigator-ua-ch, which reports it with the rest of navigator.
+    //   * (pointer: coarse) / (hover: none) -> NOT from the binary at all. They come from the CDP
+    //     Emulation.setDeviceMetricsOverride{mobile:true} that the Android path installs
+    //     (packages/engine-runner/src/mobile-emulation.ts).
+    //
+    // Measured on the Windows host: an Android persona launched with only --lobium-fp-config - the
+    // desktop path, no CDP emulation - reports uaMobile true, maxTouchPoints 5 and a 393x873 screen
+    // while (pointer: coarse) and (hover: none) both answer FALSE. Over-reporting is the dangerous
+    // direction for this contract: the sidecar requires mobile-persona for a mobile launch, and if
+    // anyone trusted the old wording and dropped the CDP layer, pointer and hover would silently
+    // revert to desktop next to an Android UA.
     "mobile-persona",
     "canvas-farbling",
     "webgl-farbling",
@@ -87,6 +105,26 @@ std::string CapabilityManifestJson() {
   // asks for it on win32 — while over-reporting would let the sidecar launch believing in isolation
   // that is not there.
   names.push_back("font-isolation");
+#endif
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
+  // The Android phone/tablet stage: LobiumDeviceFrameView is constructed by BrowserView and kept
+  // locked to the renderer emulation scale.
+  //
+  // This is a UI feature in a fingerprint contract on purpose. An Android persona whose window is
+  // a desktop-shaped rectangle at desktop dimensions contradicts the persona it just claimed, so
+  // the frame is a fingerprint surface in effect even though it is drawn rather than reported.
+  //
+  // It is here because of how its absence failed. The launcher emits --lobium-device-frame
+  // unconditionally for a mobile profile, Chromium ignores switches it does not know, and the
+  // capability contract did not cover the feature - so a binary built without it launched, reported
+  // success, and simply had no frame. That shipped and went unnoticed for days. Declaring it here
+  // means such a binary now refuses a mobile launch instead of quietly degrading it.
+  //
+  // Guarded to the platforms whose BrowserView call sites are compiled: macOS has none, so a macOS
+  // build must not claim it. requiredLobiumCapabilities only asks for it on an emulated Android
+  // launch, so under-reporting elsewhere costs nothing.
+  names.push_back("device-frame");
 #endif
 
   std::string out = base::StrCat(

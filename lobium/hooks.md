@@ -169,8 +169,13 @@ function is the stable anchor.
 
 Cosmetic only, no fingerprint effect: `account-menu-trim`, `omnibox-profile-chip`,
 `product-icon-lobster`, `signin-disable`, `ntp-branding`, `profile-lockdown` (removes guest mode and
-profile creation from the browser UI — Lobium manages profiles itself), `device-frame`, and
-`profile-window-icon`.
+profile creation from the browser UI — Lobium manages profiles itself), and `profile-window-icon`.
+
+`device-frame` is listed under Branding but is **not** cosmetic. An Android persona whose window is a
+desktop-shaped rectangle at desktop dimensions contradicts the persona it just claimed, so the frame
+is a fingerprint surface in effect even though it is drawn rather than reported. Since 2026-08-26 it
+is a declared capability (`device-frame`, `lobium/src/lobium_capabilities.cc`), required for an
+emulated Android launch and required by the packager.
 
 | Patch | File · function | What it does |
 | --- | --- | --- |
@@ -193,11 +198,27 @@ AppUserModelID from the profile path via `shell_integration::win::GetAppUserMode
 every Lobster profile already launches with its own `--user-data-dir`, so the buttons separate on
 their own once they stop looking identical.
 
-> `branding/device-frame.patch` is **incomplete and Linux-only**. Every hook is
-> `#if BUILDFLAG(IS_LINUX)`, the created `lobium_device_frame_view.cc` is in no GN target so it is
-> never compiled, and it calls `content::SetLobiumDeviceEmulationScale()` from a header that does
-> not exist. It applies cleanly and does nothing. On Windows an Android profile therefore gets a
-> desktop-sized viewport (`device-frame-linux-only-mobile-viewport`).
+> **Superseded 2026-08-26.** This note used to read: *"`branding/device-frame.patch` is incomplete
+> and Linux-only. Every hook is `#if BUILDFLAG(IS_LINUX)`, the created `lobium_device_frame_view.cc`
+> is in no GN target so it is never compiled, and it calls `content::SetLobiumDeviceEmulationScale()`
+> from a header that does not exist."* All three of those are now false:
+>
+> * The file **is** in a GN target — `core/build-gn.patch:51-52` adds
+>   `views/frame/lobium_device_frame_view.{cc,h}` to the chrome `ui` static_library, unconditionally.
+> * `content::SetLobiumDeviceEmulationScale` and its header **do** exist —
+>   `core/device-emulation-scale.patch` carries
+>   `content/{public/browser,browser/devtools}/lobium_device_emulation.*` and the
+>   `EmulationHandler::SetDeviceEmulationScale` it calls.
+> * The guards are no longer Linux-only. All 11 are
+>   `#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)`.
+>
+> The Linux-only guards were nevertheless the real cause of the Windows symptom, and in a way that
+> "never compiled" got backwards: the file compiled fine on Windows, but with every call site behind
+> `IS_LINUX` nothing referenced the class, so the linker dropped the whole object out of the static
+> library — taking its two switch strings with it. Verified on 2026-08-26 by rebuilding: the Windows
+> `chrome.dll` now contains `lobium-device-frame` and `lobium-device-screen` (13 of 13 `lobium-*`
+> switches, was 11 of 13), and launched with `--lobium-device-frame=phone
+> --lobium-device-screen=412x915` the viewport is 411x914 rather than tracking the window.
 
 ---
 

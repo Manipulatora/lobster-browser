@@ -6,7 +6,7 @@ index 141a168f48356..d6d25964fc5a1 100644
  #include "chrome/browser/ui/views/frame/browser_native_widget.h"
  #include "chrome/browser/ui/views/frame/browser_widget.h"
  #include "chrome/browser/ui/views/frame/contents_container_view.h"
-+#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 +#include "chrome/browser/ui/views/frame/lobium_device_frame_view.h"
 +#endif
  #include "chrome/browser/ui/views/frame/contents_layout_manager.h"
@@ -16,7 +16,7 @@ index 141a168f48356..d6d25964fc5a1 100644
    contents_container->SetLayoutManager(
        std::make_unique<ContentsLayoutManager>(multi_contents_view_));
  
-+#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 +  if (LobiumDeviceFrameView::IsEnabled()) {
 +    lobium_device_frame_view_ =
 +        AddChildView(std::make_unique<LobiumDeviceFrameView>(this));
@@ -29,7 +29,7 @@ index 141a168f48356..d6d25964fc5a1 100644
    main_shadow_overlay_ = nullptr;
    window_scrim_view_ = nullptr;
    contents_container_ = nullptr;
-+#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 +  lobium_device_frame_view_ = nullptr;
 +#endif
    vertical_tab_strip_region_view_ = nullptr;
@@ -39,7 +39,7 @@ index 141a168f48356..d6d25964fc5a1 100644
  
    WebContentsObserver::Observe(new_contents);
  
-+#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 +  if (lobium_device_frame_view_) {
 +    lobium_device_frame_view_->ApplyCurrentScaleToWebContents(new_contents);
 +  }
@@ -52,7 +52,7 @@ index 141a168f48356..d6d25964fc5a1 100644
    layout_views.toolbar = toolbar_;
    layout_views.infobar_container = infobar_container_;
    layout_views.contents_container = contents_container_;
-+#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 +  layout_views.lobium_device_frame_view = lobium_device_frame_view_;
 +#endif
    layout_views.multi_contents_view = multi_contents_view_;
@@ -62,7 +62,7 @@ index 141a168f48356..d6d25964fc5a1 100644
  
    UpdateAcceleratorMetrics(accelerator, command_id);
  
-+#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 +  if (lobium_device_frame_view_) {
 +    switch (command_id) {
 +      case IDC_ZOOM_PLUS:
@@ -99,7 +99,7 @@ index 70e811360e59b..8bb1026c044a5 100644
    // Handled by ContentsLayoutManager.
    raw_ptr<views::View> contents_container_ = nullptr;
  
-+#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 +  // Native phone/tablet workspace behind the real WebContents for Android
 +  // profiles.
 +  raw_ptr<LobiumDeviceFrameView> lobium_device_frame_view_ = nullptr;
@@ -132,7 +132,7 @@ index 8145f86c2a17f..a3cbc78e2692e 100644
    raw_ptr<views::View> toolbar = nullptr;
    raw_ptr<InfoBarContainerView> infobar_container = nullptr;
    raw_ptr<views::View> contents_container = nullptr;
-+#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 +  raw_ptr<LobiumDeviceFrameView> lobium_device_frame_view = nullptr;
 +#endif
    raw_ptr<MultiContentsView> multi_contents_view = nullptr;
@@ -146,7 +146,7 @@ index 64cc69c116d30..4c246bb43687f 100644
  #include "base/trace_event/common/trace_event_common.h"
  #include "base/trace_event/trace_event.h"
  #include "build/build_config.h"
-+#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 +#include "chrome/browser/ui/views/frame/lobium_device_frame_view.h"
 +#endif
  #include "chrome/browser/ui/animation/browser_animation_controller.h"
@@ -159,7 +159,7 @@ index 64cc69c116d30..4c246bb43687f 100644
 +  gfx::Rect contents_bounds(content_left, params.visual_client_area.y(),
 +                            content_right - content_left,
 +                            params.visual_client_area.height());
-+#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 +  gfx::Rect lobium_stage;
 +  if (views().lobium_device_frame_view) {
 +    layout.AddChild(views().lobium_device_frame_view, contents_bounds);
@@ -183,7 +183,7 @@ index 64cc69c116d30..4c246bb43687f 100644
      }
    }
  
-+#if BUILDFLAG(IS_LINUX)
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 +  // Lobium: clip the device aperture to the content-area (stage). When the zoomed phone/tablet is
 +  // scrolled, the aperture's top rises above the stage; clip so the WebContents keeps its full size
 +  // but the part above the stage top is hidden - the device slides UNDER the toolbar instead of
