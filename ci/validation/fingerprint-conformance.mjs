@@ -247,6 +247,10 @@ const FIELDS = [
   ['webgl.maxTextureImageUnits', (f) => f.webgl.caps.maxTextureImageUnits, (o) => get(o, 'webgl.maxTextureImageUnits'), true],
   ['webgl.extensions', (f) => [...f.webgl.extensions].sort(), (o) => get(o, 'webgl.extensions'), true],
   ['webgl2.extensions', (f) => (f.webgl.extensions2 ? [...f.webgl.extensions2].sort() : null), (o) => get(o, 'webgl2.extensions'), true],
+  // WebGPU adapter identity. vendor/architecture are the two fields real Chrome populates; see the
+  // contradiction rule for why device/description must stay empty.
+  ['webgpu.vendor', (f) => f.webgpu?.vendor ?? null, (o) => get(o, 'webgpu.adapter.vendor'), true],
+  ['webgpu.architecture', (f) => f.webgpu?.architecture ?? null, (o) => get(o, 'webgpu.adapter.architecture'), true],
   ['locale.timezone', (f) => f.locale.timezone, (o) => get(o, 'locale.timezone'), true],
   ['locale.resolvedLocale', (f) => f.locale.locale, (o) => get(o, 'locale.resolvedLocale'), false],
 ];
@@ -283,8 +287,28 @@ function contradictions(fp, o) {
   } else if (renderer && gpuPresent && adapter === null) {
     out.push({ id: 'webgl-gpu-without-webgpu-adapter', detail: 'WebGL names a discrete GPU while navigator.gpu.requestAdapter() returns null' });
   }
+  // Real Chrome 152 masks these two for privacy: measured on stock Chrome on this host, an adapter
+  // comes back as { vendor, architecture, device: "", description: "" }. Filling them in with the
+  // persona's real device id would therefore be a tell in the opposite direction - a browser that
+  // volunteers more than Chrome does.
+  const adapterInfo = get(o, 'webgpu.adapter');
+  if (adapterInfo && (adapterInfo.device || adapterInfo.description)) {
+    out.push({
+      id: 'webgpu-adapter-overshares',
+      detail: `GPUAdapterInfo exposes device "${adapterInfo.device}" / description "${adapterInfo.description}"; real Chrome 152 leaves both empty`,
+    });
+  }
   if (/SwiftShader|llvmpipe|Software/i.test(String(get(o, 'webgl.unmaskedRenderer') ?? ''))) {
     out.push({ id: 'software-renderer-leaked', detail: 'the WebGL renderer names a software rasteriser — a headless tell the persona was supposed to replace' });
+  }
+  // The same leak one surface over: WebGL can be perfectly spoofed while the WebGPU adapter still
+  // announces the software backend underneath it.
+  if (/swiftshader|llvmpipe|software|warp/i.test(String(adapterInfo?.architecture ?? '')) ||
+      /swiftshader|llvmpipe|software|warp/i.test(String(adapterInfo?.vendor ?? ''))) {
+    out.push({
+      id: 'webgpu-adapter-leaks-software',
+      detail: `GPUAdapterInfo reports vendor "${adapterInfo?.vendor}" / architecture "${adapterInfo?.architecture}" — the WebGPU adapter names the software backend the WebGL renderer hides`,
+    });
   }
   return out;
 }
