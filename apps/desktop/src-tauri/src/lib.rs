@@ -498,6 +498,27 @@ fn user_engine_runtime_dir() -> Option<PathBuf> {
     }
 }
 
+/// The manifest this build should obey: the REFRESHED copy when one exists, else the bundled one.
+///
+/// One function, so every reader agrees. That matters more than it looks: `engine_status` compares
+/// the installed engine's stamp against the resolved source, and `provision_engine` installs from
+/// it. If those two read different manifests, a client would install the engine one named and then
+/// be told by the other that no engine is present - provisioning forever, which is the exact
+/// failure mode this whole area has already produced twice.
+///
+/// The refreshed copy lives in the app data dir, not beside the binary: the install directory is
+/// read-only on a normal Windows install, and writing into it would also mean an update could not
+/// be undone by clearing user data.
+fn engine_manifest_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let cached = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join("engine-manifest.json"))
+        .filter(|path| path.is_file());
+    cached.or_else(|| app_resource_dir(app).map(|resources| resources.join("engine-manifest.json")))
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EngineStatus {
@@ -571,7 +592,7 @@ fn engine_status(app: tauri::AppHandle) -> EngineStatus {
     // No explicit binary means ensure_lobium_env found neither an embedded runtime nor a managed one
     // matching the manifest, so the manifest check below is the last thing that could say "present".
     let dir = user_engine_runtime_dir().unwrap_or_default();
-    let manifest = app_resource_dir(&app).map(|resources| resources.join("engine-manifest.json"));
+    let manifest = engine_manifest_path(&app);
     let present = engine_provision::resolve_source(manifest.as_deref())
         .is_ok_and(|source| engine_provision::engine_matches_source(&dir, &source));
     EngineStatus {
@@ -607,7 +628,7 @@ async fn provision_engine(app: tauri::AppHandle) -> Result<(), String> {
          no HOME otherwise)"
             .to_string()
     })?;
-    let manifest = app_resource_dir(&app).map(|r| r.join("engine-manifest.json"));
+    let manifest = engine_manifest_path(&app);
     let source = engine_provision::resolve_source(manifest.as_deref())
         .map_err(|e| format!("no engine source configured: {e:#}"))?;
     if engine_provision::engine_matches_source(&runtime_dir, &source) {
@@ -1314,9 +1335,8 @@ fn ensure_lobium_env(app: &tauri::AppHandle) {
         }
     }
 
-    let manifest = resource_dir
-        .as_ref()
-        .map(|resources| resources.join("engine-manifest.json"));
+    // Same resolver as engine_status and provision_engine - see engine_manifest_path.
+    let manifest = engine_manifest_path(app);
     let managed_source = match engine_provision::resolve_source(manifest.as_deref()) {
         Ok(source) => Some(source),
         Err(error) => {
@@ -1792,6 +1812,40 @@ pub fn run() {
             // stdio (no cross-runtime pipe). A spawn failure degrades gracefully: the app still opens,
             // and launches report the sidecar is unavailable rather than crashing startup.
             // Resolution order (DSK-5/11): env → packaged resources → dev source tree.
+            // Refresh the engine manifest BEFORE anything reads it.
+            //
+            // This is what lets a published engine reach clients that are already installed: the
+            // manifest ships inside the installer, so without this an engine republish silently
+            // invalidated every installer already downloaded - the copy inside still pinned the old
+            // digest, the hash check failed, and the first-run screen retried forever. That shipped
+            // twice.
+            //
+            // Blocking, with a short deadline, and deliberately so: ensure_lobium_env, engine_status
+            // and provision_engine must all see the SAME manifest within one launch. Refreshing in
+            // the background would let the file change between two of those reads, and a client that
+            // installed the engine one named while the other reported none present would provision
+            // in a loop. A failure here is a no-op - the bundled manifest still applies - so a user
+            // offline on first run is no worse off than before.
+            {
+                let handle = app.handle().clone();
+                let cache = dir.join("engine-manifest.json");
+                let url = engine_provision::remote_manifest_url();
+                let refreshed = tauri::async_runtime::block_on(async {
+                    engine_provision::refresh_manifest_cache(
+                        &cache,
+                        &url,
+                        std::time::Duration::from_secs(6),
+                    )
+                    .await
+                });
+                match refreshed {
+                    Ok(()) => tracing::info!(%url, "engine manifest refreshed"),
+                    Err(error) => {
+                        tracing::warn!(%error, %url, "engine manifest not refreshed; using the bundled copy")
+                    }
+                }
+                let _ = handle;
+            }
             ensure_lobium_env(app.handle());
             let sidecar_js = resolve_sidecar_js(app.handle());
             let node_bin = resolve_node_bin(app.handle());

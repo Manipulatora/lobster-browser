@@ -58,8 +58,66 @@ pub fn resolve_source(manifest_path: Option<&Path>) -> Result<EngineSource> {
     })?;
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading engine manifest {}", path.display()))?;
+    parse_manifest(&raw)
+}
+
+/// The URL the engine manifest is refreshed from, so a published engine reaches installed clients.
+///
+/// Overridable for testing and self-hosting, exactly as LOBSTER_ENGINE_URL is.
+pub fn remote_manifest_url() -> String {
+    std::env::var("LOBSTER_ENGINE_MANIFEST_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://lobrowser.com/download/engine/engine-manifest.json".to_string())
+}
+
+/// Fetch the published manifest and write it to `cache_path`, but only if it is USABLE.
+///
+/// WHY THIS EXISTS. The manifest is bundled into the installer, so before this the engine and the
+/// installer were permanently coupled: republishing an engine silently invalidated every installer
+/// already downloaded, because the copy inside it still pinned the old digest and the app failed the
+/// hash check into an endless retry. That happened twice in two days. Refreshing it means a new
+/// engine reaches installed clients on their next launch, which is what makes an engine update a
+/// manifest change rather than a reinstall.
+///
+/// VALIDATED BEFORE IT IS TRUSTED. The fetched document is parsed for THIS platform first, and only
+/// written if that succeeds - a truncated response or a manifest that has no entry for this platform
+/// must never replace a working local one. Trust boundary: the digest inside gates the archive
+/// bytes, and both come from the same origin, so this grants no authority the download did not
+/// already have.
+pub async fn refresh_manifest_cache(cache_path: &Path, url: &str, timeout: Duration) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(timeout)
+        .timeout(timeout)
+        .build()
+        .context("building manifest HTTP client")?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("requesting engine manifest {url}"))?;
+    if !resp.status().is_success() {
+        bail!("engine manifest fetch failed: HTTP {} for {url}", resp.status());
+    }
+    let raw = resp.text().await.context("reading engine manifest body")?;
+    // Parse before writing: a document this build cannot use is not an update, it is a way to break
+    // a client that was working.
+    parse_manifest(&raw).context("the fetched engine manifest is not usable by this build")?;
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent).context("creating manifest cache dir")?;
+    }
+    // Temp + rename, so a crash mid-write cannot leave a half-written manifest that parses as
+    // something else.
+    let tmp = cache_path.with_extension("json.incoming");
+    std::fs::write(&tmp, raw.as_bytes()).context("writing engine manifest cache")?;
+    std::fs::rename(&tmp, cache_path).context("installing engine manifest cache")?;
+    Ok(())
+}
+
+/// Parse a manifest document into the source for THIS platform.
+pub fn parse_manifest(raw: &str) -> Result<EngineSource> {
     let json: serde_json::Value =
-        serde_json::from_str(&raw).with_context(|| "parsing engine manifest")?;
+        serde_json::from_str(raw).with_context(|| "parsing engine manifest")?;
 
     // Pick the entry for THIS platform.
     //
@@ -480,6 +538,38 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A fetched manifest that this build cannot use must never replace a working local one.
+    #[test]
+    fn an_unusable_fetched_manifest_is_rejected_before_it_is_written() {
+        // No entry for this platform: the shape a manifest has when a platform has not been
+        // published yet. Writing it would strand a client that was working a moment ago.
+        let foreign = r#"{"platforms":{"solaris-sparc":{"url":"https://x/y.zip","sha256":"ab","version":"1"}}}"#;
+        assert!(parse_manifest(foreign).is_err());
+
+        // Truncated body - what a connection cut mid-response leaves.
+        assert!(parse_manifest(r#"{"platforms":{"#).is_err());
+
+        // Missing digest: accepting this would download an archive nothing verifies.
+        let want = engine_platform_id();
+        let no_digest = format!(r#"{{"platforms":{{"{want}":{{"url":"https://x/y.zip","version":"1"}}}}}}"#);
+        assert!(parse_manifest(&no_digest).is_err());
+    }
+
+    #[test]
+    fn a_usable_manifest_parses_to_the_platform_entry() {
+        let want = engine_platform_id();
+        let doc = format!(
+            r#"{{"platforms":{{"{want}":{{"url":"https://example/e.zip","sha256":"AABB","version":"152.0.1.2"}}}}}}"#
+        );
+        let source = parse_manifest(&doc).expect("usable manifest");
+        assert_eq!(source.url, "https://example/e.zip");
+        // Lowercased, because the digest is compared against a lowercase hex hash of the bytes.
+        assert_eq!(source.sha256, "aabb");
+        assert_eq!(source.version, "152.0.1.2");
+    }
+
+
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
