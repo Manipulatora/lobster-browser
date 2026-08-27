@@ -2528,6 +2528,40 @@ code {
 .engine-gate__retry:active {
   transform: translateY(1px);
 }
+/* Disabled while an attempt is in flight. Without a visible disabled state the button still looks
+   pressable during a retry, so an impatient second click reads as "it ignored me" on the one screen
+   that is already failing. */
+.engine-gate__retry:disabled {
+  cursor: default;
+  filter: grayscale(0.5) brightness(0.8);
+  box-shadow: none;
+}
+.engine-gate__retry:disabled:active {
+  transform: none;
+}
+
+/* The failure block replaces the bar rather than sitting beside it: the screen shows a progress bar
+   OR a reason, never both, so there is never a stalled bar next to an explanation of why it stalled. */
+.engine-gate__failure {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  width: 100%;
+}
+/* The one place on this screen that is deliberately wordy. It carries the message the Rust side
+   wrote, verbatim, so the failure is diagnosable instead of being a button the user clicks forever.
+   Wrapped and selectable, because the realistic next step is pasting it to support. */
+.engine-gate__reason {
+  margin: 0;
+  max-width: 100%;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--text-soft, #b6bacb);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
 .engine-gate__retry:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent, #7c3aed) 60%, #fff 40%);
   outline-offset: 3px;

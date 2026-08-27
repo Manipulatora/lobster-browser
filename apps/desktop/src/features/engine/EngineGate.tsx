@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
@@ -18,36 +18,65 @@ interface EngineDownloadProgress {
 /**
  * First run, before there is a browser engine to run.
  *
- * The installer is ~37 MB and does not carry the engine; the engine arrives here. That is the same
- * shape Octo and every other browser of this size uses, and it is what keeps the download the user
- * clicked from being 330 MB.
+ * The installer is ~30 MB and does not carry the engine; the engine arrives here.
  *
- * DELIBERATELY WORDLESS. No heading, no explanation, no "Download engine" button - a logo, a bar,
- * and a number. The user just chose to install a browser and is waiting for it to open; every
- * sentence here would be read as an obstacle or a question, and none of them change what they do
- * next. The progress bar answers the only live question ("how much longer"), and the percentage
- * answers it precisely. There is nothing to decide, so nothing is asked.
+ * DELIBERATELY WORDLESS ON THE HAPPY PATH. No heading, no explanation, no "Download engine" button -
+ * a logo, a bar, and a number. The user just chose to install a browser and is waiting for it to
+ * open; every sentence there would be read as an obstacle, and none of them change what they do
+ * next. The download starts on its own, because a button would ask approval for something already
+ * approved by installing the product.
  *
- * The download STARTS ON ITS OWN for the same reason. A button would be a prompt to approve
- * something the user has already approved by installing the product, and would leave a fresh
- * install sitting on a screen that does nothing.
+ * A FAILURE IS NOT THE HAPPY PATH, and this screen used to treat it as one. It showed a bare Retry
+ * with no reason, so a deterministic failure - a manifest that cannot be read, no disk space for the
+ * ~800 MB expansion, antivirus holding the archive open - became a loop the user could only keep
+ * clicking, with nothing on screen to say why or to suggest it would never work. Reported from the
+ * field as "it finished, then Retry appears, endlessly". Three things fix that, and only the first
+ * is cosmetic:
  *
- * The one button that does exist appears only when the download fails, because a failure IS a
- * decision point and a bar frozen at 34% with no way to act on it is the worst version of this
- * screen.
+ *   1. The reason is shown. It is the one place on this screen where words are the whole point.
+ *   2. Retry re-checks engine_status FIRST. `provision_engine` is idempotent, so if the engine did
+ *      land and only a later step failed, this ends the loop instead of re-running it.
+ *   3. Retrying is disabled while an attempt is in flight, so an impatient double-click cannot stack
+ *      two 300 MB downloads writing to the same staging directory - which fails, and would look
+ *      exactly like the bug being fixed.
  */
 export function EngineGate({ children }: { children: ReactNode }): JSX.Element {
   const desktop = isTauri();
   const [ready, setReady] = useState(!desktop);
   const [progress, setProgress] = useState<EngineDownloadProgress | null>(null);
-  const [failed, setFailed] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // A ref, not state: the guard must be correct at call time, and state updates are not synchronous
+  // enough to stop two clicks landing in the same tick.
+  const running = useRef(false);
 
-  const provision = useCallback(() => {
-    setFailed(false);
+  const attempt = useCallback(async () => {
+    if (running.current) return;
+    running.current = true;
+    setBusy(true);
+    setError(null);
     setProgress(null);
-    invoke('provision_engine')
-      .then(() => setReady(true))
-      .catch(() => setFailed(true));
+    try {
+      // Ask before fetching. `provision_engine` short-circuits when the engine already matches the
+      // manifest, but going through engine_status means a retry after a post-install failure ends
+      // here rather than re-entering the download path at all.
+      const status = await invoke<EngineStatus>('engine_status').catch(() => null);
+      if (status?.present) {
+        setReady(true);
+        return;
+      }
+      await invoke('provision_engine');
+      setReady(true);
+    } catch (cause) {
+      // Surfaced verbatim. The Rust side already writes these for a human - "engine download failed:
+      // HTTP 404 for <url>", "no engine source configured", "the engine archive does not contain
+      // chrome.exe at its root" - and paraphrasing them into something friendlier would throw away
+      // the only thing that makes the failure actionable.
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      running.current = false;
+      setBusy(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -56,22 +85,12 @@ export function EngineGate({ children }: { children: ReactNode }): JSX.Element {
     const unlisten = listen<EngineDownloadProgress>('engine-download-progress', (event) => {
       if (!cancelled) setProgress(event.payload);
     });
-    invoke<EngineStatus>('engine_status')
-      .then((status) => {
-        if (cancelled) return;
-        if (status.present) setReady(true);
-        else provision();
-      })
-      // Not knowing whether the engine is there is not a reason to stop: provisioning is a no-op
-      // when it already matches the manifest, so attempting it is strictly better than stalling.
-      .catch(() => {
-        if (!cancelled) provision();
-      });
+    void attempt();
     return () => {
       cancelled = true;
       void unlisten.then((off) => off());
     };
-  }, [desktop, provision]);
+  }, [desktop, attempt]);
 
   if (ready) return <>{children}</>;
 
@@ -87,11 +106,7 @@ export function EngineGate({ children }: { children: ReactNode }): JSX.Element {
       <div className="engine-gate__stage">
         <img className="engine-gate__logo" src={siteLogo} alt="Lobster Browser" />
 
-        {failed ? (
-          <button type="button" className="engine-gate__retry" onClick={provision}>
-            Retry
-          </button>
-        ) : (
+        {error === null ? (
           <div
             className="engine-gate__bar"
             role="progressbar"
@@ -101,10 +116,24 @@ export function EngineGate({ children }: { children: ReactNode }): JSX.Element {
               : { 'aria-valuenow': pct, 'aria-valuemin': 0, 'aria-valuemax': 100 })}
           >
             <div
-              className={pct === null ? 'engine-gate__fill engine-gate__fill--indet' : 'engine-gate__fill'}
+              className={
+                pct === null ? 'engine-gate__fill engine-gate__fill--indet' : 'engine-gate__fill'
+              }
               {...(pct === null ? {} : { style: { width: `${pct}%` } })}
             />
             {pct === null ? null : <span className="engine-gate__pct">{pct}%</span>}
+          </div>
+        ) : (
+          <div className="engine-gate__failure" role="alert">
+            <p className="engine-gate__reason">{error}</p>
+            <button
+              type="button"
+              className="engine-gate__retry"
+              onClick={() => void attempt()}
+              disabled={busy}
+            >
+              {busy ? 'Retrying…' : 'Retry'}
+            </button>
           </div>
         )}
       </div>

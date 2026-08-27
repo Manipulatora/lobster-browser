@@ -200,12 +200,31 @@ where
 
     // 1) Stream the archive to a temp file, hashing every byte as it lands.
     let tmp_archive = parent.join(".lobium-engine.download");
-    let _ = std::fs::remove_file(&tmp_archive);
+    // A previous attempt may have left a COMPLETE, hash-verified archive here: the download can
+    // succeed and extraction still fail (no disk space for the ~800 MB expansion, antivirus holding
+    // a handle, a permission fault). Re-fetching ~300 MB to retry a step that never involved the
+    // network turns one recoverable failure into a loop that costs the user the whole download every
+    // time. Verify what is on disk first and keep it if it is the archive we were going to fetch.
+    let reusable = matches!(
+        file_sha256(&tmp_archive),
+        Ok(ref digest) if digest.eq_ignore_ascii_case(&source.sha256)
+    );
+    if !reusable {
+        let _ = std::fs::remove_file(&tmp_archive);
+    }
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .context("building HTTP client")?;
     let downloaded = async {
+        if reusable {
+            // Report it as instantly complete so the UI does not sit on an empty bar while a
+            // retry that has nothing to fetch runs.
+            if let Ok(meta) = std::fs::metadata(&tmp_archive) {
+                on_progress(meta.len(), Some(meta.len()));
+            }
+            return Ok(source.sha256.to_ascii_lowercase());
+        }
         // The connect deadline ends at the TCP/TLS handshake; a server that accepts the connection
         // and then never answers would still wedge here, so the header wait gets the same deadline
         // the body chunks get.
@@ -295,7 +314,11 @@ where
     .await
     .context("engine extraction task panicked")?;
 
-    let _ = std::fs::remove_file(&tmp_archive);
+    // Deleted only on success. Keeping it after an extraction failure is what makes the retry above
+    // cheap; it is removed here so a working install does not leave ~300 MB behind.
+    if extracted.is_ok() {
+        let _ = std::fs::remove_file(&tmp_archive);
+    }
     extracted?;
     if !engine_matches_source(runtime_dir, source) {
         bail!(
@@ -384,6 +407,24 @@ fn extracted_root(staging: &Path) -> Result<PathBuf> {
         "the engine archive does not contain {} at its root",
         crate::CHROME_BIN
     )
+}
+
+/// SHA-256 of a file on disk, streamed so a ~300 MB archive is not read into memory.
+///
+/// Used to decide whether a leftover download can be reused rather than re-fetched. Any IO error is
+/// an error, not a silent "no": a partially readable file must not be mistaken for a matching one.
+fn file_sha256(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hex_lower(&hasher.finalize()))
 }
 
 fn extract_and_swap(
