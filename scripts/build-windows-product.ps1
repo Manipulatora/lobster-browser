@@ -40,7 +40,17 @@ param(
     # bundled sidecar on the user's machine.
     [string] $NodeVersion = 'v22.23.2',
     [switch] $Force,
-    [switch] $SkipBuild
+    [switch] $SkipBuild,
+    # Build the BUNDLED installer: the engine ships inside it and first run needs no download.
+    #
+    # Same tree, same binary, same manifest. The only differences are that resources\lobium is staged
+    # (bundled in via --config src-tauri/tauri.bundled.conf.json) and that a .lobium-engine-version
+    # stamp is written beside the engine. Run this script twice from one checkout, once with and once
+    # without, so the two installers cannot drift.
+    [switch] $Bundled,
+    # The packaged Lobium runtime to embed with -Bundled. Its ZIP must be the one the manifest's
+    # win-x64 entry names, because the stamp written beside it carries that entry's digest.
+    [string] $EngineRuntime
     # -Release is gone, but the check it used to gate is NOT optional any more, which is why there is
     # no switch for it. Its job was to refuse a build whose engine manifest had no usable win-x64
     # entry. Under the download-on-first-run model that entry is the only thing that makes the
@@ -166,23 +176,79 @@ try { node scripts\build-lobee.mjs; if ($LASTEXITCODE -ne 0) { Die 'build-lobee.
 finally { Pop-Location }
 Ok 'resources\lobee'
 
-Step '[3b/4] The engine is NOT staged into resources'
-# THE INSTALLER DOES NOT CARRY THE ENGINE. It briefly did, and the result was an installer six times
-# the size of what this category ships - the engine is ~300 MB compressed against a ~35 MB app. It is
-# downloaded on first run instead, from the URL and SHA-256 in resources\engine-manifest.json, into
-# %LOCALAPPDATA%\lobster\lobium.
+Step $(if ($Bundled) { '[3b/4] Stage the engine INTO resources (bundled build)' } else { '[3b/4] The engine is NOT staged into resources (web build)' })
+# TWO INSTALLERS FROM ONE TREE. The WEB installer downloads the engine on first run from the URL and
+# SHA-256 in resources\engine-manifest.json, into %LOCALAPPDATA%\lobster\lobium; the BUNDLED one
+# carries it. Everything else about them is identical, which is the point - a difference that is not
+# the engine is a bug.
 #
-# Any runtime an earlier embedded build left behind is removed here: tauri bundles whatever is in the
-# resource tree, so a leftover directory would silently put 800 MB back into the installer.
+# tauri bundles whatever is in the resource tree, so the web build must actively REMOVE a runtime an
+# earlier bundled build left behind. Otherwise it silently ships the 800 MB it claims not to carry.
 $engineDest = Join-Path $Resources 'lobium'
-if (Test-Path $engineDest) {
-    Write-Host '    removing a runtime left by an earlier embedded build ...'
-    Remove-Item -LiteralPath $engineDest -Recurse -Force
+if (-not $Bundled) {
+    if (Test-Path $engineDest) {
+        Write-Host '    removing a runtime left by an earlier bundled build ...'
+        Remove-Item -LiteralPath $engineDest -Recurse -Force
+    }
+    Ok 'engine excluded (downloaded on first run)'
+} else {
+    $src = $EngineRuntime
+    if (-not $src) {
+        $src = @(Get-ChildItem (Join-Path $Root 'dist-win') -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like 'lobium-runtime-*' } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -ExpandProperty FullName) |
+            Where-Object { Test-Path (Join-Path $_ 'chrome.exe') } |
+            Select-Object -First 1
+    }
+    if (-not $src) { Die '-Bundled needs a packaged Lobium runtime; pass -EngineRuntime <dir>' }
+
+    # Verify BEFORE embedding. An installer is the worst place to discover a bad engine: every user
+    # gets the same broken bytes and the failure surfaces at first profile launch.
+    Push-Location $Root
+    try {
+        node scripts\verify-lobium-runtime.mjs $src
+        if ($LASTEXITCODE -ne 0) { Die "the runtime at $src did not verify; refusing to embed it" }
+    } finally { Pop-Location }
+
+    if (Test-Path $engineDest) { Remove-Item -LiteralPath $engineDest -Recurse -Force }
+    Write-Host "    copying $src -> resources\lobium ..."
+    Copy-Item -LiteralPath $src -Destination $engineDest -Recurse -Force
+
+    # THE STAMP IS THE WHOLE POINT OF THIS BRANCH, AND ITS ABSENCE IS SILENT.
+    #
+    # engine_matches_source() answers "is the installed engine the one the manifest names" by reading
+    # .lobium-engine-version beside chrome.exe and comparing it by EXACT STRING EQUALITY against
+    # source_stamp(), which is format!("version={}\nsha256={}\n") over the manifest entry. A bundled
+    # engine with no stamp answers "no match" however correct its bytes are, so the app concludes it
+    # has no engine the manifest recognises and provisions one - on every launch of a fresh install.
+    # That is exactly the download bundling exists to remove, and it is invisible: the browser still
+    # works, because ensure_lobium_env accepts the embedded binary on existence alone.
+    #
+    # The digest is the ZIP's, not the directory's. It identifies the manifest ENTRY, and the manifest
+    # is what the comparison is against.
+    $stampEntry = (Get-Content (Join-Path $Resources 'engine-manifest.json') -Raw | ConvertFrom-Json).platforms.'win-x64'
+    if (-not ($stampEntry -and $stampEntry.version -and $stampEntry.sha256)) {
+        Die 'cannot stamp the bundled engine: engine-manifest.json has no usable win-x64 entry'
+    }
+    # LF and a trailing newline, written without a BOM. The Rust side compares the whole file to a
+    # format! string, so Set-Content (CRLF) or a BOM would make every comparison fail - the same
+    # silent no-match the stamp exists to prevent.
+    $stampText = "version=$($stampEntry.version)`nsha256=$($stampEntry.sha256.ToLower())`n"
+    [System.IO.File]::WriteAllText(
+        (Join-Path $engineDest '.lobium-engine-version'),
+        $stampText,
+        (New-Object System.Text.UTF8Encoding($false)))
+
+    $engineBytes = (Get-ChildItem $engineDest -Recurse -File | Measure-Object -Property Length -Sum).Sum
+    Ok ('resources\lobium  ({0:N2} GB)  stamped version={1} sha256={2}...' -f `
+        ($engineBytes / 1GB), $stampEntry.version, $stampEntry.sha256.Substring(0, 8))
 }
-Ok 'engine excluded (downloaded on first run)'
 
 Step 'Resource inventory (tauri.conf.json bundle.resources)'
-foreach ($r in @('sidecar', 'node', 'lobee', 'engine-manifest.json')) {
+$required = @('sidecar', 'node', 'lobee', 'engine-manifest.json')
+if ($Bundled) { $required += 'lobium' }
+foreach ($r in $required) {
     $p = Join-Path $Resources $r
     if (Test-Path $p) { Ok $r } else { Die "resources\$r is missing - tauri-build will refuse to bundle" }
 }
@@ -223,7 +289,13 @@ Push-Location (Join-Path $Root 'apps\desktop')
 try {
     # Tauri exposes trailing ARGS to its Cargo runner; the explicit separator makes --locked a Cargo
     # argument, so Cargo.lock cannot be silently rewritten during a product build.
-    npm run tauri -- build --bundles nsis -- --locked
+    # The bundled build differs by exactly one argument. Everything upstream of here - the Rust
+    # binary, the frontend, the sidecar, the manifest - is the same tree and the same compilation.
+    if ($Bundled) {
+        npm run tauri -- build --bundles nsis --config src-tauri/tauri.bundled.conf.json -- --locked
+    } else {
+        npm run tauri -- build --bundles nsis -- --locked
+    }
     if ($LASTEXITCODE -ne 0) { Die "tauri build failed (exit $LASTEXITCODE)" }
 } finally { Pop-Location }
 
@@ -248,8 +320,10 @@ Write-Host ('  NSIS script: {0}' -f $nsi.FullName)
 # installation", which is false under the current model and is the last thing the operator sees:
 # a correct build looked like a broken one.
 #
-# Do not reintroduce a presence check here. Step 3b removes resources\lobium on purpose, so any test
-# for it can only ever fail. What matters now is the manifest entry the app resolves at runtime.
+# The presence check IS meaningful again, but only in -Bundled mode, and only because step 3b puts
+# the runtime there deliberately. In web mode step 3b removes it, so testing for it there could only
+# ever fail - which is the trap the paragraph above describes. Branch on the mode, never on the
+# directory alone.
 $manifestPath = Join-Path $Resources 'engine-manifest.json'
 $winEntry = $null
 if (Test-Path $manifestPath) {
@@ -260,10 +334,32 @@ if (Test-Path $manifestPath) {
     }
 }
 if ($winEntry -and $winEntry.url -and $winEntry.sha256) {
-    Write-Host ('  engine    : downloaded on first run  (v{0})' -f $winEntry.version) -ForegroundColor Green
-    Write-Host ('        from   {0}' -f $winEntry.url) -ForegroundColor DarkGray
-    Write-Host ('        sha256 {0}' -f $winEntry.sha256) -ForegroundColor DarkGray
-    Write-Host '        into   %LOCALAPPDATA%\lobster\lobium' -ForegroundColor DarkGray
+    if ($Bundled) {
+        # Report the embedded engine AND its stamp. The stamp is the difference between a bundled
+        # install that never downloads and one that re-downloads on every launch, and it is invisible
+        # from the outside, so it is stated here rather than assumed.
+        $stampPath = Join-Path (Join-Path $Resources 'lobium') '.lobium-engine-version'
+        $stamped = if (Test-Path $stampPath) {
+            [System.IO.File]::ReadAllText($stampPath) -eq
+                ("version=$($winEntry.version)`nsha256=$($winEntry.sha256.ToLower())`n")
+        } else { $false }
+        $bundledBytes = (Get-ChildItem (Join-Path $Resources 'lobium') -Recurse -File |
+            Measure-Object -Property Length -Sum).Sum
+        Write-Host ('  engine    : BUNDLED, no first-run download  (v{0}, {1:N2} GB on disk)' -f $winEntry.version, ($bundledBytes / 1GB)) -ForegroundColor Green
+        Write-Host ('        sha256 {0}   (the manifest entry the stamp names)' -f $winEntry.sha256) -ForegroundColor DarkGray
+        if ($stamped) {
+            Write-Host '        stamp  .lobium-engine-version matches the manifest entry' -ForegroundColor DarkGray
+        } else {
+            Write-Host '  WARNING: the bundled engine has no matching .lobium-engine-version stamp.' -ForegroundColor Red
+            Write-Host '        Every launch of a fresh install will re-download the engine, which is' -ForegroundColor Red
+            Write-Host '        the exact cost bundling exists to remove. Do not ship this installer.' -ForegroundColor Red
+        }
+    } else {
+        Write-Host ('  engine    : downloaded on first run  (v{0})' -f $winEntry.version) -ForegroundColor Green
+        Write-Host ('        from   {0}' -f $winEntry.url) -ForegroundColor DarkGray
+        Write-Host ('        sha256 {0}' -f $winEntry.sha256) -ForegroundColor DarkGray
+        Write-Host '        into   %LOCALAPPDATA%\lobster\lobium' -ForegroundColor DarkGray
+    }
     # A `stale` marker means the repo itself says these bytes must not be shipped. Say so loudly:
     # engine_provision.rs ignores unknown manifest keys, so nothing downstream will catch it.
     if ($winEntry.PSObject.Properties.Name -contains 'stale') {
