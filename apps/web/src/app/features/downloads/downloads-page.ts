@@ -7,6 +7,8 @@ import {
   RELEASE_VERSION,
   detectPlatform,
   orderedForPlatform,
+  platformsOf,
+  variantsFor,
   type DownloadArtifact,
   type PlatformId,
 } from './downloads.catalog';
@@ -42,4 +44,17 @@ export class DownloadsPage {
   readonly artifacts = computed<readonly DownloadArtifact[]>(() =>
     orderedForPlatform(this.platform(), DOWNLOADS),
   );
+
+  /** One card per platform, the visitor's first. Derived from `artifacts` so the ordering rule
+   *  lives in exactly one place. */
+  readonly platforms = computed<readonly PlatformId[]>(() => platformsOf(this.artifacts()));
+
+  /** The builds offered for one platform: bundled, then web. */
+  variants(platform: PlatformId): readonly DownloadArtifact[] {
+    return variantsFor(platform, this.artifacts());
+  }
+
+  protected platformName(platform: PlatformId): string {
+    return variantsFor(platform, this.artifacts())[0]?.name ?? platform;
+  }
 }

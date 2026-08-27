@@ -10,7 +10,19 @@ import {
 
 describe('downloads catalog', () => {
   it('offers exactly the platforms the product ships, each with a resolvable URL', () => {
-    expect(DOWNLOADS.map((d) => d.platform).sort()).toEqual(['linux', 'windows']);
+    // Two builds per platform now: bundled and web.
+    expect(DOWNLOADS.map((d) => d.platform).sort()).toEqual([
+      'linux',
+      'linux',
+      'windows',
+      'windows',
+    ]);
+    for (const platform of ['windows', 'linux'] as const) {
+      const variants = DOWNLOADS.filter((d) => d.platform === platform).map((d) => d.variant);
+      expect(variants.sort()).toEqual(['bundled', 'web']);
+    }
+    // Every file name is distinct, or two entries would publish over each other on the server.
+    expect(new Set(DOWNLOADS.map((d) => d.file)).size).toBe(DOWNLOADS.length);
     for (const item of DOWNLOADS) {
       // The URL must end in the same file name the box saves as, or the `download` attribute names
       // one installer while the release serves another.

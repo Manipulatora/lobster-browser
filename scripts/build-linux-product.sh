@@ -48,6 +48,12 @@ export DISPLAY="${DISPLAY:-:0}"
 [[ -z "${LOBSTER_ANGLE_BACKEND}" ]] && unset LOBSTER_ANGLE_BACKEND || true
 
 DIST="$ROOT/dist-linux"
+# Version and archive name, read from the sources of truth rather than repeated here: the app
+# version from tauri.conf.json, the engine version from the manifest the app itself obeys. Hardcoding
+# either is how a release ends up serving one version under another version's name.
+APP_VERSION=$(node -p "require('$ROOT/apps/desktop/src-tauri/tauri.conf.json').version")
+ENGINE_VERSION=$(node -p "require('$ROOT/apps/desktop/src-tauri/resources/engine-manifest.json').platforms['linux-x64'].version")
+ENGINE_ARCHIVE="lobium-linux-x64-${ENGINE_VERSION}.tar.gz"
 INSTALL_ROOT="${HOME_DIR}/.local/share/lobster"
 BIN_LINK="${HOME_DIR}/.local/bin/lobster-browser"
 
@@ -107,20 +113,18 @@ rm -rf "$ROOT/apps/desktop/src-tauri/resources/fonts"
 # Keep dynamic linker happy for a copied system node (usually fine on same distro).
 "$NODE_DST/bin/node" -e "console.log('vendored node ok', process.version)"
 
-# THE ENGINE DOES NOT RIDE IN THE PACKAGE. It is ~300 MB compressed against a ~37 MB app, and
-# embedding it made the .deb 330 MB for a product whose competitors ship under 50 MB. It is
-# downloaded on first run instead (provision_engine -> EngineGate), from the URL and SHA-256 pinned
-# in resources/engine-manifest.json, into a per-user runtime directory.
+# TWO BUILDS FROM ONE TREE. The engine is staged into the resource tree, and the BUNDLED variant
+# declares it via tauri.bundled.conf.json while the WEB variant does not. Same binary, same sidecar,
+# same manifest - the only difference is whether ~260 MB of engine rides along.
 #
-# What IS still verified here is the runtime this host just packaged, because that is the artifact
-# uploaded for clients to download - a broken one must fail on the build host, not on a user's first
-# launch after a 300 MB transfer.
-#
-# Any engine a previous embedded build left in the resource tree is removed, or tauri would keep
-# bundling a stale 800 MB runtime that nothing declares any more.
-rm -rf "$ROOT/apps/desktop/src-tauri/resources/lobium"
+# The web installer stays because bundling is not strictly better: the total bytes are identical, it
+# only moves WHEN they are fetched. Bundled wins when the engine fetch would be slow (one origin, no
+# CDN, a bad route makes it minutes); web wins on a metered connection, or on a machine that already
+# has the engine, or for anyone who would rather not pull 300 MB through a browser.
+LOBIUM_DST="$ROOT/apps/desktop/src-tauri/resources/lobium"
+rm -rf "$LOBIUM_DST"
 if [[ ! -x "$DIST/lobium-runtime/chrome" ]]; then
-  echo "error: no packaged Lobium runtime at $DIST/lobium-runtime/chrome to publish" >&2
+  echo "error: no packaged Lobium runtime at $DIST/lobium-runtime/chrome" >&2
   exit 1
 fi
 "$DIST/lobium-runtime/chrome" --version >/dev/null 2>&1 || {
@@ -133,7 +137,36 @@ if file "$DIST/lobium-runtime/chrome" | grep -q "not stripped"; then
   echo "error: the packaged runtime is not stripped; it would ship ~237 MB of symbol table" >&2
   exit 1
 fi
-echo "    engine (downloaded on first run)  $(du -sh "$DIST/lobium-runtime" | cut -f1)"
+cp -a "$DIST/lobium-runtime" "$LOBIUM_DST"
+
+# The engine archive, and the stamp that lets a BUNDLED install recognise itself in the manifest.
+# Without this the background updater re-downloads the engine on every launch of a fresh install:
+# the managed runtime dir is empty, so nothing matches, even though the bundled copy is byte-for-byte
+# what the manifest names. Same stamp format provisioning writes, so both are compared identically.
+# REPRODUCIBLE. Plain `tar -czf` embeds mtimes, uid/gid and a gzip timestamp, so re-archiving
+# byte-identical content yields a DIFFERENT digest every time. That is not cosmetic here: the
+# bundled installer carries a stamp naming this archive's digest, and the manifest names it too, so
+# a churned digest makes a bundled install believe it has the wrong engine and re-download it on
+# every launch. Sorted entries, pinned mtime, numeric root owner, and gzip -n (no timestamp).
+tar --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner \
+    -C "$DIST/lobium-runtime" -cf - . | gzip -n -6 > "$DIST/$ENGINE_ARCHIVE"
+ENGINE_SHA=$(sha256sum "$DIST/$ENGINE_ARCHIVE" | cut -d" " -f1)
+printf 'version=%s\nsha256=%s\n' "$ENGINE_VERSION" "$ENGINE_SHA" > "$LOBIUM_DST/.lobium-engine-version"
+
+# ONE DIGEST, WRITTEN ONCE. The archive digest lives in two places that must agree - the stamp beside
+# the bundled engine, and the linux-x64 entry of the manifest both variants ship. Keeping them in
+# sync by hand failed the first time it was tried: the archive was rebuilt, its digest changed, the
+# manifest still named the old one, and a bundled install would have re-downloaded the engine on
+# every launch. The build now writes both from the same variable, so they cannot diverge.
+node -e '
+  const fs = require("fs");
+  const p = process.argv[1], sha = process.argv[2];
+  const m = JSON.parse(fs.readFileSync(p, "utf8"));
+  m.platforms["linux-x64"].sha256 = sha;
+  fs.writeFileSync(p, JSON.stringify(m, null, 2) + "\n");
+' "$ROOT/apps/desktop/src-tauri/resources/engine-manifest.json" "$ENGINE_SHA"
+echo "    manifest linux-x64 sha256 <- ${ENGINE_SHA:0:16}…"
+echo "    engine archive  $ENGINE_ARCHIVE  sha256 ${ENGINE_SHA:0:16}…"
 
 # Lobee: the first-party in-browser agent side-panel extension (React/TS/Tailwind, MV3), auto-loaded
 # into every profile. Rebuild it from source (packages/lobee-app → packages/lobee) so the shipped
@@ -148,7 +181,18 @@ echo "==> [4/6] Build .deb"
 # The bundle target comes from `--bundles deb` on the command line below.
 
 cd "$ROOT/apps/desktop"
-npm run tauri -- build --bundles deb 2>&1 | tee "$DIST/tauri-build.log"
+# WEB first, then BUNDLED. Order matters only for the log; both read the same staged tree, and the
+# overlay config is the single thing that decides whether resources/lobium is packaged.
+echo "==> [4a/6] Build .deb — web installer (engine fetched on first run)"
+npm run tauri -- build --bundles deb 2>&1 | tee "$DIST/tauri-build-web.log"
+WEB_DEB=$(find src-tauri/target/release/bundle/deb -name "*_amd64.deb" -newer src-tauri/tauri.conf.json | head -1)
+cp -a "$WEB_DEB" "$DIST/lobster-browser_${APP_VERSION}_amd64-web.deb"
+
+echo "==> [4b/6] Build .deb — bundled installer (engine inside)"
+npm run tauri -- build --bundles deb --config src-tauri/tauri.bundled.conf.json 2>&1 | tee "$DIST/tauri-build-bundled.log"
+BUNDLED_DEB=$(find src-tauri/target/release/bundle/deb -name "*_amd64.deb" -newer "$DIST/lobster-browser_${APP_VERSION}_amd64-web.deb" | head -1)
+cp -a "$BUNDLED_DEB" "$DIST/lobster-browser_${APP_VERSION}_amd64.deb"
+cp -a "$DIST/tauri-build-bundled.log" "$DIST/tauri-build.log"
 cd "$ROOT"
 
 # Locate cargo target (may be under CARGO_TARGET_DIR)

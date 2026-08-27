@@ -41,26 +41,44 @@ export const ENGINE_VERSION = '152.0.7977.42';
  */
 export const DOWNLOAD_BASE = 'https://lobrowser.com/download';
 
-// The exact name the Windows packager emits, so publishing is a copy and never a rename. It used to
-// read `Lobster-Browser-Setup-${RELEASE_VERSION}-x64.exe`, which matched nothing any build produced
-// - every release would have needed a manual rename on the server, and forgetting it serves a 404
-// from a well-formed URL, which is the failure `published` exists to prevent.
-const WINDOWS_INSTALLER = `Lobster-Browser-${RELEASE_VERSION}-x64-setup.exe`;
-const LINUX_INSTALLER = `lobster-browser_${RELEASE_VERSION}_amd64.deb`;
+// The exact names the packagers emit, so publishing is a copy and never a rename. One of these used
+// to read `Lobster-Browser-Setup-${RELEASE_VERSION}-x64.exe`, which matched nothing any build
+// produced - every release needed a manual rename on the server, and forgetting it serves a 404 from
+// a well-formed URL, which is the failure `published` exists to prevent.
+const WINDOWS_BUNDLED = `Lobster-Browser-${RELEASE_VERSION}-x64-setup.exe`;
+const WINDOWS_WEB = `Lobster-Browser-${RELEASE_VERSION}-x64-web-setup.exe`;
+const LINUX_BUNDLED = `lobster-browser_${RELEASE_VERSION}_amd64.deb`;
+const LINUX_WEB = `lobster-browser_${RELEASE_VERSION}_amd64-web.deb`;
 
 export type PlatformId = 'windows' | 'linux';
+
+/**
+ * Which of the two builds this is.
+ *
+ * They differ in ONE thing: whether the ~260 MB browser engine rides inside the installer. The total
+ * bytes are the same either way, so this is not a size choice but a WHEN choice - download it all up
+ * front, or download a small installer and let the app fetch the engine on first run.
+ *
+ * `bundled` is offered first because the engine fetch is the slower half for most people: it comes
+ * from one origin with no CDN in front of it, and a bad route makes it minutes. `web` stays for the
+ * cases bundling is wrong for - a metered connection, a machine that already has the engine, or
+ * anyone who would rather not pull 300 MB through a browser.
+ */
+export type DownloadVariant = 'bundled' | 'web';
 
 export interface DownloadArtifact {
   readonly platform: PlatformId;
   /** Shown under the icon, e.g. "Windows". */
   readonly name: string;
+  readonly variant: DownloadVariant;
+  /** The one-word difference, shown on the button so the choice needs no paragraph. */
+  readonly label: string;
   /** Installer file name, also the last path segment of `url`. */
   readonly file: string;
   readonly url: string;
   /**
-   * Human size, e.g. "29.3 MB". Release bookkeeping, not page copy: the page shows an icon, a name
-   * and a button and nothing else, but a published row with no size means the entry was flipped on
-   * before the asset was real, which the spec fails on.
+   * Human size, e.g. "29.3 MB". Release bookkeeping AND page copy here: with two buttons per
+   * platform the size IS the explanation of the difference, which is why neither needs a sentence.
    */
   readonly size: string;
   /**
@@ -74,20 +92,59 @@ export const DOWNLOADS: readonly DownloadArtifact[] = [
   {
     platform: 'windows',
     name: 'Windows',
-    file: WINDOWS_INSTALLER,
-    url: `${DOWNLOAD_BASE}/${WINDOWS_INSTALLER}`,
+    variant: 'bundled',
+    label: 'Download',
+    file: WINDOWS_BUNDLED,
+    url: `${DOWNLOAD_BASE}/${WINDOWS_BUNDLED}`,
+    size: '',
+    published: false,
+  },
+  {
+    platform: 'windows',
+    name: 'Windows',
+    variant: 'web',
+    label: 'Web installer',
+    file: WINDOWS_WEB,
+    url: `${DOWNLOAD_BASE}/${WINDOWS_WEB}`,
     size: '29.3 MB',
     published: true,
   },
   {
     platform: 'linux',
     name: 'Linux',
-    file: LINUX_INSTALLER,
-    url: `${DOWNLOAD_BASE}/${LINUX_INSTALLER}`,
-    size: '53.4 MB',
+    variant: 'bundled',
+    label: 'Download',
+    file: LINUX_BUNDLED,
+    url: `${DOWNLOAD_BASE}/${LINUX_BUNDLED}`,
+    size: '330 MB',
+    published: true,
+  },
+  {
+    platform: 'linux',
+    name: 'Linux',
+    variant: 'web',
+    label: 'Web installer',
+    file: LINUX_WEB,
+    url: `${DOWNLOAD_BASE}/${LINUX_WEB}`,
+    size: '56 MB',
     published: true,
   },
 ];
+
+/** The two builds for one platform, bundled first. */
+export function variantsFor(
+  platform: PlatformId,
+  items: readonly DownloadArtifact[] = DOWNLOADS,
+): readonly DownloadArtifact[] {
+  return items.filter((item) => item.platform === platform);
+}
+
+/** Each platform once, in the order its boxes should appear. */
+export function platformsOf(
+  items: readonly DownloadArtifact[] = DOWNLOADS,
+): readonly PlatformId[] {
+  return [...new Set(items.map((item) => item.platform))];
+}
 
 /**
  * Best guess at the visitor's platform, used only to sort their box first.

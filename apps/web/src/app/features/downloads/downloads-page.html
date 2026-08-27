@@ -11,11 +11,11 @@
     </section>
 
     <div class="mt-10 grid gap-4 sm:grid-cols-2">
-      @for (item of artifacts(); track item.platform) {
+      @for (platform of platforms(); track platform) {
         <article class="card flex flex-col items-center gap-5 p-8 text-center">
           <!-- Drawn inline in currentColor rather than fetched: one box always renders unpublished,
                and an icon that arrives late or not at all makes that box look broken. -->
-          @switch (item.platform) {
+          @switch (platform) {
             @case ('windows') {
               <svg class="size-12 text-ink-soft" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M2.6 5.3 10.6 4.2v7.3H2.6z" />
@@ -64,20 +64,34 @@
             }
           }
 
-          <h2 class="text-lg text-ink">{{ item.name }}</h2>
+          <h2 class="text-lg text-ink">{{ platformName(platform) }}</h2>
 
-          @if (item.published) {
-            <a
-              [href]="item.url"
-              [attr.download]="item.file"
-              class="btn btn-md btn-primary"
-              rel="noopener"
-            >
-              Download
-            </a>
-          } @else {
-            <button type="button" class="btn btn-md btn-secondary" disabled>Coming soon</button>
-          }
+          <!-- Two builds, and the SIZE is the explanation. The only difference is whether the
+               browser engine rides inside the installer, so a sentence about it would say less than
+               the two numbers already do. -->
+          <div class="flex w-full flex-col gap-2">
+            @for (item of variants(platform); track item.file) {
+              @if (item.published) {
+                <a
+                  [href]="item.url"
+                  [attr.download]="item.file"
+                  [class]="
+                    item.variant === 'bundled'
+                      ? 'btn btn-md btn-primary w-full'
+                      : 'btn btn-md btn-secondary w-full'
+                  "
+                  rel="noopener"
+                >
+                  {{ item.label }}
+                  <span class="ml-1.5 opacity-60">{{ item.size }}</span>
+                </a>
+              } @else {
+                <button type="button" class="btn btn-md btn-secondary w-full" disabled>
+                  {{ item.label }} · coming soon
+                </button>
+              }
+            }
+          </div>
         </article>
       }
     </div>

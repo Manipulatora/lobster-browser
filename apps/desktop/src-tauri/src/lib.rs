@@ -509,6 +509,19 @@ fn user_engine_runtime_dir() -> Option<PathBuf> {
 /// The refreshed copy lives in the app data dir, not beside the binary: the install directory is
 /// read-only on a normal Windows install, and writing into it would also mean an update could not
 /// be undone by clearing user data.
+/// True when the engine SHIPPED IN THE INSTALLER is already the one the manifest names.
+///
+/// Without this the background updater would re-download the engine on every launch of a freshly
+/// installed client: the managed runtime directory is empty, so `engine_matches_source` is false,
+/// even though the bundled copy is byte-for-byte what the manifest points at. The packager writes
+/// the same stamp beside the bundled engine that provisioning writes beside a downloaded one, so the
+/// two are compared the same way.
+fn bundled_engine_satisfies(app: &tauri::AppHandle, source: &engine_provision::EngineSource) -> bool {
+    app_resource_dir(app)
+        .map(|resources| resources.join("lobium"))
+        .is_some_and(|bundled| engine_provision::engine_matches_source(&bundled, source))
+}
+
 fn engine_manifest_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     let cached = app
         .path()
@@ -1352,13 +1365,22 @@ fn ensure_lobium_env(app: &tauri::AppHandle) {
             resource_candidates.push(resources.join("lobium").join(CHROME_BIN));
             resource_candidates.push(resources.join("engines").join("lobium").join(CHROME_BIN));
         }
-        if let Some(chrome) = resource_candidates.into_iter().find(|path| path.is_file()) {
-            publish_lobium_env(&chrome, LobiumBinOrigin::NonManaged);
-        } else if let Some(chrome) = user_runtime
+        // ORDER MATTERS, AND IT IS NOT THE OBVIOUS ONE. The bundled engine used to be taken
+        // unconditionally, which is what made "engine bundled in the installer" mean "engine can
+        // never be updated": a newer runtime provisioned from the manifest sat on disk unused, and
+        // the only way to move an engine was to rebuild and redistribute the installer.
+        //
+        // A managed runtime is preferred ONLY when it satisfies the current manifest. That is the
+        // whole condition: it exists, and it is the engine the manifest currently names. Otherwise
+        // the bundled copy wins, so a fresh install runs immediately with no download, and a machine
+        // that has never updated behaves exactly as if this branch did not exist.
+        let managed = user_runtime
             .as_ref()
-            .and_then(|runtime| current_managed_lobium_bin(runtime, managed_source.as_ref()))
-        {
+            .and_then(|runtime| current_managed_lobium_bin(runtime, managed_source.as_ref()));
+        if let Some(chrome) = managed {
             publish_lobium_env(&chrome, LobiumBinOrigin::Managed);
+        } else if let Some(chrome) = resource_candidates.into_iter().find(|path| path.is_file()) {
+            publish_lobium_env(&chrome, LobiumBinOrigin::NonManaged);
         }
     }
 
@@ -1847,6 +1869,43 @@ pub fn run() {
                 let _ = handle;
             }
             ensure_lobium_env(app.handle());
+
+            // BACKGROUND ENGINE UPDATE. The installer carries an engine, so first run needs no
+            // download and the gate passes straight through. That is the whole point of bundling -
+            // and it is also how bundling previously made engines unupdatable, because nothing ever
+            // looked again.
+            //
+            // So: if the refreshed manifest names an engine that is not the one in use, fetch it
+            // here, in the background, after the window is already up. ensure_lobium_env prefers a
+            // managed runtime that satisfies the manifest, so the new engine takes effect on the
+            // NEXT launch. Deliberately not applied mid-session: swapping the engine under running
+            // profiles would kill live browsers.
+            //
+            // Silent by design. The user asked for a browser, not a maintenance report; a failure
+            // here costs nothing because the bundled engine still runs.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let manifest = engine_manifest_path(&handle);
+                    let Ok(source) = engine_provision::resolve_source(manifest.as_deref()) else {
+                        return;
+                    };
+                    let Some(runtime_dir) = user_engine_runtime_dir() else {
+                        return;
+                    };
+                    if engine_provision::engine_matches_source(&runtime_dir, &source) {
+                        return; // already have exactly this engine
+                    }
+                    if bundled_engine_satisfies(&handle, &source) {
+                        return; // the shipped engine IS the one the manifest names
+                    }
+                    tracing::info!(version = %source.version, "a newer engine is published; fetching it for the next launch");
+                    match engine_provision::provision(&source, &runtime_dir, |_, _| {}).await {
+                        Ok(()) => tracing::info!("engine update staged; it takes effect on the next launch"),
+                        Err(error) => tracing::warn!(%error, "engine update failed; the bundled engine still applies"),
+                    }
+                });
+            }
             let sidecar_js = resolve_sidecar_js(app.handle());
             let node_bin = resolve_node_bin(app.handle());
             tracing::info!(%node_bin, %sidecar_js, "spawning engine-runner sidecar");
