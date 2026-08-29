@@ -96,8 +96,8 @@ export const DOWNLOADS: readonly DownloadArtifact[] = [
     label: 'Download',
     file: WINDOWS_BUNDLED,
     url: `${DOWNLOAD_BASE}/${WINDOWS_BUNDLED}`,
-    size: '',
-    published: false,
+    size: '242 MB',
+    published: true,
   },
   {
     platform: 'windows',
