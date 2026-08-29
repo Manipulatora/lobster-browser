@@ -42,6 +42,27 @@ repository up on a new machine. It records what is true today, not what is plann
 >   and then dropped it at link time, and an Android profile opened with no phone stage. The guards
 >   now cover Windows. See `docs/qa/2026-08-26-windows-understanding.md`.
 >
+> **`networkTls` and `networkHttp2` are no longer unmeasured (2026-08-29, Windows host).** Both were
+> listed above as impossible to measure for want of a stock Chrome 152 to compare against; one is now
+> installed beside the fork, so the comparison was made — twice.
+>
+> * **Against stock Chrome 152 on the same host**, direct: `ja3n`, `ja4`, `ja4_r` and the Akamai
+>   HTTP/2 hash all MATCH. Raw `ja3` differs between runs of the *same* binary — including between
+>   two stock Chrome runs — which is GREASE (RFC 8701) randomising a cipher, an extension and a
+>   supported group per connection. Raw JA3 is therefore not a stable discriminator for anyone, and
+>   the normalised forms are what a real detector uses.
+> * **Through the local proxy shim** (`ci/validation/tls-through-proxy.mjs`), which is the path
+>   essentially every paying profile takes because Chromium cannot carry proxy credentials itself:
+>   `ja3n_hash a3a3161a080b73bda9cc285fb367fcc0`, `ja4 t13d1518h2_8daaf6152771_4980c97edce0`,
+>   `akamai_hash 52d84b11737d980aef856699f885ca86` — **identical to direct**, full `ja4_r` cipher and
+>   extension list included. The shim tunnels `CONNECT` and never terminates TLS, and that is now
+>   measured rather than assumed.
+>
+> Consequence for the patch series: `net/tls-ja3-ja4.patch` and `net/http2-settings-order.patch` are
+> listed as NOT YET AUTHORED, and on this evidence they are **unnecessary** — the fork inherits
+> Chrome's BoringSSL handshake unmodified, which is exactly the goal. Writing them could only make
+> the fingerprint *less* like Chrome's.
+>
 > The audit itself (2026-08-14) returned **79 findings — 10 critical, 19 high**. Most remain open.
 > This is a solid native foundation with real, documented gaps, not a finished anti-detect product.
 
@@ -147,12 +168,28 @@ does not claim; it cannot add fonts the persona claims that the host lacks, and 
 *missing* fonts is its own tell. The engine sideloads the profile's font pack into its DirectWrite
 collection from `fontPackDir`. The pack rides with the **engine archive**, not the installer, so an
 installer can never be out of step with the engine over it. Without a pack the measurable set is
-host ∩ persona: narrower than claimed, never wider than the host — degraded, not leaking, which is why
-this path fails open where the Linux one fails closed.
+host ∩ persona: narrower than claimed, never wider than the host — so the *privacy* property holds
+even with no pack.
 
-> **Correction, 2026-08-26, measured on the Windows host: the "fails open" half of that last sentence
-> is not what the engine does.** The *privacy* claim is right — the set is never wider than the host —
-> but the *availability* claim is wrong. Launched with a persona whose claimed families are absent
+**The availability property does not hold in the case that was measured.** This path does not fail
+open there. What was actually measured, once, on this host: an **Android** persona whose claimed
+families (Roboto / Noto Sans / Droid Sans / Google Sans) are **all absent from a stock Windows host**,
+launched with **no pack**, does not produce a page target at all — see the block below.
+
+The scope of that result is exactly as narrow as the measurement. A persona whose claimed families
+are largely PRESENT on the host — a Windows persona claiming Arial and Segoe UI on Windows — was not
+tested, and would be expected to build a fallback and launch. The failure is about a restricted
+fallback chain that ends up empty, not about the absence of a pack per se. Treat "no pack" as
+*measured to be fatal when the persona's families are foreign to the host, and unmeasured otherwise*.
+
+Either way it is a launch blocker rather than a degradation in the case that matters most (mobile
+personas on desktop hosts), which is why `buildLobiumLaunchArgs` stages and verifies a pack before
+writing the config.
+
+> **Measured 2026-08-26 on the Windows host.** This paragraph previously claimed the no-pack path
+> "fails open where the Linux one fails closed". The privacy half was right; the availability half was
+> wrong, and the body text above now states the measured behaviour rather than leaving the original
+> claim standing with a rebuttal underneath. Launched with a persona whose claimed families are absent
 > from the host and no pack (an Android persona claiming Roboto / Noto Sans / Droid Sans / Google
 > Sans on a stock Windows host), the engine logs
 > `lobium_fonts.cc:535 Lobium: restricted Windows character fallback could not be built` and then

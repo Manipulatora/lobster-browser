@@ -6,7 +6,6 @@ import {
   Post,
   Req,
   UnauthorizedException,
-  UseGuards,
 } from '@nestjs/common';
 import type { User } from '@lobster/shared-types';
 
@@ -16,7 +15,8 @@ import { DesktopAuthService } from './desktop-auth.service';
 import { DesktopExchangeDto, DesktopGrantDto } from './dto/desktop-auth.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto, ResendVerificationDto, VerifyEmailDto } from './dto/register.dto';
-import { JwtAuthGuard, type AuthenticatedRequest } from './jwt-auth.guard';
+import { type AuthenticatedRequest } from './jwt-auth.guard';
+import { Public } from './public.decorator';
 
 /**
  * Auth endpoints. Bodies are validated by the global ValidationPipe (whitelist).
@@ -37,11 +37,13 @@ export class AuthController {
    * emailed code is submitted to `verify-email`. A client must not treat this response as a
    * sign-in; the return type makes that a compile error rather than a subtle bug.
    */
+  @Public()
   @Post('register')
   async register(@Body() dto: RegisterDto): Promise<ApiResponse<PendingRegistrationResult>> {
     return ok(await this.authService.register(dto));
   }
 
+  @Public()
   @Post('login')
   @HttpCode(200)
   async login(@Body() dto: LoginDto): Promise<ApiResponse<AuthResult>> {
@@ -50,7 +52,6 @@ export class AuthController {
 
   /** Current user (password hash already stripped by AuthService). Requires a valid token. */
   @Get('me')
-  @UseGuards(JwtAuthGuard)
   me(@Req() req: AuthenticatedRequest): ApiResponse<User> {
     if (!req.user) {
       // Unreachable in practice: the guard rejects unauthenticated requests before this runs.
@@ -68,7 +69,6 @@ export class AuthController {
    */
   @Post('desktop/grant')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard)
   async desktopGrant(
     @Req() req: AuthenticatedRequest,
     @Body() dto: DesktopGrantDto,
@@ -92,6 +92,7 @@ export class AuthController {
    * stands in for authentication is the code itself, plus the PKCE verifier proving the caller is
    * the same client that started the flow. See DesktopAuthService for the full threat model.
    */
+  @Public()
   @Post('desktop/exchange')
   @HttpCode(200)
   async desktopExchange(@Body() dto: DesktopExchangeDto): Promise<ApiResponse<AuthResult>> {
@@ -113,6 +114,7 @@ export class AuthController {
    * bounds guessing is the attempt counter on the pending row, not a guard here; see
    * `completePendingRegistration`.
    */
+  @Public()
   @Post('verify-email')
   @HttpCode(200)
   async verifyEmail(@Body() dto: VerifyEmailDto): Promise<ApiResponse<AuthResult>> {
@@ -128,6 +130,7 @@ export class AuthController {
    * Always 200, whether or not a pending sign-up exists for that address: reporting the truth would
    * turn this into an oracle for which addresses are mid-registration.
    */
+  @Public()
   @Post('resend-verification')
   @HttpCode(200)
   async resendVerification(
@@ -148,7 +151,6 @@ export class AuthController {
    */
   @Post('verify-email/session')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard)
   async verifyExistingEmail(
     @Req() req: AuthenticatedRequest,
     @Body('code') code: string,
@@ -160,7 +162,6 @@ export class AuthController {
   /** Re-send a code to the signed-in user's own address. */
   @Post('resend-verification/session')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard)
   async resendExistingVerification(
     @Req() req: AuthenticatedRequest,
   ): Promise<ApiResponse<{ sent: true }>> {

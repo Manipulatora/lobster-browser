@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Inject, Injectable } from '@ne
 import type { AuditLog } from '@lobster/shared-types';
 
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
+import { resolveTeamId } from '../teams/resolve-team-id';
 import { AUDIT_REPOSITORY, type AuditCursor, type AuditRepository } from './audit.repository';
 
 /**
@@ -87,7 +88,7 @@ export class AuditService {
    * timestamp cursor — only entries strictly older than it are returned.
    */
   async list(userId: string, opts: ListAuditInput): Promise<AuditLog[]> {
-    const teamId = await this.resolveTeamId(userId, opts.teamId);
+    const teamId = await resolveTeamId(this.teams, userId, opts.teamId);
     const limit = this.clampLimit(opts.limit);
     const before = this.decodeCursor(opts.before);
     return this.audit.listByTeam(teamId, before ? { limit, before } : { limit });
@@ -118,26 +119,5 @@ export class AuditService {
       throw new BadRequestException('invalid audit cursor');
     }
     return { createdAt, id };
-  }
-
-  /**
-   * Resolve the team to read. When `teamId` is given the caller must belong to it; otherwise fall
-   * back to the caller's first team. Throws `ForbiddenException` when the caller has no matching
-   * team (defence in depth — every user gets a personal team at register time).
-   */
-  private async resolveTeamId(userId: string, teamId?: string): Promise<string> {
-    if (teamId) {
-      const membership = await this.teams.getMembership(teamId, userId);
-      if (!membership) {
-        throw new ForbiddenException('you are not a member of the requested team');
-      }
-      return teamId;
-    }
-    const teams = await this.teams.findTeamsForUser(userId);
-    const first = teams[0];
-    if (!first) {
-      throw new ForbiddenException('you do not belong to any team');
-    }
-    return first.id;
   }
 }

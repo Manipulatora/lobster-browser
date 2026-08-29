@@ -7,13 +7,12 @@ import {
   Patch,
   Post,
   Query,
-  UseGuards,
 } from '@nestjs/common';
 import type { Profile, ProfileExportBundle, User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
 import { CurrentUser } from '../auth/current-user.decorator';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+
 import { BulkCreateProfilesDto } from './dto/bulk-create-profiles.dto';
 import { CreateProfileDto } from './dto/create-profile.dto';
 import { ImportProfilesDto } from './dto/import-profiles.dto';
@@ -27,7 +26,6 @@ import { ProfilesService, type SyncResult } from './profiles.service';
  * never a stub. All responses use the shared `{ code, data, msg }` envelope.
  */
 @Controller('profiles')
-@UseGuards(JwtAuthGuard)
 export class ProfilesController {
   constructor(private readonly profilesService: ProfilesService) {}
 

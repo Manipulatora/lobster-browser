@@ -1,10 +1,10 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
 import { IsEmail, IsIn, IsString, MaxLength } from 'class-validator';
 import type { Membership, Role, Team, User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
 import { CurrentUser } from '../auth/current-user.decorator';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+
 import { TeamsService } from './teams.service';
 
 // --- Inline DTOs (kept next to the controller since they are small) ---
@@ -34,7 +34,6 @@ class SetRoleDto {
  * responses use the shared `{ code, data, msg }` envelope.
  */
 @Controller('teams')
-@UseGuards(JwtAuthGuard)
 export class TeamsController {
   constructor(private readonly teamsService: TeamsService) {}
 

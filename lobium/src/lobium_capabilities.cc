@@ -57,9 +57,18 @@ constexpr std::string_view kPortableCapabilities[] = {
     //
     // Where those surfaces actually come from:
     //   * navigator.maxTouchPoints -> navigator-ua-ch, which reports it with the rest of navigator.
-    //   * (pointer: coarse) / (hover: none) -> NOT from the binary at all. They come from the CDP
-    //     Emulation.setDeviceMetricsOverride{mobile:true} that the Android path installs
+    //   * (pointer: coarse) / (hover: none) -> historically NOT from the binary at all: they came
+    //     from the CDP Emulation.setDeviceMetricsOverride{mobile:true} the Android path installs
     //     (packages/engine-runner/src/mobile-emulation.ts).
+    //
+    //     CHANGING, 2026-08-29. fingerprint/media-values-pointer-hover.patch now answers all four of
+    //     (pointer:)/(hover:)/(any-pointer:)/(any-hover:) natively in MediaValues, keyed on a
+    //     touch-primary persona (ua_mobile OR ua_form_factor == "Tablet"). It is in the series and
+    //     compiles, but NO ENGINE HAS BEEN REBUILT WITH IT YET, so every shipped binary still
+    //     behaves as described above and the CDP layer is still what delivers these at runtime.
+    //     Do not drop the CDP layer on the strength of this note: re-measure first, on a binary
+    //     built from a revision that contains the patch. The measurement below still describes
+    //     every engine in existence today.
     //
     // Measured on the Windows host: an Android persona launched with only --lobium-fp-config - the
     // desktop path, no CDP emulation - reports uaMobile true, maxTouchPoints 5 and a 393x873 screen

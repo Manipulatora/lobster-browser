@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
 
 import { PrismaService } from '../prisma/prisma.service';
@@ -35,6 +36,11 @@ import { USERS_REPOSITORY } from './users.repository';
   ],
   controllers: [AuthController],
   providers: [
+    // Authenticate-by-default: every route in the application requires a Bearer JWT unless it is
+    // explicitly annotated `@Public()` (see public.decorator.ts for what qualifies). Registered
+    // here rather than in AppModule because this module owns the guard's dependencies — and every
+    // e2e module graph already imports AuthModule, so the tests exercise the same default.
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
     EmailVerifiedGuard,
     AuthService,
     DesktopAuthService,

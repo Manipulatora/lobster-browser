@@ -1,9 +1,9 @@
-import { Body, Controller, Delete, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
 import type { ApiKey, User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
 import { CurrentUser } from '../auth/current-user.decorator';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+
 import { ApiKeysService, type CreatedApiKey } from './api-keys.service';
 import { CreateApiKeyDto } from './dto/create-api-key.dto';
 
@@ -16,7 +16,6 @@ import { CreateApiKeyDto } from './dto/create-api-key.dto';
  * public {@link ApiKey} shape (prefix/name/teamId/createdAt/lastUsedAt) — never the secret or hash.
  */
 @Controller('api-keys')
-@UseGuards(JwtAuthGuard)
 export class ApiKeysController {
   constructor(private readonly apiKeysService: ApiKeysService) {}
 

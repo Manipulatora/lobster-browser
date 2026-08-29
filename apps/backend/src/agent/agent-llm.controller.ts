@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 
+import { Public } from '../auth/public.decorator';
 import type { AgentUsageRow } from '../billing/billing.repository';
 import { AgentAuthGuard, type AgentPrincipal, type AgentRequest } from './agent-auth.guard';
 import { AgentLlmService } from './agent-llm.service';
@@ -22,6 +23,9 @@ import { AgentRefusalFilter } from './agent-refusal';
  * change (the token is a short-lived agent token from `POST /agent/token`, never an OpenRouter key).
  * Every route is guarded, and the guard resolves WHICH TEAM is spending before anything runs.
  */
+// @Public exempts this controller from the global JwtAuthGuard, which deliberately refuses
+// agent-audience tokens; AgentAuthGuard below is the sole (and mandatory) authority here.
+@Public()
 @Controller('agent/llm')
 @UseGuards(AgentAuthGuard)
 @UseFilters(AgentRefusalFilter)

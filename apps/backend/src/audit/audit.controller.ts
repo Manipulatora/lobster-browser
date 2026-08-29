@@ -1,9 +1,9 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query } from '@nestjs/common';
 import type { AuditLog, User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
 import { CurrentUser } from '../auth/current-user.decorator';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+
 import { AuditService } from './audit.service';
 
 /**
@@ -14,7 +14,6 @@ import { AuditService } from './audit.service';
  * envelope.
  */
 @Controller('audit')
-@UseGuards(JwtAuthGuard)
 export class AuditController {
   constructor(private readonly auditService: AuditService) {}
 

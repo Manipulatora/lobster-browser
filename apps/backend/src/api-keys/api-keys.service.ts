@@ -5,6 +5,7 @@ import type { ApiKey } from '@lobster/shared-types';
 
 import { AuditService } from '../audit/audit.service';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
+import { resolveTeamId } from '../teams/resolve-team-id';
 import {
   API_KEYS_REPOSITORY,
   type ApiKeyRecord,
@@ -90,7 +91,7 @@ export class ApiKeysService {
 
   /** List the caller's team's keys — display fields only (never the secret or its hash). */
   async findAll(userId: string, teamId?: string): Promise<ApiKey[]> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
     const records = await this.apiKeys.findAllByTeam(ownerTeamId);
     return records.map((record) => this.toApiKey(record));
   }
@@ -150,27 +151,6 @@ export class ApiKeysService {
   }
 
   /**
-   * Resolve the team to operate on. When `teamId` is given the caller must belong to it;
-   * otherwise fall back to the caller's first team. Throws `ForbiddenException` when the caller
-   * has no matching team (defence in depth — every user gets a personal team at register time).
-   */
-  private async resolveTeamId(userId: string, teamId?: string): Promise<string> {
-    if (teamId) {
-      const membership = await this.teams.getMembership(teamId, userId);
-      if (!membership) {
-        throw new ForbiddenException('you are not a member of the requested team');
-      }
-      return teamId;
-    }
-    const teams = await this.teams.findTeamsForUser(userId);
-    const first = teams[0];
-    if (!first) {
-      throw new ForbiddenException('you do not belong to any team');
-    }
-    return first.id;
-  }
-
-  /**
    * Resolve the team for an operation that MINTS OR DESTROYS a live credential.
    *
    * A key authenticates as the whole team, outlives the session that made it and cannot be
@@ -179,7 +159,7 @@ export class ApiKeysService {
    * carry no secret, and a member has to be able to see which keys exist on their own team.
    */
   private async resolveAdminTeamId(userId: string, teamId?: string): Promise<string> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
     const membership = await this.teams.getMembership(ownerTeamId, userId);
     if (membership?.role !== 'admin') {
       throw new ForbiddenException('this action requires the admin role');

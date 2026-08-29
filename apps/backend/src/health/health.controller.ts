@@ -1,6 +1,7 @@
 import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { Public } from '../auth/public.decorator';
 import { ok, type ApiResponse } from '../common/api-response';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -11,6 +12,9 @@ import { PrismaService } from '../prisma/prisma.service';
  * - `GET /health/ready` — 503 in production (or when `HEALTH_REQUIRE_DB=1`) if Postgres
  *   is configured but unreachable; 200 otherwise (SEC-6 readiness).
  */
+// Public by design: load balancers and uptime checks have no session, and a health probe that
+// requires one measures the auth layer, not the service.
+@Public()
 @Controller('health')
 export class HealthController {
   constructor(

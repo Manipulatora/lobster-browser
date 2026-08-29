@@ -124,10 +124,18 @@ export class AgentBridge {
       return;
     }
     const url = new URL(req.url ?? '/', getBridgeOrigin() || 'http://127.0.0.1');
-    if (req.method === 'GET' && url.pathname === '/health') {
-      return json(res, 200, { ok: true });
-    }
 
+    // NO UNAUTHENTICATED ENDPOINT. This used to answer `GET /health` with `{ ok: true }` before the
+    // token gate below. Nothing ever called it — not the panel, not the service worker, not the
+    // automation SDK (which has its own `/api/v1/health` on the local API, where an unauthenticated
+    // liveness probe is a documented part of the contract).
+    //
+    // For an ANTI-DETECT product a nameable loopback endpoint that answers without credentials is
+    // the wrong shape: anything able to reach loopback — another extension with host permissions, a
+    // local process, a page on an http origin that the browser's private-network rules have not
+    // already stopped — can sweep ports and get a positive identification of the browser it is
+    // running in. That is a small surface, and the browser mitigates most of it, but it bought
+    // nothing at all, so it costs nothing to remove.
     const entry = this.auth(req);
     if (!entry) return json(res, 401, { ok: false, error: 'unauthorized' });
     const { profileId } = entry;

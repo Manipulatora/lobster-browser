@@ -48,6 +48,10 @@ const FINGERPRINT_PATCH_CAPABILITIES = new Map([
   // The colour half of the same surface: (color:), (dynamic-range:), (color-gamut:), all
   // derived from screen.colorDepth so they cannot be configured into disagreeing with it.
   ['fingerprint/media-values-color.patch', ['screen-metrics']],
+  // (pointer:)/(hover:)/(any-pointer:)/(any-hover:), keyed on navigator.ua_mobile. Mapped to
+  // `mobile-persona` rather than `screen-metrics`: it is gated on the persona being mobile, not
+  // on screen geometry, and it is the surface that capability name has always implied.
+  ['fingerprint/media-values-pointer-hover.patch', ['mobile-persona']],
   ['fingerprint/navigator-webdriver.patch', ['navigator-webdriver']],
   [
     'fingerprint/locale-geolocation.patch',

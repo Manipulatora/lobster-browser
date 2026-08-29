@@ -224,12 +224,94 @@ END_UNTRUSTED_WEB_CONTENT
 Call the "act" tool with your next single action.`;
 }
 
-function sanitizeUntrusted(value: string): string {
-  return value
-    .replace(
-      /BEGIN_UNTRUSTED_WEB_CONTENT|END_UNTRUSTED_WEB_CONTENT|BEGIN_UNTRUSTED_LOCAL_MEMORY|END_UNTRUSTED_LOCAL_MEMORY|BEGIN_RECENT_CONVERSATION|END_RECENT_CONVERSATION|BEGIN_HARNESS_HISTORY|END_HARNESS_HISTORY|BEGIN_UNTRUSTED_ACTION_RESULT|END_UNTRUSTED_ACTION_RESULT/g,
-      '[delimiter removed]',
+// Code points that render as nothing (or only as a direction change) but break a literal string
+// match: soft hyphen, the zero-width/bidi block, line/paragraph separators, word joiner, the
+// invisible operators, the deprecated bidi overrides, and BOM. A page that writes
+// BEGIN_UNTRUSTED<zero-width space>WEB_CONTENT reads to a human, and to the model, as the
+// delimiter; to `String.replace` it is not the delimiter. Stripping these BEFORE matching is what
+// makes the match mean anything.
+//
+// Written as code points rather than literal characters so the class stays reviewable in a diff --
+// a literal zero-width space here would be invisible to the next reader, which is the whole problem.
+const INVISIBLE_CODEPOINTS: (number | [number, number])[] = [
+  0x00ad,
+  [0x200b, 0x200f],
+  [0x2028, 0x202e],
+  // The WHOLE 2060..206F block, not 2060..2064 plus 206A..206F. The gap skipped U+2066..U+2069 —
+  // the bidi ISOLATES (LRI/RLI/FSI/PDI), which are the modern replacements for the deprecated
+  // overrides at U+202A..U+202E that were already covered. Leaving the replacements out while
+  // stripping the things they replaced is the wrong half of the block.
+  [0x2060, 0x206f],
+  0xfeff,
+];
+
+// C0 and C1 controls except tab, newline and carriage return. Subsumes the lone NUL strip that this
+// function used to end with.
+const CONTROL_CODEPOINTS: (number | [number, number])[] = [
+  [0x0000, 0x0008],
+  0x000b,
+  0x000c,
+  [0x000e, 0x001f],
+  [0x007f, 0x009f],
+];
+
+function charClass(ranges: (number | [number, number])[]): RegExp {
+  const body = ranges
+    .map((r) =>
+      Array.isArray(r)
+        ? `${String.fromCodePoint(r[0])}-${String.fromCodePoint(r[1])}`
+        : String.fromCodePoint(r),
     )
-    .replace(/<\|(?:system|assistant|user|endoftext)[^|]*\|>/gi, '[chat marker removed]')
-    .replace(/\u0000/g, '');
+    .join('');
+  return new RegExp(`[${body}]`, 'g');
+}
+
+const INVISIBLE_CHARS = charClass(INVISIBLE_CODEPOINTS);
+const CONTROL_CHARS = charClass(CONTROL_CODEPOINTS);
+
+// The fence names, minus their BEGIN_/END_ prefix. Kept as data so this cannot drift out of step
+// with the fences actually emitted by `renderStepPrompt` above.
+const FENCE_NAMES = [
+  'UNTRUSTED_WEB_CONTENT',
+  'UNTRUSTED_LOCAL_MEMORY',
+  'RECENT_CONVERSATION',
+  'HARNESS_HISTORY',
+  'UNTRUSTED_ACTION_RESULT',
+];
+
+// `[^A-Za-z0-9]*` between the words so `BEGIN-UNTRUSTED-WEB-CONTENT`, `BEGIN UNTRUSTED WEB CONTENT`
+// and
+// `begin__untrusted__web__content` are all caught, and the `i` flag so case alone is not a bypass.
+// It was: the alternation this replaces carried `g` but no `i`, while the chat-marker strip on the
+// very next line did carry `i`.
+//
+// This deliberately OVER-matches. A false positive costs one mangled phrase inside a page snapshot;
+// a false negative lets a page close the fence and be read as the harness. Not closed here:
+// homoglyph substitution (a Cyrillic capital IE standing in for an ASCII E) still survives, because
+// folding confusables is a far larger hammer and a homoglyph delimiter is correspondingly less
+// likely to be read as authoritative.
+const FENCE_DELIMITER = new RegExp(
+  `(?:BEGIN|END)[^A-Za-z0-9]*(?:${FENCE_NAMES.map((n) => n.split('_').join('[^A-Za-z0-9]*')).join('|')})`,
+  'gi',
+);
+
+function sanitizeUntrusted(value: string): string {
+  // ORDER IS THE WHOLE SECURITY PROPERTY. Every character that can be DELETED later must be deleted
+  // BEFORE the delimiter match, or deleting it reassembles the delimiter after the guard has run.
+  //
+  // Controls used to be stripped last, at the end of this chain (as the lone NUL strip did before
+  // it). That is a bypass, not a nicety: `END_UNTRUSTED_LOCAL_ME<NUL>MORY` does not match
+  // FENCE_DELIMITER — the `[^A-Za-z0-9]*` separators sit BETWEEN the words, not inside them — so it
+  // passes the guard untouched, and the final strip then removes the NUL and hands the model a
+  // byte-exact `END_UNTRUSTED_LOCAL_MEMORY`. Verified for NUL, 0x01, DEL and the C1 block, in the
+  // middle of a word and in the middle of `BEGIN`.
+  //
+  // So: delete everything deletable (invisibles AND controls), NFKC-fold so compatibility forms
+  // collapse to ASCII, and only THEN match. Nothing after the match may delete a character.
+  return value
+    .replace(INVISIBLE_CHARS, '')
+    .replace(CONTROL_CHARS, '')
+    .normalize('NFKC')
+    .replace(FENCE_DELIMITER, '[delimiter removed]')
+    .replace(/<\|(?:system|assistant|user|endoftext)[^|]*\|>/gi, '[chat marker removed]');
 }

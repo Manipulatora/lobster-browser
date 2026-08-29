@@ -22,7 +22,7 @@ import type {
 
 import { CurrentUser } from '../auth/current-user.decorator';
 import { EmailVerifiedGuard } from '../auth/email-verified.guard';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { Public } from '../auth/public.decorator';
 import { ok, type ApiResponse } from '../common/api-response';
 import { AdminTokenGuard } from './admin-token.guard';
 import { BillingService, type BillingOverview, type DepositInstruction } from './billing.service';
@@ -121,7 +121,6 @@ export class BillingController {
 
   /** Balance, current package, catalog and chain options — everything the billing page renders. */
   @Get('overview')
-  @UseGuards(JwtAuthGuard)
   async overview(
     @CurrentUser() user: { id: string },
     @Query('teamId') teamId?: string,
@@ -131,7 +130,6 @@ export class BillingController {
 
   /** Credit statement, newest first. */
   @Get('transactions')
-  @UseGuards(JwtAuthGuard)
   async transactions(
     @CurrentUser() user: { id: string },
     @Query('limit') limit?: string,
@@ -141,7 +139,6 @@ export class BillingController {
   }
 
   @Get('deposits')
-  @UseGuards(JwtAuthGuard)
   async deposits(
     @CurrentUser() user: { id: string },
     @Query('limit') limit?: string,
@@ -157,7 +154,7 @@ export class BillingController {
    * a deposit, because it is an account we could not send a receipt to or resolve a dispute with.
    */
   @Post('deposits')
-  @UseGuards(JwtAuthGuard, EmailVerifiedGuard)
+  @UseGuards(EmailVerifiedGuard)
   async createDeposit(
     @CurrentUser() user: { id: string },
     @Body() dto: CreateDepositDto,
@@ -175,7 +172,6 @@ export class BillingController {
    * answer the client is holding.
    */
   @Get('quote')
-  @UseGuards(JwtAuthGuard)
   async quote(
     @CurrentUser() user: { id: string },
     @Query() query: QuoteDto,
@@ -192,7 +188,6 @@ export class BillingController {
 
   /** Buy a package, paid from Credit. */
   @Post('purchase')
-  @UseGuards(JwtAuthGuard)
   async purchase(
     @CurrentUser() user: { id: string },
     @Body() dto: PurchaseDto,
@@ -203,7 +198,6 @@ export class BillingController {
   }
 
   @Post('auto-renew')
-  @UseGuards(JwtAuthGuard)
   async autoRenew(
     @CurrentUser() user: { id: string },
     @Body() dto: AutoRenewDto,
@@ -223,6 +217,9 @@ export class BillingController {
    * overlapping invocations cannot double-charge a subscription. The counts come back so the caller
    * has something to log and alert on.
    */
+  // @Public exempts this from the global JWT guard so AdminTokenGuard is the ONLY authority
+  // here; an operator's sweep call carries an admin token, not a user session.
+  @Public()
   @Post('admin/renewal-sweep')
   @UseGuards(AdminTokenGuard)
   @HttpCode(200)
@@ -246,6 +243,7 @@ export class BillingController {
    * succeed, and answering 4xx tells a prober which payloads were structurally interesting. The
    * body distinguishes the cases for our own logs.
    */
+  @Public()
   @Post('webhook')
   @HttpCode(200)
   async webhook(@Req() req: WebhookRequest): Promise<{ received: true; credited: boolean }> {

@@ -1,10 +1,10 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Post } from '@nestjs/common';
 import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import type { User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
 import { CurrentUser } from '../auth/current-user.decorator';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+
 import { LeasesService } from './leases.service';
 import type { ProfileLease } from './leases.repository';
 
@@ -40,7 +40,6 @@ class LeaseIdDto {
  * missing. See {@link LeasesService.assertVisible}.
  */
 @Controller('profiles/:id/lease')
-@UseGuards(JwtAuthGuard)
 export class LeasesController {
   constructor(private readonly leases: LeasesService) {}
 

@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   ConflictException,
-  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -27,6 +26,7 @@ import {
 import { USERS_REPOSITORY, type UsersRepository } from '../auth/users.repository';
 import { MailService } from '../mail/mail.service';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
+import { resolveTeamId } from '../teams/resolve-team-id';
 import { addPeriod, subtractPeriod } from './billing-period';
 import {
   BILLING_REPOSITORY,
@@ -119,27 +119,8 @@ export class BillingService {
     private readonly mail: MailService,
   ) {}
 
-  /**
-   * Resolve the team to bill from the AUTHENTICATED caller.
-   *
-   * Mirrors ProfilesService: an explicit `teamId` is honoured only after the caller's membership
-   * is verified, and otherwise the caller's own team is used. A team id is never trusted from the
-   * request body — on a billing endpoint that would let anyone spend another team's Credit.
-   */
-  private async resolveTeamId(userId: string, teamId?: string): Promise<string> {
-    if (teamId) {
-      const membership = await this.teams.getMembership(teamId, userId);
-      if (!membership) throw new ForbiddenException('you are not a member of the requested team');
-      return teamId;
-    }
-    const teams = await this.teams.findTeamsForUser(userId);
-    const first = teams[0];
-    if (!first) throw new ForbiddenException('you do not belong to any team');
-    return first.id;
-  }
-
   async getOverview(userId: string, teamId?: string): Promise<BillingOverview> {
-    const team = await this.resolveTeamId(userId, teamId);
+    const team = await resolveTeamId(this.teams, userId, teamId);
     const [balanceCents, subscription] = await Promise.all([
       this.repo.getBalanceCents(team),
       this.repo.getSubscription(team),
@@ -163,12 +144,12 @@ export class BillingService {
     limit = 50,
     teamId?: string,
   ): Promise<CreditTransaction[]> {
-    const team = await this.resolveTeamId(userId, teamId);
+    const team = await resolveTeamId(this.teams, userId, teamId);
     return this.repo.listTransactions(team, Math.min(Math.max(limit, 1), 200));
   }
 
   async listDeposits(userId: string, limit = 20, teamId?: string): Promise<Deposit[]> {
-    const team = await this.resolveTeamId(userId, teamId);
+    const team = await resolveTeamId(this.teams, userId, teamId);
     return this.repo.listDeposits(team, Math.min(Math.max(limit, 1), 100));
   }
 
@@ -181,7 +162,7 @@ export class BillingService {
     currencyCode: string,
     teamId?: string,
   ): Promise<DepositInstruction> {
-    const team = await this.resolveTeamId(userId, teamId);
+    const team = await resolveTeamId(this.teams, userId, teamId);
 
     if (!Number.isInteger(amountCents)) {
       throw new BadRequestException('amount must be a whole number of cents');
@@ -426,7 +407,7 @@ export class BillingService {
     period: BillingPeriod = 'monthly',
     teamId?: string,
   ): Promise<PlanChangeQuote> {
-    const team = await this.resolveTeamId(userId, teamId);
+    const team = await resolveTeamId(this.teams, userId, teamId);
     const { quote } = await this.priceChange(team, tier, period, new Date());
     return quote;
   }
@@ -457,7 +438,7 @@ export class BillingService {
     period: BillingPeriod = 'monthly',
     teamId?: string,
   ): Promise<Subscription> {
-    const team = await this.resolveTeamId(userId, teamId);
+    const team = await resolveTeamId(this.teams, userId, teamId);
     const plan = planByTier(tier);
     const start = new Date();
     const { quote, existing } = await this.priceChange(team, tier, period, start);
@@ -599,7 +580,7 @@ export class BillingService {
    * not refund the current period, which the user has already paid for and is still using.
    */
   async setAutoRenew(userId: string, autoRenew: boolean, teamId?: string): Promise<Subscription> {
-    const team = await this.resolveTeamId(userId, teamId);
+    const team = await resolveTeamId(this.teams, userId, teamId);
     const existing = await this.repo.getSubscription(team);
     if (!existing || existing.tier === 'free') {
       throw new BadRequestException('no active package');

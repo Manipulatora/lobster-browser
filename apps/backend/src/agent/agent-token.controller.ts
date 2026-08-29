@@ -1,7 +1,6 @@
 import {
   Body,
   Controller,
-  ForbiddenException,
   HttpCode,
   Inject,
   Post,
@@ -15,9 +14,10 @@ import { planAllowsAgent, planEntitledTier, type PlanTier } from '@lobster/share
 
 import { AuthService } from '../auth/auth.service';
 import { EmailVerifiedGuard } from '../auth/email-verified.guard';
-import { JwtAuthGuard, type AuthenticatedRequest } from '../auth/jwt-auth.guard';
+import { type AuthenticatedRequest } from '../auth/jwt-auth.guard';
 import { BILLING_REPOSITORY, type BillingRepository } from '../billing/billing.repository';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
+import { resolveTeamId } from '../teams/resolve-team-id';
 import { ok, type ApiResponse } from '../common/api-response';
 import { AgentRefusalFilter, planRequired } from './agent-refusal';
 
@@ -61,7 +61,7 @@ export class AgentTokenController {
 
   @Post('token')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard, EmailVerifiedGuard)
+  @UseGuards(EmailVerifiedGuard)
   async issue(
     @Req() request: AuthenticatedRequest,
     @Body() dto: AgentTokenDto,
@@ -69,7 +69,7 @@ export class AgentTokenController {
     const user = request.user;
     if (!user) throw new UnauthorizedException();
 
-    const teamId = await this.resolveTeamId(user.id, dto.teamId);
+    const teamId = await resolveTeamId(this.teams, user.id, dto.teamId);
     // Same rule as AgentAuthGuard.resolveTier and entitledProfileLimit: a status of 'active' does
     // not mean the paid window is still open. Minting a token from `status` alone would hand a
     // lapsed package a fresh agent token that the guard then honours for its whole lifetime.
@@ -89,15 +89,4 @@ export class AgentTokenController {
    * otherwise the caller's own team is used. A team id taken on trust here would bake someone
    * else's wallet into a spending credential.
    */
-  private async resolveTeamId(userId: string, requested?: string): Promise<string> {
-    if (requested) {
-      const membership = await this.teams.getMembership(requested, userId);
-      if (!membership) throw new ForbiddenException('you are not a member of the requested team');
-      return requested;
-    }
-    const teams = await this.teams.findTeamsForUser(userId);
-    const first = teams[0];
-    if (!first) throw new ForbiddenException('you do not belong to any team');
-    return first.id;
-  }
 }

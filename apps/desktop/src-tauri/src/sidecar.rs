@@ -180,11 +180,16 @@ impl SidecarClient {
         // Drain stderr into the log. Without a reader the pipe's buffer fills and the sidecar blocks
         // on its next write — a deadlock that only appears once it has logged a few kilobytes, which
         // is exactly the situation where the output matters.
+        //
+        // Logged at INFO, not DEBUG. The sidecar only writes to stderr when something went wrong,
+        // and this is the ONLY channel that explains a launch which reports success and produces no
+        // engine process. It was previously `debug!` under an `INFO` max level, so those lines were
+        // discarded before reaching any sink — the reason that failure has stayed unexplained.
         if let Some(stderr) = child.stderr.take() {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(target: "sidecar", "{line}");
+                    tracing::info!(target: "sidecar", "{line}");
                 }
             });
         }

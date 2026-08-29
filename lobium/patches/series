@@ -103,6 +103,14 @@ fingerprint/media-values-device-size.patch
 # CHAIN: after media-values-device-size; both hook media_values.cc, so this is cut against its
 # output and cannot be validated in isolation.
 fingerprint/media-values-color.patch
+# (pointer:)/(hover:)/(any-pointer:)/(any-hover:) for mobile personas, natively.
+# These were answered ONLY by Emulation.setDeviceMetricsOverride{mobile:true} sent over CDP after
+# launch, which races a synchronous inline script on the first navigation, misses any target the
+# installer did not attach to, and reverts every tab to desktop semantics if the socket closes.
+# Keyed on navigator.ua_mobile - NOT max_touch_points, because a touchscreen laptop has touch
+# points AND a fine pointer with hover.
+# CHAIN: after media-values-color; all four hook media_values.cc.
+fingerprint/media-values-pointer-hover.patch
 # navigator.webdriver, answered in Blink rather than by --disable-blink-features. The flag kept it
 # false but raised Chromium's "unsupported command-line flag" infobar and named itself on
 # chrome://version - two tells bought to hide one.

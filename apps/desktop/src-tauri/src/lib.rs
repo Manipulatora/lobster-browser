@@ -1744,11 +1744,139 @@ async fn agent_status(
         .map_err(|e| e.to_string())
 }
 
+/// Where the desktop app writes its log. `%LOCALAPPDATA%\lobster\logs` / `~/.local/share/lobster/logs`.
+///
+/// Beside the engine runtime dir rather than under the Tauri app-data dir, because logging is
+/// initialised BEFORE the Tauri builder exists and therefore cannot ask `app.path()` for anything.
+fn user_log_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .or_else(|| user_home_dir().map(|home| home.join("AppData").join("Local")))
+            .map(|base| base.join("lobster").join("logs"))
+    }
+    #[cfg(not(windows))]
+    {
+        user_home_dir().map(|home| home.join(".local/share/lobster/logs"))
+    }
+}
+
+/// A `MakeWriter` over one shared append-mode file.
+///
+/// `tracing_subscriber` implements `MakeWriter` for `Fn() -> W`, so this only has to be a `Write`
+/// that can be handed out repeatedly. The mutex makes a whole formatted event one `write_all`, which
+/// is what stops two threads interleaving mid-line — a log that shreds its own lines under
+/// concurrency is worse than no log, because it reads as corruption rather than as contention.
+#[derive(Clone)]
+struct SharedFileWriter(std::sync::Arc<std::sync::Mutex<std::fs::File>>);
+
+impl std::io::Write for SharedFileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self.0.lock() {
+            Ok(mut file) => file.write_all(buf).map(|()| buf.len()),
+            // A poisoned mutex means another thread panicked mid-log. Dropping the line is strictly
+            // better than propagating a panic out of the logger and taking the app with it.
+            Err(_) => Ok(buf.len()),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.0.lock() {
+            Ok(mut file) => file.flush(),
+            Err(_) => Ok(()),
+        }
+    }
+}
+
+/// Initialise logging to a FILE, and say where.
+///
+/// WHY A FILE. `tracing_subscriber::fmt()` defaults to stdout, and a Tauri app is built for the
+/// Windows GUI subsystem — it has no console attached, so on the shipped Windows product every log
+/// line went to a handle nobody could read. Combined with sidecar stderr being logged at `debug!`
+/// under an `INFO` max level (so it was filtered out even in a dev console), the practical effect
+/// was that the installed product produced NO diagnostic output at all.
+///
+/// That is why the phantom first launch — `launch` returns a pid and `code=0`, yet no engine process
+/// exists and `stop` reports nothing running — has never been explained: the one component that
+/// knows what happened, the sidecar, was writing its reason into a void.
+///
+/// `LOBSTER_LOG` overrides the level (`trace`/`debug`/`info`/`warn`/`error`). The previous log is
+/// kept as `.1` so a crash-and-relaunch does not destroy the evidence of the crash.
+fn init_logging() -> Option<PathBuf> {
+    let level = match std::env::var("LOBSTER_LOG").unwrap_or_default().to_ascii_lowercase().as_str() {
+        "trace" => tracing::Level::TRACE,
+        "debug" => tracing::Level::DEBUG,
+        "warn" => tracing::Level::WARN,
+        "error" => tracing::Level::ERROR,
+        // DEBUG by default, not INFO: sidecar stderr is logged at debug, and that is precisely the
+        // stream needed to diagnose a launch that reports success and does nothing.
+        _ => tracing::Level::DEBUG,
+    };
+
+    let path = user_log_dir().map(|dir| dir.join("lobster.log"));
+    if let Some(path) = path {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Rotate once, so the log cannot grow without bound and the previous run survives.
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > 8 * 1024 * 1024 {
+                let _ = std::fs::rename(&path, path.with_extension("log.1"));
+            }
+        }
+        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let writer = SharedFileWriter(std::sync::Arc::new(std::sync::Mutex::new(file)));
+            // WINDOWS ONLY takes the file-only path. The no-console problem this exists for is
+            // specific to the Windows GUI subsystem; on Linux and macOS the app is routinely run
+            // from a terminal, and silently swallowing stdout there would REMOVE working
+            // diagnostics to fix a platform that never had any. So elsewhere the same events go to
+            // BOTH the file and stderr.
+            #[cfg(windows)]
+            {
+                tracing_subscriber::fmt()
+                    .with_max_level(level)
+                    .with_ansi(false) // a file is not a terminal; escape codes only obscure it
+                    .with_writer(move || writer.clone())
+                    .init();
+            }
+            #[cfg(not(windows))]
+            {
+                // `Tee` rather than two layers, to keep this free of extra crates.
+                struct Tee(SharedFileWriter);
+                impl std::io::Write for Tee {
+                    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                        let _ = std::io::Write::write_all(&mut std::io::stderr(), buf);
+                        std::io::Write::write(&mut self.0.clone(), buf)
+                    }
+                    fn flush(&mut self) -> std::io::Result<()> {
+                        let _ = std::io::Write::flush(&mut std::io::stderr());
+                        std::io::Write::flush(&mut self.0.clone())
+                    }
+                }
+                tracing_subscriber::fmt()
+                    .with_max_level(level)
+                    .with_ansi(false)
+                    .with_writer(move || Tee(writer.clone()))
+                    .init();
+            }
+            return Some(path);
+        }
+    }
+
+    // No writable log location. Fall back to the old behaviour rather than losing logging entirely
+    // on a host with an unusual profile layout.
+    tracing_subscriber::fmt().with_max_level(level).init();
+    None
+}
+
 /// Application entrypoint invoked by `main.rs` (and the mobile entry macro later).
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .init();
+    let log_path = init_logging();
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        log = ?log_path,
+        "lobster desktop starting"
+    );
 
     let mut builder = tauri::Builder::default();
     // DSK-3: single-instance lock. Must be the FIRST registered plugin so a second launch exits

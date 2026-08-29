@@ -15,6 +15,7 @@ import type { Profile, ProfileExport, ProfileExportBundle } from '@lobster/share
 
 import { AuditService } from '../audit/audit.service';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
+import { resolveTeamId } from '../teams/resolve-team-id';
 import { BLOB_STORE, BlobVersionConflictError, type BlobStore } from './blob/blob-store';
 import { blobObjectKey, normalizeKeyPrefix } from './blob/s3-blob-store';
 import type { BulkCreateProfilesDto } from './dto/bulk-create-profiles.dto';
@@ -119,7 +120,7 @@ export class ProfilesService {
   }
 
   async create(userId: string, dto: CreateProfileDto, teamId?: string): Promise<Profile> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
 
     // Every profile MUST get a unique seed — a shared/constant seed would give many profiles the
     // same fingerprint identity. Generate a fresh random 128-bit seed when the caller omits one.
@@ -167,7 +168,7 @@ export class ProfilesService {
     dto: BulkCreateProfilesDto,
     teamId?: string,
   ): Promise<Profile[]> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
     const records: CreateProfileRecord[] = Array.from({ length: dto.count }, (_, index) => ({
       ownerTeamId,
       name: `${dto.namePrefix} ${index + 1}`,
@@ -194,7 +195,7 @@ export class ProfilesService {
    * This is the export/transfer wire format ({@link ProfileExportBundle}).
    */
   async exportAll(userId: string, teamId?: string): Promise<ProfileExportBundle> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
     const profiles = await this.profiles.findAllByTeam(ownerTeamId);
     return {
       version: 1,
@@ -209,7 +210,7 @@ export class ProfilesService {
    * The profile rows commit as one transaction before the fail-safe audit attempt.
    */
   async importBundle(userId: string, dto: ImportProfilesDto, teamId?: string): Promise<Profile[]> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
     const records: CreateProfileRecord[] = dto.profiles.map((item) => ({
       ownerTeamId,
       name: item.name,
@@ -261,12 +262,12 @@ export class ProfilesService {
   }
 
   async findAll(userId: string, teamId?: string): Promise<Profile[]> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
     return this.profiles.findAllByTeam(ownerTeamId);
   }
 
   async findOne(userId: string, id: string, teamId?: string): Promise<Profile> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
     const profile = await this.profiles.findById(ownerTeamId, id);
     if (!profile) {
       throw new NotFoundException('profile not found');
@@ -280,7 +281,7 @@ export class ProfilesService {
     dto: UpdateProfileDto,
     teamId?: string,
   ): Promise<Profile> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
     const updated = await this.profiles.update(ownerTeamId, id, dto);
     if (!updated) {
       throw new NotFoundException('profile not found');
@@ -302,7 +303,7 @@ export class ProfilesService {
     id: string,
     teamId?: string,
   ): Promise<{ id: string; deleted: true }> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
     const result = await this.profiles.removeAsAdmin(ownerTeamId, id, userId);
     if (result.outcome === 'forbidden') {
       throw new ForbiddenException('this action requires the admin role');
@@ -344,7 +345,7 @@ export class ProfilesService {
     input: SyncProfileInput,
     teamId?: string,
   ): Promise<SyncResult> {
-    const ownerTeamId = await this.resolveTeamId(userId, teamId);
+    const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
     // Confirm the profile exists and belongs to the caller's team before touching the blob store.
     const profile = await this.profiles.findById(ownerTeamId, id);
     if (!profile) {
@@ -468,27 +469,6 @@ export class ProfilesService {
       return `file://${this.blobStorePath}/${this.blobKey(teamId, profileId)}/v${String(version).padStart(10, '0')}.blob`;
     }
     return `memory://${objectKey}`;
-  }
-
-  /**
-   * Resolve the team to operate on. When `teamId` is given the caller must belong to it;
-   * otherwise fall back to the caller's first team. Throws `ForbiddenException` when the caller
-   * has no matching team (defence in depth — every user gets a personal team at register time).
-   */
-  private async resolveTeamId(userId: string, teamId?: string): Promise<string> {
-    if (teamId) {
-      const membership = await this.teams.getMembership(teamId, userId);
-      if (!membership) {
-        throw new ForbiddenException('you are not a member of the requested team');
-      }
-      return teamId;
-    }
-    const teams = await this.teams.findTeamsForUser(userId);
-    const first = teams[0];
-    if (!first) {
-      throw new ForbiddenException('you do not belong to any team');
-    }
-    return first.id;
   }
 
   /** Translate the repository's atomic capacity rejection to the API's established 403. */

@@ -1,0 +1,121 @@
+Lobium — native pointer/hover media features for mobile personas.
+
+WHY THIS PATCH EXISTS
+
+`(pointer: coarse)`, `(hover: none)`, `(any-pointer: coarse)` and `(any-hover: none)` are how a page
+asks "is this a touch device?", and they are among the first things a mobile-detection script reads.
+Today an Android persona answers them correctly — but only because the sidecar sends
+`Emulation.setDeviceMetricsOverride {mobile: true}` over CDP after the browser is up
+(packages/engine-runner/src/mobile-emulation.ts).
+
+That contradicts the product's own stated principle: the fingerprint is supposed to be established by
+the BINARY before the first script runs, never by a CDP overlay. The CDP route is observably weaker
+in three specific ways:
+
+  1. It is a RACE. The commands are applied per target after `waitForEndpointOrExit` returns, so a
+     document that runs `matchMedia('(pointer: coarse)')` in a synchronous inline script at the very
+     top of the first navigation can be served the desktop answer.
+  2. It is per-target, so any target that appears without the installer having attached to it (a
+     popup opened faster than the Target.attachedToTarget round trip) is a desktop-shaped tab in a
+     mobile-shaped browser — an internal contradiction, which is worse than either answer alone.
+  3. It requires a live CDP socket for the browser's whole lifetime. `mobileEmulation.close()` on any
+     error path silently reverts every tab to desktop pointer semantics mid-session.
+
+`Settings::GetPrimaryPointerType()` is the browser-side value DevTools' device emulation overrides.
+Reading the persona config directly in MediaValues puts the answer in the renderer, before script,
+with no socket and no race — the same shape as the device-width hook already in this file.
+
+WHAT IT KEYS OFF
+
+A TOUCH-PRIMARY persona: `ua_mobile` OR `ua_form_factor == "Tablet"`.
+
+Both halves are needed. `ua_mobile` alone covers phones but MISSES ANDROID TABLETS, which set
+`uaMobile=false` on purpose — real tablet Chrome omits the "Mobile" UA token, and
+packages/fingerprint/src/android.ts asserts exactly that (`nav.uaMobile === (formFactor === 'phone')`).
+A tablet persona would then report (pointer: fine) and (hover: hover) from the renderer while the CDP
+layer said the opposite, which is a contradiction inside one browser and worse than either answer
+alone. Real Android tablets report coarse/none.
+
+`max_touch_points` is deliberately NOT the trigger, and neither is "has touch": a Windows laptop with
+a touchscreen has touch points AND a genuine fine pointer with hover. Its form factor is "Desktop",
+so it is correctly excluded.
+
+The available-* variants report the coarse/none bit ONLY, matching real Chrome on Android, which
+reports `any-pointer: coarse` and no fine pointer at all. Reporting both bits would describe a device
+with a mouse attached — a combination that exists (a tablet with a trackpad) but is not what these
+personas claim to be.
+
+NOTE ON THE CDP PATH: it stays. Once this ships, the CDP commands become redundant for pointer/hover
+but are still what supplies touch-event emission and the visual viewport, which are not media
+features. `mobile-emulation.ts` should keep sending them.
+
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -404,16 +404,44 @@
+   return frame->GetPage()->GetSettings().GetAcceleratedCompositingEnabled();
+ }
+ 
++namespace {
++
++// True for a TOUCH-PRIMARY persona: a phone, or a tablet.
++//
++// ua_mobile alone is not enough. A tablet reports ua_mobile=false, because real tablet Chrome omits
++// the "Mobile" UA token - see the comment on ua_form_factor in lobium_fp_config.h. Keying only on
++// ua_mobile would leave every Android TABLET persona reporting (pointer: fine) and (hover: hover)
++// from the renderer while the CDP layer said otherwise, which is a contradiction inside one browser.
++//
++// A touchscreen LAPTOP is deliberately excluded: its form factor is "Desktop", and it genuinely has
++// a fine pointer and hover alongside its touch points.
++bool LobiumIsTouchPrimaryPersona() {
++  const lobium::LobiumFpConfig* cfg = lobium::LobiumFpConfig::Current();
++  return cfg && (cfg->navigator.ua_mobile || cfg->navigator.ua_form_factor == "Tablet");
++}
++
++}  // namespace
++
+ mojom::blink::PointerType MediaValues::CalculatePrimaryPointerType(
+     LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  // Lobium: decided in the renderer before any script runs, rather than by a post-launch CDP
++  // override that a synchronous inline script on the first navigation can outrun.
++  if (LobiumIsTouchPrimaryPersona()) {
++    return mojom::blink::PointerType::kPointerCoarseType;
++  }
+   return frame->GetSettings()->GetPrimaryPointerType();
+ }
+ 
+ int MediaValues::CalculateAvailablePointerTypes(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  // Coarse ONLY. Real Chrome on Android reports no fine pointer at all; adding the fine bit too
++  // would describe a phone with a mouse attached.
++  if (LobiumIsTouchPrimaryPersona()) {
++    return static_cast<int>(mojom::blink::PointerType::kPointerCoarseType);
++  }
+   return frame->GetSettings()->GetAvailablePointerTypes();
+ }
+ 
+@@ -421,6 +449,11 @@
+     LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  // Lobium: a touch-primary device cannot hover. '(hover: hover)' on a persona that reports
++  // '(pointer: coarse)' is a direct self-contradiction, and that is what a detector looks for.
++  if (LobiumIsTouchPrimaryPersona()) {
++    return mojom::blink::HoverType::kHoverNone;
++  }
+   return frame->GetSettings()->GetPrimaryHoverType();
+ }
+ 
+@@ -434,6 +467,9 @@
+ int MediaValues::CalculateAvailableHoverTypes(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
++  if (LobiumIsTouchPrimaryPersona()) {
++    return static_cast<int>(mojom::blink::HoverType::kHoverNone);
++  }
+   return frame->GetSettings()->GetAvailableHoverTypes();
+ }
+ 

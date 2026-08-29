@@ -1,10 +1,10 @@
-import { Controller, Get, Inject, UseGuards } from '@nestjs/common';
+import { Controller, Get, Inject } from '@nestjs/common';
 import { generateSymmetricKey } from '@lobster/crypto';
 import type { User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
 import { CurrentUser } from '../auth/current-user.decorator';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+
 import { VAULT_REPOSITORY, type VaultRepository } from './vault.repository';
 
 /**
@@ -18,7 +18,6 @@ import { VAULT_REPOSITORY, type VaultRepository } from './vault.repository';
  * could hand one user's key to another.
  */
 @Controller('vault')
-@UseGuards(JwtAuthGuard)
 export class VaultController {
   constructor(@Inject(VAULT_REPOSITORY) private readonly repo: VaultRepository) {}
 

@@ -30,10 +30,12 @@
 // it hands every profile a near-unique fullVersionList — the exact defect this script was written to
 // clean up (the repo sat on canary 152.0.7928.0). Override with --allow-unreleased only for a local
 // experiment, never for a shipping pin.
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, readFileSync, rmSync } from 'node:fs';
 import { readFile, stat, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -291,6 +293,68 @@ async function finalizeManifest(target) {
     console.log(`  sha256(${tarball}) = ${sha}  (${(info.size / 1e6).toFixed(1)} MB)`);
     if (suppliedSha && suppliedSha.toLowerCase() !== sha) {
       die(`--sha256 does not match the tarball digest (${suppliedSha} vs ${sha})`);
+    }
+
+    // THE ARCHIVE MUST BE WHAT IT CLAIMS TO BE, not merely a file that exists and hashes.
+    //
+    // A digest proves the bytes were read. It proves nothing about whether those bytes are the
+    // engine, are complete, carry the native hooks, or correspond to any commit. All four
+    // artifact-vs-tree incidents passed the check above and shipped wrong anyway. The gate opens
+    // the archive the way a consumer does and verifies it against its own attestation.
+    //
+    // --skip-archive-gate exists for bootstrapping an archive built before the marker did. It warns,
+    // because using it is a decision someone should have to defend.
+    if (flag('skip-archive-gate')) {
+      console.log('  ! archive gate SKIPPED (--skip-archive-gate): provenance is unverified');
+    } else {
+      const gate = join(ROOT, 'ci/validation/engine-archive-gate.mjs');
+      const summaryPath = join(tmpdir(), `engine-gate-${process.pid}.json`);
+      console.log(`  running engine archive gate on ${tarball} ...`);
+      // ABSOLUTE path. `--tarball out/lobium-linux-x64.tar.gz` is resolved against the CALLER's cwd
+      // by the `stat` above, but the gate is spawned with `cwd: ROOT`, so a relative path that the
+      // caller could see resolved to a different place — or nowhere — inside the child. Running the
+      // documented command from anywhere but the repo root then failed the publish with "archive not
+      // found" for an archive that plainly exists.
+      const gateTarget = resolve(tarball);
+      const result = spawnSync(process.execPath, [gate, gateTarget, '--json', summaryPath], {
+        cwd: ROOT,
+        encoding: 'utf8',
+      });
+      for (const line of `${result.stdout ?? ''}${result.stderr ?? ''}`.split('\n')) {
+        if (line.trim()) console.log(`    ${line}`);
+      }
+      if (result.status !== 0) {
+        die(
+          `engine archive gate FAILED for ${tarball}. The manifest was NOT touched.\n` +
+            '  Publishing this archive would ship bytes that disagree with their own attestation.\n' +
+            '  Rebuild the runtime, or pass --skip-archive-gate if you have a specific reason.',
+        );
+      }
+
+      // THE ARCHIVE SAYS WHICH PLATFORM IT IS. Believe it over the flag.
+      //
+      // `--platform` defaults to linux-x64, so publishing the Windows artifact and forgetting the
+      // flag silently pairs a win-x64 digest with the linux-x64 URL — first-run provisioning then
+      // 404s or digest-mismatches for every Linux user, and the artifact that IS correct never gets
+      // published. That is incident (4) — the two installers released under each other's names —
+      // reachable through a flag default rather than a filename. The archive now carries its own
+      // platform in LOBSTER_ENGINE.json, which no default can get wrong.
+      try {
+        const declared = JSON.parse(readFileSync(summaryPath, 'utf8')).platform;
+        rmSync(summaryPath, { force: true });
+        if (declared && declared !== platform) {
+          die(
+            `platform mismatch: ${tarball} declares '${declared}', but this bump targets ` +
+              `'${platform}'${value('platform') ? '' : " (the DEFAULT — you did not pass --platform)"}.\n` +
+              `  Publishing it would write a ${declared} digest into the ${platform} manifest entry.\n` +
+              `  Re-run with --platform ${declared}.`,
+          );
+        }
+        if (declared) console.log(`    archive declares platform '${declared}' — matches --platform`);
+      } catch (e) {
+        if (e?.message?.startsWith('platform mismatch')) throw e;
+        console.log('    ! could not read the gate summary; platform cross-check skipped');
+      }
     }
   }
   if (!/^[0-9a-f]{64}$/.test((sha || '').toLowerCase())) {
