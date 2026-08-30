@@ -94,7 +94,7 @@ hosts, 429 when rate limiting, 502 on a flaky exit node.
 
 **Both halves are now measured.** That a single non-200 CONNECT kills the browser after the launch
 is reported successful: reproduced. And the first-launch asymmetry: reproduced too — driving the
-real  RPC, Chrome CONNECTed to  on its own seven
+real `startProfile` RPC, Chrome CONNECTed to `optimizationguide-pa.googleapis.com` on its own seven
 seconds after startup, with no navigation from the harness at all. A fresh profile makes that class
 of call (GCM registration, safe browsing, the component updater, optimization hints); a warmed one
 does not. One 403 on any of them was enough.
