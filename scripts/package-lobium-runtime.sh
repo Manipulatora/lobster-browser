@@ -136,16 +136,78 @@ if [[ "${LOBSTER_KEEP_SYMBOLS:-}" != "1" ]]; then
   fi
 fi
 
-# Keep a marker so resolveLobiumBinary / LOBSTER_LOBIUM_DIR can find it.
-cat > "$OUT/LOBSTER_ENGINE.json" <<EOF
-{
-  "engine": "lobium",
-  "platform": "linux-x64",
-  "chrome": "chrome",
-  "fonts": "fonts/font-pack.manifest.json",
-  "packagedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-EOF
+# ATTESTATION MARKER (schemaVersion 2).
+#
+# This used to be a five-line v1 marker: engine, platform, chrome, fonts, packagedAt. That is enough
+# for resolveLobiumBinary to FIND the runtime and nothing more — ci/validation/engine-archive-gate.mjs
+# reports a v1 artifact as UNATTESTED, because there is nothing in it to check the bytes against.
+# Measured on the published Linux archive before this change: "no ledger - unattested", while the
+# Windows artifact verified 554 files byte-for-byte.
+#
+# So the marker now carries what makes the archive checkable by a consumer who has only the archive:
+#
+#   artifacts.files[]     every file with its size and sha256
+#   artifacts.treeSha256  one hash over that ledger, so a single comparison detects any change
+#   provenance            the commit, the Chromium ref, whether the tree was dirty, and the
+#                         capability contract the binary actually emits
+#
+# The tree hash MUST be computed exactly as the gate recomputes it — sorted by path, then
+# "path\tbytes\tsha256\n" per entry — or every archive fails its own attestation.
+#
+# The marker excludes ITSELF from the ledger: it cannot contain its own hash.
+echo "[lobium-runtime] building attestation ledger…"
+CHROME_CAPS=$("$OUT/chrome" --lobium-fingerprint-capabilities 2>/dev/null || echo '{}')
+LOBSTER_REV=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo "")
+LOBSTER_DIRTY=$(test -n "$(git -C "$ROOT" status --porcelain 2>/dev/null)" && echo true || echo false)
+CHROMIUM_REF=$(node -p "require('$ROOT/apps/desktop/src-tauri/resources/engine-manifest.json').platforms['linux-x64'].version" 2>/dev/null || echo "")
+
+python3 - "$OUT" "$CHROMIUM_REF" "$LOBSTER_REV" "$LOBSTER_DIRTY" "$CHROME_CAPS" <<'PYEOF'
+import hashlib, json, os, sys, datetime
+
+out, chromium_ref, revision, dirty, caps_raw = sys.argv[1:6]
+try:
+    caps = json.loads(caps_raw)
+except Exception:
+    caps = {}
+
+MARKER = "LOBSTER_ENGINE.json"
+files = []
+for root, _dirs, names in os.walk(out):
+    for name in names:
+        full = os.path.join(root, name)
+        rel = os.path.relpath(full, out).replace(os.sep, "/")
+        if rel == MARKER or os.path.islink(full):
+            continue
+        h = hashlib.sha256()
+        with open(full, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        files.append({"path": rel, "bytes": os.path.getsize(full), "sha256": h.hexdigest()})
+
+files.sort(key=lambda f: f["path"])
+tree = hashlib.sha256()
+for f in files:
+    tree.update(f"{f['path']}\t{f['bytes']}\t{f['sha256']}\n".encode("utf-8"))
+
+json.dump({
+    "schemaVersion": 2,
+    "engine": "lobium",
+    "platform": "linux-x64",
+    "chrome": "chrome",
+    "fonts": "fonts/font-pack.manifest.json",
+    "version": chromium_ref,
+    "packagedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "artifacts": {"treeSha256": tree.hexdigest(), "files": files},
+    "provenance": {
+        "chromiumRef": chromium_ref,
+        "lobsterRevision": revision,
+        "lobsterWorkingTreeDirty": dirty == "true",
+        "capabilityContractVersion": caps.get("contractVersion"),
+        "capabilities": caps.get("capabilities", []),
+    },
+}, open(os.path.join(out, MARKER), "w"), indent=2)
+print(f"[lobium-runtime] attested {len(files)} files, tree {tree.hexdigest()[:16]}…")
+PYEOF
 
 chmod +x "$OUT/chrome" || true
 du -sh "$OUT"
