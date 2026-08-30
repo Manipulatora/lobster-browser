@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
+import { connect as netConnect } from 'node:net';
 import test from 'node:test';
 import {
   assertUpstreamReachable,
@@ -65,4 +67,106 @@ test('startLocalProxyAdapter binds loopback HTTP and redacts creds on listen fai
   } finally {
     await adapter.close();
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Failure classification — the phantom first launch.
+//
+// The launcher kills the browser when the adapter reports a FATAL failure. It used to report every
+// upstream hiccup that way, so a single non-200 CONNECT ended the session; because a fresh Chrome
+// profile CONNECTs to a burst of Google endpoints on startup, that overwhelmingly hit the FIRST
+// launch and a retry on a warmed profile survived. These pin the distinction.
+// ---------------------------------------------------------------------------------------------
+
+/** A stand-in upstream that answers every CONNECT with one status. */
+function upstreamAnswering(status: number): Promise<{ port: number; close: () => void }> {
+  const srv = createHttpServer();
+  srv.on('connect', (_req, socket) => {
+    socket.end(`HTTP/1.1 ${status} X\r\n\r\n`);
+  });
+  return new Promise((resolve) => {
+    srv.listen(0, '127.0.0.1', () => {
+      resolve({
+        port: (srv.address() as { port: number }).port,
+        close: () => srv.close(),
+      });
+    });
+  });
+}
+
+async function collectFailures(
+  status: number,
+  attempts: number,
+): Promise<Array<{ message: string; fatal: boolean; statusCode?: number }>> {
+  const upstream = await upstreamAnswering(status);
+  const adapter = await startLocalProxyAdapter({
+    server: `http://127.0.0.1:${upstream.port}`,
+    username: 'u',
+    password: 'p',
+  });
+  const seen: Array<{ message: string; fatal: boolean; statusCode?: number }> = [];
+  adapter.onFailure((f) => seen.push(f));
+
+  for (let i = 0; i < attempts; i += 1) {
+    await new Promise<void>((resolve) => {
+      const s = netConnect({ host: '127.0.0.1', port: adapter.port }, () => {
+        s.write('CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n');
+      });
+      const done = (): void => {
+        try {
+          s.destroy();
+        } catch {
+          /* already gone */
+        }
+        resolve();
+      };
+      s.once('data', done);
+      s.once('error', done);
+      s.once('close', done);
+      setTimeout(done, 2000);
+    });
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  await new Promise((r) => setTimeout(r, 250));
+  await adapter.close();
+  upstream.close();
+  return seen;
+}
+
+test('a blocked host (403) is reported but is NOT fatal — the browser must keep running', async () => {
+  const seen = await collectFailures(403, 2);
+  assert.ok(seen.length > 0, 'the failure must still be reported');
+  assert.ok(
+    seen.every((f) => !f.fatal),
+    `a provider blocking one host must never end the session, got: ${JSON.stringify(seen)}`,
+  );
+  assert.equal(seen[0]!.statusCode, 403);
+});
+
+test('rate limiting (429) is not fatal either', async () => {
+  const seen = await collectFailures(429, 2);
+  assert.ok(seen.length > 0);
+  assert.ok(seen.every((f) => !f.fatal), JSON.stringify(seen));
+});
+
+test('a 407 is fatal on the FIRST occurrence — the credentials are wrong', async () => {
+  // No amount of retrying fixes wrong credentials, and every request will fail identically, so
+  // this is the one case worth stopping the session over immediately.
+  const seen = await collectFailures(407, 1);
+  assert.ok(seen.length > 0, 'expected a failure report');
+  assert.equal(seen[0]!.fatal, true, `407 must be fatal, got ${JSON.stringify(seen[0])}`);
+  assert.equal(seen[0]!.statusCode, 407);
+});
+
+test('an upstream that fails EVERYTHING becomes fatal, but only after several attempts', async () => {
+  // Distinguishes "this proxy is dead" from "this proxy blocks one host". The first few must be
+  // non-fatal, or the phantom-launch bug is simply back with a different status code.
+  const seen = await collectFailures(502, 7);
+  assert.ok(seen.length >= 5, `expected several reports, got ${seen.length}`);
+  assert.ok(!seen[0]!.fatal, 'the first failure must not be fatal');
+  assert.ok(!seen[1]!.fatal, 'the second failure must not be fatal');
+  assert.ok(
+    seen.some((f) => f.fatal),
+    'a totally dead upstream must eventually be judged unusable',
+  );
 });

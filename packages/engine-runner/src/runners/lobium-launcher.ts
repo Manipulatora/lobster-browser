@@ -1046,13 +1046,70 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
         // window ever appears. chrome.exe is a GUI subsystem binary, so false costs no console flash.
         windowsHide: false,
       });
+      // ARM THE EXIT RECORD IMMEDIATELY, not after CDP setup.
+      //
+      // `child.once('exit')` used to be registered ~27 lines below, after the cookie-import and
+      // mobile-emulation round-trips. Node never invokes a listener for an event that already
+      // fired, so an engine that died inside that window was never observed at all: the teardown
+      // never ran, and the handle was returned as if healthy. One record, armed here, is observed
+      // by both.
+      let exited: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+      const exitListeners = new Set<() => void>();
+      const onEngineExit = (listener: () => void): void => {
+        if (exited) {
+          listener();
+          return;
+        }
+        exitListeners.add(listener);
+      };
+      child.once('exit', (code, signal) => {
+        exited = { code, signal };
+        for (const listener of exitListeners) listener();
+        exitListeners.clear();
+      });
+
       let networkFailure: string | undefined;
-      adapter?.onFailure((message) => {
+      let reportedNonFatal = 0;
+      adapter?.onFailure((failure) => {
+        // NON-FATAL FIRST, because it is the common case and killing on it was the bug.
+        //
+        // THE PHANTOM FIRST LAUNCH. This handler used to kill the whole browser tree on the FIRST
+        // upstream failure of any kind. proxy-chain raises `tunnelConnectFailed` for every non-200
+        // CONNECT, and a non-200 for one host is routine: residential providers answer 403 for
+        // blocklisted domains, 429 when rate limiting, 502 on a flaky exit node. A fresh Chrome
+        // profile CONNECTs to a burst of Google endpoints within seconds of starting — GCM
+        // registration, safe browsing, the component updater, optimization hints — so the FIRST
+        // launch was overwhelmingly the one that tripped it, and a retry on a warmed profile that
+        // no longer makes those calls survived. That is exactly the reported symptom: the launch
+        // reports success with a pid, the browser vanishes ~2s later, and `stop` then answers
+        // "profile ... is not running" because CompositeRunner dropped the handle on child exit.
+        //
+        // Reproduced with an upstream returning 403 for a single host: browser killed 2.5s after
+        // the product had already reported the launch successful.
+        //
+        // It also bought no safety. Chromium runs with --proxy-server and no bypass list, so a
+        // refused tunnel surfaces as ERR_TUNNEL_CONNECTION_FAILED on that one navigation. Nothing
+        // is retried directly and the real IP is never exposed — there was no ambiguous network
+        // state to fail closed on.
+        if (!failure.fatal) {
+          reportedNonFatal += 1;
+          // Report the first few, then stay quiet: a proxy that blocks one busy domain would
+          // otherwise fill the log for the life of the session.
+          if (reportedNonFatal <= 3) {
+            console.error(
+              `[lobium] profile ${ctx.profileId} upstream refused one request ` +
+                `(${failure.message}) — the proxy is working; that host is blocked or throttled. ` +
+                `The browser keeps running.`,
+            );
+          }
+          return;
+        }
         if (networkFailure) return;
-        networkFailure = `proxy upstream failed: ${message}`;
+        networkFailure = `proxy upstream failed: ${failure.message}`;
         console.error(`[lobium] profile ${ctx.profileId} ${networkFailure}`);
-        // Product-scope fail closed: stop this browser process so it cannot continue in an
-        // ambiguous network state. Chromium remains proxy-configured; no direct route is enabled.
+        // FATAL ONLY: wrong credentials (407/401), or repeated failures with not one successful
+        // tunnel. Here the proxy cannot carry traffic at all, so a browser that stays open is a
+        // browser that loads nothing — stopping it with a stated reason beats that.
         signalProcessTree(child, 'SIGTERM');
       });
       try {
@@ -1083,11 +1140,26 @@ export function createLobiumLauncher(opts: NativeLobiumLauncherOptions = {}): La
             adapter = undefined;
           }
         };
-        child.once('exit', () => {
+        // The exit record was armed immediately after spawn (see `exited` above), so a death during
+        // the CDP-setup window just above is already captured. Wire the teardown onto it now.
+        onEngineExit(() => {
           mobileEmulation?.close();
           void shutdownAdapter();
           for (const listener of closeListeners) listener(networkFailure);
         });
+
+        // NEVER hand back a dead pid. If the engine died while cookies and emulation were being
+        // installed — real CDP round-trips over a real socket, racing --restore-last-session's first
+        // navigation — then every check above still passed and this would return a handle to a
+        // corpse. CompositeRunner would keep that handle in `running` forever: `stop` would report
+        // success while killing nothing, and every later launch would be refused with
+        // "profile <id> is already running" until the app restarted.
+        if (exited) {
+          throw new Error(
+            `Lobium exited during launch setup (code=${String(exited.code)}, ` +
+              `signal=${String(exited.signal)})${networkFailure ? `: ${networkFailure}` : ''}`,
+          );
+        }
         return {
           pid: child.pid ?? 0,
           ws,

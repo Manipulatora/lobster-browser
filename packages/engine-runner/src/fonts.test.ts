@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import test from 'node:test';
 import {
   availableFontFamilies,
@@ -148,8 +148,11 @@ test('native stage contains only the selected persona files and is content-keyed
     assert.equal(stagedFiles.length, 1);
     const stagedFile = stagedFiles[0];
     assert.ok(stagedFile);
-    assert.match(stagedFile, /DejaVuSans-Regular\.ttf$/);
-    assert.ok(!stagedFile.includes('LiberationSans'));
+    // The staged NAME is deliberately just an index plus the extension. The engine enumerates
+    // files/, filters on the extension and sorts by path — it never parses the name — and every
+    // character here is charged against Windows MAX_PATH (see stagedFontRelativePath).
+    assert.match(stagedFile, /^\d{4}\.ttf$/, `staged name must be short and indexed: ${stagedFile}`);
+    assert.ok(!stagedFile.includes('LiberationSans'), 'only the persona selection is staged');
 
     const second = await stageNativeFontPack(root, 'android', pack);
     assert.equal(
@@ -483,5 +486,53 @@ test('a provision that had to copy is not rebuilt on every launch', async () => 
     assert.equal(after.mtimeMs, before.mtimeMs, 'a copied provision must still be a cache hit');
   } finally {
     await rm(udd, { recursive: true, force: true });
+  }
+});
+
+test('the staged pack fits MAX_PATH under a realistic Windows profile path', async () => {
+  // WHY THIS IS A TEST AND NOT A COMMENT.
+  //
+  // Windows refuses a non-`\?\` path over 260 characters, LongPathsEnabled is 0 on a default
+  // install, and the engine calls bare ::GetFileAttributes on these files. An over-length face
+  // reads back as INVALID_FILE_ATTRIBUTES, FontPackFaces clears the ENTIRE pack, and an empty pack
+  // fails the browser's DirectWrite init — lazily, on first font resolution, which is AFTER the CDP
+  // endpoint is published. The product has already reported the launch successful by then, so the
+  // browser simply vanishes and `stop` answers "not running".
+  //
+  // The old layout spent 155 characters below the user-data-dir, leaving 105. A real profile path is
+  // C:\Users\<user>\AppData\Roaming\com.lobster.browser\profiles\prf_<32 hex> = 91 + len(username),
+  // so "Administrator" landed on 259 — one character inside the limit — and any username of 15
+  // characters or more was permanently broken, on every launch of every profile.
+  const root = await mkdtemp(join(tmpdir(), 'fonts-maxpath-'));
+  try {
+    const SEP = String.fromCharCode(92); // a literal backslash, without escaping games
+    const pack = await fixturePack(root);
+    const staged = await stageNativeFontPack(root, 'android', pack);
+    const files = await readdir(join(staged.dir, 'files'));
+    assert.ok(files.length > 0);
+
+    // Longest path the layout adds below the user-data-dir: <packs>\<key>\files\<name>
+    const key = basename(staged.dir);
+    const longest = files.reduce((a, b) => (a.length >= b.length ? a : b));
+    const belowUdd = ['native-font-packs', key, 'files', longest].join(SEP).length + 1;
+
+    // A 20-character Windows username, which is ordinary, must still fit.
+    const profileDir =
+      [`C:${SEP}Users`, 'a'.repeat(20), 'AppData', 'Roaming', 'com.lobster.browser', 'profiles',
+        `prf_${'0'.repeat(32)}`].join(SEP);
+    assert.ok(
+      profileDir.length + belowUdd <= 260,
+      `staged font path would exceed MAX_PATH for a 20-char username: ` +
+        `${profileDir.length} + ${belowUdd} = ${profileDir.length + belowUdd} > 260. ` +
+        `The pack then reads as empty and the browser dies after reporting a successful launch.`,
+    );
+
+    // And keep real headroom rather than sitting one character inside the limit.
+    assert.ok(
+      belowUdd <= 80,
+      `the staged layout costs ${belowUdd} chars below the user-data-dir; keep it small`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

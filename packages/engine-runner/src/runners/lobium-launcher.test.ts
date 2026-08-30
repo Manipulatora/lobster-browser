@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -450,13 +450,34 @@ test(
         assert.notEqual(config.fontPackDir, sourcePack, `${entry.name} must use a private subset`);
         assert.match(config.fontPackDir, /native-font-packs/);
         assert.deepEqual(config.fontFallbackFamilies.slice(0, 3), entry.fallback);
-        const stagedFiles = readdirSync(join(config.fontPackDir, 'files')).sort();
-        const staged = stagedFiles.join('|');
+        // Staged faces are named by INDEX only (MAX_PATH — see stagedFontRelativePath), so identity
+        // comes from the BYTES, not the filename. Map each staged file back to its source face by
+        // content hash: a stronger check than the old name match, because it also catches the right
+        // name carrying the wrong font.
+        const sourceByHash = new Map<string, string>();
+        for (const file of readdirSync(join(sourcePack, 'files'))) {
+          const bytes = readFileSync(join(sourcePack, 'files', file));
+          sourceByHash.set(createHash('sha256').update(bytes).digest('hex'), file);
+        }
+        const stagedNames = readdirSync(join(config.fontPackDir, 'files')).sort();
+        const stagedSources = stagedNames.map((name) => {
+          const bytes = readFileSync(join(config.fontPackDir, 'files', name));
+          return sourceByHash.get(createHash('sha256').update(bytes).digest('hex')) ?? `UNKNOWN(${name})`;
+        });
+        const staged = stagedSources.join('|');
+        // Order is load-bearing: the engine sorts by path, so the index prefix fixes the order the
+        // persona's fallback chain is built from.
         entry.order.forEach((name, index) =>
-          assert.match(stagedFiles[index] ?? '', new RegExp(name)),
+          assert.match(
+            stagedSources[index] ?? '',
+            new RegExp(name),
+            `${entry.name}: staged slot ${index} should be ${name}, resolved to ${stagedSources[index]}`,
+          ),
         );
         for (const name of entry.included) assert.match(staged, new RegExp(name));
         for (const name of entry.excluded) assert.doesNotMatch(staged, new RegExp(name));
+        // The names themselves must stay short, or MAX_PATH silently empties the whole pack.
+        for (const name of stagedNames) assert.match(name, /^\d{4}\.[a-z0-9]+$/);
         for (const [claimed, physical] of Object.entries(entry.aliases)) {
           assert.equal(config.fontAliases[claimed], physical);
         }
@@ -879,5 +900,78 @@ setInterval(() => {
     await handle.close();
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test('the engine exiting is always observed, so teardown runs and the profile is released', async () => {
+  // THE STUCK-PROFILE BUG. `child.once('exit')` used to be registered ~27 lines after the launch's
+  // success gate, behind the cookie-import and mobile-emulation CDP round-trips. Node never invokes
+  // a listener for an event that already fired, so an engine that died inside that window was never
+  // observed AT ALL: the teardown never ran, and CompositeRunner kept the handle in `running`
+  // forever. `stop` then reported success while killing nothing, and every later launch of that
+  // profile was refused with "profile <id> is already running" until the app was restarted.
+  //
+  // The record is now armed immediately after spawn, so the exit is observed whenever it happens.
+  // This pins that: the fake publishes a reachable endpoint, the launch succeeds, the engine dies,
+  // and onClose must fire.
+  const root = await mkdtemp(join(tmpdir(), 'lobium-exit-observed-'));
+  const userDataDir = join(root, 'profile');
+  const fakeBin = await writeFakeBinary(
+    root,
+    'fake-lobium-exits',
+    `const fs = require('node:fs');
+const net = require('node:net');
+const path = require('node:path');
+if (process.argv.includes('--lobium-fingerprint-capabilities')) {
+  process.stdout.write(CAPABILITY_MANIFEST_JSON);
+  process.exit(0);
+}
+const uddArg = process.argv.find((arg) => arg.startsWith('--user-data-dir='));
+if (!uddArg) process.exit(7);
+const userDataDir = uddArg.slice('--user-data-dir='.length);
+fs.mkdirSync(userDataDir, {recursive: true});
+const server = net.createServer();
+server.listen(43218, '127.0.0.1', () => {
+  fs.writeFileSync(path.join(userDataDir, 'DevToolsActivePort'), '43218' + NL + '/devtools/browser/exits' + NL);
+  // Live long enough for the launch to complete, then die like a crashing browser.
+  setTimeout(() => { server.close(); process.exit(3); }, 1200);
+});
+`
+      .replace('CAPABILITY_MANIFEST_JSON', JSON.stringify(capabilityManifest))
+      .replaceAll('NL', JSON.stringify('\n')),
+  );
+  try {
+    const launcher = createLobiumLauncher({
+      executablePath: fakeBin,
+      extraArgsFor: buildLobiumLaunchArgs,
+      envFor: async () => undefined,
+    });
+    const handle = await launcher(ctxWith(userDataDir));
+    assert.ok(handle.pid > 0, 'the launch itself must succeed');
+
+    const closed = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), 15_000);
+      handle.onClose?.(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+    assert.ok(
+      closed,
+      'the engine exited but onClose never fired: CompositeRunner would keep this profile in ' +
+        '`running` forever and refuse every future launch of it',
+    );
+  } finally {
+    // Windows keeps a handle on the fixture .exe briefly after the shim exits, so a single unlink
+    // can lose a race that has nothing to do with what is under test.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        await rm(root, { recursive: true, force: true });
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
   }
 });

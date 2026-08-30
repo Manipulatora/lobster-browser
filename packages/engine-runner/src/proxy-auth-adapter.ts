@@ -17,6 +17,29 @@ export interface UpstreamProxy {
   password?: string;
 }
 
+/**
+ * How many upstream failures, with NO tunnel ever having succeeded, before the proxy is judged
+ * unusable rather than merely selective.
+ *
+ * Deliberately small but not 1. One failure proves nothing — the very first request a fresh Chrome
+ * profile makes can be to a host the provider blocks. Several in a row with not one success is a
+ * different claim: nothing at all gets through this upstream.
+ */
+const UNUSABLE_AFTER = 5;
+
+/** An upstream failure, and whether it means the proxy is unusable rather than selective. */
+export interface ProxyFailure {
+  /** Human-readable, credentials already redacted. */
+  message: string;
+  /**
+   * True only when the proxy cannot be used at all: wrong credentials (407/401), or repeated
+   * failures with not one successful tunnel. A single blocked or rate-limited host is NOT fatal.
+   */
+  fatal: boolean;
+  /** Upstream CONNECT status, when there was one. */
+  statusCode?: number;
+}
+
 export interface LocalProxyAdapter {
   /** Value for Chromium `--proxy-server=` (no credentials). */
   proxyServer: string;
@@ -24,8 +47,15 @@ export interface LocalProxyAdapter {
   port: number;
   /** Tear down the local listener (call on profile stop / launch failure). */
   close: () => Promise<void>;
-  /** Observe an upstream request failure without exposing credentials. */
-  onFailure: (listener: (message: string) => void) => void;
+  /**
+   * Observe an upstream failure without exposing credentials.
+   *
+   * The listener is called for EVERY failure so it can be reported; act destructively only on
+   * `fatal`. This used to hand over a bare string, which gave the caller no way to tell "this one
+   * host is blocked" from "this proxy does not work" — and the launcher, reasonably enough, treated
+   * both as the latter and killed the browser.
+   */
+  onFailure: (listener: (failure: ProxyFailure) => void) => void;
 }
 
 function encodeUserinfo(username: string, password?: string): string {
@@ -140,19 +170,55 @@ export async function startLocalProxyAdapter(proxy: UpstreamProxy): Promise<Loca
       upstreamProxyUrl: upstream,
     }),
   });
-  const failureListeners = new Set<(message: string) => void>();
+  const failureListeners = new Set<(failure: ProxyFailure) => void>();
+
+  // Has ANY tunnel through this upstream ever succeeded?
+  //
+  // This single bit separates the two situations the old code conflated. If a CONNECT has ever
+  // returned 200 then the upstream is reachable, authenticated and working, so a later non-200 for
+  // one host is that provider ENFORCING POLICY — a blocklisted domain, a rate limit, a flaky exit
+  // node. That is ordinary and must not end the session. If nothing has ever succeeded, the proxy
+  // may genuinely be unusable.
+  let tunnelEverSucceeded = false;
+  let consecutiveFailures = 0;
+  server.on('tunnelConnectResponded', () => {
+    tunnelEverSucceeded = true;
+    consecutiveFailures = 0;
+  });
+
+  const emit = (failure: ProxyFailure): void => {
+    for (const listener of failureListeners) listener(failure);
+  };
+
   server.on('requestFailed', ({ error }: { error?: Error }) => {
     const message = (error?.message || 'upstream proxy request failed').replace(
       /\/\/[^@\s]+@/g,
       '//***@',
     );
-    for (const listener of failureListeners) listener(message);
+    consecutiveFailures += 1;
+    // proxy-chain raises this only for UNEXPECTED errors — a typed RequestError is answered to the
+    // client instead (server.js failRequest). Still not proof the upstream is dead.
+    emit({ message, fatal: !tunnelEverSucceeded && consecutiveFailures >= UNUSABLE_AFTER });
   });
+
   server.on('tunnelConnectFailed', ({ response }: { response?: { statusCode?: number } }) => {
-    const message = `upstream proxy tunnel failed${
-      response?.statusCode ? ` (HTTP ${response.statusCode})` : ''
-    }`;
-    for (const listener of failureListeners) listener(message);
+    const statusCode = response?.statusCode;
+    const message = `upstream proxy tunnel failed${statusCode ? ` (HTTP ${statusCode})` : ''}`;
+    consecutiveFailures += 1;
+
+    // 407 (and 401) mean the CREDENTIALS are wrong. Every request will fail identically, waiting
+    // cannot help, and the user has to change something — the one case worth ending the session
+    // over on the first occurrence.
+    const authFailed = statusCode === 407 || statusCode === 401;
+
+    // Any other non-200 is per-request policy, and it is NOT a leak. Chromium runs with
+    // --proxy-server and no bypass list, so a refused tunnel surfaces as
+    // ERR_TUNNEL_CONNECTION_FAILED on that one navigation; nothing is retried directly and the
+    // profile's real IP is never exposed. Killing the browser therefore bought no safety at all.
+    const unusable = !tunnelEverSucceeded && consecutiveFailures >= UNUSABLE_AFTER;
+
+    // `exactOptionalPropertyTypes` is on: omit the key rather than passing undefined.
+    emit({ message, fatal: authFailed || unusable, ...(statusCode ? { statusCode } : {}) });
   });
 
   try {

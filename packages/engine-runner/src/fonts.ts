@@ -602,11 +602,50 @@ function selectPersonaFontFiles(manifest: FontPackManifest, os: FontPersona): Pe
 }
 
 const NATIVE_FONT_PACKS_DIRNAME = 'native-font-packs';
-const NATIVE_FONT_PACK_STAGE_VERSION = 1;
+// Bumped to 2 when the staged layout was shortened for MAX_PATH (see stagedFontRelativePath). The
+// version is inside the content key, so every profile re-stages into a new short directory and no
+// existing stage is ever read with the new naming.
+const NATIVE_FONT_PACK_STAGE_VERSION = 2;
 const NATIVE_FONT_PACK_MARKER = 'font-pack.stage.json';
 
+/**
+ * How many hex characters of the content key name the stage directory.
+ *
+ * 16 rather than the full 64. This is a per-user-data-dir cache key, not a security boundary — the
+ * bytes are verified face by face against their own sha256 in `verifyStagedNativeFontPack` — so 64
+ * bits of collision resistance is ample, and the other 48 characters were pure MAX_PATH cost.
+ */
+const NATIVE_FONT_PACK_KEY_CHARS = 16;
+
+/**
+ * Where one face lands inside the staged pack. SHORT ON PURPOSE.
+ *
+ * MAX_PATH. Windows still refuses a non-`\\?\` path longer than 260 characters, `LongPathsEnabled`
+ * is 0 on a default install, and the engine calls bare `::GetFileAttributes` on these files
+ * (`IsUnsafePackPath` in `lobium_fonts.cc`). An over-length face therefore reads back as
+ * INVALID_FILE_ATTRIBUTES, `FontPackFaces` clears the WHOLE pack, and an empty pack fails the
+ * browser's DirectWrite initialisation — which happens LAZILY, on the first font resolution, well
+ * after the CDP endpoint is published. So the product reports the launch successful and the browser
+ * dies seconds later.
+ *
+ * The old layout was `files/<index4>-<sha12>-<basename>`, and pack basenames already carry their own
+ * 16-hex content prefix (`379010e87421a883-LiberationSerif-BoldItalic.ttf`, 47 chars). Together with
+ * a 64-hex key directory that put 155 characters below the user-data-dir, leaving a budget of 105 —
+ * while the real profile path is `…\com.lobster.browser\profiles\prf_<32hex>`, i.e. 91 plus the
+ * length of the Windows username. `Administrator` (13) landed on 259, one character inside the
+ * limit; any username of 15 characters or more was permanently over it, on every launch of every
+ * profile on that machine.
+ *
+ * The index alone suffices. The engine enumerates `files/`, filters on the extension and SORTS by
+ * path — it never parses the name — so a zero-padded index preserves an ordering that the sha and
+ * the family name never contributed to anyway. 8 characters instead of 65.
+ */
 function stagedFontRelativePath(index: number, file: FontPackFile): string {
-  return `files/${String(index).padStart(4, '0')}-${file.sha256.slice(0, 12)}-${basename(file.path)}`;
+  const name = basename(file.path);
+  const dot = name.lastIndexOf('.');
+  // The extension is load-bearing: IsFontFile() in the engine selects on it.
+  const ext = dot > 0 ? name.slice(dot).toLowerCase() : '.ttf';
+  return `files/${String(index).padStart(4, '0')}${ext}`;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -701,7 +740,8 @@ export async function stageNativeFontPack(
         files: selection.files.map((file) => [file.path, file.sha256, file.families]),
       }),
     )
-    .digest('hex');
+    .digest('hex')
+    .slice(0, NATIVE_FONT_PACK_KEY_CHARS);
   const stagesRoot = join(userDataDir, NATIVE_FONT_PACKS_DIRNAME);
   const destination = join(stagesRoot, key);
   await mkdir(stagesRoot, { recursive: true, mode: 0o700 });
