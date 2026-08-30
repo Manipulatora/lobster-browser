@@ -4,25 +4,47 @@
 and then nothing is there. No engine process, and `stop` answers `profile <id> is not running`. An
 immediate retry always works. Reproduced on both installers, so it is the product, not bundling.
 
-Two independent mechanisms were found that each kill the browser *after* the launch has been
-reported successful. Both are reproduced, and both are fixed here. **Be precise about what that does
-and does not settle:**
+**Cause 1 is confirmed, through the real product path.** Driving the actual sidecar `startProfile`
+RPC — the exact call the desktop makes, so font staging, host calibration, the fingerprint config
+and the launcher all run for real — against an authenticated upstream proxy that tunnels everything
+except one blocklisted host:
 
-| | proven | explains "retry works"? |
+```
+PRE-FIX
+12:55:09  startProfile OK — pid 9372, endpoint 127.0.0.1:51384   <- desktop reports SUCCESS
+12:55:20  upstream: 403 for optimizationguide-pa.googleapis.com
+12:55:21  browser pid 9372 *** GONE ***
+12:55:21  product status: 0 running                              <- "profile is not running"
+          [lobium] proxy upstream failed: upstream proxy tunnel failed (HTTP 403)
+
+POST-FIX (identical setup, identical block)
+12:56:18  startProfile OK — pid 10308
+12:56:27  upstream: 403 for optimizationguide-pa.googleapis.com
+12:57:02  browser pid 10308: ALIVE   (30s)   product status: 1 running
+          [lobium] upstream refused one request (HTTP 403) — the proxy is working;
+                   that host is blocked or throttled. The browser keeps running.
+```
+
+Nothing navigated anywhere. **Chrome CONNECTed to that host on its own, seven seconds after
+startup** — which is precisely the first-launch asymmetry: a fresh profile makes those calls and a
+warmed one does not. That is the reported bug, reproduced and fixed.
+
+A second, independent kill path was also found and fixed. Keep the two straight:
+
+| | status | explains "retry works"? |
 | --- | --- | --- |
-| **Cause 1** — one blocked domain kills the browser | reproduced end to end | **yes**, if the profile has proxy credentials |
-| **Cause 2** — staged font pack over MAX_PATH | reproduced end to end | **no** — it is *permanent* for an affected user |
+| **Cause 1** — one blocked domain kills the browser | **confirmed through the real product path** | **yes** — for any profile with proxy credentials |
+| **Cause 2** — staged font pack over MAX_PATH | proven mechanism, real shipped defect | **no** — it is *permanent* for an affected user |
 
-Cause 1 fits every symptom including the retry, but only for a profile with proxy credentials, and
-whether the originally reported profile had one was never recorded. Cause 2 produces an identical
-visible failure but on *every* launch for any user whose Windows username is 15+ characters, so it
-cannot by itself be the reported first-launch-only bug — an adversarial re-test confirmed that a
-deliberately broken pack makes the *retry* fail loudly at `verifyStagedNativeFontPack`, which is the
-wrong pair of outcomes.
+Cause 2 produces an identical visible failure but on *every* launch for any user whose Windows
+username is 15+ characters, so it is not the first-launch-only bug reported here — an adversarial
+re-test confirmed a deliberately broken pack makes the *retry* fail loudly at
+`verifyStagedNativeFontPack`, the wrong pair of outcomes. It is fixed because it is a real defect
+that presents to a user as exactly this symptom, not because it is the instance that was reported.
 
-So: two real bugs, both shipped, both fixed. Which one a given user hit is not established, and
-**the log now written to `%LOCALAPPDATA%\lobster\logs` is what will settle it** — that logging did
-not exist when the symptom was first reported, which is the whole reason it stayed a mystery.
+The log now written to `%LOCALAPPDATA%\lobster\logs` distinguishes them in one line if either
+recurs; that logging did not exist when the symptom was first reported, which is why it stayed a
+mystery for a week.
 
 ---
 
@@ -70,13 +92,12 @@ and `proxy-auth-adapter.ts` raised that signal from proxy-chain's **per-request*
 A non-200 on one CONNECT is routine, not fatal. Residential providers answer 403 for blocklisted
 hosts, 429 when rate limiting, 502 on a flaky exit node.
 
-**What is proven, and what is inferred.** That a single non-200 CONNECT kills the browser after the
-launch is reported successful is *proven* — reproduced below. The first-launch asymmetry is
-*inferred*: a fresh Chrome profile CONNECTs to a burst of Google endpoints within seconds of
-starting (GCM registration, safe browsing, the component updater, optimization hints) that a warmed
-profile no longer makes, so the first launch has strictly more chances to hit a blocked host. That
-is a sound mechanism for "retry works", but it was not measured against a real provider — doing so
-needs a profile with real proxy credentials, which this host does not have.
+**Both halves are now measured.** That a single non-200 CONNECT kills the browser after the launch
+is reported successful: reproduced. And the first-launch asymmetry: reproduced too — driving the
+real  RPC, Chrome CONNECTed to  on its own seven
+seconds after startup, with no navigation from the harness at all. A fresh profile makes that class
+of call (GCM registration, safe browsing, the component updater, optimization hints); a warmed one
+does not. One 403 on any of them was enough.
 
 **Reproduced** with an upstream that answers 403 for a single host and tunnels everything else:
 
