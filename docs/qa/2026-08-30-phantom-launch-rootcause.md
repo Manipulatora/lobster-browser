@@ -1,11 +1,28 @@
-# The phantom first launch — root cause, 2026-08-30
+# The phantom launch — two proven kill paths, 2026-08-30
 
 **Symptom.** The first profile launch after a fresh install reports success — `code=0` and a pid —
 and then nothing is there. No engine process, and `stop` answers `profile <id> is not running`. An
 immediate retry always works. Reproduced on both installers, so it is the product, not bundling.
 
-It has **two** independent causes, each of which produces that exact symptom on its own. Both are
-fixed here. Both were found by reproducing them, not by reading code.
+Two independent mechanisms were found that each kill the browser *after* the launch has been
+reported successful. Both are reproduced, and both are fixed here. **Be precise about what that does
+and does not settle:**
+
+| | proven | explains "retry works"? |
+| --- | --- | --- |
+| **Cause 1** — one blocked domain kills the browser | reproduced end to end | **yes**, if the profile has proxy credentials |
+| **Cause 2** — staged font pack over MAX_PATH | reproduced end to end | **no** — it is *permanent* for an affected user |
+
+Cause 1 fits every symptom including the retry, but only for a profile with proxy credentials, and
+whether the originally reported profile had one was never recorded. Cause 2 produces an identical
+visible failure but on *every* launch for any user whose Windows username is 15+ characters, so it
+cannot by itself be the reported first-launch-only bug — an adversarial re-test confirmed that a
+deliberately broken pack makes the *retry* fail loudly at `verifyStagedNativeFontPack`, which is the
+wrong pair of outcomes.
+
+So: two real bugs, both shipped, both fixed. Which one a given user hit is not established, and
+**the log now written to `%LOCALAPPDATA%\lobster\logs` is what will settle it** — that logging did
+not exist when the symptom was first reported, which is the whole reason it stayed a mystery.
 
 ---
 
@@ -51,10 +68,15 @@ and `proxy-auth-adapter.ts` raised that signal from proxy-chain's **per-request*
 (`chain.js:81`: 401/407 map to AUTH_FAILED, everything else to NON_200).
 
 A non-200 on one CONNECT is routine, not fatal. Residential providers answer 403 for blocklisted
-hosts, 429 when rate limiting, 502 on a flaky exit node. And a fresh Chrome profile CONNECTs to a
-burst of Google endpoints within seconds of starting — GCM registration, safe browsing, the
-component updater, optimization hints — which is exactly why the **first** launch was the one that
-died and a retry, on a warmed profile that no longer makes those calls, survived.
+hosts, 429 when rate limiting, 502 on a flaky exit node.
+
+**What is proven, and what is inferred.** That a single non-200 CONNECT kills the browser after the
+launch is reported successful is *proven* — reproduced below. The first-launch asymmetry is
+*inferred*: a fresh Chrome profile CONNECTs to a burst of Google endpoints within seconds of
+starting (GCM registration, safe browsing, the component updater, optimization hints) that a warmed
+profile no longer makes, so the first launch has strictly more chances to hit a blocked host. That
+is a sound mechanism for "retry works", but it was not measured against a real provider — doing so
+needs a profile with real proxy credentials, which this host does not have.
 
 **Reproduced** with an upstream that answers 403 for a single host and tunnels everything else:
 
@@ -128,6 +150,17 @@ hidden → CDP up, then `child exit code=0x80000003` with
 
 Note this variant is *permanent* on an affected machine, not first-launch-only — every launch of
 every profile for any user whose Windows username is 15 characters or longer.
+
+**So it is not, on its own, the reported bug.** An adversarial re-test made the point sharply: with a
+pack deliberately broken, the *second* launch does not reach `spawn` at all — `stageNativeFontPack`
+→ `verifyStagedNativeFontPack` throws `ENOENT` and the product surfaces a loud launch error. That is
+phantom-success-then-loud-failure, where the report is phantom-success-then-working-retry. The
+MAX_PATH variant differs only in that Node can read the long paths the engine cannot (Node uses the
+Unicode APIs; the engine calls bare `::GetFileAttributes`), so staging keeps succeeding and the
+crash simply repeats — permanently, not once.
+
+It is fixed here because it is a real shipped defect that presents to a user as exactly this
+symptom, not because it is proven to be the instance that was reported.
 
 ### The fix
 
