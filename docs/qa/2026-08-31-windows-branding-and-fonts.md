@@ -3,8 +3,63 @@
 **For the agent on the Windows build host.** No memory of the conversation that produced this is
 assumed. `git pull` first — everything below has landed on the Linux side.
 
-This is one engine rebuild that closes three of the product owner's test findings. Two of them
-require the rebuild; the third is already fixed in app-side code and only needs you to confirm it.
+This is one engine rebuild plus one desktop rebuild. Two findings need the engine rebuilt; the rest
+are already fixed in app-side code and need you to confirm them on a real Windows install, which is
+the only place several of them can be observed at all.
+
+---
+
+## Also in this release, and needing your confirmation
+
+### Lobee never loaded — desktop rebuild, no engine rebuild
+
+Reported: *"I cannot find the Lobee agent extension in the profile. Where is it?"*
+
+It was shipping the whole time. `build-lobee.mjs` runs in both product scripts, `tauri.conf.json`
+maps `resources/lobee` → `lobee`, and `build-windows-product.ps1` **fails the build** if
+`resources\lobee` is missing. The extension was on disk in every install.
+
+Nothing ever told the browser about it. `prepareDefaultLobeeExtension` loads Lobee only when
+`LOBSTER_LOBEE_DIR` names the bundle, and a repo-wide grep found exactly one production setter:
+`scripts/build-linux-product.sh`, which writes the export into a **Linux launcher wrapper**. No
+`.rs` file set it and the Windows build never did — Windows launches the Tauri exe directly, with
+no wrapper to export into. So the variable was always unset on Windows, the function returned
+`undefined`, and the launcher silently omitted both `--load-extension` and
+`--lobium-open-side-panel`.
+
+`publish_lobee_env` in `lib.rs` now resolves `<app_resource_dir>/lobee` (through the
+verbatim-stripping helper — never `resource_dir()` directly, which returns `\\?\C:\…` on Windows),
+requires a real `manifest.json`, and runs in setup before the sidecar spawns. Both skip paths now
+log loudly naming every directory searched, because the silence is what hid this.
+
+**What to check on a fresh install.** The log should carry
+`Lobee side panel published; it loads into every profile` with the resolved path. If it instead says
+`no Lobee extension bundle found`, its `searched` field names exactly which paths were probed —
+send that back, it is the whole diagnosis. Then open a profile and confirm the panel is docked on
+the right.
+
+Three things could not be verified from Linux and are specifically yours:
+`app_resource_dir()` resolving to the real installed `lobee` directory; the `#[cfg(windows)]` half
+of `strip_verbatim_prefix`, which is compiled out here; and the engine actually honouring
+`--lobium-open-side-panel` so the panel is *visibly* docked. Everything up to the flag being emitted
+is proven.
+
+**Do not be surprised by a "Lobee is included with Plus" screen.** Lobee is gated to `plus`/`pro`/
+`max` and the test account is on `free`; wallet balance is irrelevant, the plan check runs first.
+That is correct behaviour, not a regression — the account needs a real subscription tier before the
+panel will run a task.
+
+### The operator OpenRouter credential — backend only, no build
+
+A new `OPENROUTER_API_KEY` goes in `/etc/lobster/backend.env` (root:lobster, 0640) followed by
+`sudo systemctl restart lobster-backend` — a restart, not a reload; `EnvironmentFile` is read once
+at spawn. This needs no desktop or engine change and is **not your task**; it is recorded here so
+you are not surprised by agent behaviour changing under you.
+
+Verify a key with `GET /agent/llm/models` returning a **non-empty** roster. Do not trust
+`/health/ready` — it checks Postgres only and goes green with a completely broken key. `GET
+/health/agent` now reports whether a credential is configured (never its value, and it does not
+probe the provider).
 
 ---
 
@@ -139,6 +194,7 @@ Test-Path lobium\stage-branding.mjs
 Test-Path lobium\branding\BRANDING
 Test-Path lobium\branding\overlay\chrome\app\theme\chromium\win\chromium.ico
 (Get-Content lobium\patches\series) -match 'windows-font-renderer-fallback'
+Select-String -Path apps\desktop\src-tauri\src\lib.rs -Pattern 'publish_lobee_env'   # Lobee fix present
 ```
 
 ### 2. Build the engine
@@ -216,6 +272,31 @@ powershell -ExecutionPolicy Bypass -File scripts\build-windows-product.ps1 -Bund
 
 **Remember the `.lobium-engine-version` stamp beside the bundled engine** — without it every fresh
 bundled install re-downloads the engine forever.
+
+Both installers carry the Lobee fix automatically — it is Rust in the desktop app, so it ships with
+any normal `build-windows-product.ps1` run. Nothing extra to stage.
+
+### 6. Install and confirm on a real machine
+
+Several fixes in this release cannot be observed anywhere except a Windows install. Install the
+BUNDLED installer on a clean machine and check, in one pass:
+
+* **Branding** — taskbar and Explorer icon are the Lobium mark; `chrome://version` shows the Lobium
+  logo and application name; Explorer → Properties on `chrome.exe` reads Lobium / The Lobium
+  Authors. Then somewhere ordinary in the UI: the password bubble's "Relaunch" prompt and the SSL
+  interstitial should say Lobium, not Chromium — 90 such strings were rebranded and they are the
+  ones a user actually meets.
+* **Fonts** — emoji render; ordinary text is in the expected face; scrollbar arrows are visible;
+  Arabic / CJK / Devanagari render rather than tofu.
+* **Lobee** — the side panel is docked on the right in a fresh profile, and the log line named
+  above appears.
+* **Profile avatars** — rows show a lobster silhouette, each profile a different tint. Note the
+  taskbar/window icon still shows initials: the engine-side half of that has not been built yet, so
+  the mismatch is expected and is not a bug to report.
+* **Export/import a profile** — this errored on every attempt before; it should now run to
+  completion with a progress line, and Cancel should actually cancel.
+* **Proxy** — a profile that carries a proxy should still carry it after a sync or an
+  export/import round trip. This was silently dropped for every modern profile.
 
 ---
 
