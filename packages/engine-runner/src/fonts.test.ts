@@ -89,6 +89,60 @@ test('Windows CSS alias plan distinguishes metric clones from class approximatio
   assert.deepEqual(plan.classFallback, ['Consolas', 'Segoe UI']);
 });
 
+test('engine UI icon families are never aliased - an absent family IS the correct answer', () => {
+  // ui/native_theme/native_theme_fluent.cc draws the Fluent scrollbar arrows as Segoe Fluent Icons
+  // codepoints (U+EDDB/U+EDDC) and falls back to its own hand-drawn vector triangles ONLY when the
+  // family lookup returns no typeface. Aliasing the family onto the pack sans handed the theme a
+  // real typeface with no chevron glyphs, so Windows-persona profiles rendered the arrow buttons as
+  // invisible .notdef boxes while personas that never claim the family (Android) kept theirs - the
+  // per-profile split observed in the field.
+  const plan = planFontAliases(
+    'windows',
+    [
+      'Liberation Sans',
+      'Liberation Serif',
+      'Liberation Mono',
+      'Noto Color Emoji',
+      'Noto Sans Symbols2',
+    ],
+    [
+      'Segoe Fluent Icons',
+      'Segoe MDL2 Assets',
+      'HoloLens MDL2 Assets',
+      'Segoe UI Emoji',
+      'Wingdings',
+      'Arial',
+    ],
+  );
+  assert.ok(!('Segoe Fluent Icons' in plan.aliases), 'no alias may answer for the icon family');
+  assert.ok(!('Segoe MDL2 Assets' in plan.aliases));
+  assert.ok(!('HoloLens MDL2 Assets' in plan.aliases));
+  // Emoji/symbol claims are coverage requests, not text requests: they land on the pack's coverage
+  // faces, never on a Latin sans that owns none of the glyphs pages actually ask them for.
+  assert.equal(plan.aliases['Segoe UI Emoji'], 'Noto Color Emoji');
+  assert.equal(plan.aliases['Wingdings'], 'Noto Sans Symbols2');
+  // Ordinary metric-clone mappings are untouched by either exclusion.
+  assert.equal(plan.aliases['Arial'], 'Liberation Sans');
+});
+
+test('emoji/symbol claims degrade to the persona sans only when no coverage face is packed', () => {
+  // The coverage tables are a claim about the PACK, not a wish list: preferring an absent Noto face
+  // would resolve to fontconfig's own last-resort pick. First physically present face wins, and a
+  // pack with no coverage face at all falls back to the readable persona sans (the pre-existing
+  // behavior, now explicit).
+  const bare = planFontAliases('windows', ['Liberation Sans'], ['Segoe UI Emoji', 'Wingdings']);
+  assert.equal(bare.aliases['Segoe UI Emoji'], 'Liberation Sans');
+  assert.equal(bare.aliases['Wingdings'], 'Liberation Sans');
+  // Symbols2 > Symbols > Color Emoji: with only the emoji face present, symbols ride on it, since
+  // its pictographic coverage still beats a Latin text face.
+  const partial = planFontAliases(
+    'windows',
+    ['Liberation Sans', 'Noto Color Emoji'],
+    ['Wingdings'],
+  );
+  assert.equal(partial.aliases['Wingdings'], 'Noto Color Emoji');
+});
+
 test('native fallback order puts persona sans/serif/mono ahead of alphabetical coverage', () => {
   assert.deepEqual(
     orderFontFallbackFamilies('android', [
@@ -420,6 +474,33 @@ test('a metric clone that the pack does not carry falls back to its class face',
     ['Calibri'],
   );
   assert.match(xml, /<alias><family>Calibri<\/family><prefer><family>Liberation Sans<\/family>/);
+});
+
+test('the private fontconfig lets engine icon lookups FAIL so the theme draws its triangles', () => {
+  // Linux half of the scrollbar-arrow fix: even with no <alias> for Segoe Fluent Icons, the
+  // universal weak fallback appends the pack sans into every pattern, and Skia's family-name check
+  // then accepts the sans face as a "match" for the icon request - a real typeface with no arrow
+  // glyphs. The guards must sit INSIDE the same <match> as the weak append (multiple <test>
+  // elements in one match are ANDed by fontconfig), so the append still fires for everything else.
+  const xml = buildFontConfig(
+    'windows',
+    '/profile/fonts',
+    '/profile/cache',
+    ['Liberation Sans', 'Liberation Serif', 'Liberation Mono'],
+    ['Segoe Fluent Icons', 'Segoe MDL2 Assets', 'Arial'],
+  );
+  assert.doesNotMatch(xml, /<alias><family>Segoe Fluent Icons<\/family>/);
+  assert.doesNotMatch(xml, /<alias><family>Segoe MDL2 Assets<\/family>/);
+  assert.match(
+    xml,
+    /<match target="pattern">\s*(<test qual="all" compare="not_eq" name="family"><string>(?:Segoe Fluent Icons|Segoe MDL2 Assets|HoloLens MDL2 Assets)<\/string><\/test>\s*){3}<edit name="family" mode="append_last" binding="weak"><string>Liberation Sans<\/string><\/edit>/,
+  );
+  // Each engine family gets its own guard - {3} above cannot silently drop one.
+  for (const family of ['Segoe Fluent Icons', 'Segoe MDL2 Assets', 'HoloLens MDL2 Assets']) {
+    assert.match(xml, new RegExp(`compare="not_eq" name="family"><string>${family}</string>`));
+  }
+  // An ordinary claimed family still aliases and still reaches the weak sans last resort.
+  assert.match(xml, /<alias><family>Arial<\/family><prefer><family>Liberation Sans/);
 });
 
 test('a reinstalled pack with identical contents still re-links the profile', async () => {

@@ -33,7 +33,12 @@ const FONTCONFIG_FILENAME = 'lobium-fonts.conf';
 const FONT_PROVISION_CACHE_FILENAME = '.lobium-fonts-ready';
 // Bump whenever buildFontConfig semantics change so existing profiles cannot keep a stale XML file
 // merely because their selected font binaries are unchanged.
-const FONT_CONFIG_SCHEMA_VERSION = 2;
+// v3: the engine-UI glyph families (Segoe Fluent Icons et al) are no longer aliased and the
+//     universal weak fallback refuses to answer for them (restores the theme's own scrollbar-arrow
+//     drawing), and emoji/symbol claims now land on the pack's coverage faces instead of a Latin
+//     sans. Windows needs no counterpart bump: fontAliases are recomputed by planFontAliases on
+//     every launch and handed straight to the engine — nothing there is cached against a version.
+const FONT_CONFIG_SCHEMA_VERSION = 3;
 export const FONT_PACK_MANIFEST_FILENAME = 'font-pack.manifest.json';
 const verifiedPackFiles = new Set<string>();
 
@@ -56,10 +61,30 @@ interface PersonaFontSelection {
   files: FontPackFile[];
 }
 
-const GENERIC_PREFERENCES: Record<
-  FontPersona,
-  { sans: string[]; serif: string[]; mono: string[] }
-> = {
+/**
+ * Every bucket a claimed family name can classify into. `sans`/`serif`/`mono` are METRIC-SHAPE
+ * classes — a fallback face should at least come from the right text class. `emoji`/`symbol` are
+ * GLYPH-COVERAGE classes: a request for `Segoe UI Emoji` or `Wingdings` is asking for pictographs,
+ * and answering it with a Latin text face renders every glyph a page actually wants from it as a
+ * .notdef box (the "no emoji" symptom). Coverage classes therefore resolve to coverage faces.
+ */
+type FontClass = 'sans' | 'serif' | 'mono' | 'emoji' | 'symbol';
+
+/**
+ * The coverage classes resolve identically for every persona — there is no metric ambition here,
+ * only glyph repertoire, and the pack carries exactly one color-emoji face. For symbols the Noto
+ * faces are tried in coverage order: Symbols2 first because it carries the geometric/arrow/legacy-
+ * computing ranges a Wingdings-style request actually draws from, then Symbols, then Noto Color
+ * Emoji as a last pictographic resort (its overlap still beats a Latin sans). When none of these is
+ * physically present, preferredFamily degrades the class to the persona sans — readable text over
+ * an arbitrary first-on-disk face.
+ */
+const COVERAGE_PREFERENCES: Record<'emoji' | 'symbol', string[]> = {
+  emoji: ['Noto Color Emoji'],
+  symbol: ['Noto Sans Symbols2', 'Noto Sans Symbols', 'Noto Color Emoji'],
+};
+
+const GENERIC_PREFERENCES: Record<FontPersona, Record<FontClass, string[]>> = {
   windows: {
     // CSS generics on Windows conventionally resolve to Arial/Times New Roman. Liberation is the
     // bundled metric-compatible substitute; Carlito/Caladea target Calibri/Cambria and made ordinary
@@ -67,21 +92,25 @@ const GENERIC_PREFERENCES: Record<
     sans: ['Liberation Sans', 'Carlito', 'Noto Sans', 'DejaVu Sans'],
     serif: ['Liberation Serif', 'Caladea', 'Noto Serif', 'DejaVu Serif'],
     mono: ['Liberation Mono', 'Noto Sans Mono', 'DejaVu Sans Mono'],
+    ...COVERAGE_PREFERENCES,
   },
   macos: {
     sans: ['Liberation Sans', 'Carlito', 'Noto Sans', 'DejaVu Sans'],
     serif: ['Liberation Serif', 'Caladea', 'Noto Serif', 'DejaVu Serif'],
     mono: ['Liberation Mono', 'Noto Sans Mono', 'DejaVu Sans Mono'],
+    ...COVERAGE_PREFERENCES,
   },
   linux: {
     sans: ['Ubuntu Sans', 'Ubuntu', 'Liberation Sans', 'Noto Sans', 'DejaVu Sans', 'Carlito'],
     serif: ['Liberation Serif', 'Noto Serif', 'DejaVu Serif', 'Caladea'],
     mono: ['Ubuntu Mono', 'DejaVu Sans Mono', 'Liberation Mono', 'Noto Sans Mono'],
+    ...COVERAGE_PREFERENCES,
   },
   android: {
     sans: ['Roboto', 'Noto Sans', 'Roboto Condensed', 'DejaVu Sans'],
     serif: ['Noto Serif', 'FreeSerif', 'DejaVu Serif'],
     mono: ['Noto Sans Mono', 'Roboto Mono', 'DejaVu Sans Mono'],
+    ...COVERAGE_PREFERENCES,
   },
 };
 
@@ -89,14 +118,14 @@ function xmlEscape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function preferredFamily(
-  os: FontPersona,
-  kind: 'sans' | 'serif' | 'mono',
-  selected: readonly string[],
-): string {
-  return (
-    GENERIC_PREFERENCES[os][kind].find((family) => selected.includes(family)) ?? selected[0] ?? ''
-  );
+function preferredFamily(os: FontPersona, kind: FontClass, selected: readonly string[]): string {
+  const preferred = GENERIC_PREFERENCES[os][kind].find((family) => selected.includes(family));
+  if (preferred) return preferred;
+  // A coverage class with no purpose-built face in the pack degrades to the persona sans, NOT to
+  // `selected[0]`: the first pack family is ordering luck, and the sans face is a deliberate,
+  // persona-consistent choice (exactly what buildFontConfig always did for the `emoji` generic).
+  if (kind === 'emoji' || kind === 'symbol') return preferredFamily(os, 'sans', selected);
+  return selected[0] ?? '';
 }
 
 /** Canonical native fallback priority: readable sans first, then serif/mono, then coverage. */
@@ -147,10 +176,16 @@ function metricClone(name: string, physicalFamilies: readonly string[]): string 
 }
 
 /**
- * Classify an arbitrary font-family name into a serif/sans/mono bucket by its name, so a claimed
- * family with no bundled face still resolves to a metric-class-appropriate open face.
+ * Classify an arbitrary font-family name into a class bucket by its name, so a claimed family with
+ * no bundled face still resolves to a class-appropriate open face. The coverage classes are tested
+ * FIRST: `Segoe UI Emoji` reads as sans by every other cue, yet sending it (or `Wingdings`) to a
+ * Latin text face guarantees a .notdef box for every glyph a page requests from it. Engine icon
+ * families (MDL2/Fluent/HoloLens) are deliberately NOT a class here — they must resolve to nothing
+ * at all, so they are excluded from aliasing outright via ENGINE_UI_GLYPH_FAMILIES.
  */
-function familyClass(name: string): 'sans' | 'serif' | 'mono' {
+function familyClass(name: string): FontClass {
+  if (/(emoji)/i.test(name)) return 'emoji';
+  if (/(symbol|wingding|webding|dingbat)/i.test(name)) return 'symbol';
   if (/(mono|courier|consol|typewriter|terminal|\bcode\b|fixed)/i.test(name)) return 'mono';
   if (
     /(serif|times|georgia|roman|garamond|cambria|palatino|book antiqua|minion|century|ming|song|batang|sung|mincho)/i.test(
@@ -187,6 +222,21 @@ const RESERVED_FONT_ALIAS_NAMES = new Set([
 ]);
 
 /**
+ * Families the ENGINE ITSELF renders UI glyphs from, looked up by name through the same
+ * DirectWrite/fontconfig path as page text (ui/native_theme/native_theme_fluent.cc draws the
+ * Fluent scrollbar arrows as Segoe Fluent Icons codepoints and falls back to its own vector
+ * triangles ONLY when the family resolves to nothing). Aliasing one of these onto a pack face
+ * hands the theme a real typeface with no arrow glyphs, and the buttons render as invisible
+ * .notdef boxes. Never alias them: an absent family degrades to Chromium's own fallback drawing,
+ * which is exactly what stock Chrome does on a host without the font.
+ */
+const ENGINE_UI_GLYPH_FAMILIES = new Set([
+  'Segoe Fluent Icons',
+  'Segoe MDL2 Assets',
+  'HoloLens MDL2 Assets',
+]);
+
+/**
  * Build the one canonical claimed-family -> physical-family plan used by Linux fontconfig and the
  * Windows FontDataService CSS path. This does not fabricate Local Font Access or PostScript names.
  */
@@ -195,17 +245,28 @@ export function planFontAliases(
   physicalFamilies: readonly string[],
   claimedFamilies: readonly string[],
 ): FontAliasPlan {
-  const preferByClass: Record<'sans' | 'serif' | 'mono', string> = {
+  const preferByClass: Record<FontClass, string> = {
     sans: preferredFamily(os, 'sans', physicalFamilies),
     serif: preferredFamily(os, 'serif', physicalFamilies),
     mono: preferredFamily(os, 'mono', physicalFamilies),
+    emoji: preferredFamily(os, 'emoji', physicalFamilies),
+    symbol: preferredFamily(os, 'symbol', physicalFamilies),
   };
   const physical = new Set(physicalFamilies);
   const aliases: Record<string, string> = {};
   const metricCompatible: string[] = [];
   const classFallback: string[] = [];
   for (const family of [...new Set(claimedFamilies)].sort((a, b) => a.localeCompare(b, 'en'))) {
-    if (physical.has(family) || RESERVED_FONT_ALIAS_NAMES.has(family)) continue;
+    if (
+      physical.has(family) ||
+      RESERVED_FONT_ALIAS_NAMES.has(family) ||
+      // Engine icon families must resolve to NO typeface so the native theme draws its own arrows
+      // (see ENGINE_UI_GLYPH_FAMILIES). With no entry here, lobium::FontFamilyForMatching — the
+      // Windows consumer of this map — leaves the request alone and DirectWrite reports it absent.
+      ENGINE_UI_GLYPH_FAMILIES.has(family)
+    ) {
+      continue;
+    }
     const clone = metricClone(family, physicalFamilies);
     const target = clone ?? preferByClass[familyClass(family)];
     if (!target) continue;
@@ -274,14 +335,14 @@ export function buildFontConfig(
     <test qual="any" name="family"><string>${xmlEscape(family)}</string></test>
     <edit name="family" mode="prepend" binding="strong"><string>${xmlEscape(prefer)}</string></edit>
   </match>`;
-  const preferByClass: Record<'sans' | 'serif' | 'mono', string> = {
+  const preferByClass: Record<FontClass, string> = {
     sans: preferredFamily(os, 'sans', physicalFamilies),
     serif: preferredFamily(os, 'serif', physicalFamilies),
     mono: preferredFamily(os, 'mono', physicalFamilies),
+    emoji: preferredFamily(os, 'emoji', physicalFamilies),
+    symbol: preferredFamily(os, 'symbol', physicalFamilies),
   };
-  const emoji = physicalFamilies.includes('Noto Color Emoji')
-    ? 'Noto Color Emoji'
-    : preferByClass.sans;
+  const emoji = preferByClass.emoji;
   const math = physicalFamilies.includes('Noto Sans Math') ? 'Noto Sans Math' : preferByClass.serif;
   // Every CSS generic and system-UI keyword is bound to its class-appropriate bundled face with a
   // STRONG preference (not just a weak <alias><prefer>). This is essential, not cosmetic: because the
@@ -339,6 +400,19 @@ export function buildFontConfig(
     lines.push(alias(family, target));
   }
   const cjkRules = cjkLanguageRules(physicalFamilies);
+  // Guards for the universal weak fallback below. Skia's fontconfig backend accepts a match when the
+  // returned face's family name appears anywhere in the POST-SUBSTITUTION pattern, so the weak sans
+  // appended to every pattern makes even a `Segoe Fluent Icons` request "resolve" — to a real
+  // typeface with no arrow glyphs, which is precisely the failure FIX 1 exists to prevent (the
+  // native theme draws its own vector triangles only when the lookup returns NOTHING). One not_eq
+  // test per engine family; multiple <test> elements inside a <match> are ANDed, so the append still
+  // fires for every other family. qual="all": skip only when every family value is a guarded name.
+  const engineUiGlyphGuards = [...ENGINE_UI_GLYPH_FAMILIES]
+    .map(
+      (family) =>
+        `    <test qual="all" compare="not_eq" name="family"><string>${xmlEscape(family)}</string></test>`,
+    )
+    .join('\n');
   return `<?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
 <fontconfig>
@@ -352,8 +426,14 @@ ${cjkRules}
        or a persona family the pack cannot physically carry) would otherwise resolve to whichever pack
        file sorts first on disk — Liberation Mono — rendering ordinary text monospaced. Append the
        persona sans face as a weak final fallback so unmapped requests degrade to readable sans, while
-       every strong prepend above (mono/serif/emoji/CJK) still wins for its own request. -->
+       every strong prepend above (mono/serif/emoji/CJK) still wins for its own request.
+       EXCEPT the engine's own icon families (the not_eq tests): ui/native_theme/native_theme_fluent.cc
+       draws the Fluent scrollbar arrows as Segoe Fluent Icons codepoints and hand-draws vector
+       triangles ONLY when the family lookup returns no typeface, so for those names an unanswered
+       request IS the correct answer — a sans fallback here renders the arrows as invisible .notdef
+       boxes instead. -->
   <match target="pattern">
+${engineUiGlyphGuards}
     <edit name="family" mode="append_last" binding="weak"><string>${xmlEscape(preferByClass.sans)}</string></edit>
   </match>
   <!-- The private config deliberately excludes the host font configuration, so carry deterministic
