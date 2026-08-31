@@ -230,12 +230,21 @@ bundled install re-downloads the engine forever.
 4. **Emoji actually rasterize.** One caveat worth an explicit check: the pack's `NotoColorEmoji.ttf`
    is a **CBDT/CBLC bitmap font with no `glyf`/`loca`/`CFF` outline table at all** — I confirmed this
    by parsing the bytes out of the published zip. It clearly *loads* today (DirectWrite's strict
-   all-or-nothing pack registration would otherwise have killed the whole font system and the
-   browser would render nothing), but loading is not the same as rasterizing colour glyphs. **If
-   emoji are still blank after this rebuild, that is the next thing to test** — and the fix would be
-   to swap in Google's COLRv1 build (`Noto-COLRv1.ttf`), which has real `glyf`+`loca` outlines plus
-   `COLR`/`CPAL`, reports the identical family/PostScript name (so it is a drop-in with no persona or
-   alias change), and is 5.0 MB against the current 10.7 MB.
+   all-or-nothing pack registration would otherwise have killed the whole font system), but loading
+   is not the same as rasterizing colour glyphs. **If emoji are still blank after this rebuild, that
+   is the next thing to test** — and the fix would be to swap in Google's COLRv1 build
+   (`Noto-COLRv1.ttf`), which has real `glyf`+`loca` outlines plus `COLR`/`CPAL`, reports the
+   identical family/PostScript name (so it is a drop-in with no persona or alias change), and is
+   5.0 MB against the current 10.7 MB.
+
+   **This is now a latent risk, not the live phantom-launch bug.** `589db08` found and fixed that
+   one independently: the staged pack path exceeded Windows `MAX_PATH`, so `FontPackFaces` cleared
+   the whole pack and DirectWrite initialisation failed *lazily*, on the first font resolution —
+   after the CDP endpoint was already published, which is why the product reported a successful
+   launch and the browser died seconds later. Worth noting that both bugs reach the browser through
+   the *same* fail-closed chain (empty or unregisterable pack → no restricted collection → no
+   fonts), so if a font-shaped launch failure ever reappears, check pack registration before
+   suspecting anything else.
 
 ### One open question for the product owner, not for you
 
