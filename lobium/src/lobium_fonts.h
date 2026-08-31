@@ -71,6 +71,28 @@ bool FontFamilyAllowed(std::string_view family);
 // conversion (and pick different case rules).
 bool FontFamilyAllowed(std::u16string_view family);
 
+// True when `family` is one of the persona's PHYSICAL pack families, i.e. a
+// member of `font_fallback_families` (case-insensitively).
+//
+// This exists for the RENDERER, not the browser. Windows font isolation
+// substitutes a claimed family onto a metric-compatible physical pack face in
+// the browser process, but Blink then re-validates the result in the renderer
+// BY FAMILY NAME (see font_cache_skia_win.cc): the SkTypeface it rebuilds from
+// the pack bytes carries the physical name, so a request for "Segoe UI" served
+// from "Liberation Sans" fails the name check and text falls through to the
+// last-resort face; emoji fallback re-resolves "Noto Color Emoji" by name and
+// gets nothing. This predicate lets that check accept a typeface whose own
+// family is a member of the profile's OWN advertised pack inventory.
+//
+// Unlike FontFamilyAllowed this fails CLOSED: with no policy (or no pack
+// inventory) it returns false, so stock Chromium's by-name verification is left
+// exactly as-is. It is a membership test over the profile's own configuration
+// and reveals nothing about the host font set.
+bool FontFamilyIsPackPhysical(std::string_view family);
+
+// The same test for a UTF-16 family name, mirroring the FontFamilyAllowed pair.
+bool FontFamilyIsPackPhysical(std::u16string_view family);
+
 // True when a PostScript / full font name may resolve for the active persona.
 //
 // `src: local("ArialMT")` and the Local Font Access blob API look a face up by

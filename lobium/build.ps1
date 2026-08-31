@@ -379,6 +379,31 @@ if (ShouldRun 'patch') {
 }
 
 # --------------------------------------------------------------------------------------------
+# 2b. Stage Lobium branding into the checkout.
+#
+# Runs AFTER the patch step (and after -Force's `git checkout -- .` tree reset) and BEFORE gn gen, so
+# nothing can revert it. The stager is deterministic and Playwright-free: it mirrors the committed
+# lobium/branding/overlay (product_logo_* rasters + the Windows chrome.ico), copies the Lobium
+# BRANDING over chrome/app/theme/chromium/BRANDING (so version_info compiles "Lobium"), applies the
+# product-name string transforms (incl. components/components_chromium_strings.grd), and stages the
+# NTP icon PNGs. Without this, a clean checkout + build shipped stock Chromium branding.
+if (ShouldRun 'patch') {
+    Step '2b. Stage Lobium branding (overlay + BRANDING + strings + NTP icons)'
+    $stager = Join-Path $Here 'stage-branding.mjs'
+    if (-not (Test-Path $stager)) { Die "missing $stager" }
+    $node = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
+    if (-not $node) { $node = (Get-Command node -ErrorAction SilentlyContinue).Source }
+    if (-not $node) { Die 'node is not on PATH - required to stage branding.' }
+    if ($Run) {
+        & $node $stager $SrcDir
+        if ($LASTEXITCODE -ne 0) { Die "branding staging failed (exit $LASTEXITCODE)" }
+        Ok 'Lobium branding staged'
+    } else {
+        Plan "node lobium\stage-branding.mjs $SrcDir"
+    }
+}
+
+# --------------------------------------------------------------------------------------------
 if (ShouldRun 'gen') {
     Step '3. gn gen'
     $argsFile = Join-Path $Here 'gn-args-windows.gn'

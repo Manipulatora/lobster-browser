@@ -313,7 +313,14 @@ std::string StripBrowserOnlyKeys(const std::string& config_json) {
   parsed->Remove("fonts");
   parsed->Remove("fontPackDir");
   parsed->Remove("fontAliases");
-  parsed->Remove("fontFallbackFamilies");
+  // NOTE: "fontFallbackFamilies" is intentionally NOT removed - the renderer
+  // needs it. The alias-aware family-name check in font_cache_skia_win.cc
+  // (windows-font-renderer-fallback.patch) accepts a substituted pack typeface
+  // only when its own physical family is a member of font_fallback_families, so
+  // the renderer must parse this field or emoji/substituted text fall through to
+  // the last-resort face. It is ~1 KB, well within the renderer size guard. This
+  // list MUST stay mirrored with LOBIUM_BROWSER_ONLY_CONFIG_KEYS in
+  // packages/engine-runner/src/lobium-config.ts.
 
   std::string out;
   if (!base::JSONWriter::Write(*parsed, &out)) {

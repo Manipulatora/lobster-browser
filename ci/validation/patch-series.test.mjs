@@ -63,6 +63,10 @@ const FINGERPRINT_PATCH_CAPABILITIES = new Map([
   ['fingerprint/webrtc-policy.patch', ['webrtc-policy']],
   ['fingerprint/native-timezone.patch', ['native-timezone']],
   ['fingerprint/windows-font-isolation.patch', ['font-isolation']],
+  // The renderer-side half of the same Windows font concern (Blink re-validates the browser
+  // substitution by family name). Same capability: it is not separately advertised — a build that
+  // ships font isolation ships this fix with it.
+  ['fingerprint/windows-font-renderer-fallback.patch', ['font-isolation']],
 ]);
 
 function walk(dir) {

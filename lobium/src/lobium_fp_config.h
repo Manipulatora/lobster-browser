@@ -203,8 +203,12 @@ struct LobiumFpConfig {
   // persona's requested name at the service boundary while asking DirectWrite for a real pack face;
   // they do not fabricate PostScript names or Local Font Access entries.
   std::vector<std::pair<std::string, std::string>> font_aliases;
-  // Ordered physical pack families eligible for character/default fallback. Browser-only: the
-  // renderer never needs the pack's physical inventory.
+  // Ordered physical pack families eligible for character/default fallback. Populated in BOTH
+  // processes: the browser drives DirectWrite character/default fallback with it, and the renderer
+  // uses it as the inventory that FontFamilyIsPackPhysical() tests against so Blink's Windows font
+  // code accepts a browser-substituted pack typeface (see windows-font-renderer-fallback.patch)
+  // instead of re-rejecting it by family name. Unlike `fonts`/`fontPackDir`, it is NOT stripped from
+  // the renderer config copy.
   std::vector<std::string> font_fallback_families;
   // Directory holding the profile's verified persona-specific font stage, as an absolute native
   // path. Windows sideloads every face in that stage into a pack-only DirectWrite collection. Empty
@@ -238,8 +242,10 @@ struct LobiumFpConfig {
 // historically listed thousands, while every font hook - DirectWrite family lookup, Local Font
 // Access, the pack sideload - runs browser-side. Same for `fontPackDir`. Dropping them keeps the
 // renderer payload small enough that the guard never trips, so the font list can be complete on the
-// side that actually consumes it. `fontAliases` and `fontFallbackFamilies` are browser-only for the
-// same reason.
+// side that actually consumes it. `fontAliases` (the large claimed->physical map) is browser-only
+// for the same reason. `fontFallbackFamilies` is the exception: it is NOT stripped, because the
+// renderer's alias-aware font-name check needs the physical pack inventory to test against, and at
+// ~46 names it is small enough to ride the renderer command line.
 //
 // Returns `config_json` unchanged if it cannot be parsed: an unparseable config is already handled
 // (and logged) downstream, and silently substituting an empty document here would turn a loud

@@ -1,0 +1,40 @@
+Lobium - Windows renderer-side font fallback and family-name re-validation.
+
+The companion to windows-font-isolation.patch. That patch makes the BROWSER process serve one stable
+persona collection: a claimed family is matched inside a restricted DirectWrite collection and, where
+the persona has no such face installed, substituted onto a verified physical pack face (Segoe UI ->
+Liberation Sans, Segoe UI Emoji -> Noto Color Emoji). But Blink's Windows font code RE-VALIDATES that
+browser answer in the RENDERER, by family NAME, and nothing hooked that second check. The result is a
+Windows-only rendering defect that the browser-side gates could not see: emoji do not render at all,
+and ordinary text renders in the last-resort face.
+
+third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc has two such re-validations.
+
+(1) Character / emoji fallback. FontCache::GetDWriteFallbackFamily matches the fallback typeface with
+matchFamilyStyleCharacter (correctly Noto Color Emoji from the restricted collection), then throws
+that typeface away and re-resolves it BY NAME: GetFontPlatformData(FontFaceCreationParams("Noto Color
+Emoji")) -> mojo MatchFamilyName("Noto Color Emoji") -> lobium::FontFamilyAllowed() == false, because
+a Windows persona's `fonts` list advertises only Windows family names, never the physical pack faces.
+The lookup returns nullptr, so there is no fallback font for ANY codepoint. This patch builds the
+platform data straight from the typeface already in hand, through the existing shared Android/Windows
+helper FontCache::CreateFontPlatformDataForCharacter, so no family-name round trip is involved.
+
+(2) All text. FontCache::CreateFontPlatformData calls TypefacesMatchesFamily(typeface, requested)
+after building the typeface. Under isolation the renderer's typeface is built from the substituted
+pack bytes, whose own family name is the physical one ("Liberation Sans"), so a request for "Segoe UI"
+or "Arial" fails the name match and only the kLastResort path (which skips the check) ever renders.
+This patch makes the check alias-aware: it also accepts the typeface when the typeface's OWN family
+name is a member of the persona's physical pack inventory, via the new predicate
+lobium::FontFamilyIsPackPhysical (a membership test over LobiumFpConfig::font_fallback_families).
+
+Linux is immune to both: its fallback builds fonts by file path, with no family-name verification, so
+this hook is Windows-only by nature just like the isolation patch it accompanies. font_fallback_families
+must reach the renderer for predicate (2) to have anything to test against; that field is no longer
+stripped from the renderer config copy (see lobium_fp_config.cc / lobium-config.ts). It is ~1 KB of
+physical family names; the 435-entry fontAliases map stays browser-only for command-line size.
+
+This patch hooks a DIFFERENT file than windows-font-isolation.patch, so there is no textual apply
+chain between the two; the series orders it immediately after purely for readability.
+
+Hook point: third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc
+            third_party/blink/renderer/platform/BUILD.gn (dep on //components/lobium_fp)

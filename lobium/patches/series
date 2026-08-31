@@ -135,6 +135,11 @@ fingerprint/native-timezone.patch
 # the font-pack sideload. Windows-only by nature: Linux reaches the same isolation through the
 # launcher's per-profile FONTCONFIG_FILE, which is not a property of the binary.
 fingerprint/windows-font-isolation.patch
+# The RENDERER half of the same concern: Blink re-validates the browser's font substitution by family
+# name in font_cache_skia_win.cc, which without this rejected it -> emoji did not render and text fell
+# to the last-resort face. Hooks a DIFFERENT file than windows-font-isolation.patch (no textual apply
+# chain); ordered right after it only for readability. Windows-only for the same reason.
+fingerprint/windows-font-renderer-fallback.patch
 
 # --- NOT YET AUTHORED -----------------------------------------------------------------------------
 # net/tls-ja3-ja4.patch              BoringSSL ClientHello order -> match the claimed Chrome.

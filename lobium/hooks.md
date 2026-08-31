@@ -140,6 +140,9 @@ function is the stable anchor.
 | | `content/browser/renderer_host/dwrite_font_proxy_impl_win.cc` · `FindFamily`, `MatchUniqueFont` | the pre-M152 equivalents. Still hooked: they serve single-process mode and any build with `kFontDataServiceAllWebContents` off |
 | | same · `GetLocalFontCollection` | sideloads the profile's font pack, built **once per process** and shared across renderers |
 | | `content/browser/font_access/font_enumeration_data_source_win.cc` · `GetFonts` | Local Font Access (`navigator.fonts.query`) filtered to the same set |
+| `fingerprint/windows-font-renderer-fallback.patch` | `third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc` · `GetDWriteFallbackFamily` | **RENDERER** hook. Builds the fallback font straight from the matched typeface via `CreateFontPlatformDataForCharacter`, instead of re-resolving it by name — the by-name round trip failed `FontFamilyAllowed` for the physical pack face (e.g. `Noto Color Emoji`) and returned no fallback for **any** codepoint, so emoji did not render |
+| | same · `CreateFontPlatformData` / new `TypefaceIsPackPhysicalFamily` | makes the `TypefacesMatchesFamily` name check alias-aware: also accepts the typeface when its OWN family is in the persona's physical pack inventory (`lobium::FontFamilyIsPackPhysical` over `font_fallback_families`). Without it a claimed family served from pack bytes (`Segoe UI` → `Liberation Sans`) failed the name match and only the last-resort face rendered |
+| | `third_party/blink/renderer/platform/BUILD.gn` · `component("platform")` | dep on `//components/lobium_fp` so the renderer can call the predicate |
 
 > **Do not assume DWriteFontProxy is the Windows font path.** It is what every older source and
 > every guide describes, and the first version of this patch hooked only it — with literally zero
@@ -148,6 +151,16 @@ function is the stable anchor.
 > because `kFontDataServiceAllWebContents` is `FEATURE_ENABLED_BY_DEFAULT` on Windows. This is
 > exactly the class of mistake the in-browser oracle gate exists to catch; a source-only review
 > would have called the patch complete.
+
+> **And browser-side substitution is only half of it: Blink RE-VALIDATES the result in the RENDERER,
+> by family name.** `FontDataService`/the DWrite proxy can return the correct persona face, but
+> `third_party/blink/renderer/platform/fonts/win/font_cache_skia_win.cc` then re-resolves that face by
+> its family name — `GetDWriteFallbackFamily` re-runs `MatchFamilyName` (→ `FontFamilyAllowed`, which
+> rejects the physical pack family), and `CreateFontPlatformData` runs `TypefacesMatchesFamily`
+> against the requested name (which the pack bytes' own physical name fails). With only the browser
+> half hooked the visible result on Windows was: emoji did not render at all, and ordinary text
+> rendered in the last-resort face. `windows-font-renderer-fallback.patch` is the renderer half.
+> Linux never hits this because its fallback builds fonts by file path, with no name re-validation.
 | `fingerprint/audio-context.patch` | `modules/webaudio/offline_audio_context.cc` · `FireCompletionEvent` | farbles the finished offline result **in place, once**, so `getChannelData`, `copyFromChannel` and `event.renderedBuffer` agree by construction |
 | | `modules/webaudio/realtime_analyser.cc` · `GetFloat/ByteFrequencyData`, `GetFloat/ByteTimeDomainData` | perturbs only the JS-visible destination; the byte paths farble the float values and *then* quantise, so the byte path stays the exact quantisation of the float path |
 | `fingerprint/audio-worklet-tap.patch` | `modules/webaudio/audio_worklet_global_scope.h` + `offline_audio_worklet_thread.cc` | a default-false `is_offline_context_` flag only the offline thread sets |

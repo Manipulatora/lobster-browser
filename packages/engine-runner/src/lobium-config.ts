@@ -40,13 +40,16 @@ export const LOBIUM_MAX_RENDERER_CONFIG_BASE64_BYTES = 28 * 1024;
  * DirectWrite family lookup, `local()`, Local Font Access, the pack sideload — runs in the BROWSER
  * process, which reads the config file directly and is not size-bound. Only the renderer copy rides
  * the command line, so only the renderer copy is subject to the size guard below.
+ *
+ * `fontFallbackFamilies` is deliberately NOT stripped: it now reaches the renderer. The alias-aware
+ * font-name check in `font_cache_skia_win.cc` (windows-font-renderer-fallback.patch) accepts a
+ * substituted pack typeface only when its own physical family is a member of this list, so without it
+ * the renderer re-validation rejects the browser's substitution and text/emoji fall back to the
+ * last-resort face. It is the ~46 physical family names (~1 KB) — small enough for the size guard.
+ * The 435-entry `fontAliases` map stays browser-only because it is large and the renderer never needs
+ * the claimed→physical mapping, only the physical inventory to test against.
  */
-export const LOBIUM_BROWSER_ONLY_CONFIG_KEYS = [
-  'fonts',
-  'fontPackDir',
-  'fontAliases',
-  'fontFallbackFamilies',
-] as const;
+export const LOBIUM_BROWSER_ONLY_CONFIG_KEYS = ['fonts', 'fontPackDir', 'fontAliases'] as const;
 
 /**
  * The exact document the renderer receives: the config minus the browser-only keys.
@@ -117,7 +120,11 @@ export interface LobiumConfig {
   fontPackDir?: string;
   /** CSS-only claimed-family substitutions backed by verified physical pack families. */
   fontAliases?: Record<string, string>;
-  /** Ordered persona-pack families eligible for native character fallback. Browser-only. */
+  /**
+   * Ordered persona-pack families eligible for native character fallback. Reaches the renderer too
+   * (not stripped): the renderer-side font check accepts a substituted pack typeface only when its
+   * physical family is in this list. See {@link LOBIUM_BROWSER_ONLY_CONFIG_KEYS}.
+   */
   fontFallbackFamilies?: string[];
   seeds: LobiumFarblingSeeds;
   policy: LobiumPolicyConfig;

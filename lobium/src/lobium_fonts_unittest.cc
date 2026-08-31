@@ -45,7 +45,7 @@ TEST(LobiumFontsTest, MissingProvisionerFilesTreeRejectsPack) {
   EXPECT_TRUE(FontPackFaces(pack).empty());
 }
 
-TEST(LobiumFontsTest, OrderedFallbackFamiliesParseAndStayBrowserOnly) {
+TEST(LobiumFontsTest, OrderedFallbackFamiliesParseAndReachRenderer) {
   base::ScopedTempDir temp;
   ASSERT_TRUE(temp.CreateUniqueTempDir());
   const base::FilePath config_path = temp.GetPath().AppendASCII("lobium-fp.json");
@@ -65,11 +65,18 @@ TEST(LobiumFontsTest, OrderedFallbackFamiliesParseAndStayBrowserOnly) {
             (std::vector<std::string>{"Roboto", "Noto Serif",
                                       "Noto Sans Mono"}));
 
+  // fontFallbackFamilies now REACHES the renderer: the renderer-side alias-aware
+  // font-name check (windows-font-renderer-fallback.patch) tests against it, so
+  // it must survive the browser-only strip. fonts/fontPackDir/fontAliases stay
+  // browser-only. This mirror is also enforced from the TS side by
+  // lobium-config.test.ts ("the browser-only key list mirrors ...").
   const std::string renderer = StripBrowserOnlyKeys(config);
-  EXPECT_EQ(renderer.find("fontFallbackFamilies"), std::string::npos);
+  EXPECT_NE(renderer.find("fontFallbackFamilies"), std::string::npos);
   EXPECT_EQ(renderer.find("fontPackDir"), std::string::npos);
   EXPECT_EQ(renderer.find("fontAliases"), std::string::npos);
-  EXPECT_EQ(renderer.find("fonts"), std::string::npos);
+  // "fonts" as an exact key is gone, but "fontFallbackFamilies" contains no
+  // "fonts" substring, so a plain find() would not be fooled either way.
+  EXPECT_EQ(renderer.find("\"fonts\""), std::string::npos);
 }
 
 } // namespace

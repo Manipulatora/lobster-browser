@@ -84,6 +84,36 @@ bool FontFamilyAllowed(std::u16string_view family) {
   return FontFamilyAllowed(std::string_view(utf8));
 }
 
+bool FontFamilyIsPackPhysical(std::string_view family) {
+  const LobiumFpConfig *cfg = LobiumFpConfig::Current();
+  // Fail CLOSED - the opposite of FontFamilyAllowed. With no policy, or a
+  // persona with no pack inventory, there are no physical pack families, so
+  // this must never widen acceptance: the renderer's by-name font verification
+  // then behaves exactly like stock Chromium.
+  if (!cfg || cfg->font_fallback_families.empty()) {
+    return false;
+  }
+
+  const std::string needle = base::ToLowerASCII(family);
+  for (const std::string &physical : cfg->font_fallback_families) {
+    if (base::EqualsCaseInsensitiveASCII(physical, needle)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool FontFamilyIsPackPhysical(std::u16string_view family) {
+  // Cheap pre-check before the UTF-16 -> UTF-8 conversion, mirroring the
+  // FontFamilyAllowed overload: with no pack inventory nothing can match.
+  const LobiumFpConfig *cfg = LobiumFpConfig::Current();
+  if (!cfg || cfg->font_fallback_families.empty()) {
+    return false;
+  }
+  const std::string utf8 = base::UTF16ToUTF8(family);
+  return FontFamilyIsPackPhysical(std::string_view(utf8));
+}
+
 bool FontUniqueNameAllowed(std::string_view unique_name) {
   const LobiumFpConfig *cfg = LobiumFpConfig::Current();
   if (!cfg || cfg->fonts.empty()) {

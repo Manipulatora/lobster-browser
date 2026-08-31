@@ -1,29 +1,45 @@
 #!/usr/bin/env node
 /**
- * Apply Lobster/Lobium brand assets end-to-end:
- * - Desktop masters (mono icon, Tauri PNG sizes)
- * - Chromium theme product_logo_* / favicon assets
- * - NTP wordmark image (not plain text)
- * - BRANDING + user-visible Chrome/Google/Chromium → Lobium strings
+ * DESIGN-TIME brand REGENERATOR. Run this when the brand art changes — rarely — never as a build step.
  *
- * Usage: npm run apply:lobium-branding
- * Env: LOBIUM_CHROMIUM_SRC / CHROMIUM_SRC (optional; native source patching is skipped when absent)
+ * It renders every Lobium brand raster from the masters under apps/desktop/src/assets/brand/ and
+ * writes them, byte-for-byte, into the COMMITTED overlay at lobium/branding/overlay/ (mirroring the
+ * Chromium-tree-relative path each asset must land at) plus lobium/branding/BRANDING. Those checked-in
+ * files are the source of truth the build consumes; the build-time stager (lobium/stage-branding.mjs)
+ * copies them into a Chromium checkout with NO Playwright, so a clean checkout + build always ships
+ * Lobium branding. See lobium/stage-branding.mjs for why staging had to be split off from rendering.
+ *
+ * This script therefore:
+ *   - renders the theme product_logo_* / favicon / wordmark / version-page rasters + the linux .xpm
+ *     into lobium/branding/overlay/... (design-time; needs Playwright),
+ *   - assembles the multi-size Windows chrome.ico (previously MISSING from every branding pass, so the
+ *     Windows taskbar/exe kept the stock Chromium ball) into the same overlay,
+ *   - writes lobium/branding/BRANDING (COMPANY_FULLNAME=The Lobium Authors, PRODUCT_FULLNAME=Lobium, …),
+ *   - refreshes the launcher embeds (packages/engine-runner/src/runners/*-data.ts) and
+ *     apps/desktop/public/favicon.png and the Tauri desktop icon set.
+ *
+ * It NO LONGER writes into a Chromium checkout. The string/NTP/BRANDING patching of a live tree that
+ * used to live here now lives in lobium/stage-branding.mjs, which runs at build time. Keeping the two
+ * apart is the whole point: rendering is a rare Playwright step, staging must be a deterministic
+ * prerequisite of every reproducible build.
+ *
+ * Usage: npm run apply:lobium-branding    (or: node scripts/apply-lobium-branding.mjs)
  */
-import { mkdir, readFile, writeFile, copyFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { chromium } from 'playwright';
-import { resolveChromiumSrc } from '../lobium/chromium-src.mjs';
 
 // Derived from this file's own location, NOT from the working directory. `resolve('.')` meant every
-// path below silently rebased onto wherever the caller happened to be: run from the Chromium tree —
-// which is exactly where a build driver runs it, right before ntp-branding.patch needs the icons it
-// stages — and it died on `Missing brand master: <chromium-src>/apps/desktop/src/assets/brand/icon.png`.
-// The script has one correct root and it is the repository, so it resolves that for itself.
+// path below silently rebased onto wherever the caller happened to be. The script has one correct
+// root and it is the repository, so it resolves that for itself.
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const CHROMIUM_SRC = resolveChromiumSrc({ required: false });
+// The committed overlay: every rendered binary lands here at its Chromium-tree-relative path, and
+// lobium/stage-branding.mjs mirrors this directory into a checkout verbatim.
+const OVERLAY_DIR = resolve(ROOT, 'lobium/branding/overlay');
+const BRANDING_OUT = resolve(ROOT, 'lobium/branding/BRANDING');
 const MAIN_ICON = resolve(ROOT, 'apps/desktop/src/assets/brand/icon.png');
 const SITE_LOGO = resolve(ROOT, 'apps/desktop/src/assets/brand/site-logo.png');
 const NTP_MASTER = resolve(ROOT, 'apps/desktop/src/assets/brand/browser-logo.png');
@@ -31,7 +47,26 @@ const NTP_AD = resolve(ROOT, 'apps/desktop/src/assets/brand/ad.png');
 const PUBLIC_FAVICON = resolve(ROOT, 'apps/desktop/public/favicon.png');
 const EMBED_DIR = resolve(ROOT, 'packages/engine-runner/src/runners');
 const ACCENT = '#7c3aed';
-const LEGACY_NTP_AD_NAME = ['profile', 'branding.png'].join('_');
+// Tab/window glyph and version-page favicon are a dark lobster, matching the shipped tab icon.
+const MONO_DARK = '#1f2430';
+
+// The BRANDING file Chromium's version_info reads (branding_path_component stays "chromium", so the
+// build reads chrome/app/theme/chromium/BRANDING, which the stager overwrites with THIS). PRODUCT_*
+// here is what `chrome --version` and chrome://version print.
+const BRANDING_CONTENTS = [
+  'COMPANY_FULLNAME=The Lobium Authors',
+  'COMPANY_SHORTNAME=Lobium',
+  'PRODUCT_FULLNAME=Lobium',
+  'PRODUCT_SHORTNAME=Lobium',
+  'PRODUCT_INSTALLER_FULLNAME=Lobium Installer',
+  'PRODUCT_INSTALLER_SHORTNAME=Lobium Installer',
+  'COPYRIGHT=Copyright @LASTCHANGE_YEAR@ The Lobium Authors. All rights reserved.',
+  'MAC_BUNDLE_ID=com.lobster.lobium',
+  'MAC_CREATOR_CODE=Lb24',
+  'MAC_TEAM_ID=',
+  '',
+].join('\n');
+
 async function ensureDir(path) {
   await mkdir(dirname(path), { recursive: true });
 }
@@ -44,6 +79,10 @@ function pngBufferFromDataUrl(dataUrl) {
 function imageDataUrl(path) {
   const bytes = Buffer.from(readFileSync(path));
   return `data:image/png;base64,${bytes.toString('base64')}`;
+}
+
+function overlay(relPath) {
+  return resolve(OVERLAY_DIR, relPath);
 }
 
 async function renderIcon(page, { sourceDataUrl, size, mono, monoColor = ACCENT }) {
@@ -130,6 +169,64 @@ async function renderIcon(page, { sourceDataUrl, size, mono, monoColor = ACCENT 
   );
 }
 
+// Raw cropped+squared RGBA at `size`, used to encode uncompressed DIB entries for the Windows .ico.
+// Same crop/scale as renderIcon(), but returns pixels instead of a PNG so the ICO writer can build
+// 32-bit BGRA bitmaps directly.
+async function renderRGBA(page, { sourceDataUrl, size }) {
+  const flat = await page.evaluate(
+    async ({ src, targetSize }) => {
+      const image = new Image();
+      image.src = src;
+      await image.decode();
+      const scratch = document.createElement('canvas');
+      scratch.width = image.naturalWidth;
+      scratch.height = image.naturalHeight;
+      const sc = scratch.getContext('2d');
+      sc.drawImage(image, 0, 0);
+      const px = sc.getImageData(0, 0, scratch.width, scratch.height);
+      let minX = scratch.width;
+      let minY = scratch.height;
+      let maxX = -1;
+      let maxY = -1;
+      for (let y = 0; y < scratch.height; y += 1) {
+        for (let x = 0; x < scratch.width; x += 1) {
+          if ((px.data[(y * scratch.width + x) * 4 + 3] ?? 0) > 8) {
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+      if (maxX < minX) {
+        minX = 0;
+        minY = 0;
+        maxX = scratch.width - 1;
+        maxY = scratch.height - 1;
+      }
+      const cw = maxX - minX + 1;
+      const ch = maxY - minY + 1;
+      const side = Math.max(cw, ch);
+      const crop = document.createElement('canvas');
+      crop.width = side;
+      crop.height = side;
+      const cc = crop.getContext('2d');
+      cc.clearRect(0, 0, side, side);
+      cc.drawImage(image, -minX + (side - cw) / 2, -minY + (side - ch) / 2);
+      const out = document.createElement('canvas');
+      out.width = targetSize;
+      out.height = targetSize;
+      const oc = out.getContext('2d');
+      oc.imageSmoothingEnabled = true;
+      oc.imageSmoothingQuality = 'high';
+      oc.drawImage(crop, 0, 0, targetSize, targetSize);
+      return Array.from(oc.getImageData(0, 0, targetSize, targetSize).data);
+    },
+    { src: sourceDataUrl, targetSize: size },
+  );
+  return Uint8ClampedArray.from(flat);
+}
+
 async function renderMonoXpm(page, sourceDataUrl) {
   const rows = await page.evaluate(
     async ({ sourceDataUrl: src }) => {
@@ -194,7 +291,6 @@ async function renderVersionLogo(page, { sourceDataUrl, width, height, color }) 
       image.src = src;
       await image.decode();
 
-      // Crop the icon to its alpha bounding box.
       const scratch = document.createElement('canvas');
       scratch.width = image.naturalWidth;
       scratch.height = image.naturalHeight;
@@ -224,7 +320,6 @@ async function renderVersionLogo(page, { sourceDataUrl, width, height, color }) 
       const cw = maxX - minX + 1;
       const ch = maxY - minY + 1;
 
-      // Tint the icon to `col` (luma-derived shade so form is preserved).
       const icon = document.createElement('canvas');
       icon.width = cw;
       icon.height = ch;
@@ -271,15 +366,79 @@ async function renderVersionLogo(page, { sourceDataUrl, width, height, color }) 
   return dataUrl;
 }
 
-async function replaceInFile(path, transforms) {
-  if (!existsSync(path)) return false;
-  let text = await readFile(path, 'utf8');
-  const before = text;
-  for (const [pattern, replacement] of transforms) {
-    text = text.replace(pattern, replacement);
+// ---- Windows .ico writer -------------------------------------------------------------------------
+// The ICO container is a 6-byte ICONDIR + N × 16-byte ICONDIRENTRY + N image payloads. Each payload
+// is either an uncompressed 32-bit DIB or a whole PNG. We use DIB for <=128 (widest compatibility
+// with rc.exe / the Windows shell) and PNG for 256 (the conventional encoding at that size). This
+// file overwrites the stock chrome/app/theme/chromium/win/chromium.ico, which chrome_exe.rc already
+// points IDR_MAINFRAME at for the non-branded build — so no .rc change is needed.
+function bmpDibEntry(width, height, rgba) {
+  const header = Buffer.alloc(40);
+  header.writeUInt32LE(40, 0); // biSize
+  header.writeInt32LE(width, 4); // biWidth
+  header.writeInt32LE(height * 2, 8); // biHeight — XOR bitmap + AND mask stacked
+  header.writeUInt16LE(1, 12); // biPlanes
+  header.writeUInt16LE(32, 14); // biBitCount
+  header.writeUInt32LE(0, 16); // biCompression = BI_RGB
+  // XOR bitmap: bottom-up rows, BGRA.
+  const xor = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    const dstRow = height - 1 - y;
+    for (let x = 0; x < width; x += 1) {
+      const s = (y * width + x) * 4;
+      const d = (dstRow * width + x) * 4;
+      xor[d] = rgba[s + 2]; // B
+      xor[d + 1] = rgba[s + 1]; // G
+      xor[d + 2] = rgba[s]; // R
+      xor[d + 3] = rgba[s + 3]; // A
+    }
   }
-  if (text !== before) await writeFile(path, text, 'utf8');
-  return text !== before;
+  // 1-bpp AND mask, rows padded to a 32-bit boundary, bottom-up. Left all-zero: the 32-bit alpha
+  // channel carries transparency on every Windows the engine targets.
+  const andStride = Math.ceil(width / 32) * 4;
+  const andMask = Buffer.alloc(andStride * height);
+  return Buffer.concat([header, xor, andMask]);
+}
+
+function assembleIco(entries) {
+  const dir = Buffer.alloc(6);
+  dir.writeUInt16LE(0, 0); // reserved
+  dir.writeUInt16LE(1, 2); // type = icon
+  dir.writeUInt16LE(entries.length, 4);
+  const dirEntries = [];
+  const payloads = [];
+  let offset = 6 + entries.length * 16;
+  for (const e of entries) {
+    const de = Buffer.alloc(16);
+    de.writeUInt8(e.size >= 256 ? 0 : e.size, 0); // width (0 => 256)
+    de.writeUInt8(e.size >= 256 ? 0 : e.size, 1); // height (0 => 256)
+    de.writeUInt8(0, 2); // palette color count
+    de.writeUInt8(0, 3); // reserved
+    de.writeUInt16LE(1, 4); // color planes
+    de.writeUInt16LE(32, 6); // bits per pixel
+    de.writeUInt32LE(e.data.length, 8); // bytes in resource
+    de.writeUInt32LE(offset, 12); // offset from file start
+    dirEntries.push(de);
+    payloads.push(e.data);
+    offset += e.data.length;
+  }
+  return Buffer.concat([dir, ...dirEntries, ...payloads]);
+}
+
+async function writeWindowsIco(page, sourceDataUrl, path) {
+  const dibSizes = [16, 24, 32, 48, 64, 128];
+  const entries = [];
+  for (const size of dibSizes) {
+    const rgba = await renderRGBA(page, { sourceDataUrl, size });
+    entries.push({ size, data: bmpDibEntry(size, size, rgba) });
+  }
+  // 256 as PNG (the standard large-size encoding).
+  const png256 = pngBufferFromDataUrl(
+    await renderIcon(page, { sourceDataUrl, size: 256, mono: false }),
+  );
+  entries.push({ size: 256, data: png256 });
+  await ensureDir(path);
+  await writeFile(path, assembleIco(entries));
 }
 
 async function writeFileIfChanged(path, contents) {
@@ -299,8 +458,7 @@ async function writeBrandEmbed(fileName, exportName, sourcePath) {
     resolve(EMBED_DIR, fileName),
     // Emitted pre-wrapped because that is what Prettier produces and `npm run format:check` is a
     // CI gate: a base64 PNG always exceeds printWidth, so the assignment is always broken onto its
-    // own line. Writing it on one line instead left three generated files failing format:check
-    // after every branding run, which is a red build for anyone who forgets to run Prettier after.
+    // own line.
     `// Generated by scripts/apply-lobium-branding.mjs from ${source}. Do not edit.\n` +
       `export const ${exportName} =\n  '${base64}';\n`,
   );
@@ -317,193 +475,12 @@ function generateTauriIcons() {
     },
   );
   if (result.status !== 0) {
-    throw new Error(`Tauri icon generation failed with status ${result.status ?? 'unknown'}`);
-  }
-}
-
-async function patchNativeBrandingFiles() {
-  if (!CHROMIUM_SRC || !existsSync(CHROMIUM_SRC)) {
+    // Non-fatal: the Tauri icon set is a desktop-app concern, not engine branding, and its toolchain
+    // (npx tauri) may be absent on a design box that only needs to regenerate the overlay. Warn and
+    // continue so the committed overlay + BRANDING still regenerate.
     console.warn(
-      'Chromium source is not configured or does not exist; skipped native source patching. ' +
-        'Set LOBIUM_CHROMIUM_SRC to enable it.',
+      `WARN: Tauri icon generation skipped (exit ${result.status ?? 'unknown'}; is @tauri-apps/cli installed?).`,
     );
-    return;
-  }
-
-  // Theme BRANDING — used for installer/window metadata (must not stay "Chromium").
-  await writeFileIfChanged(
-    resolve(CHROMIUM_SRC, 'chrome/app/theme/chromium/BRANDING'),
-    [
-      'COMPANY_FULLNAME=The Lobium Authors',
-      'COMPANY_SHORTNAME=Lobium',
-      'PRODUCT_FULLNAME=Lobium',
-      'PRODUCT_SHORTNAME=Lobium',
-      'PRODUCT_INSTALLER_FULLNAME=Lobium Installer',
-      'PRODUCT_INSTALLER_SHORTNAME=Lobium Installer',
-      'COPYRIGHT=Copyright @LASTCHANGE_YEAR@ The Lobium Authors. All rights reserved.',
-      'MAC_BUNDLE_ID=com.lobster.lobium',
-      'MAC_CREATOR_CODE=Lb24',
-      'MAC_TEAM_ID=',
-      '',
-    ].join('\n'),
-  );
-
-  // Native NTP images: Lobster Browser logo above search and ad below search.
-  const ntpIconsDir = resolve(CHROMIUM_SRC, 'chrome/browser/resources/new_tab_page/icons');
-  if (existsSync(NTP_MASTER)) {
-    await copyFile(NTP_MASTER, resolve(ntpIconsDir, 'lobium_master.png'));
-  }
-  if (existsSync(NTP_AD)) {
-    await copyFile(NTP_AD, resolve(ntpIconsDir, 'lobster_ad.png'));
-  }
-  await rm(resolve(ntpIconsDir, LEGACY_NTP_AD_NAME), { force: true });
-
-  const iconsBuildGn = resolve(ntpIconsDir, 'BUILD.gn');
-  if (existsSync(iconsBuildGn)) {
-    let gn = await readFile(iconsBuildGn, 'utf8');
-    for (const asset of ['lobium_master.png', 'lobster_ad.png']) {
-      if (!gn.includes(`"${asset}"`)) {
-        gn = gn.replace('input_files = [', `input_files = [\n    "${asset}",`);
-      }
-    }
-    gn = gn.replace(new RegExp(`^\\s*"${LEGACY_NTP_AD_NAME}",\\n?`, 'm'), '');
-    await writeFile(iconsBuildGn, gn, 'utf8');
-  }
-
-  // Force-write NTP logo template to use the brand image (every new tab).
-  const logoHtml = [
-    '${this.showLogo_ ? html`',
-    '  <div id="logo" aria-label="Lobster Browser">',
-    '    <img id="logoImage" src="icons/lobium_master.png" alt="Lobster Browser" draggable="false">',
-    '  </div>',
-    "` : ''}",
-    '${this.showDoodle_ ? html`',
-    '  <div id="doodle" title="${this.doodle_!.description}">',
-    '    <div id="imageDoodle" ?hidden="${!this.imageDoodle_}"',
-    '        tabindex="${this.imageDoodleTabIndex_}" @click="${this.onImageClick_}"',
-    '        @keydown="${this.onImageKeydown_}">',
-    '      <div id="imageContainer">',
-    '        <img id="image" src="${this.imageUrl_}" @load="${this.onImageLoad_}">',
-    '      </div>',
-    '      <cr-button id="shareButton" title="$i18n{shareDoodle}"',
-    '          @click="${this.onShareButtonClick_}">',
-    '        <div id="shareButtonIcon"></div>',
-    '      </cr-button>',
-    '    </div>',
-    '  </div>',
-    "` : ''}",
-    '${this.showShareDialog_ ? html`',
-    '  <ntp-doodle-share-dialog .title="${this.doodle_!.description}"',
-    '      .url="${this.doodle_!.image!.shareUrl}"',
-    '      @close="${this.onShareDialogClose_}" @share="${this.onShare_}">',
-    '  </ntp-doodle-share-dialog>',
-    "` : ''}",
-    '',
-  ].join('\n');
-  await writeFile(
-    resolve(CHROMIUM_SRC, 'chrome/browser/resources/new_tab_page/logo.html'),
-    logoHtml,
-  );
-
-  // Patch logo.css #logo block to display the wordmark image.
-  await replaceInFile(resolve(CHROMIUM_SRC, 'chrome/browser/resources/new_tab_page/logo.css'), [
-    [
-      /#logo \{[\s\S]*?\}\n\n:host\(\[single-colored\]\) #logo[\s\S]*?\n\}/,
-      `#logo {
-  background: none;
-  forced-color-adjust: none;
-  height: auto;
-  width: auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 auto;
-}
-
-#logoImage {
-  display: block;
-  width: auto;
-  height: auto;
-  max-width: min(440px, 74vw);
-  max-height: 260px;
-  object-fit: contain;
-  user-select: none;
-  -webkit-user-drag: none;
-}
-
-:host([single-colored]) #logo,
-:host(:not([single-colored])) #logo {
-  -webkit-mask-image: none;
-  background-image: none;
-}`,
-    ],
-  ]);
-
-  // Lobster Browser ad directly under the search box on the NTP. Idempotent:
-  // only inserts when the marker id is not already present.
-  const appHtmlPath = resolve(CHROMIUM_SRC, 'chrome/browser/resources/new_tab_page/app.html');
-  if (existsSync(appHtmlPath)) {
-    let appHtml = await readFile(appHtmlPath, 'utf8');
-    appHtml = appHtml.replaceAll(LEGACY_NTP_AD_NAME, 'lobster_ad.png');
-    appHtml = appHtml
-      .replace(
-        /<!-- Lobium: sub-brand image[^>]*-->/,
-        '<!-- Lobster Browser ad directly under the search box. -->',
-      )
-      .replace(
-        /<img src="icons\/lobster_ad\.png" alt="[^"]*"/,
-        '<img src="icons/lobster_ad.png" alt="Lobster Browser for multiple profile management"',
-      );
-    if (!appHtml.includes('id="lobiumSubBrand"')) {
-      // Insert right after the #searchboxContainer closes (the `</div>` before the action-chips block).
-      appHtml = appHtml.replace(
-        /(\n {2}<\/div>\n)( {2}\$\{this\.lazyRender_ && this\.ntpNextFeaturesEnabled_)/,
-        `$1  <!-- Lobster Browser ad directly under the search box. -->\n  <div id="lobiumSubBrand" ?hidden="\${!this.logoEnabled_}">\n    <img src="icons/lobster_ad.png" alt="Lobster Browser for multiple profile management" draggable="false">\n  </div>\n$2`,
-      );
-    }
-    await writeFileIfChanged(appHtmlPath, appHtml);
-  }
-  const appCssPath = resolve(CHROMIUM_SRC, 'chrome/browser/resources/new_tab_page/app.css');
-  if (existsSync(appCssPath)) {
-    let appCss = await readFile(appCssPath, 'utf8');
-    appCss = appCss.replaceAll(LEGACY_NTP_AD_NAME, 'lobster_ad.png');
-    appCss = appCss.replace(
-      /\/\* Lobium: sub-brand image[^*]*\*\//,
-      '/* Lobster Browser ad directly under the search box. */',
-    );
-    if (!appCss.includes('#lobiumSubBrand')) {
-      appCss +=
-        '\n/* Lobster Browser ad directly under the search box. */\n' +
-        '#lobiumSubBrand {\n  display: flex;\n  justify-content: center;\n  align-items: center;\n' +
-        '  margin: 4px auto 16px;\n  width: var(--ntp-search-box-width, min(337px, 80vw));\n}\n' +
-        '#lobiumSubBrand[hidden] {\n  display: none;\n}\n' +
-        '#lobiumSubBrand img {\n  display: block;\n  width: 100%;\n  height: auto;\n' +
-        '  max-width: var(--ntp-search-box-width, min(337px, 80vw));\n  object-fit: contain;\n' +
-        '  user-select: none;\n  -webkit-user-drag: none;\n}\n';
-    }
-    await writeFileIfChanged(appCssPath, appCss);
-  }
-
-  // NOTE: We deliberately do NOT disable shortcuts / one-google-bar or rewrite the omnibox / Web Store
-  // strings. The product intent is a stock-Chrome NTP with only the brand images swapped — real
-  // "Add shortcut" tiles, real search text ("Search Google or type a URL"), real Web Store. Those
-  // transforms were removed; app.ts / generated_resources.grd stay pristine.
-
-  const stringFiles = [
-    'chrome/app/chromium_strings.grd',
-    'chrome/app/settings_chromium_strings.grdp',
-    'chrome/app/google_chrome_strings.grd',
-    'chrome/app/settings_google_chrome_strings.grdp',
-  ].map((file) => resolve(CHROMIUM_SRC, file));
-  for (const file of stringFiles) {
-    await replaceInFile(file, [
-      [/\bGoogle Chrome\b/g, 'Lobium'],
-      [/\bChrome\b/g, 'Lobium'],
-      [/\bChromium\b/g, 'Lobium'],
-      // Prior branding pass used Lobster as product name — normalize to Lobium in chrome UI.
-      [/\bLobster for Testing\b/g, 'Lobium for Testing'],
-      [/\bLobster\b/g, 'Lobium'],
-    ]);
   }
 }
 
@@ -518,159 +495,124 @@ async function main() {
   try {
     await writeRenderedPng(page, sourceDataUrl, PUBLIC_FAVICON, 32, false);
 
-    if (CHROMIUM_SRC && existsSync(CHROMIUM_SRC)) {
-      // Color product logos (window / about / linux desktop).
-      const colorTargets = [
-        ['chrome/app/theme/chromium/product_logo_16.png', 16],
-        ['chrome/app/theme/chromium/product_logo_24.png', 24],
-        ['chrome/app/theme/chromium/product_logo_48.png', 48],
-        ['chrome/app/theme/chromium/product_logo_64.png', 64],
-        ['chrome/app/theme/chromium/product_logo_128.png', 128],
-        ['chrome/app/theme/chromium/product_logo_256.png', 256],
-        ['chrome/app/theme/chromium/linux/product_logo_24.png', 24],
-        ['chrome/app/theme/chromium/linux/product_logo_48.png', 48],
-        ['chrome/app/theme/chromium/linux/product_logo_64.png', 64],
-        ['chrome/app/theme/chromium/linux/product_logo_128.png', 128],
-        ['chrome/app/theme/chromium/linux/product_logo_256.png', 256],
-        ['chrome/app/theme/default_100_percent/chromium/product_logo_16.png', 16],
-        ['chrome/app/theme/default_100_percent/chromium/product_logo_32.png', 32],
-        ['chrome/app/theme/default_200_percent/chromium/product_logo_16.png', 32],
-        ['chrome/app/theme/default_200_percent/chromium/product_logo_32.png', 64],
-      ];
-      for (const [file, size] of colorTargets) {
-        await writeRenderedPng(page, sourceDataUrl, resolve(CHROMIUM_SRC, file), size, false);
-      }
-
-      // Tab / window title icon (IDR_PRODUCT_LOGO_16). On Linux this loads from the linux/ subdir, which
-      // the color targets above MISS — so a stock Chromium logo was still showing in the tab/window. Render
-      // it as a MONO-DARK lobster (the user's requested tab icon), fully replacing Chromium there.
-      const MONO_DARK = '#1f2430';
-      const monoDarkTargets = [
-        ['chrome/app/theme/chromium/linux/product_logo_16.png', 16],
-        ['chrome/app/theme/default_100_percent/chromium/linux/product_logo_16.png', 16],
-        ['chrome/app/theme/default_200_percent/chromium/linux/product_logo_16.png', 32],
-      ];
-      for (const [file, size] of monoDarkTargets) {
-        await writeRenderedPng(
-          page,
-          sourceDataUrl,
-          resolve(CHROMIUM_SRC, file),
-          size,
-          true,
-          MONO_DARK,
-        );
-      }
-
-      // Wordmark-style name logos (toolbar / about).
-      const nameTargets = [
-        ['chrome/app/theme/default_100_percent/chromium/product_logo_name_22.png', 22],
-        ['chrome/app/theme/default_200_percent/chromium/product_logo_name_22.png', 44],
-      ];
-      for (const [file, size] of nameTargets) {
-        // Prefer horizontal wordmark when available; fall back to icon.
-        const src = imageDataUrl(SITE_LOGO);
-        await writeRenderedPng(page, src, resolve(CHROMIUM_SRC, file), size, false);
-      }
-
-      // Mono / white name logos.
-      const whiteNameTargets = [
-        ['chrome/app/theme/default_100_percent/chromium/product_logo_name_22_white.png', 22],
-        ['chrome/app/theme/default_200_percent/chromium/product_logo_name_22_white.png', 44],
-        ['chrome/app/theme/chromium/product_logo_22_mono.png', 22],
-      ];
-      for (const [file, size] of whiteNameTargets) {
-        await writeRenderedPng(page, sourceDataUrl, resolve(CHROMIUM_SRC, file), size, true);
-      }
-
-      // NTP tab favicon — mono-dark lobster to match the tab/window icon (a consistent dark tab glyph).
-      const faviconTargets = [
-        ['chrome/app/theme/default_100_percent/common/favicon_ntp.png', 16],
-        ['chrome/app/theme/default_200_percent/common/favicon_ntp.png', 32],
-      ];
-      for (const [file, size] of faviconTargets) {
-        await writeRenderedPng(
-          page,
-          sourceDataUrl,
-          resolve(CHROMIUM_SRC, file),
-          size,
-          true,
-          MONO_DARK,
-        );
-      }
-
-      // chrome://version top-right logo (IDR_PRODUCT_LOGO / _WHITE). These live under
-      // components/resources and were NOT covered by the theme targets above, so the page
-      // still showed the stock Chromium logo. Render the lobster + "Lobium" wordmark: dark
-      // ink for light mode, white for dark mode, at 100%/200%.
-      const versionLogoTargets = [
-        ['components/resources/default_100_percent/chromium/product_logo.png', 171, 32, MONO_DARK],
-        [
-          'components/resources/default_100_percent/chromium/product_logo_white.png',
-          171,
-          32,
-          '#ffffff',
-        ],
-        ['components/resources/default_200_percent/chromium/product_logo.png', 342, 64, MONO_DARK],
-        [
-          'components/resources/default_200_percent/chromium/product_logo_white.png',
-          342,
-          64,
-          '#ffffff',
-        ],
-      ];
-      for (const [file, w, h, color] of versionLogoTargets) {
-        const target = resolve(CHROMIUM_SRC, file);
-        await ensureDir(target);
-        const dataUrl = await renderVersionLogo(page, {
-          sourceDataUrl,
-          width: w,
-          height: h,
-          color,
-        });
-        await writeFile(target, pngBufferFromDataUrl(dataUrl));
-      }
-
-      // chrome://version favicon (IDR_PRODUCT_FAVICON) — mono-dark lobster, matching the tab glyph.
-      const versionFaviconTargets = [
-        ['components/resources/default_100_percent/chromium/favicon_product.png', 16],
-        ['components/resources/default_200_percent/chromium/favicon_product.png', 32],
-      ];
-      for (const [file, size] of versionFaviconTargets) {
-        await writeRenderedPng(
-          page,
-          sourceDataUrl,
-          resolve(CHROMIUM_SRC, file),
-          size,
-          true,
-          MONO_DARK,
-        );
-      }
-
-      const xpmPath = resolve(CHROMIUM_SRC, 'chrome/app/theme/chromium/linux/product_logo_32.xpm');
-      await ensureDir(xpmPath);
-      await writeFile(
-        xpmPath,
-        await renderMonoXpm(page, await renderIcon(page, { sourceDataUrl, size: 32, mono: true })),
-        'utf8',
-      );
+    // Color product logos (window / about / linux desktop).
+    const colorTargets = [
+      ['chrome/app/theme/chromium/product_logo_16.png', 16],
+      ['chrome/app/theme/chromium/product_logo_24.png', 24],
+      ['chrome/app/theme/chromium/product_logo_48.png', 48],
+      ['chrome/app/theme/chromium/product_logo_64.png', 64],
+      ['chrome/app/theme/chromium/product_logo_128.png', 128],
+      ['chrome/app/theme/chromium/product_logo_256.png', 256],
+      ['chrome/app/theme/chromium/linux/product_logo_24.png', 24],
+      ['chrome/app/theme/chromium/linux/product_logo_48.png', 48],
+      ['chrome/app/theme/chromium/linux/product_logo_64.png', 64],
+      ['chrome/app/theme/chromium/linux/product_logo_128.png', 128],
+      ['chrome/app/theme/chromium/linux/product_logo_256.png', 256],
+      ['chrome/app/theme/default_100_percent/chromium/product_logo_16.png', 16],
+      ['chrome/app/theme/default_100_percent/chromium/product_logo_32.png', 32],
+      ['chrome/app/theme/default_200_percent/chromium/product_logo_16.png', 32],
+      ['chrome/app/theme/default_200_percent/chromium/product_logo_32.png', 64],
+    ];
+    for (const [file, size] of colorTargets) {
+      await writeRenderedPng(page, sourceDataUrl, overlay(file), size, false);
     }
+
+    // Tab / window title icon (IDR_PRODUCT_LOGO_16). On Linux this loads from the linux/ subdir, which
+    // the color targets above MISS. Render it as a MONO-DARK lobster (the requested tab icon).
+    const monoDarkTargets = [
+      ['chrome/app/theme/chromium/linux/product_logo_16.png', 16],
+      ['chrome/app/theme/default_100_percent/chromium/linux/product_logo_16.png', 16],
+      ['chrome/app/theme/default_200_percent/chromium/linux/product_logo_16.png', 32],
+    ];
+    for (const [file, size] of monoDarkTargets) {
+      await writeRenderedPng(page, sourceDataUrl, overlay(file), size, true, MONO_DARK);
+    }
+
+    // Wordmark-style name logos (toolbar / about), from the horizontal site logo.
+    const nameTargets = [
+      ['chrome/app/theme/default_100_percent/chromium/product_logo_name_22.png', 22],
+      ['chrome/app/theme/default_200_percent/chromium/product_logo_name_22.png', 44],
+    ];
+    const siteLogoDataUrl = imageDataUrl(SITE_LOGO);
+    for (const [file, size] of nameTargets) {
+      await writeRenderedPng(page, siteLogoDataUrl, overlay(file), size, false);
+    }
+
+    // Mono / white name logos.
+    const whiteNameTargets = [
+      ['chrome/app/theme/default_100_percent/chromium/product_logo_name_22_white.png', 22],
+      ['chrome/app/theme/default_200_percent/chromium/product_logo_name_22_white.png', 44],
+      ['chrome/app/theme/chromium/product_logo_22_mono.png', 22],
+    ];
+    for (const [file, size] of whiteNameTargets) {
+      await writeRenderedPng(page, sourceDataUrl, overlay(file), size, true);
+    }
+
+    // NTP tab favicon — mono-dark lobster to match the tab/window icon.
+    const faviconTargets = [
+      ['chrome/app/theme/default_100_percent/common/favicon_ntp.png', 16],
+      ['chrome/app/theme/default_200_percent/common/favicon_ntp.png', 32],
+    ];
+    for (const [file, size] of faviconTargets) {
+      await writeRenderedPng(page, sourceDataUrl, overlay(file), size, true, MONO_DARK);
+    }
+
+    // chrome://version top-right logo (IDR_PRODUCT_LOGO / _WHITE) under components/resources: the
+    // lobster + "Lobium" wordmark, dark ink for light mode, white for dark, at 100%/200%.
+    const versionLogoTargets = [
+      ['components/resources/default_100_percent/chromium/product_logo.png', 171, 32, MONO_DARK],
+      ['components/resources/default_100_percent/chromium/product_logo_white.png', 171, 32, '#ffffff'],
+      ['components/resources/default_200_percent/chromium/product_logo.png', 342, 64, MONO_DARK],
+      ['components/resources/default_200_percent/chromium/product_logo_white.png', 342, 64, '#ffffff'],
+    ];
+    for (const [file, w, h, color] of versionLogoTargets) {
+      const target = overlay(file);
+      await ensureDir(target);
+      const dataUrl = await renderVersionLogo(page, { sourceDataUrl, width: w, height: h, color });
+      await writeFile(target, pngBufferFromDataUrl(dataUrl));
+    }
+
+    // chrome://version favicon (IDR_PRODUCT_FAVICON) — mono-dark lobster.
+    const versionFaviconTargets = [
+      ['components/resources/default_100_percent/chromium/favicon_product.png', 16],
+      ['components/resources/default_200_percent/chromium/favicon_product.png', 32],
+    ];
+    for (const [file, size] of versionFaviconTargets) {
+      await writeRenderedPng(page, sourceDataUrl, overlay(file), size, true, MONO_DARK);
+    }
+
+    // Linux desktop-entry glyph (.xpm) — a mono violet lobster.
+    const xpmPath = overlay('chrome/app/theme/chromium/linux/product_logo_32.xpm');
+    await ensureDir(xpmPath);
+    await writeFile(
+      xpmPath,
+      await renderMonoXpm(page, await renderIcon(page, { sourceDataUrl, size: 32, mono: true })),
+      'utf8',
+    );
+
+    // Windows taskbar / .exe icon — the multi-size chrome.ico that every prior branding pass MISSED,
+    // which is why Windows kept showing the stock Chromium ball.
+    await writeWindowsIco(
+      page,
+      sourceDataUrl,
+      overlay('chrome/app/theme/chromium/win/chromium.ico'),
+    );
   } finally {
     await browser.close();
   }
+
+  // The committed BRANDING the stager copies over chrome/app/theme/chromium/BRANDING.
+  await writeFileIfChanged(BRANDING_OUT, BRANDING_CONTENTS);
 
   generateTauriIcons();
   await writeBrandEmbed('brand-icon-data.ts', 'BRAND_ICON_PNG_BASE64', MAIN_ICON);
   await writeBrandEmbed('browser-logo-data.ts', 'BROWSER_LOGO_PNG_BASE64', NTP_MASTER);
   await writeBrandEmbed('brand-ad-data.ts', 'BRAND_AD_PNG_BASE64', NTP_AD);
-  await patchNativeBrandingFiles();
-  console.log(
-    `Applied Lobium/Lobster branding assets. Chromium source: ${CHROMIUM_SRC ?? 'not configured'}`,
-  );
-  console.log(`Primary icon: ${MAIN_ICON}`);
-  console.log(`Site logo: ${SITE_LOGO}`);
-  console.log(
-    'Native Chromium resources were updated in source only; rebuild Lobium to ship them.',
-  );
+
+  console.log(`Regenerated Lobium branding overlay: ${OVERLAY_DIR}`);
+  console.log(`Wrote BRANDING: ${BRANDING_OUT}`);
+  console.log('Overlay + BRANDING are the committed source of truth; the build stages them via');
+  console.log('lobium/stage-branding.mjs (no Playwright). Rebuild the engine to ship them.');
 }
 
 await main();

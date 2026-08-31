@@ -50,6 +50,13 @@ run "cp '${HERE}'/src/* '${SRC_DIR}/components/lobium_fp/'"
 step "4. Apply the quilt patch series (hook points into existing Chromium files)"
 run "cd '${SRC_DIR}' && QUILT_PATCHES='${HERE}/patches' QUILT_SERIES='${HERE}/patches/series' quilt push -a"
 
+# HERE is lobium/, so the repo root is HERE/.. and this script sits next to build.sh. Staging runs
+# AFTER the patch series so nothing (a later `git checkout -- .`, a re-quilt) can revert the branding
+# the deterministic stager writes: overlay rasters + Windows .ico, the Lobium BRANDING, the
+# product-name string transforms, and the NTP icon PNGs. No Playwright — it copies committed files.
+step "4b. Stage Lobium branding into the checkout (after patches, before gn gen)"
+run "node '${HERE}/stage-branding.mjs' '${SRC_DIR}'"
+
 step "5. Configure (GN) with the Lobium args"
 run "cd '${SRC_DIR}' && gn gen '${OUT_DIR}' --args=\"\$(grep -v '^#' '${HERE}/gn-args.gn.example' | tr '\\n' ' ')\""
 

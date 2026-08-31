@@ -69,8 +69,9 @@ test('buildLobiumConfig carries the fingerprint surfaces + a version', () => {
   // The font list reaches the engine now. It was previously held back because the browser base64s
   // this whole document onto the renderer command line, where a large catalog trips the size guard
   // and the browser drops the config entirely — a total host leak caused by a field no renderer
-  // reads. The engine strips `fonts`/`fontPackDir`/`fontAliases`/`fontFallbackFamilies` from the
-  // renderer copy, so browser-side font hooks get the full list while its payload stays small.
+  // reads. The engine strips `fonts`/`fontPackDir`/`fontAliases` from the renderer copy (but keeps
+  // `fontFallbackFamilies`, which the renderer font check needs), so browser-side font hooks get the
+  // full list while the renderer payload stays small.
   assert.deepEqual(config.fonts, ['Arial', 'Calibri']);
   // Absent, not empty, when no pack is provisioned: the engine treats a missing key as "no pack" and
   // an empty string would be a path it then tries to enumerate.
