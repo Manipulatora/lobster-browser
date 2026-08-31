@@ -3,7 +3,7 @@ import type { Profile } from '@lobster/shared-types';
 import { useId, useState } from 'react';
 import { save } from '@tauri-apps/plugin-dialog';
 
-import { profilesClient } from '../../api/tauri';
+import { profilesClient, type ProfileFileProgress } from '../../api/tauri';
 import { Button, Modal } from '../../ui';
 
 interface ExportProfileDialogProps {
@@ -38,6 +38,13 @@ export function ExportProfileDialog({
   const [includeProxyCredentials, setIncludeProxyCredentials] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Streamed live from Rust while the export runs, so a multi-gigabyte session directory is a
+  // sequence of named steps rather than a spinner of unknowable length.
+  const [progress, setProgress] = useState<ProfileFileProgress | null>(null);
+  // The id the CANCEL command addresses. Minted per attempt: the Rust cancellation registry is
+  // keyed by it and cleared when the operation ends, so reusing one across attempts could cancel
+  // the wrong run.
+  const [opId, setOpId] = useState<string | null>(null);
   // The finished export stays ON SCREEN rather than closing silently. A file the user cannot find
   // is indistinguishable from an export that never ran, and the omissions matter more than the
   // success — a file believed complete that quietly left out the proxy login is a support ticket a
@@ -76,7 +83,10 @@ export function ExportProfileDialog({
     // than folded in here.
     if (!destination) return;
 
+    const runId = crypto.randomUUID();
     setBusy(true);
+    setOpId(runId);
+    setProgress(null);
     try {
       const report = await profilesClient.export_profile_file(
         profile.id,
@@ -89,12 +99,19 @@ export function ExportProfileDialog({
           // pretending the capture was coherent.
           capture: running ? 'live' : 'quiesced',
         },
+        setProgress,
+        runId,
       );
       setDone({ path: destination, omitted: report.omitted ?? [] });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      // Cancelling is an outcome the user chose, not a failure to report — the Rust side unwinds
+      // completely ("nothing was left behind"), so the dialog just returns to its form.
+      if (!message.includes('CANCELLED')) setError(message);
     } finally {
       setBusy(false);
+      setOpId(null);
+      setProgress(null);
     }
   }
 
@@ -137,7 +154,16 @@ export function ExportProfileDialog({
       ariaDescribedBy={descriptionId}
       footer={
         <>
-          <Button variant="secondary" onClick={onClose} disabled={busy}>
+          {/* While the export runs, Cancel cancels THE OPERATION — the Rust side stops at the next
+              step boundary and unwinds — rather than the dialog; closing over a still-running
+              export would leave it writing with nobody watching. */}
+          <Button
+            variant="secondary"
+            onClick={() => {
+              if (busy && opId) void profilesClient.cancel_profile_file_op(opId);
+              else onClose();
+            }}
+          >
             Cancel
           </Button>
           <Button
@@ -229,6 +255,15 @@ export function ExportProfileDialog({
           <p className="notice notice--warn">
             <strong>This profile is running.</strong> Open tabs and extension state will come from
             the last complete capture, or be left out. Stop it first for a complete copy.
+          </p>
+        ) : null}
+
+        {/* The step Rust is on right now, verbatim. Most phases have no meaningful count (0/0);
+            the per-artifact ones append theirs. */}
+        {busy && progress ? (
+          <p className="notice" role="status" aria-live="polite">
+            {progress.detail}
+            {progress.total > 0 ? ` (${progress.done}/${progress.total})` : ''}
           </p>
         ) : null}
 

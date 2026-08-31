@@ -10,6 +10,7 @@ import type {
   StoredProxy,
 } from '@lobster/shared-types';
 
+import { accountClient } from '../../api/account';
 import {
   proxiesClient,
   profilesClient,
@@ -95,10 +96,13 @@ function pendingActionCopy(action: PendingProfileAction | null): {
 export function ProfilesView({
   createProfileSignal = 0,
   onProfileCountChange,
+  onAccountChanged,
 }: {
   createProfileSignal?: number;
   /** Called whenever the profile set changes, so the shell's allowance meter can keep up. */
   onProfileCountChange?: (count: number) => void;
+  /** Called when this view changed something billing answers for — a create, a refreshed cap. */
+  onAccountChanged?: () => void;
 } = {}): JSX.Element {
   const { showError } = useErrorModal();
   const {
@@ -234,7 +238,25 @@ export function ProfilesView({
     input: CreateProfileInput,
     options?: { password?: string },
   ): Promise<void> {
-    const profile = await create(input);
+    let profile: Profile;
+    try {
+      profile = await create(input);
+    } catch (e: unknown) {
+      // THE CAP CAN BE STALE, AND ONLY A SUMMARY FETCH UN-STALES IT. The Rust side enforces the
+      // profile limit from entitlement.json — a local cache that is only rewritten by a successful
+      // `account_summary` call. A user who hits the cap, upgrades on the website and comes back is
+      // still judged against the OLD plan until someone refetches, so without this retry they were
+      // wedged behind PROFILE_LIMIT_REACHED until they restarted the app.
+      if (!errMessage(e).includes('PROFILE_LIMIT_REACHED')) throw e;
+      const summary = await accountClient.summary();
+      // Null means the refetch failed, so the cache was NOT rewritten and retrying would only hit
+      // the same wall; the original, accurate error is the one to surface.
+      if (!summary) throw e;
+      onAccountChanged?.();
+      // Once: either the refreshed entitlement admits the profile now, or the limit is real and
+      // the second failure propagates to the form like any other create error.
+      profile = await create(input);
+    }
     if (options?.password) {
       await setPassword(profile.id, options.password);
     }
@@ -244,6 +266,8 @@ export function ProfilesView({
     } catch {
       /* non-fatal */
     }
+    // The allowance meter counts this profile against the cap the moment it exists.
+    onAccountChanged?.();
     setShowForm(false);
   }
 

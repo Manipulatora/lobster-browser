@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { accountClient, type AccountState } from './api/account';
 import { authClient, type CloudUser } from './api/auth';
 import { profilesClient } from './api/tauri';
+import { useRefreshOnFocus } from './api/useRefreshOnFocus';
 import { AuthScreen } from './features/auth/AuthScreen';
 import { AuthBootstrapGate } from './features/auth/authBootstrap';
 import { ProfilesView } from './features/profiles/ProfilesView';
@@ -35,10 +36,13 @@ function ActiveView({
   active,
   createProfileSignal,
   onProfileCountChange,
+  onAccountChanged,
 }: {
   active: NavKey;
   createProfileSignal: number;
   onProfileCountChange: (count: number) => void;
+  /** The view did something billing must answer for again (created a profile, refreshed the cap). */
+  onAccountChanged: () => void;
 }): JSX.Element {
   switch (active) {
     case 'profiles':
@@ -46,6 +50,7 @@ function ActiveView({
         <ProfilesView
           createProfileSignal={createProfileSignal}
           onProfileCountChange={onProfileCountChange}
+          onAccountChanged={onAccountChanged}
         />
       );
     case 'proxies':
@@ -165,24 +170,35 @@ function Dashboard({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [account, setAccount] = useState<AccountState>({ kind: 'loading' });
-  /** Bumped by the panel's Retry, so a boot-time failure is not permanent. */
+  /**
+   * Bumped for EVERY reason to ask billing again — the panel's Retry, the window regaining focus
+   * after a purchase on the website, a profile create that repainted the allowance. One owner, so
+   * no path can forget to refresh and none can invent its own competing fetch.
+   */
   const [accountAttempt, setAccountAttempt] = useState(0);
+  const refreshAccount = useCallback(() => setAccountAttempt((n) => n + 1), []);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
 
-  // Balance, plan and cap. Re-fetched when the profile set changes so the usage figure in the
-  // sidebar cannot drift from the list beside it — a cap that reads 11/200 next to twelve rows is
-  // worse than no cap at all.
+  // Balance, plan and cap.
   //
   // EVERY OUTCOME IS A STATE, and the panel renders all of them. This used to store
   // `AccountSummary | null` and render nothing for null — which was simultaneously "loading",
   // "offline", "signed out", "401" and "billing is down". The user saw an empty sidebar and no way
   // to know why or to try again.
   //
-  // `accountAttempt` is in the deps because the previous version could only ever retry when the
-  // user or the profile count changed. On a fresh install with no profiles neither ever does, so a
-  // single failed fetch at startup stayed failed for the life of the process.
+  // Keyed on the user's ID rather than the object: the auth bootstrap hands out a fresh object for
+  // the same person on every verify, and an effect keyed on identity refired for no informational
+  // change — while never firing for the changes that mattered (paying on the website). Those all
+  // arrive through `accountAttempt` now.
+  //
+  // A FAILED REFRESH NEVER DESTROYS A GOOD ANSWER. Focus-driven refreshes run far more often than
+  // the boot fetch did, including moments the network is flaky; flashing a working panel to
+  // "error" because one background re-ask timed out would make the reactivity feel like a
+  // regression. Stale-but-real beats fresh-but-empty; `error` is only for when there is nothing
+  // real to show.
+  const userId = user?.id ?? null;
   useEffect(() => {
-    if (!user) {
+    if (!userId) {
       // Admitted by the auth gate as `offline`: a session is held but could not be verified, so
       // there is no identity to bill against and no point calling.
       setAccount({ kind: 'offline' });
@@ -195,29 +211,42 @@ function Dashboard({
         if (cancelled) return;
         // The Rust side collapses every transport and HTTP failure to null; treat that as an error
         // the user can retry rather than as an absence of information.
-        setAccount(summary ? { kind: 'ready', summary } : { kind: 'error' });
+        if (summary) setAccount({ kind: 'ready', summary });
+        else setAccount((prev) => (prev.kind === 'ready' ? prev : { kind: 'error' }));
       })
       .catch(() => {
-        if (!cancelled) setAccount({ kind: 'error' });
+        if (!cancelled) setAccount((prev) => (prev.kind === 'ready' ? prev : { kind: 'error' }));
       });
     return () => {
       cancelled = true;
     };
-  }, [user, profiles.length, accountAttempt]);
+  }, [userId, accountAttempt]);
 
-  // The reported count is the trigger, not the state: the shell refetches the list, because the
-  // palette and quick-launch read it too and a bare number would leave those stale.
-  const knownProfileCount = useRef(-1);
-  const handleProfileCountChange = useCallback((count: number) => {
-    if (knownProfileCount.current === count) return;
-    knownProfileCount.current = count;
+  // Money changes on the WEBSITE (top-ups, upgrades — hosted flows in the system browser), so the
+  // moment this window regains focus is the moment the answer changed. See the hook for why.
+  useRefreshOnFocus(refreshAccount);
+
+  // Keep a lightweight profile list for command-palette search / quick-launch.
+  const refreshProfiles = useCallback(() => {
     void profilesClient
       .list_profiles()
       .then(setProfiles)
       .catch(() => undefined);
   }, []);
 
-  // Keep a lightweight profile list for command-palette search / quick-launch.
+  // The reported count is the trigger, not the state: the shell refetches the list, because the
+  // palette and quick-launch read it too and a bare number would leave those stale. No dedupe on
+  // the count — "delete one, create one" lands on the same number with different rows, and the
+  // callback only fires when the child's list actually changed, so re-asking is already cheap.
+  const handleProfileCountChange = useCallback(
+    (_count: number) => refreshProfiles(),
+    [refreshProfiles],
+  );
+
+  // One fetch when the view or the create signal changes; after that the list only refreshes while
+  // someone is actually looking at the window (see useRefreshOnFocus below). The previous version
+  // ran a bare 8s setInterval forever, so a launcher minimised for a day kept polling into the
+  // void.
   useEffect(() => {
     let cancelled = false;
     void profilesClient
@@ -228,19 +257,11 @@ function Dashboard({
       .catch(() => {
         if (!cancelled) setProfiles([]);
       });
-    const id = window.setInterval(() => {
-      void profilesClient
-        .list_profiles()
-        .then((list) => {
-          if (!cancelled) setProfiles(list);
-        })
-        .catch(() => undefined);
-    }, 8000);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
     };
   }, [active, createProfileSignal]);
+  useRefreshOnFocus(refreshProfiles, 8000);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent): void {
@@ -427,7 +448,7 @@ function Dashboard({
               onToggleMenu={() => setAccountMenuOpen((open) => !open)}
               onSignOut={() => void handleSignOut()}
               onOpenBilling={() => void accountClient.openBilling()}
-              onRetry={() => setAccountAttempt((n) => n + 1)}
+              onRetry={refreshAccount}
               menuRef={accountMenuRef}
             />
             {/* Buying happens on the website, never in the app: the purchase debits Credit and the
@@ -451,6 +472,7 @@ function Dashboard({
             active={active}
             createProfileSignal={createProfileSignal}
             onProfileCountChange={handleProfileCountChange}
+            onAccountChanged={refreshAccount}
           />
         </main>
       </div>

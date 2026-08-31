@@ -3,6 +3,7 @@ import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 
 import {
   profilesClient,
+  type ProfileFileProgress,
   type ProfileImportPreview,
   type ProfileImportReport,
 } from '../../api/tauri';
@@ -42,6 +43,12 @@ export function ImportProfileDialog({
   const [passphrase, setPassphrase] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Streamed live from Rust while the import runs: unlock, ledger adoption and restore are each a
+  // named step rather than one long unexplained wait.
+  const [progress, setProgress] = useState<ProfileFileProgress | null>(null);
+  // The id the CANCEL command addresses. Minted per attempt — the Rust cancellation registry is
+  // keyed by it and cleared when the operation ends, so a reused id could cancel the wrong run.
+  const [opId, setOpId] = useState<string | null>(null);
 
   const passId = useId();
   const descriptionId = useId();
@@ -78,19 +85,33 @@ export function ImportProfileDialog({
   async function runImport(): Promise<void> {
     if (!path || !preview) return;
     setError(null);
+    const runId = crypto.randomUUID();
     setBusy(true);
+    setOpId(runId);
+    setProgress(null);
     try {
-      const report = await profilesClient.import_profile_file(path, passphrase, null);
+      const report = await profilesClient.import_profile_file(
+        path,
+        passphrase,
+        null,
+        setProgress,
+        runId,
+      );
       onImported(report);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // The Rust side tags the overwhelmingly common failure so the dialog can say the useful
-      // thing rather than surfacing an AEAD error.
-      setError(
-        message.includes('WRONG_PASSPHRASE') ? 'That password does not open this file.' : message,
-      );
+      // thing rather than surfacing an AEAD error. Cancelling is the user's own outcome, not a
+      // failure — the operation unwinds completely, so the dialog just returns to its form.
+      if (!message.includes('CANCELLED')) {
+        setError(
+          message.includes('WRONG_PASSPHRASE') ? 'That password does not open this file.' : message,
+        );
+      }
     } finally {
       setBusy(false);
+      setOpId(null);
+      setProgress(null);
     }
   }
 
@@ -105,7 +126,16 @@ export function ImportProfileDialog({
       ariaDescribedBy={descriptionId}
       footer={
         <>
-          <Button variant="secondary" onClick={onClose} disabled={busy}>
+          {/* While the import runs, Cancel cancels THE OPERATION — Rust stops at the next step
+              boundary and removes the row and directory it created — rather than the dialog;
+              closing over a still-running import would leave it restoring with nobody watching. */}
+          <Button
+            variant="secondary"
+            onClick={() => {
+              if (busy && opId) void profilesClient.cancel_profile_file_op(opId);
+              else onClose();
+            }}
+          >
             Cancel
           </Button>
           <Button
@@ -190,6 +220,15 @@ export function ImportProfileDialog({
               onChange={(event) => setPassphrase(event.target.value)}
             />
           </label>
+        ) : null}
+
+        {/* The step Rust is on right now, verbatim. Most phases carry no meaningful count (0/0);
+            the per-artifact ones append theirs. */}
+        {busy && progress ? (
+          <p className="notice" role="status" aria-live="polite">
+            {progress.detail}
+            {progress.total > 0 ? ` (${progress.done}/${progress.total})` : ''}
+          </p>
         ) : null}
 
         {error ? (

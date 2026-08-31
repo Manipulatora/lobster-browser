@@ -1,4 +1,4 @@
-import { invoke, isTauri } from '@tauri-apps/api/core';
+import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 import type {
@@ -74,6 +74,8 @@ export interface ProfilesClient {
     passphrase: string,
     profilePassword: string | null,
     options?: ProfileExportOptions,
+    onProgress?: (progress: ProfileFileProgress) => void,
+    opId?: string,
   ): Promise<ProfileExportReport>;
   /** Read only the plaintext header, so the import dialog can describe a file before asking for its password. */
   inspect_profile_file(path: string): Promise<ProfileImportPreview>;
@@ -81,7 +83,31 @@ export interface ProfilesClient {
     path: string,
     passphrase: string,
     nameOverride: string | null,
+    onProgress?: (progress: ProfileFileProgress) => void,
+    opId?: string,
   ): Promise<ProfileImportReport>;
+  /**
+   * Ask the in-flight export/import identified by `opId` (the id the caller minted and passed to
+   * the command) to stop. The Rust side stops at the next step boundary and unwinds completely, so
+   * cancelling never leaves a half-written file or a half-imported profile behind.
+   */
+  cancel_profile_file_op(opId: string): Promise<void>;
+}
+
+/**
+ * One step of a running export/import, streamed from Rust over a Tauri {@link Channel}.
+ *
+ * Mirrors `profile_portable::FileProgress` field for field (serde renames to camelCase on the
+ * wire). `done`/`total` are both 0 for the phases that have no meaningful count — the dialog shows
+ * `detail` alone then.
+ */
+export interface ProfileFileProgress {
+  /** `capture` | `read` | `seal` | `write` | `open` | `ledger` | `restore` | `done`. */
+  phase: string;
+  /** What is happening, in words the dialog shows verbatim. */
+  detail: string;
+  done: number;
+  total: number;
 }
 
 export interface ProfileExportOptions {
@@ -218,17 +244,37 @@ const tauriClient: ProfilesClient = {
   stop_profile: (id) => invoke<void>('stop_profile', { id }),
   export_profile_cookies: (id) => invoke<string>('export_profile_cookies', { id }),
   list_font_families: (os) => invoke<string[]>('list_font_families', { os }),
-  export_profile_file: (id, destPath, passphrase, profilePassword, options) =>
-    invoke<ProfileExportReport>('export_profile_file', {
+  // Both commands declare `on_progress: Channel<FileProgress>` NON-optional in Rust, so a channel
+  // is constructed and sent on every call, listener or not. Invoking without the key never reaches
+  // Rust at all — Tauri's deserialiser rejects it with "missing required key onProgress", which is
+  // the failure that silently broke export/import from this file for a while.
+  export_profile_file: (id, destPath, passphrase, profilePassword, options, onProgress, opId) => {
+    const channel = new Channel<ProfileFileProgress>();
+    if (onProgress) channel.onmessage = onProgress;
+    return invoke<ProfileExportReport>('export_profile_file', {
       id,
       destPath,
       passphrase,
       profilePassword,
       options,
-    }),
+      onProgress: channel,
+      // `Option<String>` on the Rust side; null (not undefined) so the key is always present.
+      opId: opId ?? null,
+    });
+  },
   inspect_profile_file: (path) => invoke<ProfileImportPreview>('inspect_profile_file', { path }),
-  import_profile_file: (path, passphrase, nameOverride) =>
-    invoke<ProfileImportReport>('import_profile_file', { path, passphrase, nameOverride }),
+  import_profile_file: (path, passphrase, nameOverride, onProgress, opId) => {
+    const channel = new Channel<ProfileFileProgress>();
+    if (onProgress) channel.onmessage = onProgress;
+    return invoke<ProfileImportReport>('import_profile_file', {
+      path,
+      passphrase,
+      nameOverride,
+      onProgress: channel,
+      opId: opId ?? null,
+    });
+  },
+  cancel_profile_file_op: (opId) => invoke<void>('cancel_profile_file_op', { opId }),
 };
 
 const tauriProxiesClient: ProxiesClient = {
@@ -564,6 +610,9 @@ const mockClient: ProfilesClient = {
   import_profile_file: async () => {
     throw new Error('Importing a profile needs the desktop app.');
   },
+  // Nothing to cancel in the mock — the operations above never start — but the member must exist
+  // so the web-dev client keeps satisfying {@link ProfilesClient}.
+  cancel_profile_file_op: async () => undefined,
 };
 
 const mockProxiesClient: ProxiesClient = {

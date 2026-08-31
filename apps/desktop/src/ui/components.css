@@ -543,10 +543,12 @@
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  /* 20px mark + 2px gap + 2px ring = 28px. The ring is a laid-out box rather than a box-shadow so
-     it cannot eat the title cell's gap. */
-  width: 28px;
-  height: 28px;
+  /* 24px mark + 2px gap + 2px ring = 32px. The ring is a laid-out box rather than a box-shadow so
+     it cannot eat the title cell's gap. 24px, up from 20px, because the mark now carries the
+     lobster silhouette rather than one or two fat glyphs — a silhouette's limbs collapse into each
+     other below roughly 30 device px, where initials were still legible. */
+  width: 32px;
+  height: 32px;
   border-radius: var(--radius-md);
 }
 .profile-mark::after {
@@ -597,27 +599,39 @@
   }
 }
 
-/* The mark inside the ring: the SAME rounded violet square the launched window shows in the taskbar,
-   down to the initials and the ramp stop — that is the whole point of it, so an operator can match a
-   row here to one of a dozen otherwise identical windows. The tint is an inline style because it is
-   per-profile data, not a theme decision.
+/* The mark inside the ring: a tinted rounded square carrying the lobster silhouette. The tint is an
+   inline style because it is per-profile data, not a theme decision — and for now the tint is the
+   cue that matches this row to its window: the taskbar/engine icon still draws initials until the
+   engine-side lobster change ships, so the two surfaces meet on the colour, not the glyph.
 
    `border-radius` is a PERCENTAGE, not a token: the engine draws the corner at 22% of the side
    (lobium_profile_icon.cc, kCornerRadiusRatio) because that still reads as a square at 16px, and a
    fixed radius here would agree at one size and disagree at every other. */
 .profile-mark__square {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
+  position: relative;
+  width: 24px;
+  height: 24px;
   border-radius: 22%;
   overflow: hidden;
-  color: var(--on-brand);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: 0.2px;
-  user-select: none;
+}
+
+/* The lobster itself. The PNG is a MASK — the CSS reads only its alpha channel and paints
+   var(--on-brand) through it — so one white-on-transparent asset serves every tint on the ramp
+   instead of one recoloured image per stop. Both the prefixed and standard properties, because
+   WebKitGTK on Linux still ships only the -webkit- form. The image is a 128px square with the
+   silhouette pre-centred at 88% of the side, so stretching it 100% 100% over this square box is
+   aspect-true and needs no extra positioning. */
+.profile-mark__square::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-color: var(--on-brand);
+  -webkit-mask-image: url('../assets/brand/lobster-mark.png');
+  mask-image: url('../assets/brand/lobster-mark.png');
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
 }
 
 /* --- Tabs --------------------------------------------------------------------------------------- */
