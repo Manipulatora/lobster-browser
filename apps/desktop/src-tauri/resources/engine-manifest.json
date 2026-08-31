@@ -10,8 +10,8 @@
     },
     "win-x64": {
       "version": "152.0.7977.42",
-      "url": "https://lobrowser.com/download/engine/lobium-win-x64-152.0.7977.42.zip",
-      "sha256": "adcbb43d7cc33c2f5ca1b42fc059e2971259f0f05aa3e2701bf5d0e8e3c797bd"
+      "url": "https://lobrowser.com/download/engine/lobium-win-x64-152.0.7977.42-b2.zip",
+      "sha256": "1ed28f186b58628199628c3b1e164af669bd793fdfa10f9ae18744f2d55184c9"
     }
   }
 }
