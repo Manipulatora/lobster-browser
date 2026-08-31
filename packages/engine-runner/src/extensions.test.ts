@@ -11,9 +11,25 @@ import {
   extractExtensionZip,
   LOBEE_EXTENSION_ID,
   parseChromeWebStoreId,
+  prepareDefaultLobeeExtension,
   prepareProfileExtensions,
   verifyCrx3,
 } from './extensions.js';
+
+/** Run `fn` with stderr's `console.error` captured, so a diagnostic can be asserted on. */
+async function capturingStderr(fn: () => Promise<void>): Promise<string[]> {
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map(String).join(' '));
+  };
+  try {
+    await fn();
+  } finally {
+    console.error = original;
+  }
+  return lines;
+}
 
 function varint(value: number): Buffer {
   const bytes: number[] = [];
@@ -407,6 +423,67 @@ test('a changed local extension is re-snapshotted rather than reused', async () 
       await readFile(join(userDataDir, 'lobium-extensions', 'installed.json'), 'utf8'),
     );
     assert.equal(installed[0].version, '2.0.0');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The shipped-but-never-loaded bug. `prepareDefaultLobeeExtension` returned `undefined` for BOTH
+ * "no LOBSTER_LOBEE_DIR" and "a LOBSTER_LOBEE_DIR with nothing in it", without a word on any channel —
+ * so a packaged Windows build that carried `resources/lobee` on disk launched every profile with no
+ * side panel and left no trace of having decided anything. The skip itself is correct (a missing panel
+ * must not block a browser launch); the silence was the bug.
+ */
+test('a Lobee bundle that cannot be loaded is reported, not silently skipped', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'lobee-diagnostic-'));
+  try {
+    const userDataDir = join(root, 'profile');
+    const empty = join(root, 'lobee-without-manifest');
+    await mkdir(empty, { recursive: true });
+
+    // Configured, and pointed at a directory holding no extension: the message must name the exact
+    // path that was tried, because "Lobee is missing" and "Lobee was looked for HERE" are different
+    // bugs with different fixes.
+    let result: string | undefined = 'unset';
+    const configured = await capturingStderr(async () => {
+      result = await prepareDefaultLobeeExtension(userDataDir, 'p1', empty);
+    });
+    assert.equal(result, undefined, 'a broken bundle must never fail the launch');
+    assert.equal(configured.length, 1);
+    assert.match(configured[0]!, /profile p1/);
+    assert.match(configured[0]!, /WITHOUT the Lobee side panel/);
+    assert.ok(configured[0]!.includes(empty), `the tried path must be named: ${configured[0]}`);
+
+    // Not configured at all - the exact state every packaged Windows install was in. Passing
+    // `undefined` falls through to the parameter default, which reads the env var, so the var has to
+    // actually be absent for this to test what it claims to.
+    const previous = process.env.LOBSTER_LOBEE_DIR;
+    delete process.env.LOBSTER_LOBEE_DIR;
+    try {
+      const unconfigured = await capturingStderr(async () => {
+        result = await prepareDefaultLobeeExtension(userDataDir, 'p1');
+      });
+      assert.equal(result, undefined);
+      assert.equal(unconfigured.length, 1);
+      assert.match(unconfigured[0]!, /LOBSTER_LOBEE_DIR is not set/);
+    } finally {
+      if (previous === undefined) delete process.env.LOBSTER_LOBEE_DIR;
+      else process.env.LOBSTER_LOBEE_DIR = previous;
+    }
+
+    // A real bundle still resolves, and says nothing on the failure channel.
+    const source = join(root, 'lobee');
+    await mkdir(source, { recursive: true });
+    await writeFile(
+      join(source, 'manifest.json'),
+      '{"manifest_version":3,"name":"Lobee","version":"1.0.0"}',
+    );
+    const quiet = await capturingStderr(async () => {
+      result = await prepareDefaultLobeeExtension(userDataDir, undefined, source);
+    });
+    assert.deepEqual(quiet, []);
+    assert.equal(result, join(userDataDir, 'lobium-extensions', 'lobee'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

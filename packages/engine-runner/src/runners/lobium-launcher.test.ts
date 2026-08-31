@@ -724,6 +724,55 @@ test('buildNativeLobiumProcessArgs is direct native Chromium args, not Patchrigh
   }
 });
 
+/**
+ * The whole Lobee chain in one assertion: a resolvable `LOBSTER_LOBEE_DIR` must put the snapshot on
+ * `--load-extension` AND emit `--lobium-open-side-panel`, and an unresolvable one must emit neither.
+ *
+ * Nothing between those two switches and the user's screen is conditional, so this is the last point
+ * where "the extension ships but never loads" is still observable from a test. It shipped that way:
+ * only the Linux launcher wrapper ever exported the variable, so every packaged Windows install took
+ * the empty branch below while carrying the extension on disk. The desktop app now publishes the
+ * variable itself (apps/desktop/src-tauri/src/lib.rs, publish_lobee_env), which is what makes the
+ * populated branch the real one on every platform.
+ */
+test('a resolvable Lobee bundle reaches the engine as --load-extension plus --lobium-open-side-panel', async () => {
+  const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-lobee-args-'));
+  const prevLobee = process.env.LOBSTER_LOBEE_DIR;
+  try {
+    const bundle = join(userDataDir, 'bundled-lobee');
+    await mkdir(bundle, { recursive: true });
+    await writeFile(
+      join(bundle, 'manifest.json'),
+      '{"manifest_version":3,"name":"Lobee","version":"1.0.0"}',
+    );
+    process.env.LOBSTER_LOBEE_DIR = bundle;
+
+    const args = await buildNativeLobiumProcessArgs(ctxWith(userDataDir));
+    const snapshot = join(userDataDir, 'lobium-extensions', 'lobee');
+    const load = args.find((arg) => arg.startsWith('--load-extension='));
+    assert.ok(load, '--load-extension must be emitted when Lobee resolves');
+    assert.ok(load.includes(snapshot), `Lobee must be on the load list: ${load}`);
+    // Loaded FIRST, ahead of any user extension, and named on the allow-list too - otherwise
+    // --disable-extensions-except would refuse the very extension we just loaded.
+    assert.equal(load.slice('--load-extension='.length).split(',')[0], snapshot);
+    assert.ok(
+      args.some((arg) => arg === `--disable-extensions-except=${snapshot}`),
+      'the allow-list must carry Lobee',
+    );
+    assert.ok(args.includes(`--lobium-open-side-panel=${LOBEE_EXTENSION_ID}`));
+
+    // The failure this bug shipped as: no bundle -> no load flag, no auto-open flag, launch unaffected.
+    delete process.env.LOBSTER_LOBEE_DIR;
+    const without = await buildNativeLobiumProcessArgs(ctxWith(userDataDir));
+    assert.ok(!without.some((arg) => arg.startsWith('--load-extension=')));
+    assert.ok(!without.some((arg) => arg.startsWith('--lobium-open-side-panel=')));
+  } finally {
+    if (prevLobee === undefined) delete process.env.LOBSTER_LOBEE_DIR;
+    else process.env.LOBSTER_LOBEE_DIR = prevLobee;
+    await rm(userDataDir, { recursive: true, force: true });
+  }
+});
+
 test('buildNativeLobiumProcessArgs hands the engine a per-profile window mark', async () => {
   const userDataDir = await mkdtemp(join(tmpdir(), 'lobium-profile-mark-'));
   try {

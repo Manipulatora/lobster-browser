@@ -774,10 +774,23 @@ async function recordInstalled(root: string, entries: InstallStamp[]): Promise<v
 export const LOBEE_EXTENSION_ID = 'opbicdcjjlpehmibpmkmkconpnnkijel';
 
 /**
+ * Report, on stderr, that this launch will carry no Lobee side panel.
+ *
+ * Same `[lobium] profile <id> …` report channel the launcher uses for a fail-closed proxy and for
+ * extensions `--disable-extensions-except` refuses (see `reportUnloadableUserExtensions`), so every
+ * "your browser is not what you configured" line for one launch reads off one stream in one format.
+ */
+function reportLobeeUnavailable(reason: string, profileId?: string): void {
+  const who = profileId ? `profile ${profileId}` : 'this launch';
+  console.error(`[lobium] ${who} will run WITHOUT the Lobee side panel: ${reason}`);
+}
+
+/**
  * Resolve the first-party Lobee side-panel extension (bundled with the desktop app), so it can be
  * auto-loaded into EVERY profile. The directory comes from `LOBSTER_LOBEE_DIR` (set by the installer)
  * or an explicit override. It is snapshotted into the profile like any unpacked extension. Returns
- * `undefined` when Lobee isn't configured (dev/CI without the bundle) so launches still work.
+ * `undefined` when Lobee isn't configured (dev/CI without the bundle) so launches still work — but it
+ * SAYS SO on stderr first; see {@link reportLobeeUnavailable}.
  *
  * IT IS LOADED FOR EVERY PACKAGE, INCLUDING THE ONES THAT MAY NOT RUN IT, and the panel locks itself
  * instead. Entitlement is decided by the credential the desktop pushes (see `managed-credential.ts`)
@@ -794,10 +807,31 @@ export async function prepareDefaultLobeeExtension(
   dir: string | undefined = process.env.LOBSTER_LOBEE_DIR,
 ): Promise<string | undefined> {
   const source = dir?.trim();
-  if (!source) return undefined;
+  if (!source) {
+    // SILENCE HERE COST US A SHIPPED FEATURE. Both "not configured" and "configured but empty" used
+    // to return undefined without a word, so a packaged build that shipped Lobee on disk but never
+    // published LOBSTER_LOBEE_DIR (every Windows install did exactly that — only the Linux launcher
+    // wrapper exported it) launched profiles with no side panel and nothing anywhere said so. The
+    // user's bug report was "I cannot find Lobee agent extension in the profile", and there was no
+    // log line on either side to point at. Still non-fatal — a missing panel must never block a
+    // browser launch — but never again invisible.
+    reportLobeeUnavailable(
+      'LOBSTER_LOBEE_DIR is not set; the desktop app publishes it at startup, so an unset value means ' +
+        'either a bare sidecar/dev run or a packaged build that failed to resolve its bundled copy',
+      profileId,
+    );
+    return undefined;
+  }
   if (!isAbsolute(source)) throw new Error('LOBSTER_LOBEE_DIR must be an absolute path');
   const manifest = await stat(join(source, 'manifest.json')).catch(() => undefined);
-  if (!manifest?.isFile()) return undefined; // not a valid extension dir — skip rather than fail launch
+  if (!manifest?.isFile()) {
+    // Configured, and wrong: the path exists in someone's mind but carries no extension. Naming the
+    // exact directory is the whole point — it is the difference between "Lobee is missing" and
+    // "Lobee was looked for HERE". Skipped rather than thrown, so a broken bundle degrades to a
+    // browser without a panel instead of a browser that will not start.
+    reportLobeeUnavailable(`no manifest.json under ${source}`, profileId);
+    return undefined;
+  }
   const root = join(userDataDir, 'lobium-extensions');
   await mkdir(root, { recursive: true, mode: 0o700 });
   const destination = join(root, 'lobee');

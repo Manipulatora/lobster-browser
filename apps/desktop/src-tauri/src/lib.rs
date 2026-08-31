@@ -1266,6 +1266,29 @@ fn first_font_pack_dir(candidates: impl IntoIterator<Item = PathBuf>) -> Option<
         .find(|dir| dir.join("font-pack.manifest.json").is_file())
 }
 
+/// Decide what `LOBSTER_LOBEE_DIR` this process should publish, or `None` when it must publish nothing.
+///
+/// `inherited` is whatever the environment already carried. A non-empty value is the documented
+/// developer workflow (point the app at a working tree's `packages/lobee` and reload it without
+/// rebuilding the bundle), so it is left exactly as it is — same rule `ensure_lobium_env` applies to
+/// `LOBSTER_LOBIUM_BIN` and `LOBSTER_FONTS_DIR`.
+///
+/// A candidate counts only if it actually holds a `manifest.json`. Publishing a path that is merely
+/// *plausible* would be worse than publishing nothing: the sidecar would accept the variable, find no
+/// manifest, and skip Lobee anyway — with the extra cost that the "not configured" diagnostic would no
+/// longer be reachable and the log would claim a bundle that is not there.
+fn lobee_dir_to_publish(
+    inherited: Option<&std::ffi::OsStr>,
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    if inherited.is_some_and(|value| !value.is_empty()) {
+        return None;
+    }
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("manifest.json").is_file())
+}
+
 #[cfg(target_os = "linux")]
 /// Whether the kernel can give Chromium its USER-NAMESPACE sandbox.
 ///
@@ -1439,6 +1462,59 @@ fn ensure_lobium_env(app: &tauri::AppHandle) {
                 std::env::set_var("LOBSTER_ALLOW_SOFTWARE_GPU_CALIBRATION", "1");
             }
         }
+    }
+}
+
+/// Point the sidecar at the bundled Lobee side-panel extension.
+///
+/// WHY THIS LIVES IN THE RUST APP AND NOT IN A LAUNCHER SCRIPT. `prepareDefaultLobeeExtension` in the
+/// sidecar loads Lobee only when `LOBSTER_LOBEE_DIR` names a real extension directory, and the ONLY
+/// production writer of that variable was `scripts/build-linux-product.sh`, which bakes an `export`
+/// into the Linux shell wrapper. Linux launches the app through that wrapper, so Linux worked. Windows
+/// (and any bundle that starts the Tauri executable directly, which is every packaged build) has no
+/// wrapper to bake anything into — nothing set the variable, the sidecar took the silent `undefined`
+/// branch, and every profile launched with no side panel while `resources/lobee` sat installed on disk
+/// the whole time. The user-visible bug was exactly that: "I cannot find Lobee agent extension in the
+/// profile". A wrapper script cannot fix that class of bug because the wrapper is the thing that does
+/// not exist; the process that spawns the sidecar is the only place that always runs.
+///
+/// So it is published here, beside the engine and font paths, from the one process every platform is
+/// guaranteed to go through — and the sidecar inherits it, because `SidecarClient::spawn` inherits this
+/// process's environment.
+///
+/// Both outcomes are logged. The failure mode this fixes was pure silence on both sides of the
+/// boundary, and a bug nobody can see in a log is a bug that ships twice.
+fn publish_lobee_env(app: &tauri::AppHandle) {
+    let inherited = std::env::var_os("LOBSTER_LOBEE_DIR");
+    let mut candidates = Vec::new();
+    // Packaged: tauri.conf.json maps `resources/lobee` -> `lobee` in the resource dir. MUST go through
+    // app_resource_dir, never resource_dir() directly — see strip_verbatim_prefix for what a raw
+    // `\\?\C:\...` path does to the Node side of this handoff.
+    if let Some(resources) = app_resource_dir(app) {
+        candidates.push(resources.join("lobee"));
+    }
+    // Dev: the source tree next to this crate, same fallback shape resolve_sidecar_js uses. Baked at
+    // compile time, so in a packaged build it simply names a path that does not exist and is skipped.
+    candidates.push(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packages/lobee"),
+    );
+
+    let resolved = lobee_dir_to_publish(inherited.as_deref(), candidates.clone());
+    match resolved {
+        Some(dir) => {
+            std::env::set_var("LOBSTER_LOBEE_DIR", dir.to_string_lossy().as_ref());
+            tracing::info!(lobee = %dir.display(), "Lobee side panel published; it loads into every profile");
+        }
+        None => match inherited {
+            Some(value) if !value.is_empty() => tracing::info!(
+                lobee = %PathBuf::from(value).display(),
+                "LOBSTER_LOBEE_DIR was inherited; keeping the developer override"
+            ),
+            _ => tracing::warn!(
+                searched = ?candidates,
+                "no Lobee extension bundle found (no manifest.json in any candidate); profiles will launch WITHOUT the side panel"
+            ),
+        },
     }
 }
 
@@ -2010,6 +2086,10 @@ pub fn run() {
                 let _ = handle;
             }
             ensure_lobium_env(app.handle());
+            // BEFORE the sidecar spawns, because the sidecar inherits this environment once and a
+            // variable set afterwards would only reach the NEXT app start — i.e. a fresh install's
+            // very first profile launch would still come up without the side panel.
+            publish_lobee_env(app.handle());
 
             // BACKGROUND ENGINE UPDATE. The installer carries an engine, so first run needs no
             // download and the gate passes straight through. That is the whole point of bundling -
@@ -2295,8 +2375,8 @@ pub fn run() {
 mod lifecycle_tests {
     use super::{
         current_managed_lobium_bin, discovered_lobium_bin_origin, explicit_lobium_bin_from,
-        first_font_pack_dir, managed_engine_expectation, remove_profile_data_dir, LobiumBinOrigin,
-        CHROME_BIN,
+        first_font_pack_dir, lobee_dir_to_publish, managed_engine_expectation,
+        remove_profile_data_dir, LobiumBinOrigin, CHROME_BIN,
     };
 
     #[cfg(target_os = "windows")]
@@ -2315,6 +2395,51 @@ mod lifecycle_tests {
         std::fs::write(packed.join("font-pack.manifest.json"), b"{}").unwrap();
 
         assert_eq!(first_font_pack_dir([empty, packed.clone()]), Some(packed));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The regression this guards: a packaged build shipped `resources/lobee` and never published
+    /// `LOBSTER_LOBEE_DIR`, so the sidecar skipped the side panel on every Windows profile launch.
+    #[test]
+    fn lobee_resolution_takes_a_real_bundle_and_refuses_everything_else() {
+        let root = std::env::temp_dir().join(format!("lobster-lobee-{}", uuid::Uuid::new_v4()));
+        let empty = root.join("empty");
+        let bundled = root.join("lobee");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(bundled.join("manifest.json"), b"{}").unwrap();
+
+        // A directory carrying manifest.json is the bundle; earlier candidates without one are skipped
+        // rather than published, so a half-populated resource dir cannot mask the real copy.
+        assert_eq!(
+            lobee_dir_to_publish(None, [empty.clone(), bundled.clone()]),
+            Some(bundled.clone())
+        );
+
+        // No manifest anywhere: publish NOTHING. Setting the variable to a plausible-but-empty path
+        // would make the sidecar's "not configured" diagnostic unreachable and log a bundle that is
+        // not there.
+        assert_eq!(
+            lobee_dir_to_publish(None, [empty.clone(), root.join("absent")]),
+            None
+        );
+
+        // An inherited value is the developer workflow (a working tree's packages/lobee). It wins over
+        // the packaged copy and is never overwritten - same rule the engine and font paths follow.
+        assert_eq!(
+            lobee_dir_to_publish(
+                Some(std::ffi::OsStr::new("/opt/dev/packages/lobee")),
+                [bundled.clone()]
+            ),
+            None,
+            "an inherited LOBSTER_LOBEE_DIR must be left exactly as it is"
+        );
+        // An empty value is not an override; it is an unset variable spelled badly.
+        assert_eq!(
+            lobee_dir_to_publish(Some(std::ffi::OsStr::new("")), [bundled.clone()]),
+            Some(bundled)
+        );
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
