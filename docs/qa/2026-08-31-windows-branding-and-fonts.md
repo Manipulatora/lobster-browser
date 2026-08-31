@@ -297,6 +297,11 @@ BUNDLED installer on a clean machine and check, in one pass:
   completion with a progress line, and Cancel should actually cancel.
 * **Proxy** — a profile that carries a proxy should still carry it after a sync or an
   export/import round trip. This was silently dropped for every modern profile.
+* **Sync convergence** — reconcile now runs every 60s rather than once per launch, and a pull that
+  fails to apply is retried on the next tick instead of being recorded as done. If you see a profile
+  reported as `failed` in a sync summary, it should recover by itself within a minute or two; a
+  profile that stays `failed` forever is worth reporting, because that is the exact shape of the bug
+  this replaced.
 
 ---
 
