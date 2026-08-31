@@ -138,7 +138,45 @@ const NAME_TRANSFORMS = [
   [/\bLobster for Testing\b/g, 'Lobium for Testing'],
   [/\bLobster\b/g, 'Lobium'],
 ];
+
+// A NARROWER transform for the long tail of string files below. It rewrites ONLY "Chromium" — never
+// "Chrome" or "Google Chrome".
+//
+// That asymmetry is deliberate and is the documented product decision: "Chromium" is our own engine
+// identity and must never be user-visible, whereas a bare "Chrome"/"Google" in these files is usually
+// a genuine third-party reference we WANT left alone (the real Chrome Web Store, "Search Google or
+// type a URL", Google Password Manager, Google Wallet). Rewriting those would misname other people's
+// products; rewriting "Chromium" never can.
+const CHROMIUM_ONLY_TRANSFORMS = [[/\bChromium\b/g, 'Lobium']];
+
+// The files that leak a LITERAL "Chromium" into shipped desktop UI. Every one of these strings sits
+// in a `<if expr="not _google_chrome">` / `*_NON_BRANDED` branch — which is exactly the branch this
+// engine compiles — so before this list they reached real users: "Relaunch Chromium" in the password
+// bubble, "Chromium cannot verify these certificates" on the SSL interstitial, "Autofill this card
+// for purchases made in Chromium".
+//
+// Deliberately EXCLUDED, having been checked one by one: chrome/app/generated_resources.grd and
+// chrome/app/settings_strings.grdp (their only hits are <ex> translator hints, never shipped),
+// components/metrics/server_urls.grd and components/policy/resources/policy_templates*.grd (file
+// header comments only).
+const CHROMIUM_ONLY_FILES = [
+  'chrome/app/password_manager_ui_strings.grdp',
+  'components/privacy_sandbox_strings.grd',
+  'components/page_info_strings.grdp',
+  'components/search_engine_choice_strings.grdp',
+  'components/autofill_strings.grdp',
+  'components/autofill_payments_strings.grdp',
+  'components/security_interstitials_strings.grdp',
+  'components/password_manager_strings.grdp',
+  'components/ssl_errors_strings.grdp',
+  'components/reset_password_strings.grdp',
+  'components/new_or_sad_tab_strings.grdp',
+  'components/management_strings.grdp',
+  'components/components_google_chrome_strings.grd',
+];
+
 async function stageStrings() {
+  // Full product-name rewrite: these four+1 files exist purely to name the product.
   const files = [
     'chrome/app/chromium_strings.grd',
     'chrome/app/settings_chromium_strings.grdp',
@@ -151,6 +189,48 @@ async function stageStrings() {
     const changed = await replaceInFile(resolve(CHROMIUM_SRC, file), NAME_TRANSFORMS);
     console.log(`  strings: ${file} ${changed ? '-> Lobium' : '(already Lobium / no tokens)'}`);
   }
+
+  // Chromium-only rewrite across the long tail of shipped UI strings.
+  let touched = 0;
+  for (const file of CHROMIUM_ONLY_FILES) {
+    if (await replaceInFile(resolve(CHROMIUM_SRC, file), CHROMIUM_ONLY_TRANSFORMS)) touched += 1;
+  }
+  console.log(
+    `  strings: Chromium-only pass over ${CHROMIUM_ONLY_FILES.length} shipped-UI file(s), ${touched} rewritten`,
+  );
+}
+
+// (c2) Windows install_static display names.
+//
+// chrome/install_static/chromium_install_modes.h mixes two very different kinds of constant, and only
+// one of them may be rewritten:
+//
+//   DISPLAY (rewritten here) - base_app_name, and the two ProgID *descriptions* that Windows shows in
+//   Explorer's "Open with" list and the file-properties dialog ("Chromium HTML Document").
+//
+//   IDENTITY (deliberately LEFT ALONE) - base_app_id is the AppUserModelId, which owns taskbar
+//   pinning identity; kProductPathName is a component of the install and USER DATA directory path, so
+//   changing it orphans every existing profile; browser_prog_id_prefix / pdf_prog_id_prefix are the
+//   registry KEY names behind the file associations; direct_launch_url_scheme is a URL scheme; and
+//   kSafeBrowsingName is a network-visible client identifier sent to the Safe Browsing service -
+//   giving an anti-detect browser its own unique value there would be a fingerprinting regression,
+//   not a branding win. Every one of those is a product decision with migration consequences and is
+//   NOT something a branding pass may change silently.
+//
+// Windows-only: this header is not compiled on Linux, so the rewrite can be verified as staged text
+// here but its visual effect only appears in a Windows build.
+async function stageWindowsInstallModes() {
+  const file = 'chrome/install_static/chromium_install_modes.h';
+  const changed = await replaceInFile(resolve(CHROMIUM_SRC, file), [
+    // Anchored on the field name: base_app_id on the very next line holds the identical literal
+    // L"Chromium" and must NOT be touched.
+    [/(\.base_app_name\s*=\s*)L"Chromium"/, '$1L"Lobium"'],
+    [/L"Chromium HTML Document"/, 'L"Lobium HTML Document"'],
+    [/L"Chromium PDF Document"/, 'L"Lobium PDF Document"'],
+  ]);
+  console.log(
+    `  install_static: ${file} ${changed ? '-> Lobium display names (identity keys untouched)' : '(already Lobium / absent)'}`,
+  );
 }
 
 // (d) NTP brand icons + the html/css/logo transforms. The icon COPY is the load-bearing part; the
@@ -306,6 +386,7 @@ async function main() {
   await stageOverlay();
   await stageBranding();
   await stageStrings();
+  await stageWindowsInstallModes();
   await stageNtp();
   console.log('Lobium branding staged. Rebuild to ship it.');
 }
