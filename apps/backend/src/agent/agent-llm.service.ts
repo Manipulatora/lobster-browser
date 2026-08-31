@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   ServiceUnavailableException,
+  type OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AgentModelInfo, AgentModelsResult } from '@lobster/shared-types';
@@ -110,6 +111,93 @@ interface PreparedCall {
 const CHARS_PER_TOKEN = 4;
 
 /**
+ * What a caller is told when the failure is OURS.
+ *
+ * THE OPERATOR'S WALLET IS NOT THE CUSTOMER'S WALLET. OpenRouter answers a dead operator key with
+ * 401 and an empty operator balance with 402 — the same two statuses this proxy uses for "your agent
+ * token expired" and "your Credit ran out". Passed through verbatim, which is what the controller's
+ * `@Res()` design does with every other status, they reach the panel indistinguishable from the
+ * customer's own problem: a revoked SERVER key told the user "the model credential was rejected" and
+ * sent the sidecar off to re-mint a token that was never the issue, and an unpaid OpenRouter invoice
+ * told the user to top up a Credit balance nothing had touched. Neither sentence is true, and the
+ * second one bills the operator's arrears to the customer's conscience.
+ *
+ * So 401, 402 and 403 are RESERVED for this proxy's own decisions — {@link AgentAuthGuard},
+ * `insufficientCredit`, `planRequired` — and an upstream failure in that range is re-stated as a 5xx
+ * the client cannot mistake for its own. The provider's own words are dropped on the way out too:
+ * OpenRouter's credential errors quote the operator's key-management URL back at whoever asked.
+ */
+const OPERATOR_FAULT_MESSAGE =
+  'Lobee is temporarily unavailable — this is on our side, not yours; nothing was charged.';
+
+/** An upstream failure re-stated as a fault of the right owner. */
+interface UpstreamFault {
+  /** What the client is answered with. Never the upstream's own 401/402/403. */
+  status: number;
+  /** True when only the operator can end this — dead key, empty provider balance, key spend cap. */
+  operatorFault: boolean;
+  /** Stable support code. OURS: the provider's own text is never forwarded and never logged. */
+  reason: string;
+  message: string;
+}
+
+/**
+ * Re-state an upstream 401/402/403, or `undefined` to pass the status through as it stands.
+ *
+ * Only that range is touched. A 429 or a 500 from OpenRouter already means to the client exactly
+ * what it means to us, and rewriting it would cost the sidecar the retry behaviour it picks from it.
+ */
+function translateUpstreamFailure(
+  status: number,
+  code: string,
+  detail: string,
+): UpstreamFault | undefined {
+  const operatorFault = (reason: string): UpstreamFault => ({
+    status: 503,
+    operatorFault: true,
+    reason,
+    message: OPERATOR_FAULT_MESSAGE,
+  });
+  // 401: OpenRouter never sees the caller's agent token, so the only credential it can reject here
+  // is the operator's. 402: likewise, the only balance it can find empty is the operator's.
+  if (status === 401) return operatorFault('operator_key_rejected');
+  if (status === 402) return operatorFault('operator_out_of_funds');
+  if (status === 403) {
+    // OpenRouter spends 403 on two unrelated things: a key that is out of allowance ("limit",
+    // "credit", "quota") and a request its moderation declined. The first is the operator's to fix;
+    // the second is about THIS request and must not be reported to everyone as an outage.
+    return /\b(api[ _-]?key|key|credit|quota|limit|billing|balance|funds?)\b/i.test(
+      `${code} ${detail}`,
+    )
+      ? operatorFault('operator_key_limited')
+      : {
+          status: 502,
+          operatorFault: false,
+          reason: 'upstream_rejected',
+          message: 'The model provider declined this request.',
+        };
+  }
+  return undefined;
+}
+
+/** The body a translated fault answers with. Carries no provider text — see OPERATOR_FAULT_MESSAGE. */
+function upstreamFaultBody(fault: UpstreamFault): Record<string, unknown> {
+  return {
+    // `error.message` is where the sidecar's OpenAI-compatible client looks, exactly as it does for
+    // a typed refusal; `operatorFault` is the field that says whose problem this is without the
+    // client having to read English.
+    error: {
+      code: fault.operatorFault ? 'upstream_unavailable' : 'upstream_rejected',
+      type: 'agent_upstream_error',
+      message: fault.message,
+    },
+    upstream: 'openrouter',
+    operatorFault: fault.operatorFault,
+    reason: fault.reason,
+  };
+}
+
+/**
  * The managed LLM path. It holds the SERVER's OpenRouter key and brokers the sidecar's OpenAI-compatible
  * chat/completions calls, so a managed run never exposes the key to the desktop/client (the BYOK path's
  * whole reason to exist elsewhere). It meters token usage for billing and applies cheap-by-default guard
@@ -128,7 +216,7 @@ const CHARS_PER_TOKEN = 4;
  * ledger and there is no second, softer record of what was spent.
  */
 @Injectable()
-export class AgentLlmService {
+export class AgentLlmService implements OnModuleInit {
   private readonly logger = new Logger(AgentLlmService.name);
   private modelsCache?: { at: number; payload: AgentModelsResult };
 
@@ -136,6 +224,26 @@ export class AgentLlmService {
     private readonly config: ConfigService,
     private readonly spend: AgentSpendService,
   ) {}
+
+  /**
+   * Say at BOOT what a missing operator key costs, instead of at the first user request.
+   *
+   * NOT a boot failure, deliberately. This key powers one module; refusing to start without it would
+   * take sign-in, profile sync and billing down for a deployment that simply does not sell the
+   * agent, and `/health/ready` — which systemd's ExecStartPost polls — would then fail the whole
+   * unit. A backend with no key serves everything else correctly. What it must not do is start
+   * silently and let the operator discover the gap from a customer, which is what `.env.example`
+   * not listing the variable at all made the normal outcome. `/health/agent` carries the same fact
+   * for anything that reads rather than tails.
+   */
+  onModuleInit(): void {
+    if (this.config.get<string>('OPENROUTER_API_KEY')?.trim()) return;
+    this.logger.warn(
+      'OPENROUTER_API_KEY is not set — the managed Lobee agent is DISABLED on this backend: ' +
+        '/agent/llm/chat/completions answers 503 and /agent/llm/models serves an empty roster. ' +
+        'Nothing else is affected. See apps/backend/.env.example.',
+    );
+  }
 
   /**
    * Lobee's model roster, synced from the live OpenRouter catalog and cached for about an hour. Text-chat
@@ -303,10 +411,26 @@ export class AgentLlmService {
       const body = (await res.json().catch(() => ({}))) as OpenRouterErrorBody & {
         usage?: OpenRouterUsage;
       };
+      const code = diagnosticCode(body.error?.code ?? body.error?.type);
       this.logger.warn(
-        `agent/llm upstream_error stream model=${String(forward.model)} status=${res.status} code=${diagnosticCode(body.error?.code ?? body.error?.type)}`,
+        `agent/llm upstream_error stream model=${String(forward.model)} status=${res.status} code=${code}`,
       );
+      // Same translation as the buffered path — nothing has been written to the client yet, so the
+      // status line is still ours to choose. Streaming itself is untouched: this branch is the one
+      // where there is no stream to pipe.
+      const fault = translateUpstreamFailure(res.status, code, errorMessageOf(body));
+      if (fault?.operatorFault) {
+        // NOT metered, and that is a deliberate exception to `settleFailure`'s rule. A generation
+        // cut short because the OPERATOR's key hit its ceiling was still billed to us by the
+        // provider — but the sentence the user is handed says nothing was charged, and a promise
+        // the ledger contradicts costs more than the fraction of a cent it would recover.
+        this.reportUpstreamFault(fault, prepared.model, res.status, code, requestIdOf(res));
+        return { status: fault.status, stream: null, body: upstreamFaultBody(fault) };
+      }
       await this.settleFailure(prepared, principal, body.usage);
+      if (fault) {
+        return { status: fault.status, stream: null, body: upstreamFaultBody(fault) };
+      }
       return { status: res.status, stream: null, body };
     }
     return {
@@ -392,7 +516,16 @@ export class AgentLlmService {
    */
   private async prepare(raw: ChatBody, principal: AgentPrincipal): Promise<PreparedCall> {
     const key = this.config.get<string>('OPENROUTER_API_KEY')?.trim();
-    if (!key) throw new ServiceUnavailableException('OPENROUTER_API_KEY is not configured');
+    if (!key) {
+      // The variable name goes in the JOURNAL, not in the answer: the client is not the operator,
+      // and "OPENROUTER_API_KEY is not configured" is a sentence no user can act on. 503 also puts
+      // this in the same bucket as a refused key, which is right — both are the operator's to fix.
+      this.logger.error(
+        'agent/llm OPERATOR_FAULT reason=key_missing — OPENROUTER_API_KEY is not set, so every ' +
+          'managed Lobee call is refused. See apps/backend/.env.example.',
+      );
+      throw new ServiceUnavailableException(OPERATOR_FAULT_MESSAGE);
+    }
     if (typeof raw.model !== 'string' || !Array.isArray(raw.messages)) {
       throw new BadRequestException('body must include a string `model` and a `messages` array');
     }
@@ -508,13 +641,21 @@ export class AgentLlmService {
       });
     } else {
       const code = diagnosticCode(body.error?.code ?? body.error?.type);
-      const requestId = diagnosticCode(
-        res.headers.get('x-request-id') ?? res.headers.get('openrouter-request-id'),
-      );
+      const requestId = requestIdOf(res);
       this.logger.warn(
         `agent/llm upstream_error model=${model} status=${res.status} code=${code} requestId=${requestId}`,
       );
+      const fault = translateUpstreamFailure(res.status, code, errorMessageOf(body));
+      if (fault?.operatorFault) {
+        // Deliberately NOT metered — see the streaming path for why "nothing was charged" has to be
+        // true rather than nearly true.
+        this.reportUpstreamFault(fault, model, res.status, code, requestId);
+        return { status: fault.status, body: upstreamFaultBody(fault) };
+      }
       await this.settleFailure(prepared, principal, body.usage);
+      if (fault) {
+        return { status: fault.status, body: upstreamFaultBody(fault) };
+      }
     }
     return { status: res.status, body };
   }
@@ -522,6 +663,30 @@ export class AgentLlmService {
   /** Newest-first per-team usage, for the panel's spend view and for explaining a charge. */
   async usage(teamId: string, limit = 50): Promise<AgentUsageRow[]> {
     return this.spend.listUsage(teamId, limit);
+  }
+
+  /**
+   * Say loudly, in the operator's log, that this one is theirs.
+   *
+   * The user is given one honest sentence and no way to act on it, so the only thing that can end
+   * this outage is somebody reading the journal. `error` and not `warn`: a revoked key or an empty
+   * provider balance stops EVERY managed run on the deployment at once, and at `warn` it sits
+   * indistinguishable from the ordinary upstream noise until a customer complains.
+   */
+  private reportUpstreamFault(
+    fault: UpstreamFault,
+    model: string,
+    upstreamStatus: number,
+    code: string,
+    requestId: string,
+  ): void {
+    if (!fault.operatorFault) return;
+    this.logger.error(
+      `agent/llm OPERATOR_FAULT reason=${fault.reason} upstreamStatus=${upstreamStatus} ` +
+        `code=${code} requestId=${requestId} model=${model} — OpenRouter refused the ` +
+        'OPENROUTER_API_KEY this backend runs on (revoked key, exhausted operator balance, or key ' +
+        'spend cap). Every managed Lobee run fails until it is fixed; no customer was charged.',
+    );
   }
 
   /**
@@ -667,6 +832,19 @@ function diagnosticKind(error: unknown): string {
   if (error instanceof UpstreamTimeoutError) return 'timeout';
   if (error instanceof UpstreamCancelledError) return 'cancelled';
   return diagnosticCode(error instanceof Error ? error.name : typeof error);
+}
+
+/** The provider's own sentence, for CLASSIFYING a failure. Never forwarded, never logged. */
+function errorMessageOf(body: OpenRouterErrorBody): string {
+  const message = body.error?.message ?? body.message;
+  return typeof message === 'string' ? message : '';
+}
+
+/** OpenRouter's id for this call — the one thing that makes a support ticket answerable. */
+function requestIdOf(res: Response): string {
+  return diagnosticCode(
+    res.headers.get('x-request-id') ?? res.headers.get('openrouter-request-id'),
+  );
 }
 
 function diagnosticCode(value: unknown): string {

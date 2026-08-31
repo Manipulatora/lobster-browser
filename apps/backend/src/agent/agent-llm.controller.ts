@@ -33,10 +33,18 @@ export class AgentLlmController {
   constructor(private readonly service: AgentLlmService) {}
 
   /**
-   * Forward one chat completion to OpenRouter and pass the upstream status + JSON back verbatim.
-   * `@Res()` passthrough preserves the upstream status code (e.g. a 429 balance error) so the
+   * Forward one chat completion to OpenRouter and pass the status + JSON the service settled on
+   * back to the caller. `@Res()` passthrough preserves that status (e.g. a 429 rate limit) so the
    * sidecar client sees the real failure. `Record<string,unknown>` (not a DTO) so the global
    * ValidationPipe doesn't strip OpenAI fields (messages/tools/…).
+   *
+   * NOT QUITE VERBATIM, IN ONE PLACE. 401, 402 and 403 are reserved for THIS proxy's own decisions —
+   * a rejected agent token, an exhausted customer wallet, a package that does not include Lobee —
+   * so `AgentLlmService` re-states an upstream failure in that range as a 5xx before it gets here
+   * (see OPERATOR_FAULT_MESSAGE). Without that, a revoked OPERATOR key arrived at the sidecar as a
+   * 401 indistinguishable from an expired user token and sent it re-minting, and an empty OPERATOR
+   * balance arrived as a 402 that told the customer to top up. Everything else, streaming included,
+   * still passes through untouched.
    */
   @Post('chat/completions')
   async chat(

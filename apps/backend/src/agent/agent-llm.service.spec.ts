@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { BadRequestException, GatewayTimeoutException } from '@nestjs/common';
+import {
+  BadRequestException,
+  GatewayTimeoutException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 
 import type {
@@ -632,6 +636,255 @@ test('a streamed request for a model outside the roster is refused before any by
       ),
       BadRequestException,
     );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+/** Silences the service's logger and records what it said, so a test can assert on the loud line. */
+function captureLogs(service: AgentLlmService): { warn: string[]; error: string[] } {
+  const captured = { warn: [] as string[], error: [] as string[] };
+  (
+    service as unknown as {
+      logger: { warn: (m: string) => void; error: (m: string) => void; log: (m: string) => void };
+    }
+  ).logger = {
+    warn: (message: string): void => void captured.warn.push(message),
+    error: (message: string): void => void captured.error.push(message),
+    log: (): void => {},
+  };
+  return captured;
+}
+
+/** A catalog answer plus one upstream failure of the caller's choosing. */
+function stubUpstream(status: number, body: unknown): typeof fetch {
+  return (async (input: unknown) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json', 'x-request-id': 'or-req-9' },
+    });
+  }) as typeof fetch;
+}
+
+test('a rejected OPERATOR key is not the caller’s agent token going stale', async () => {
+  const original = globalThis.fetch;
+  // What OpenRouter actually answers to a revoked or deleted key. The caller's agent token never
+  // reaches OpenRouter, so this 401 cannot be about it — but passed through verbatim it was
+  // indistinguishable from the proxy's own 401, and the sidecar spent its one retry re-minting a
+  // token that was never the problem before telling the user their credential was rejected.
+  globalThis.fetch = stubUpstream(401, {
+    error: { code: 'invalid_api_key', message: 'No auth credentials found' },
+  });
+
+  try {
+    const spend = new FakeSpend();
+    const service = createService({ OPENROUTER_API_KEY: 'server-key-placeholder' }, spend);
+    await service.listModels();
+    const logs = captureLogs(service);
+    const result = await service.chatCompletion(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }] },
+      PRINCIPAL,
+    );
+
+    // 401/402/403 belong to THIS proxy's own decisions. An upstream credential failure must not be
+    // able to wear one of them, or the client cannot tell whose credential was refused.
+    assert.equal(result.status, 503);
+    const body = result.body as {
+      error: { code: string; message: string };
+      operatorFault: boolean;
+      reason: string;
+    };
+    assert.equal(body.error.code, 'upstream_unavailable');
+    assert.equal(body.operatorFault, true);
+    assert.equal(body.reason, 'operator_key_rejected');
+    assert.equal(
+      body.error.message,
+      'Lobee is temporarily unavailable — this is on our side, not yours; nothing was charged.',
+    );
+    // Not "the model credential was rejected", and not a word about the user's own credential.
+    assert.doesNotMatch(JSON.stringify(body), /credential was rejected|your (token|key)/i);
+    // The provider's own sentence is not forwarded: OpenRouter quotes the operator's key URL in it.
+    assert.doesNotMatch(JSON.stringify(body), /No auth credentials found/);
+    // Nothing generated, nothing charged.
+    assert.deepEqual(spend.charges, []);
+    // And the operator hears about it, loudly — nobody else can end this outage.
+    assert.match(logs.error.join('\n'), /OPERATOR_FAULT reason=operator_key_rejected/);
+    assert.match(logs.error.join('\n'), /OPENROUTER_API_KEY/);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('an exhausted OPERATOR balance is an outage, not the customer’s empty wallet', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = stubUpstream(402, {
+    error: { code: 'insufficient_credits', message: 'Insufficient credits. Add more using ...' },
+  });
+
+  try {
+    const spend = new FakeSpend();
+    const service = createService({ OPENROUTER_API_KEY: 'server-key-placeholder' }, spend);
+    await service.listModels();
+    const logs = captureLogs(service);
+    const result = await service.chatCompletion(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }] },
+      PRINCIPAL,
+    );
+
+    // A 402 from OpenRouter is the OPERATOR's account, and the customer's wallet is irrelevant to
+    // it. Passed through, it reached the panel as "Your Credit has run out — top up", which invoices
+    // the operator's unpaid bill to a customer who owes nothing.
+    assert.equal(result.status, 503, 'the upstream 402 must not survive as a customer-facing 402');
+    const serialised = JSON.stringify(result.body);
+    assert.doesNotMatch(serialised, /insufficient_credit\b/);
+    assert.doesNotMatch(serialised, /top up/i);
+    assert.match(serialised, /"reason":"operator_out_of_funds"/);
+    assert.deepEqual(spend.charges, []);
+    assert.match(logs.error.join('\n'), /OPERATOR_FAULT reason=operator_out_of_funds/);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('our own billing refusal still says insufficient_credit, and still says 402', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    throw new Error('an unaffordable call must never reach the provider');
+  }) as typeof fetch;
+
+  try {
+    const spend = new FakeSpend();
+    spend.affordable = false;
+    spend.balanceCents = 1;
+    spend.requiredCents = 9;
+    const service = createService({ OPENROUTER_API_KEY: 'server-key-placeholder' }, spend);
+    await assert.rejects(
+      service.chatCompletion(
+        { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }] },
+        PRINCIPAL,
+      ),
+      (error: unknown) => {
+        // The half that must NOT change: a wallet WE computed as empty is still the customer's own
+        // product state, with a top-up as its next action. Only the provider's 402 was ever a lie.
+        assert.ok(error instanceof AgentRefusalException);
+        assert.equal(error.getStatus(), 402);
+        assert.equal(error.body.reason, 'insufficient_credit');
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a streamed call hits the same translation before a single byte is written', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = stubUpstream(401, { error: { message: 'User not found.' } });
+
+  try {
+    const service = createService({ OPENROUTER_API_KEY: 'server-key-placeholder' });
+    await service.listModels();
+    captureLogs(service);
+    const { status, stream, body } = await service.chatCompletionStream(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }], stream: true },
+      PRINCIPAL,
+    );
+
+    // The failure branch is the one where there is no stream to pipe, so the status line is still
+    // ours to choose; the piping path itself is untouched.
+    assert.equal(stream, null);
+    assert.equal(status, 503);
+    assert.equal((body as { operatorFault: boolean }).operatorFault, true);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('an upstream 403 that is about the request is not reported as an operator outage', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = stubUpstream(403, {
+    error: { code: 'moderation', message: 'This request was flagged by the provider.' },
+  });
+
+  try {
+    const service = createService({ OPENROUTER_API_KEY: 'server-key-placeholder' });
+    await service.listModels();
+    const logs = captureLogs(service);
+    const result = await service.chatCompletion(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }] },
+      PRINCIPAL,
+    );
+
+    // Still not a 403 — that status is `planRequired`'s, and returning it here would have put an
+    // "upgrade your package" screen in front of a moderation decision. But it is not an outage
+    // either, so it is neither logged as one nor latched as one.
+    assert.equal(result.status, 502);
+    assert.equal((result.body as { operatorFault: boolean }).operatorFault, false);
+    assert.deepEqual(logs.error, []);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a backend with no operator key says so to its operator, not to its users', async () => {
+  const service = createService({});
+  const logs = captureLogs(service);
+
+  // Boot: named, prominent, and NOT fatal — this key powers one module, and failing the whole
+  // process would take sign-in, profile sync and billing down with it (and fail the readiness probe
+  // systemd's ExecStartPost polls).
+  service.onModuleInit();
+  assert.match(logs.warn.join('\n'), /OPENROUTER_API_KEY is not set/);
+  assert.match(logs.warn.join('\n'), /DISABLED/);
+
+  // First request: the user gets one honest sentence, and the variable name stays in the journal.
+  await assert.rejects(
+    service.chatCompletion(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }] },
+      PRINCIPAL,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof ServiceUnavailableException);
+      assert.equal(
+        error.message,
+        'Lobee is temporarily unavailable — this is on our side, not yours; nothing was charged.',
+      );
+      assert.doesNotMatch(error.message, /OPENROUTER_API_KEY/);
+      return true;
+    },
+  );
+  assert.match(logs.error.join('\n'), /OPERATOR_FAULT reason=key_missing/);
+});
+
+test('a generation the OPERATOR’s key ran out under is not billed to the customer', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = stubUpstream(403, {
+    error: { code: 'key_limit', message: 'Key limit exceeded (total limit).' },
+    usage: { prompt_tokens: 900, completion_tokens: 240, cost: 0.004 },
+  });
+
+  try {
+    const spend = new FakeSpend();
+    const service = createService({ OPENROUTER_API_KEY: 'server-key-placeholder' }, spend);
+    await service.listModels();
+    captureLogs(service);
+    const result = await service.chatCompletion(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }] },
+      PRINCIPAL,
+    );
+
+    assert.equal(result.status, 503);
+    assert.match(JSON.stringify(result.body), /"reason":"operator_key_limited"/);
+    // The usual rule meters a part-generated answer the provider billed us for. Here it is waived on
+    // purpose: the user is being told "nothing was charged", and that has to be true, not nearly
+    // true. It is the operator's ceiling that stopped this, and the operator eats the fraction.
+    assert.deepEqual(spend.charges, []);
   } finally {
     globalThis.fetch = original;
   }

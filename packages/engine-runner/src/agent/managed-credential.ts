@@ -40,8 +40,18 @@ const REFRESH_TIMEOUT_MS = 10_000;
  */
 const NOTED_REFUSAL_TTL_MS = 60_000;
 
+/**
+ * Why Lobee is not running.
+ *
+ * The first four are about THIS ACCOUNT and each has an action the user can take. `provider_unavailable`
+ * is the odd one out and deliberately so: it means the OPERATOR's side could not serve the call — the
+ * server's own OpenRouter credential was refused, the operator's provider balance is empty, or the
+ * backend has no key at all. It exists because those failures used to be reported as
+ * `insufficient_credit`, i.e. the operator's unpaid bill rendered as the customer's empty wallet,
+ * complete with a "top up" button that would have taken money for nothing.
+ */
 export type AgentRefusalCode =
-  'plan_required' | 'insufficient_credit' | 'signed_out' | 'unconfigured';
+  'plan_required' | 'insufficient_credit' | 'signed_out' | 'unconfigured' | 'provider_unavailable';
 
 export interface ManagedCredential {
   baseUrl: string;
@@ -345,9 +355,15 @@ export function managedLlmConfig(
   };
 }
 
-/** HTTP status for a refusal: 402 is "you have not paid for this yet", 403 is "you may not". */
+/**
+ * HTTP status for a refusal: 402 is "you have not paid for this yet", 403 is "you may not", and 503
+ * is "we could not" — an outage on our side, which is not a thing the account did wrong and must
+ * not be answered in the 4xx range that says it was.
+ */
 export function refusalStatus(code: AgentRefusalCode): number {
-  return code === 'insufficient_credit' ? 402 : 403;
+  if (code === 'insufficient_credit') return 402;
+  if (code === 'provider_unavailable') return 503;
+  return 403;
 }
 
 /** Test-only lifecycle reset; the sidecar holds this state for its whole process life. */

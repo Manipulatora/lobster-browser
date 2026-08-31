@@ -55,9 +55,16 @@ export interface AgentRunSnapshot {
   error?: string;
 }
 
-/** Why the agent said no. Mirrors the backend's refusal codes; the panel shows a screen per code. */
+/**
+ * Why the agent said no. Mirrors the sidecar's refusal codes; the panel shows a screen per code.
+ *
+ * The first four are about THIS ACCOUNT and each has an action the user can take. `provider_unavailable`
+ * is ours, not theirs: the operator's model provider refused the server's own credential or its
+ * balance is empty. It has its own code because it used to arrive as `insufficient_credit` and put
+ * a "top up your Credit" screen in front of a user whose Credit was never the problem.
+ */
 export type AgentRefusalCode =
-  'plan_required' | 'insufficient_credit' | 'signed_out' | 'unconfigured';
+  'plan_required' | 'insufficient_credit' | 'signed_out' | 'unconfigured' | 'provider_unavailable';
 
 /**
  * What this account may do with Lobee right now, as the sidecar reports it.

@@ -1767,6 +1767,12 @@ function tierLabel(tier: string | undefined): string {
  * billing page here would put a first-party visit to a Lobster domain on that profile's proxy IP and
  * fingerprint, tying a disguised identity to the account paying for it. Billing belongs in the
  * Lobster app, and it is the app the user is told to go to.
+ *
+ * ONE OF THESE SCREENS IS NOT ABOUT THE ACCOUNT AT ALL. `provider_unavailable` means the operator's
+ * model provider refused the SERVER's credential, or the operator's own balance is empty. It used to
+ * arrive here as `insufficient_credit` — the provider's 402 was passed through verbatim and read as
+ * the customer's — so the panel showed "Your Credit has run out" and pointed at a top-up for a
+ * balance nothing had touched. It gets its own screen, it apologises, and it asks for nothing.
  */
 function AgentLocked({
   entitlement,
@@ -1778,32 +1784,39 @@ function AgentLocked({
   const minimum = tierLabel(entitlement.minimumTier ?? 'plus');
   const included = (entitlement.requiredTiers ?? ['plus', 'pro', 'max']).map(tierLabel).join(', ');
   const screen =
-    entitlement.code === 'insufficient_credit'
+    entitlement.code === 'provider_unavailable'
       ? {
-          headline: 'Your Credit has run out',
-          detail: `Agent time is charged against your Credit balance. Top up in the Lobster app, under Account → Billing, and Lobee picks up where it left off.`,
-          action: 'Check again',
+          headline: 'Lobee is temporarily unavailable',
+          detail:
+            'This is on our side, not yours — nothing was charged and your Credit is untouched. It usually clears on its own; try again shortly.',
+          action: 'Try again',
         }
-      : entitlement.code === 'signed_out'
+      : entitlement.code === 'insufficient_credit'
         ? {
-            headline: 'Sign in to use Lobee',
-            detail:
-              'Lobee runs on your Lobster account. Sign in from the Lobster app, then reopen this panel.',
+            headline: 'Your Credit has run out',
+            detail: `Agent time is charged against your Credit balance. Top up in the Lobster app, under Account → Billing, and Lobee picks up where it left off.`,
             action: 'Check again',
           }
-        : entitlement.code === 'plan_required'
+        : entitlement.code === 'signed_out'
           ? {
-              headline: `Lobee is included with ${minimum}`,
-              detail: `Your team is on ${tierLabel(entitlement.tier)}. ${included} include the agent — upgrade in the Lobster app, under Account → Billing, to run tasks in this profile.`,
+              headline: 'Sign in to use Lobee',
+              detail:
+                'Lobee runs on your Lobster account. Sign in from the Lobster app, then reopen this panel.',
               action: 'Check again',
             }
-          : {
-              headline: 'Lobee is not connected yet',
-              detail:
-                entitlement.message ||
-                'The Lobster app has not authorised this profile for the agent yet. This usually clears within a moment of signing in.',
-              action: 'Try again',
-            };
+          : entitlement.code === 'plan_required'
+            ? {
+                headline: `Lobee is included with ${minimum}`,
+                detail: `Your team is on ${tierLabel(entitlement.tier)}. ${included} include the agent — upgrade in the Lobster app, under Account → Billing, to run tasks in this profile.`,
+                action: 'Check again',
+              }
+            : {
+                headline: 'Lobee is not connected yet',
+                detail:
+                  entitlement.message ||
+                  'The Lobster app has not authorised this profile for the agent yet. This usually clears within a moment of signing in.',
+                action: 'Try again',
+              };
 
   return (
     <div

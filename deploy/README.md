@@ -61,6 +61,22 @@ sudo systemctl enable --now lobster-backend
 `DATABASE_URL` therefore fails the unit rather than succeeding and 500-ing on the first user
 request.
 
+That probe's pass/fail is Postgres and nothing else, deliberately — anything else allowed to fail it
+also gains the power to block a deploy. The managed Lobee agent's operator credential is therefore
+REPORTED and not enforced: `/health/ready` carries an `agentCredential` field, `GET /health/agent`
+answers 200 with the detail, and a backend missing `OPENROUTER_API_KEY` logs a named warning at
+startup. It starts and serves everything else correctly; only the agent is down. Check it after a
+first install, because nothing will fail to tell you:
+
+```sh
+curl -fsS http://127.0.0.1:8080/health/agent    # -> "credential":"configured"
+```
+
+And watch the journal for `agent/llm OPERATOR_FAULT`: that is OpenRouter refusing the operator key,
+or the operator's OpenRouter balance running out. Every managed run fails while it stands, and by
+design no customer is charged and none is asked to top anything up — so that log line is the only
+thing that will tell you.
+
 Release:
 
 ```sh

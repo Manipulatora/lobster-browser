@@ -36,6 +36,9 @@ const REFUSAL_CODES: readonly string[] = [
   'insufficient_credit',
   'signed_out',
   'unconfigured',
+  // An outage on the operator's side rather than a state of this account. Listed here so the panel
+  // renders the honest "this is on us" card instead of a bare `The run could not start (503)`.
+  'provider_unavailable',
 ];
 
 function asRefusal(body: Record<string, unknown>): AgentEntitlement | null {
