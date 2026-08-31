@@ -703,12 +703,56 @@ pub async fn push_profile(
     Ok(outcome)
 }
 
+/// What [`reconcile`] should do with a snapshot it has just downloaded.
+#[derive(Debug, PartialEq, Eq)]
+enum PullDisposition {
+    /// Overlay the row and stamp the watermark.
+    Apply,
+    /// The account has nothing newer than this machine already has. Drop the duplicate snapshot.
+    Stale,
+    /// The profile changed locally while the download was in flight, so this pull is already out of
+    /// date. Drop it, leave the watermark alone, and let the next tick push the local edit first.
+    LocallyLeads,
+}
+
+/// Decide what to do with a pulled snapshot, given the sync link as it stands RIGHT NOW.
+///
+/// Separated from [`reconcile`] because both of its non-`Apply` answers are bugs that were shipped
+/// and are invisible in an integration test: each needs an exact interleaving of a network download
+/// against a local write, which is precisely what a unit test can state and a live sync cannot.
+///
+/// `link_now` MUST be re-read under the same lock the overlay will be written through — the guard
+/// that ran before the download is stale by definition, because `pull_profile` awaits the network
+/// with the database lock released.
+fn pull_disposition(
+    link_now: Option<&crate::profile_store::SyncLink>,
+    remote_version: u64,
+    last_seen: u64,
+) -> PullDisposition {
+    // Dirty first: a local edit outranks a remote version regardless of how new the remote is.
+    // Checking staleness first would let a newer remote overwrite an edit the user just made.
+    if link_now.is_none_or(|l| l.dirty) {
+        return PullDisposition::LocallyLeads;
+    }
+    if remote_version <= last_seen {
+        return PullDisposition::Stale;
+    }
+    PullDisposition::Apply
+}
+
 /// Download the account's snapshot into an existing local profile's ledger.
 ///
 /// It does NOT touch the user-data-dir. Writing another machine's session over a directory this one
 /// has been using is a data-loss event dressed as a sync, so the restore is a separate, deliberate
 /// step — the exception is a profile that has no user-data-dir at all, which [`reconcile`] handles
 /// because there is nothing there to lose.
+///
+/// IT ALSO DOES NOT ADVANCE `remote_version`. That watermark is the ONLY record of what this machine
+/// still has to catch up on, and a download is not a catch-up: [`reconcile`] pulls a row and can
+/// still fail to apply it. When this function advanced the watermark itself, that failure was
+/// permanent — the next tick read `remote_version == V`, decided nothing had moved, discarded the
+/// snapshot, and never retried, while the UI reported the profile as synced. So the caller stamps
+/// the watermark, and only once the row it pulled is actually in the local store.
 pub async fn pull_profile(state: &AppState, profile_id: &str) -> Result<PullOutcome> {
     ensure_account_key(state).await?;
     let remote_id = {
@@ -720,13 +764,7 @@ pub async fn pull_profile(state: &AppState, profile_id: &str) -> Result<PullOutc
     };
     let (key, _) = content_key(state, &remote_id)?;
     let vault = open_vault(state)?;
-    let outcome = pull(&vault, profile_id, &remote_id, &key).await?;
-    {
-        let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
-        crate::profile_store::mark_synced(&conn, profile_id, outcome.remote_version)
-            .map_err(|e| anyhow!("{e}"))?;
-    }
-    Ok(outcome)
+    pull(&vault, profile_id, &remote_id, &key).await
 }
 
 /// Make this machine and the account agree, in both directions.
@@ -847,37 +885,49 @@ pub async fn reconcile(state: &AppState) -> Result<SyncSummary> {
 
         match pull_profile(state, &local.id).await {
             Ok(outcome) => {
-                if outcome.remote_version <= last_seen {
-                    // Nothing moved server-side. The pull still adopted the (byte-identical)
-                    // snapshot as a fresh ledger version — reconcile runs every minute now, and
-                    // keeping one duplicate per tick would grow the ledger without bound — so drop
-                    // it again. No summary entry: the push loop already reported "unchanged".
-                    if let Ok(vault) = open_vault(state) {
-                        let _ = vault.discard(&local.id, outcome.snapshot_version);
-                    }
-                    continue;
-                }
                 // The snapshot is in the ledger for a deliberate restore (`pull_profile` never
                 // touches a user-data-dir this machine is using); the ROW is applied now, because
                 // proxy, notes, tags and folder are what "profile sync" means between launches. A
                 // payload from before rows travelled has nothing to overlay.
-                let applied = match outcome.row.as_ref() {
-                    Some(row) => {
-                        let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
-                        apply_portable_row(&conn, &state.cipher, &local, row).and_then(|()| {
-                            // `update` bumped `updated_at` past `synced_at`, so without a re-stamp
-                            // the overlay this machine just ACCEPTED would be pushed straight back
-                            // on the next tick as if it were a local edit.
-                            crate::profile_store::mark_synced(
-                                &conn,
-                                &local.id,
-                                outcome.remote_version,
-                            )
+                //
+                // Both decisions are made against a link re-read under the lock the overlay writes
+                // through: the pre-download guard is stale by construction, because `pull_profile`
+                // awaits the network with the lock released.
+                let applied = {
+                    let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
+                    let link_now = crate::profile_store::sync_link(&conn, &local.id)
+                        .map_err(|e| anyhow!("{e}"))?;
+                    match pull_disposition(link_now.as_ref(), outcome.remote_version, last_seen) {
+                        PullDisposition::Apply => {}
+                        // Nothing moved server-side, or a local edit landed mid-download. Either way
+                        // the pull adopted a snapshot we do not want: drop it (reconcile runs every
+                        // minute now, and keeping one duplicate per tick would grow the ledger
+                        // without bound) and leave the watermark exactly where it was, so a genuine
+                        // remote change is still seen as new on the next tick. No summary entry —
+                        // the push loop already reported this profile.
+                        PullDisposition::Stale | PullDisposition::LocallyLeads => {
+                            drop(conn);
+                            if let Ok(vault) = open_vault(state) {
+                                let _ = vault.discard(&local.id, outcome.snapshot_version);
+                            }
+                            continue;
+                        }
+                    }
+                    match outcome.row.as_ref() {
+                        Some(row) => apply_portable_row(&conn, &state.cipher, &local, row),
+                        None => Ok(()),
+                    }
+                    .and_then(|()| {
+                        // Stamp ONLY here, on the success path. `apply_portable_row` bumped
+                        // `updated_at` past `synced_at`, so without this the overlay this machine
+                        // just ACCEPTED would be pushed straight back on the next tick as if it
+                        // were a local edit. And because `pull_profile` no longer stamps, a failure
+                        // below leaves the watermark at `last_seen`, so the next tick genuinely
+                        // retries instead of concluding that nothing moved.
+                        crate::profile_store::mark_synced(&conn, &local.id, outcome.remote_version)
                             .map_err(|e| anyhow!("{e}"))
                             .map(|_| ())
-                        })
-                    }
-                    None => Ok(()),
+                    })
                 };
                 match applied {
                     Ok(()) => {
@@ -1315,14 +1365,24 @@ pub async fn sync_push_profile(
 }
 
 /// Download one profile's snapshot into the local ledger. Does not touch the user-data-dir.
+///
+/// This one DOES stamp the watermark, because the user asked for exactly this and nothing further is
+/// pending: the snapshot is in the ledger, and there is no row-apply step that could still fail.
+/// [`reconcile`] has one, which is why [`pull_profile`] leaves the stamp to its caller.
 #[tauri::command]
 pub async fn sync_pull_profile(
     state: tauri::State<'_, AppState>,
     profile_id: String,
 ) -> Result<PullOutcome, String> {
-    pull_profile(&state, &profile_id)
+    let outcome = pull_profile(&state, &profile_id)
         .await
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| format!("{e:#}"))?;
+    {
+        let conn = state.db.lock().map_err(|e| format!("{e}"))?;
+        crate::profile_store::mark_synced(&conn, &profile_id, outcome.remote_version)
+            .map_err(|e| format!("{e}"))?;
+    }
+    Ok(outcome)
 }
 
 /// Reconcile every profile in both directions.
@@ -1801,5 +1861,56 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(after.name, "EU Retail (imported)");
+    }
+
+    fn link(remote_version: u64, dirty: bool) -> crate::profile_store::SyncLink {
+        crate::profile_store::SyncLink {
+            remote_id: Some("rp_1".into()),
+            remote_version,
+            synced_at: Some("2026-08-31T00:00:00Z".into()),
+            dirty,
+        }
+    }
+
+    #[test]
+    fn an_edit_made_while_the_pull_was_downloading_beats_the_snapshot_it_raced() {
+        // The bug this pins: the dirty guard ran BEFORE the download, and `pull_profile` awaits the
+        // network with the db lock released. A user editing the profile in that window had their
+        // work overwritten by the arriving row AND stamped synced, so it was never pushed either —
+        // silent data loss. A local edit outranks a remote version no matter how new the remote is,
+        // which is why the dirty test comes first.
+        assert_eq!(
+            pull_disposition(Some(&link(5, true)), 9, 5),
+            PullDisposition::LocallyLeads,
+            "a strictly newer remote must still lose to an edit made mid-download"
+        );
+        assert_eq!(
+            pull_disposition(None, 9, 0),
+            PullDisposition::LocallyLeads,
+            "no link at all is not an invitation to overwrite"
+        );
+    }
+
+    #[test]
+    fn a_pull_that_is_not_applied_leaves_the_watermark_for_the_next_tick() {
+        // The other half of the same defect. `pull_profile` used to stamp `remote_version` itself,
+        // as a side effect of downloading. So when the overlay then FAILED — an unreadable secret
+        // on the local copy is enough — the watermark had already advanced to the remote version,
+        // every later tick concluded "nothing moved", discarded the snapshot, and the remote change
+        // never landed while the UI reported the profile as synced. Permanent, silent divergence.
+        //
+        // The stamp now happens only on the success path in `reconcile`, so a non-applied pull is
+        // still seen as new next time. `Stale` is the only disposition that means "genuinely
+        // nothing to do", and it requires the watermark to have been advanced by a real apply.
+        assert_eq!(
+            pull_disposition(Some(&link(5, false)), 5, 5),
+            PullDisposition::Stale,
+            "already applied: the account has nothing this machine lacks"
+        );
+        assert_eq!(
+            pull_disposition(Some(&link(5, false)), 6, 5),
+            PullDisposition::Apply,
+            "a watermark left at 5 by a failed apply must read as new work, not as settled"
+        );
     }
 }
