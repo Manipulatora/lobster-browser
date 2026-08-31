@@ -619,7 +619,7 @@ async fn ensure_remote_id(
             .map_err(|e| anyhow!("{e}"))?
             .and_then(|l| l.remote_id);
         (
-            crate::profile_portable::portable_row(&conn, &profile)?,
+            crate::profile_portable::portable_row(&conn, &state.cipher, &profile)?,
             link,
         )
     };
@@ -745,6 +745,11 @@ pub async fn reconcile(state: &AppState) -> Result<SyncSummary> {
         crate::profile_store::list(&conn, &state.cipher).map_err(|e| anyhow!("{e}"))?
     };
 
+    // Profiles whose push just succeeded. The pull direction skips these: the version this machine
+    // holds after a push IS the server's current one, and pulling it straight back would download
+    // the whole blob — up to 25 MiB — to learn nothing.
+    let mut pushed_now: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for profile in &locals {
         let link = {
             let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
@@ -769,6 +774,7 @@ pub async fn reconcile(state: &AppState) -> Result<SyncSummary> {
         };
         match push_profile(state, &profile.id, Some(mode)).await {
             Ok(outcome) => {
+                pushed_now.insert(profile.id.clone());
                 summary.pushed += 1;
                 summary.profiles.push(SyncedProfile {
                     profile_id: profile.id.clone(),
@@ -791,30 +797,114 @@ pub async fn reconcile(state: &AppState) -> Result<SyncSummary> {
     }
 
     for remote in &remote_rows {
-        let already = {
+        let local = {
             let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
             crate::profile_store::find_by_remote_id(&conn, &state.cipher, &remote.id)
                 .map_err(|e| anyhow!("{e}"))?
-                .is_some()
         };
-        if already {
+        let Some(local) = local else {
+            match materialise(state, remote).await {
+                Ok(name) => {
+                    summary.pulled += 1;
+                    summary.profiles.push(SyncedProfile {
+                        profile_id: remote.id.clone(),
+                        name,
+                        action: "restored".into(),
+                        detail: None,
+                    });
+                }
+                Err(err) => {
+                    summary.failed += 1;
+                    summary.profiles.push(SyncedProfile {
+                        profile_id: remote.id.clone(),
+                        name: remote.name.clone(),
+                        action: "failed".into(),
+                        detail: Some(format!("{err:#}")),
+                    });
+                }
+            }
+            continue;
+        };
+
+        // The profile exists here. The pull direction used to stop at that fact — create-only — so
+        // an edit made on another machine (a proxy attached, notes, tags, a rename) never landed on
+        // a machine that already had the profile: the account's copy advanced and this one just sat
+        // there. Overlay the sealed row instead, under one hard guard: a LOCALLY-DIRTY profile is
+        // never touched. Its local edits are the push direction's job (it just ran, above), and
+        // overwriting them with the remote copy would turn a sync into a data shredder.
+        if pushed_now.contains(&local.id) {
             continue;
         }
-        match materialise(state, remote).await {
-            Ok(name) => {
-                summary.pulled += 1;
-                summary.profiles.push(SyncedProfile {
-                    profile_id: remote.id.clone(),
-                    name,
-                    action: "restored".into(),
-                    detail: None,
-                });
+        let link = {
+            let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
+            crate::profile_store::sync_link(&conn, &local.id).map_err(|e| anyhow!("{e}"))?
+        };
+        if link.as_ref().is_none_or(|l| l.dirty) {
+            // Pushed — or failed to push — above; either way the local copy leads right now.
+            continue;
+        }
+        let last_seen = link.map(|l| l.remote_version).unwrap_or(0);
+
+        match pull_profile(state, &local.id).await {
+            Ok(outcome) => {
+                if outcome.remote_version <= last_seen {
+                    // Nothing moved server-side. The pull still adopted the (byte-identical)
+                    // snapshot as a fresh ledger version — reconcile runs every minute now, and
+                    // keeping one duplicate per tick would grow the ledger without bound — so drop
+                    // it again. No summary entry: the push loop already reported "unchanged".
+                    if let Ok(vault) = open_vault(state) {
+                        let _ = vault.discard(&local.id, outcome.snapshot_version);
+                    }
+                    continue;
+                }
+                // The snapshot is in the ledger for a deliberate restore (`pull_profile` never
+                // touches a user-data-dir this machine is using); the ROW is applied now, because
+                // proxy, notes, tags and folder are what "profile sync" means between launches. A
+                // payload from before rows travelled has nothing to overlay.
+                let applied = match outcome.row.as_ref() {
+                    Some(row) => {
+                        let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
+                        apply_portable_row(&conn, &state.cipher, &local, row).and_then(|()| {
+                            // `update` bumped `updated_at` past `synced_at`, so without a re-stamp
+                            // the overlay this machine just ACCEPTED would be pushed straight back
+                            // on the next tick as if it were a local edit.
+                            crate::profile_store::mark_synced(
+                                &conn,
+                                &local.id,
+                                outcome.remote_version,
+                            )
+                            .map_err(|e| anyhow!("{e}"))
+                            .map(|_| ())
+                        })
+                    }
+                    None => Ok(()),
+                };
+                match applied {
+                    Ok(()) => {
+                        summary.pulled += 1;
+                        summary.profiles.push(SyncedProfile {
+                            profile_id: local.id.clone(),
+                            name: local.name.clone(),
+                            action: "pulled".into(),
+                            detail: Some(format!("version {}", outcome.remote_version)),
+                        });
+                    }
+                    Err(err) => {
+                        summary.failed += 1;
+                        summary.profiles.push(SyncedProfile {
+                            profile_id: local.id.clone(),
+                            name: local.name.clone(),
+                            action: "failed".into(),
+                            detail: Some(format!("{err:#}")),
+                        });
+                    }
+                }
             }
             Err(err) => {
                 summary.failed += 1;
                 summary.profiles.push(SyncedProfile {
-                    profile_id: remote.id.clone(),
-                    name: remote.name.clone(),
+                    profile_id: local.id.clone(),
+                    name: local.name.clone(),
                     action: "failed".into(),
                     detail: Some(format!("{err:#}")),
                 });
@@ -823,6 +913,96 @@ pub async fn reconcile(state: &AppState) -> Result<SyncSummary> {
     }
 
     Ok(summary)
+}
+
+/// Overlay a sealed row that arrived from the account onto a profile this machine already has.
+///
+/// The update half of what [`materialise`] does for a profile that does not exist yet. Only the
+/// fields [`crate::profile_store::UpdateProfilePatch`] can express are applied — which is every
+/// portable field except identity (the seed is immutable; engine and OS are store-gated and never
+/// legitimately change under a profile) and the password hash (not patchable, and silently swapping
+/// a lock the user is relying on is not a background sync's call). The patch shape cannot express
+/// CLEARING an optional field (`None` means "keep"), so a field the remote emptied stays as it was
+/// locally — conservative on purpose.
+fn apply_portable_row(
+    conn: &rusqlite::Connection,
+    cipher: &crate::secrets::SecretCipher,
+    local: &crate::profile_store::Profile,
+    row: &PortableRow,
+) -> Result<()> {
+    use crate::profile_portable::AdoptedProxy;
+
+    // The same helper the import path uses, for the same reason: the blob names its catalog entry,
+    // and this machine may not have that entry yet — re-materialising it is precisely how "the
+    // proxy is not imported from the DB" gets fixed for a profile that already exists here.
+    let (proxy, proxy_id) = match row.proxy.as_ref() {
+        Some(blob) => match crate::profile_portable::adopt_portable_proxy(conn, cipher, blob)? {
+            // `Some(id)` selects the catalog entry; the store nulls the inline column itself.
+            AdoptedProxy::Catalog { id } => (None, Some(id)),
+            // An inline blob plus an EMPTY selection clears any stale catalog binding — the store
+            // reads `Some("")` as "no stored proxy selected", exactly as the edit form sends it.
+            AdoptedProxy::Inline(value) => (Some(value), Some(String::new())),
+        },
+        // A row with NO proxy is not an order to clear the local one. Every blob pushed by a
+        // pre-fix build carries `proxy: None` for every catalog-bound profile (the very defect this
+        // was fixed for), and honouring that as a clear would let one machine on old code delete
+        // the proxies a fixed machine just preserved.
+        None => (None, None),
+    };
+
+    // A name that collides with a DIFFERENT local profile is suffixed, never forced: the import
+    // path already makes this promise, and two rows under one name is the confusion `free_name`
+    // exists to prevent.
+    let name = if row.name == local.name {
+        None
+    } else {
+        let others: Vec<_> = crate::profile_store::list(conn, cipher)
+            .map_err(|e| anyhow!("{e}"))?
+            .into_iter()
+            .filter(|p| p.id != local.id)
+            .collect();
+        Some(crate::profile_portable::free_name(&others, &row.name))
+    };
+
+    let fingerprint_overrides = match &row.fingerprint_overrides_json {
+        Some(text) => Some(
+            serde_json::from_str::<serde_json::Value>(text)
+                .context("the synced profile's fingerprint overrides are malformed")?,
+        ),
+        None => None,
+    };
+
+    crate::profile_store::update(
+        conn,
+        cipher,
+        &local.id,
+        crate::profile_store::UpdateProfilePatch {
+            name,
+            engine: None,
+            os: None,
+            os_version: row.os_version.clone(),
+            fingerprint_overrides,
+            proxy,
+            proxy_id,
+            template_id: None,
+            cookies_import: row.cookies_import.clone(),
+            extensions: row.extensions.clone(),
+            tags: Some(row.tags.clone()),
+            folder: row.folder.clone(),
+            notes: row.notes.clone(),
+        },
+    )
+    .map_err(|e| anyhow!("{e}"))?
+    .ok_or_else(|| anyhow!("profile {} vanished while applying the pulled row", local.id))?;
+
+    // A DIFFERENT cookie-import draft re-arms the applied stamp inside `update`; if the machine
+    // that pushed it had already injected it, carry that fact across so this machine's next launch
+    // does not inject the same stale session again.
+    if row.cookies_import_applied_at.is_some() {
+        crate::profile_store::mark_cookie_import_applied(conn, &local.id)
+            .map_err(|e| anyhow!("{e}"))?;
+    }
+    Ok(())
 }
 
 /// Bring a profile the account has and this machine does not into existence, data and all.
@@ -990,26 +1170,100 @@ pub fn spawn_backup_after_stop(app: tauri::AppHandle, profile_id: String) {
     });
 }
 
-/// Reconcile with the account shortly after startup.
+/// Push a profile the moment it is created or edited, without making the caller wait.
 ///
-/// Delayed rather than immediate: first paint must not compete with a capture, and the account key
-/// fetch is a network call that has no business in front of the profile list. Nothing here blocks the
-/// UI, and a failure leaves the app exactly as usable as it is offline.
+/// Fire-and-forget for the same reason as [`spawn_backup_after_stop`]: the local store is the
+/// durable copy and has already committed, so a failed upload is a retry on the next reconcile tick
+/// rather than a lost edit — while a Save button blocking on a network round trip would make a
+/// flaky connection feel like a broken app. This exists because reconcile used to be the ONLY push
+/// trigger for row edits: attach a proxy here and the other machine saw nothing until this one next
+/// restarted — "sync" that was not remotely instant.
+///
+/// The push reuses the newest snapshot (no capture): what changed is the ROW — name, proxy, notes —
+/// and the sealed payload re-sent around it is what carries those fields. A profile with no
+/// snapshot yet (just created, never launched) has nothing for `push` to wrap, so only its remote
+/// row is published — enough for other machines to materialise it instantly — and it stays dirty,
+/// so the first real capture (on stop, or on a reconcile tick) uploads the blob.
+pub fn spawn_push_after_write(app: tauri::AppHandle, profile_id: String) {
+    if !signed_in() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let has_snapshot = open_vault(&state)
+            .ok()
+            .and_then(|vault| vault.latest_version(&profile_id).ok().flatten())
+            .is_some();
+        if has_snapshot {
+            match push_profile(&state, &profile_id, None).await {
+                Ok(outcome) => tracing::info!(
+                    profile_id,
+                    remote_version = outcome.remote_version,
+                    "pushed the profile after a local write"
+                ),
+                Err(err) => tracing::warn!(
+                    profile_id,
+                    error = %format!("{err:#}"),
+                    "could not push the profile after a local write; reconcile will retry"
+                ),
+            }
+            return;
+        }
+        let published = async {
+            ensure_account_key(&state).await?;
+            ensure_remote_id(&state, &profile_id).await
+        }
+        .await;
+        match published {
+            Ok((remote_id, _row)) => tracing::info!(
+                profile_id,
+                remote_id,
+                "published the profile's row after a local write; no snapshot to upload yet"
+            ),
+            Err(err) => tracing::warn!(
+                profile_id,
+                error = %format!("{err:#}"),
+                "could not publish the profile's row after a local write; reconcile will retry"
+            ),
+        }
+    });
+}
+
+/// How often this machine and the account re-agree while the app stays open.
+///
+/// One minute is the "instant enough" point: an edit on another machine lands here within a tick,
+/// while a clean profile's cost per tick stays one blob download (see `reconcile`'s pull side) —
+/// tight enough to feel live, loose enough not to saturate a metered connection.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Reconcile with the account shortly after startup, then KEEP reconciling while the app runs.
+///
+/// A loop, not a one-shot: reconcile used to run exactly once per launch, so a profile created or
+/// edited on another machine while this one sat open never appeared until the next restart —
+/// nothing later ever landed. Delayed rather than immediate on the first pass: first paint must not
+/// compete with a capture, and the account key fetch is a network call that has no business in
+/// front of the profile list. Nothing here blocks the UI, and a failed tick leaves the app exactly
+/// as usable as it is offline.
 pub fn spawn_startup_reconcile(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(5)).await;
-        if !signed_in() {
-            return;
-        }
-        let state = app.state::<AppState>();
-        match reconcile(&state).await {
-            Ok(summary) => tracing::info!(
-                pushed = summary.pushed,
-                pulled = summary.pulled,
-                failed = summary.failed,
-                "reconciled with the account"
-            ),
-            Err(err) => tracing::warn!(error = %format!("{err:#}"), "startup reconcile failed"),
+        loop {
+            // Checked INSIDE the loop, not once before it: signing in mid-session must start the
+            // sync on the next tick rather than after a restart — and signing out must stop it
+            // just as quietly.
+            if signed_in() {
+                let state = app.state::<AppState>();
+                match reconcile(&state).await {
+                    Ok(summary) => tracing::info!(
+                        pushed = summary.pushed,
+                        pulled = summary.pulled,
+                        failed = summary.failed,
+                        "reconciled with the account"
+                    ),
+                    Err(err) => tracing::warn!(error = %format!("{err:#}"), "reconcile failed"),
+                }
+            }
+            tokio::time::sleep(RECONCILE_INTERVAL).await;
         }
     });
 }
@@ -1389,5 +1643,163 @@ mod tests {
                 && profiles[0].get("cookiesImport").is_none(),
             "the import envelope must remain a secret-free server row"
         );
+    }
+
+    // --- Applying a pulled row to a profile this machine already has -----------------------------
+    //
+    // The pull direction used to be create-only, so these fields never landed on a machine that
+    // already had the profile. The overlay is what makes an edit made elsewhere arrive here.
+
+    fn store_fixture() -> (rusqlite::Connection, crate::secrets::SecretCipher) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::profile_store::SCHEMA).unwrap();
+        conn.execute_batch(crate::proxy_store::SCHEMA).unwrap();
+        (conn, crate::secrets::SecretCipher::new(&[7u8; 32]))
+    }
+
+    fn local_profile(
+        conn: &rusqlite::Connection,
+        cipher: &crate::secrets::SecretCipher,
+        proxy: Option<serde_json::Value>,
+        proxy_id: Option<String>,
+    ) -> crate::profile_store::Profile {
+        crate::profile_store::create(
+            conn,
+            cipher,
+            crate::profile_store::CreateProfileInput {
+                name: "US Retail".into(),
+                engine: "lobium".into(),
+                os: "windows".into(),
+                os_version: Some("11".into()),
+                fingerprint_seed: None,
+                fingerprint_overrides: None,
+                proxy,
+                proxy_id,
+                template_id: None,
+                cookies_import: None,
+                extensions: None,
+                tags: Some(vec!["stale".into()]),
+                folder: None,
+                notes: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pulled_row_overlays_the_local_profile_and_rematerialises_its_proxy() {
+        let (conn, cipher) = store_fixture();
+        let local = local_profile(&conn, &cipher, None, None);
+
+        let mut row = row_fixture();
+        row.name = local.name.clone();
+        row.proxy = Some(serde_json::json!({
+            "id": "px_from_other_machine", "type": "http",
+            "host": "gw.example.com", "port": 8080, "username": "u", "password": "p",
+        }));
+        row.tags = vec!["retail".into(), "us".into()];
+        row.folder = Some("Shopping".into());
+        row.notes = Some("attached on the desktop upstairs".into());
+
+        apply_portable_row(&conn, &cipher, &local, &row).unwrap();
+
+        let after = crate::profile_store::get(&conn, &cipher, &local.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.proxy_id.as_deref(),
+            Some("px_from_other_machine"),
+            "the arriving proxy must be bound through the catalog, as the UI would bind it"
+        );
+        assert!(after.proxy.is_none(), "not orphaned inline beside the id");
+        assert_eq!(after.tags, vec!["retail".to_string(), "us".to_string()]);
+        assert_eq!(after.folder.as_deref(), Some("Shopping"));
+        assert_eq!(
+            after.notes.as_deref(),
+            Some("attached on the desktop upstairs")
+        );
+        let entry = crate::proxy_store::get(&conn, &cipher, "px_from_other_machine")
+            .unwrap()
+            .expect("the catalog entry was re-created on this machine");
+        assert_eq!(
+            entry.config.get("password").and_then(|v| v.as_str()),
+            Some("p")
+        );
+    }
+
+    #[test]
+    fn a_pulled_row_with_no_proxy_never_clears_the_local_binding() {
+        // The hazard is mixed versions: every blob pushed by a pre-fix build carries `proxy: None`
+        // for every catalog-bound profile. Reading that as "clear the proxy" would let one machine
+        // on old code delete the binding a fixed machine just preserved.
+        let (conn, cipher) = store_fixture();
+        let stored = crate::proxy_store::create(
+            &conn,
+            &cipher,
+            crate::proxy_store::CreateStoredProxyInput {
+                source: "mine".into(),
+                label: "Kept".into(),
+                config: serde_json::json!({ "type": "http", "host": "keep.example.com", "port": 9090 }),
+                location: None,
+                timezone: None,
+                rotate_url: None,
+            },
+        )
+        .unwrap();
+        let local = local_profile(&conn, &cipher, None, Some(stored.id.clone()));
+
+        let mut row = row_fixture();
+        row.name = local.name.clone();
+        row.proxy = None;
+
+        apply_portable_row(&conn, &cipher, &local, &row).unwrap();
+
+        let after = crate::profile_store::get(&conn, &cipher, &local.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.proxy_id.as_deref(),
+            Some(stored.id.as_str()),
+            "a rowless proxy is silence, not an instruction to clear"
+        );
+    }
+
+    #[test]
+    fn a_pulled_name_that_collides_with_another_profile_is_suffixed_not_forced() {
+        let (conn, cipher) = store_fixture();
+        let local = local_profile(&conn, &cipher, None, None);
+        // A second, unrelated profile already owns the name the remote wants to give the first.
+        crate::profile_store::create(
+            &conn,
+            &cipher,
+            crate::profile_store::CreateProfileInput {
+                name: "EU Retail".into(),
+                engine: "lobium".into(),
+                os: "windows".into(),
+                os_version: None,
+                fingerprint_seed: None,
+                fingerprint_overrides: None,
+                proxy: None,
+                proxy_id: None,
+                template_id: None,
+                cookies_import: None,
+                extensions: None,
+                tags: None,
+                folder: None,
+                notes: None,
+            },
+        )
+        .unwrap();
+
+        let mut row = row_fixture();
+        row.name = "EU Retail".into();
+        row.proxy = None;
+
+        apply_portable_row(&conn, &cipher, &local, &row).unwrap();
+
+        let after = crate::profile_store::get(&conn, &cipher, &local.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.name, "EU Retail (imported)");
     }
 }

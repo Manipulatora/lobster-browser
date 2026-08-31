@@ -24,7 +24,9 @@
 //!
 //! - the per-install Local Store Key — export RE-SEALS under the passphrase, it never copies the vault
 //! - the account key and the cloud token — those are account credentials, not profile data
-//! - `proxy_id` / `template_id` — ids in *this* install's tables; the proxy is resolved inline instead
+//! - `template_id` — an id in *this* install's tables. The proxy is different: it travels BY VALUE
+//!   (resolved out of the machine-local `proxies` catalog, keeping its `px_…` id) so the importer
+//!   can re-create the catalog entry — see [`portable_row`] and [`adopt_portable_proxy`]
 //! - proxy username/password — opt-in only, because the whole point of a file is that it travels
 //! - `status` / `trashed_at` — transient; a fresh import is always `idle`
 //!
@@ -174,7 +176,11 @@ pub struct PortableRow {
 /// Reads two columns the [`Profile`] struct does not expose: the password hash (deliberately absent
 /// from anything that reaches the UI) and the fingerprint-overrides TEXT verbatim, for the digest
 /// reason above.
-pub fn portable_row(conn: &rusqlite::Connection, profile: &Profile) -> Result<PortableRow> {
+pub fn portable_row(
+    conn: &rusqlite::Connection,
+    cipher: &crate::secrets::SecretCipher,
+    profile: &Profile,
+) -> Result<PortableRow> {
     let password_hash: Option<String> = conn
         .query_row(
             "SELECT password_hash FROM profiles WHERE id = ?1",
@@ -190,6 +196,22 @@ pub fn portable_row(conn: &rusqlite::Connection, profile: &Profile) -> Result<Po
         )
         .with_context(|| format!("reading {}'s fingerprint overrides", profile.id))?;
 
+    // The proxy travels BY VALUE, because the sealed payload has to be self-contained: a modern
+    // profile does not hold its proxy inline — the UI stores a `proxy_id` into the machine-local
+    // `proxies` catalog, and the store forces the inline column NULL the moment that reference is
+    // set. This row is the single shape that leaves the machine (sealed for the account AND written
+    // into a `.lobprofile`), and the catalog it points into exists nowhere but here — not on the
+    // server, not on the receiving machine. Copying `profile.proxy` alone therefore shipped
+    // `proxy: None` for every catalog-bound profile, which is exactly "the proxy is not imported".
+    // The resolved config keeps its `px_…` id on purpose, so the importer can re-create the catalog
+    // entry instead of orphaning the blob inline — see [`adopt_portable_proxy`].
+    let proxy = match profile.proxy_id.as_deref() {
+        Some(id) => crate::proxy_store::get(conn, cipher, id)
+            .with_context(|| format!("resolving {}'s proxy {id}", profile.id))?
+            .map(|stored| stored.config),
+        None => profile.proxy.clone(),
+    };
+
     Ok(PortableRow {
         source_profile_id: profile.id.clone(),
         name: profile.name.clone(),
@@ -198,7 +220,7 @@ pub fn portable_row(conn: &rusqlite::Connection, profile: &Profile) -> Result<Po
         os_version: profile.os_version.clone(),
         fingerprint_seed: profile.fingerprint_seed.clone(),
         fingerprint_overrides_json,
-        proxy: profile.proxy.clone(),
+        proxy,
         cookies_import: profile.cookies_import.clone(),
         cookies_import_applied_at: profile.cookies_import_applied_at.clone(),
         extensions: profile.extensions.clone(),
@@ -207,6 +229,73 @@ pub fn portable_row(conn: &rusqlite::Connection, profile: &Profile) -> Result<Po
         notes: profile.notes.clone(),
         password_hash,
     })
+}
+
+/// How an arriving portable proxy blob binds to THIS machine's rows.
+#[derive(Debug)]
+pub(crate) enum AdoptedProxy {
+    /// The blob named a catalog entry, and that entry now exists locally — bind `proxy_id` to it.
+    Catalog { id: String },
+    /// The blob carries no catalog identity (a legacy inline proxy from before the catalog existed,
+    /// or a blob the catalog refused) — it stays inline on the profile, as it always has.
+    Inline(serde_json::Value),
+}
+
+/// Land an arriving proxy blob in the local `proxies` catalog, if it names an entry there.
+///
+/// [`portable_row`] resolves a `proxy_id` reference into the config by value, id included; this is
+/// the other half of that round trip. The existence check is not an optimisation: `proxies.id` is a
+/// PRIMARY KEY, and the same profile arrives more than once — a second cloud pull, the same
+/// `.lobprofile` imported twice — so inserting blind would fail the whole import on a constraint
+/// violation. An entry that already exists is bound as-is and NEVER overwritten: the catalog is this
+/// machine's own truth about the proxy (label, credentials, check results), and an arriving copy
+/// must not clobber it.
+pub(crate) fn adopt_portable_proxy(
+    conn: &rusqlite::Connection,
+    cipher: &crate::secrets::SecretCipher,
+    blob: &serde_json::Value,
+) -> Result<AdoptedProxy> {
+    let Some(id) = blob.get("id").and_then(serde_json::Value::as_str) else {
+        return Ok(AdoptedProxy::Inline(blob.clone()));
+    };
+    if crate::proxy_store::get(conn, cipher, id)
+        .with_context(|| format!("looking up arriving proxy {id}"))?
+        .is_some()
+    {
+        return Ok(AdoptedProxy::Catalog { id: id.to_string() });
+    }
+    // The catalog requires a label but the config blob rarely carries one; the host is the
+    // next-best handle the user can recognise the proxy by in the manager.
+    let label = blob
+        .get("label")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| blob.get("host").and_then(serde_json::Value::as_str))
+        .unwrap_or("Imported proxy")
+        .to_string();
+    match crate::proxy_store::create(
+        conn,
+        cipher,
+        crate::proxy_store::CreateStoredProxyInput {
+            source: "mine".to_string(),
+            label,
+            config: blob.clone(),
+            location: None,
+            timezone: None,
+            rotate_url: None,
+        },
+    ) {
+        Ok(created) => Ok(AdoptedProxy::Catalog { id: created.id }),
+        Err(err) => {
+            // A blob the catalog refuses (a shape an older build wrote, say) must not fail the
+            // whole profile import over its proxy: inline is exactly as launchable, just unmanaged.
+            tracing::warn!(
+                proxy_id = id,
+                error = %format!("{err:#}"),
+                "could not re-create the arriving proxy in the catalog; keeping it inline"
+            );
+            Ok(AdoptedProxy::Inline(blob.clone()))
+        }
+    }
 }
 
 /// Create a local profile from a portable row, PINNING the seed and carrying the password across.
@@ -231,6 +320,18 @@ pub fn create_from_portable_row(
         ),
         None => None,
     };
+    // The proxy arrived by value but may name its catalog entry (see [`portable_row`]): re-create
+    // that entry here and bind the profile to it by id, exactly as the UI would have. Binding
+    // matters beyond fidelity — the store nulls the inline column whenever `proxy_id` is set, so
+    // keeping the blob inline instead would leave the imported profile's proxy invisible to the
+    // proxy manager and different from the machine it came from.
+    let (proxy, proxy_id) = match row.proxy.as_ref() {
+        Some(blob) => match adopt_portable_proxy(conn, cipher, blob)? {
+            AdoptedProxy::Catalog { id } => (None, Some(id)),
+            AdoptedProxy::Inline(value) => (Some(value), None),
+        },
+        None => (None, None),
+    };
     let created = profile_store::create_preserving_fingerprint_seed(
         conn,
         cipher,
@@ -241,8 +342,8 @@ pub fn create_from_portable_row(
             os_version: row.os_version.clone(),
             fingerprint_seed: Some(row.fingerprint_seed.clone()),
             fingerprint_overrides: overrides,
-            proxy: row.proxy.clone(),
-            proxy_id: None,
+            proxy,
+            proxy_id,
             template_id: None,
             cookies_import: row.cookies_import.clone(),
             extensions: row.extensions.clone(),
@@ -694,7 +795,7 @@ fn export_inner(
             bail!("PROFILE_PASSWORD_REQUIRED: this profile is password protected — enter its password to export it");
         }
 
-        portable_row(&conn, &profile)?
+        portable_row(&conn, data.cipher, &profile)?
     };
 
     let vault = &data.vault;
@@ -1292,6 +1393,189 @@ mod tests {
             Some("u")
         );
         assert!(included);
+    }
+
+    // --- The proxy reference ---------------------------------------------------------------------
+    //
+    // The UI stores a proxy as a `proxy_id` into the machine-local `proxies` catalog and the store
+    // nulls the inline column, so a portable row built from `profile.proxy` alone shipped every
+    // modern profile with NO proxy at all — for cloud sync and `.lobprofile` files alike. These
+    // pin both halves of the by-value round trip.
+
+    fn conn_with_catalog() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(profile_store::SCHEMA).unwrap();
+        conn.execute_batch(crate::proxy_store::SCHEMA).unwrap();
+        conn
+    }
+
+    fn profile_input(name: &str, proxy_id: Option<String>) -> CreateProfileInput {
+        CreateProfileInput {
+            name: name.to_string(),
+            engine: "lobium".into(),
+            os: "windows".into(),
+            os_version: None,
+            fingerprint_seed: None,
+            fingerprint_overrides: None,
+            proxy: None,
+            proxy_id,
+            template_id: None,
+            cookies_import: None,
+            extensions: None,
+            tags: None,
+            folder: None,
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn a_catalog_proxy_travels_by_value_in_the_portable_row() {
+        let conn = conn_with_catalog();
+        let cipher = crate::secrets::SecretCipher::new(&[42u8; 32]);
+
+        let stored = crate::proxy_store::create(
+            &conn,
+            &cipher,
+            crate::proxy_store::CreateStoredProxyInput {
+                source: "mine".into(),
+                label: "US gateway".into(),
+                config: serde_json::json!({
+                    "type": "http", "host": "gw.example.com", "port": 8080,
+                    "username": "operator", "password": "s3cret",
+                }),
+                location: None,
+                timezone: None,
+                rotate_url: None,
+            },
+        )
+        .unwrap();
+
+        let profile = profile_store::create(
+            &conn,
+            &cipher,
+            profile_input("Catalog", Some(stored.id.clone())),
+        )
+        .unwrap();
+        assert!(
+            profile.proxy.is_none(),
+            "precondition: the store nulls the inline column for a catalog-bound profile"
+        );
+
+        let row = portable_row(&conn, &cipher, &profile).unwrap();
+        let blob = row
+            .proxy
+            .expect("the referenced proxy must be resolved into the row by value");
+        assert_eq!(
+            blob.get("id").and_then(|v| v.as_str()),
+            Some(stored.id.as_str()),
+            "the catalog id must travel so the importer can re-create the entry"
+        );
+        assert_eq!(
+            blob.get("host").and_then(|v| v.as_str()),
+            Some("gw.example.com")
+        );
+        // The catalog decrypts at its own boundary; the sealed payload is what protects this in
+        // transit, and the export path redacts it separately unless the user opts in.
+        assert_eq!(
+            blob.get("password").and_then(|v| v.as_str()),
+            Some("s3cret")
+        );
+    }
+
+    #[test]
+    fn a_dangling_proxy_reference_travels_as_no_proxy_rather_than_failing() {
+        // The catalog row can be deleted after the profile bound it. Backups and exports must keep
+        // working for such a profile — a proxy it no longer has is not worth losing the session over.
+        let conn = conn_with_catalog();
+        let cipher = crate::secrets::SecretCipher::new(&[42u8; 32]);
+        let profile = profile_store::create(
+            &conn,
+            &cipher,
+            profile_input("Orphaned", Some("px_deleted_long_ago".into())),
+        )
+        .unwrap();
+        let row = portable_row(&conn, &cipher, &profile).unwrap();
+        assert!(row.proxy.is_none());
+    }
+
+    #[test]
+    fn an_arriving_catalog_proxy_is_rematerialised_once_and_bound_by_id() {
+        let conn = conn_with_catalog();
+        let cipher = crate::secrets::SecretCipher::new(&[42u8; 32]);
+
+        let mut row = portable_row_with_seed("deadbeefdeadbeef");
+        row.proxy = Some(serde_json::json!({
+            "id": "px_roundtrip", "type": "socks5", "host": "exit.example.net", "port": 1080,
+            "username": "operator", "password": "s3cret",
+        }));
+
+        let first = create_from_portable_row(&conn, &cipher, &row, "First arrival".into()).unwrap();
+        assert_eq!(first.proxy_id.as_deref(), Some("px_roundtrip"));
+        assert!(
+            first.proxy.is_none(),
+            "bound to the catalog by id, not orphaned inline"
+        );
+        let entry = crate::proxy_store::get(&conn, &cipher, "px_roundtrip")
+            .unwrap()
+            .expect("the catalog entry was re-created on this machine");
+        assert_eq!(entry.source, "mine");
+        assert_eq!(
+            entry.label, "exit.example.net",
+            "with no label in the blob, the host is the recognisable fallback"
+        );
+        assert_eq!(
+            entry.config.get("password").and_then(|v| v.as_str()),
+            Some("s3cret"),
+            "credentials that travelled must land usable"
+        );
+
+        // The same profile arriving AGAIN — a second cloud pull, the same file imported twice —
+        // must bind to the existing entry rather than fail the whole import on the catalog's
+        // PRIMARY KEY, and must not touch what this machine already holds.
+        let second =
+            create_from_portable_row(&conn, &cipher, &row, "Second arrival".into()).unwrap();
+        assert_eq!(second.proxy_id.as_deref(), Some("px_roundtrip"));
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM proxies", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn a_credential_redacted_catalog_proxy_still_rematerialises() {
+        // A `.lobprofile` strips username/password unless the user opts in, but keeps the id. The
+        // routing half must still become a catalog entry — `validate_config` requires type, host
+        // and port, not credentials.
+        let conn = conn_with_catalog();
+        let cipher = crate::secrets::SecretCipher::new(&[42u8; 32]);
+        let mut row = portable_row_with_seed("deadbeefdeadbeef");
+        row.proxy = Some(serde_json::json!({
+            "id": "px_redacted", "type": "http", "host": "gw.example.com", "port": 8080,
+        }));
+        let created = create_from_portable_row(&conn, &cipher, &row, "Redacted".into()).unwrap();
+        assert_eq!(created.proxy_id.as_deref(), Some("px_redacted"));
+        let entry = crate::proxy_store::get(&conn, &cipher, "px_redacted")
+            .unwrap()
+            .expect("routing without credentials is still a valid catalog entry");
+        assert!(entry.config.get("password").is_none());
+    }
+
+    #[test]
+    fn a_proxy_blob_without_a_catalog_id_stays_inline_as_before() {
+        // Legacy inline proxies never had a catalog identity; inventing one would create catalog
+        // entries the user never made. They keep travelling inline, exactly as they always have.
+        let conn = conn_with_catalog();
+        let cipher = crate::secrets::SecretCipher::new(&[42u8; 32]);
+        let mut row = portable_row_with_seed("deadbeefdeadbeef");
+        let inline = serde_json::json!({ "type": "http", "host": "legacy.example.com", "port": 3128 });
+        row.proxy = Some(inline.clone());
+        let created = create_from_portable_row(&conn, &cipher, &row, "Legacy".into()).unwrap();
+        assert_eq!(created.proxy, Some(inline));
+        assert!(created.proxy_id.is_none());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM proxies", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     // --- The round trip ------------------------------------------------------------------------

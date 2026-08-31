@@ -802,6 +802,7 @@ fn list_trashed_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, Str
 
 #[tauri::command]
 fn create_profile(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     input: CreateProfileInput,
 ) -> Result<Profile, String> {
@@ -821,7 +822,13 @@ fn create_profile(
             if limit == 1 { "" } else { "s" }
         ));
     }
-    profile_store::create(&conn, &state.cipher, input).map_err(|e| e.to_string())
+    let created = profile_store::create(&conn, &state.cipher, input).map_err(|e| e.to_string())?;
+    drop(conn);
+    // Row edits used to reach the account only on the next reconcile, so a profile created here was
+    // invisible to the user's other machines until then. The push runs behind the returned result:
+    // creating a profile must not wait on the network, and the local row is already the durable copy.
+    profile_sync::spawn_push_after_write(app, created.id.clone());
+    Ok(created)
 }
 
 #[tauri::command]
@@ -834,14 +841,20 @@ fn get_profile(state: State<'_, AppState>, id: String) -> Result<Profile, String
 
 #[tauri::command]
 fn update_profile(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: String,
     patch: UpdateProfilePatch,
 ) -> Result<Profile, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    profile_store::update(&conn, &state.cipher, &id, patch)
+    let updated = profile_store::update(&conn, &state.cipher, &id, patch)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("profile {id} not found"))
+        .ok_or_else(|| format!("profile {id} not found"))?;
+    drop(conn);
+    // Same reason as `create_profile`: an edit — a proxy attached, notes, a rename — must reach the
+    // account NOW, not on the next reconcile tick, and must never make the Save button wait.
+    profile_sync::spawn_push_after_write(app, id);
+    Ok(updated)
 }
 
 #[tauri::command]
