@@ -65,8 +65,19 @@ test('the label is the whole NAME, cut to what a wrapped icon can hold', () => {
   assert.equal(profileMark('\u{1F468}‍\u{1F680}x', 'p1').word, '\u{1F468}‍\u{1F680}x');
 });
 
-test('the tint is a brand violet, stable per profile ID and independent of the name', () => {
-  const ramp = new Set(['#7c3aed', '#6d28d9', '#5b21b6', '#4c1d95']);
+test('the tint is a ramp stop, stable per profile ID and independent of the name', () => {
+  // Eight stops now, not four violets: the row avatar draws the lobster silhouette with no
+  // initials, so the shade is the whole per-profile identity and must actually vary.
+  const ramp = new Set([
+    '#7c3aed',
+    '#4338ca',
+    '#0e7490',
+    '#b91c1c',
+    '#a21caf',
+    '#4c1d95',
+    '#0f766e',
+    '#b45309',
+  ]);
   for (const id of ['a', 'b', 'c', 'd', 'e', 'f', '0e6d3d2a-1f4b-4c9a-9f3e-2b7c8d1a5e60']) {
     assert.ok(ramp.has(profileMark('Any Name', id).tint), `${id} left the brand ramp`);
   }
@@ -74,5 +85,5 @@ test('the tint is a brand violet, stable per profile ID and independent of the n
   assert.equal(profileMark('Acme US', 'p1').tint, profileMark('Different Name', 'p1').tint);
   // And the ramp is actually spread over, not collapsed onto one stop.
   const seen = new Set(Array.from({ length: 64 }, (_, i) => profileMark('n', `profile-${i}`).tint));
-  assert.equal(seen.size, 4);
+  assert.equal(seen.size, 8);
 });

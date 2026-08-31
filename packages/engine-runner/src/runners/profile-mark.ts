@@ -1,6 +1,6 @@
 /**
- * The visual identity of one profile: the initials, the short word and the violet tint that the
- * launched browser window's OS icon and the manager's row avatar both carry.
+ * The visual identity of one profile: the initials, the short word and the tint that the launched
+ * browser window's OS icon and the manager's row avatar both carry.
  *
  * WHY A REDUCTION AT ALL. A title-bar icon is 16px and a taskbar icon 32px. That holds one or two
  * glyphs, not a 120-character profile name, so the icon can only ever show a reduction of the name.
@@ -24,14 +24,27 @@
  */
 
 /**
- * The brand violet ramp, --brand-500 .. --brand-800 from apps/desktop/src/ui/tokens.css.
+ * The tint ramp the mark's square is painted with. Anchored on the brand violet (--brand-500, then
+ * three more violet stops) and widened with four hues that keep the same darkness.
  *
- * Only the four dark stops: the mark carries white text, and --brand-400 and lighter do not reach a
- * readable contrast against it. Every stop is unmistakably the product violet, so the SHADE is a
- * secondary cue and the letters carry the identity - which is the right way round at 16px, where two
- * violets one ramp step apart are not tellable but two letters are.
+ * THE SHADE IS NOW THE WHOLE PER-PROFILE IDENTITY. The manager's row avatar draws the lobster
+ * silhouette on this tint - no initials - so the colour is the only thing telling two profiles
+ * apart at a glance, where four near-identical violets could rely on the letters to do that work.
+ * Eight stops chosen to be tellable from each other at 16px is the widest this can go before two
+ * stops stop being tellable, which would be worse than fewer. Every stop is dark enough that the
+ * white silhouette (and the white initials the engine still draws until its lobster change ships)
+ * keeps readable contrast.
  */
-const BRAND_TINTS = ['#7c3aed', '#6d28d9', '#5b21b6', '#4c1d95'] as const;
+const BRAND_TINTS = [
+  '#7c3aed',
+  '#4338ca',
+  '#0e7490',
+  '#b91c1c',
+  '#a21caf',
+  '#4c1d95',
+  '#0f766e',
+  '#b45309',
+] as const;
 
 /** Whitespace and the separators people actually type inside a profile name ("acme-us", "qa_02"). */
 const WORD_BOUNDARY = /[\s_\-/\\|]+/u;
@@ -65,7 +78,7 @@ export interface ProfileMark {
    * Drawn on the larger icon slots; the small ones fall back to {@link ProfileMark.initials}.
    */
   word: string;
-  /** A `#rrggbb` stop on the brand violet ramp, stable for the lifetime of the profile. */
+  /** A `#rrggbb` stop on the tint ramp above, stable for the lifetime of the profile. */
   tint: string;
 }
 
