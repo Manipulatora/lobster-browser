@@ -173,6 +173,9 @@ const CHROMIUM_ONLY_FILES = [
   'components/new_or_sad_tab_strings.grdp',
   'components/management_strings.grdp',
   'components/components_google_chrome_strings.grd',
+  // Outside chrome/ and components/: the external-install prompts ("Another program on your computer
+  // added an extension that may change the way Chromium works.", "Remove from Chromium").
+  'extensions/strings/extensions_chromium_strings.grdp',
 ];
 
 async function stageStrings() {

@@ -4,6 +4,13 @@
 *.patch text eol=lf whitespace=-blank-at-eol
 /lobium/patches/series text eol=lf
 
+# Shell scripts must be LF, always. A CRLF `#!/usr/bin/env bash` script is not merely untidy — bash
+# reads the carriage return as part of the last token on every line, so the file fails `bash -n`
+# with "unexpected end of file" and cannot execute at all on Linux. lobium/build.sh and
+# lobium/rebase.sh were committed with CRLF and were, in consequence, both dead on this platform;
+# every other .sh in the tree was already LF, so nothing here is a convention being overridden.
+*.sh text eol=lf
+
 # These tracked files intentionally use CRLF; do not mistake the carriage return for whitespace.
 /.github/workflows/ci.yml whitespace=cr-at-eol
 /package-lock.json whitespace=cr-at-eol
