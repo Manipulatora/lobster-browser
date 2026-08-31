@@ -4,12 +4,13 @@ import {
   Get,
   HttpCode,
   Inject,
+  Param,
   Post,
   Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { IsBoolean, IsIn, IsInt, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 import type {
   BillingPeriod,
@@ -26,7 +27,7 @@ import { Public } from '../auth/public.decorator';
 import { ok, type ApiResponse } from '../common/api-response';
 import { AdminTokenGuard } from './admin-token.guard';
 import { BillingService, type BillingOverview, type DepositInstruction } from './billing.service';
-import { DEPOSIT_CHAINS } from './deposit-chains';
+import { DEPOSIT_CHAINS, MAX_DEPOSIT_CENTS, MIN_DEPOSIT_CENTS } from './deposit-chains';
 import { PAYMENT_PROVIDER, type PaymentProvider } from './payments/payment-provider';
 import { RenewalService, type RenewalSweepResult } from './renewal.service';
 
@@ -44,9 +45,23 @@ const BILLING_PERIODS: BillingPeriod[] = ['monthly', 'yearly'];
 const CHAIN_CODES = DEPOSIT_CHAINS.map((c) => c.code);
 
 class CreateDepositDto {
-  /** Amount to add to Credit, in USD cents. */
+  /**
+   * Amount to add to Credit, in USD cents.
+   *
+   * BOUNDED AT THE DOOR, not just in the service. Without the range here, a typed "0.001" reached
+   * the API as `amountCents: 0` and died at the service's own check as a bare unexplained 400 —
+   * after the user had already pressed Pay. The service still enforces the same range (it has
+   * other callers), but validating in the DTO makes the refusal name the field and the floor.
+   * The bounds import from ./deposit-chains so this and the service can never quote two answers.
+   */
   @Type(() => Number)
   @IsInt()
+  @Min(MIN_DEPOSIT_CENTS, {
+    message: `deposit must be at least ${MIN_DEPOSIT_CENTS / 100} Credit`,
+  })
+  @Max(MAX_DEPOSIT_CENTS, {
+    message: `deposit must be at most ${MAX_DEPOSIT_CENTS / 100} Credit`,
+  })
   amountCents!: number;
 
   @IsIn(CHAIN_CODES)
@@ -162,6 +177,29 @@ export class BillingController {
     return ok(
       await this.billing.createDeposit(user.id, dto.amountCents, dto.currencyCode, dto.teamId),
     );
+  }
+
+  /**
+   * Abandon an open deposit — the server half of the payment page's Cancel button.
+   *
+   * Without it, "Cancel" only cleared the client's screen: the row underneath stayed `pending`
+   * forever and the page re-surfaced its address on every visit, looking auto-generated. Same
+   * auth shape as the sibling deposit routes: the JWT identifies the caller, membership of the
+   * (optional) `teamId` is proven in the service, and the repository predicate is tenant-scoped —
+   * a guessed id belonging to another team is a no-op, not a 403 oracle. No `EmailVerifiedGuard`
+   * here: that guard fences the route that opens payments, and closing one moves no money.
+   *
+   * `canceled: false` in the answer is normal (a double-click, a deposit that confirmed
+   * mid-flight), which is why this is a 200 either way rather than a 404.
+   */
+  @Post('deposits/:id/cancel')
+  @HttpCode(200)
+  async cancelDeposit(
+    @CurrentUser() user: { id: string },
+    @Param('id') id: string,
+    @Query('teamId') teamId?: string,
+  ): Promise<ApiResponse<{ canceled: boolean }>> {
+    return ok(await this.billing.cancelDeposit(user.id, id, teamId));
   }
 
   /**

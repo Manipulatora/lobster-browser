@@ -12,6 +12,7 @@ import {
   type DesktopAuthRepository,
 } from '../auth/desktop-auth.repository';
 import { USERS_REPOSITORY, type UsersRepository } from '../auth/users.repository';
+import { BillingService } from '../billing/billing.service';
 import { LEASES_REPOSITORY, type LeasesRepository } from '../leases/leases.repository';
 
 /** Default gap between sweeps. Nothing here is urgent; an hour keeps the tables from growing. */
@@ -20,12 +21,18 @@ const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
 /**
  * Drops rows that have outlived their purpose.
  *
- * FOUR TABLES ARE WRITE-ONLY WITHOUT THIS. Pending sign-ups, desktop authorisation grants, email
- * verification codes and profile leases are all short-lived by design, and every one of them has
- * its expiry enforced in the predicate that reads it — so a stale row is harmless, and nothing in
- * the request path ever had a reason to delete one. The result is that they only ever grow, for
- * the life of the deployment, which is what `PendingRegistration`'s "expires and is swept, leaving
- * nothing" was always supposed to mean.
+ * FIVE TABLES ARE WRITE-ONLY WITHOUT THIS. Pending sign-ups, desktop authorisation grants, email
+ * verification codes, profile leases and unpaid deposit addresses are all short-lived by design,
+ * and every one of them has its expiry enforced in the predicate that reads it — so a stale row is
+ * harmless, and nothing in the request path ever had a reason to delete one. The result is that
+ * they only ever grow, for the life of the deployment, which is what `PendingRegistration`'s
+ * "expires and is swept, leaving nothing" was always supposed to mean.
+ *
+ * DEPOSITS ARE EXPIRED, NOT DELETED, and the distinction matters twice over: the row is a money
+ * record (it stays on the statement as `expired`), and a stale `pending` row was not harmless —
+ * the billing page surfaces the newest open deposit, so one abandoned address kept reappearing on
+ * every visit forever. The cutoff and its money-safety guarantees live in
+ * `BillingService.expireStaleDeposits`, not here — see it for why 7 days is not arbitrary.
  *
  * DELETING IS THE POINT, not just tidiness: a pending registration holds a password hash and an
  * email address for an account that was never created, and a redeemed desktop grant holds the
@@ -44,6 +51,9 @@ export class HousekeepingService implements OnModuleInit, OnModuleDestroy {
     @Inject(USERS_REPOSITORY) private readonly users: UsersRepository,
     @Inject(DESKTOP_AUTH_REPOSITORY) private readonly desktopAuth: DesktopAuthRepository,
     @Inject(LEASES_REPOSITORY) private readonly leases: LeasesRepository,
+    // The service, not BILLING_REPOSITORY: the deposit-expiry cutoff is billing policy, coupled
+    // to reconciliation's lookback, and housekeeping has no business owning a copy of it.
+    private readonly billing: BillingService,
     private readonly config: ConfigService,
   ) {}
 
@@ -79,5 +89,6 @@ export class HousekeepingService implements OnModuleInit, OnModuleDestroy {
     await this.users.purgeExpiredEmailVerifications(now);
     await this.desktopAuth.purgeExpired(now);
     await this.leases.purgeExpired(now);
+    await this.billing.expireStaleDeposits(now);
   }
 }

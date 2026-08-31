@@ -64,6 +64,12 @@ export interface BillingOverview {
   /** Whether the processor is usable right now; false means deposits cannot be started. */
   depositsAvailable: boolean;
   /**
+   * The smallest deposit the API accepts, in USD cents — the server's `MIN_DEPOSIT_CENTS`,
+   * forwarded so the amount field can refuse a below-minimum entry as it is typed AND name the
+   * real floor, instead of hard-coding a figure that drifts the day the server's moves.
+   */
+  minDepositCents: number;
+  /**
    * When Credit is next debited for the package, or null when nothing is due.
    *
    * The server's own figure, never recomputed here: a date this page worked out from a period

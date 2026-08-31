@@ -199,6 +199,41 @@ export interface BillingRepository {
     limit: number;
   }): Promise<StoredDeposit[]>;
 
+  /**
+   * Write off ONE open deposit at the user's request — the server half of the payment page's
+   * Cancel button.
+   *
+   * WHY THIS EXISTS. Cancelling used to clear only the client's signals, so the row stayed
+   * `pending` forever and the billing page re-surfaced its address on every visit — an abandoned
+   * payment that looked auto-generated. Cancel has to be a fact the server knows, or the server
+   * keeps repeating the thing the user dismissed.
+   *
+   * NEVER TOUCHES MONEY, by predicate rather than by promise: the guard matches only
+   * `status: 'pending'` with `creditedAt: null`, and is scoped to `teamId` so one team cannot
+   * expire another's rows by guessing ids. A deposit that confirmed (or even started confirming)
+   * between the click and this call matches nothing and keeps its state — and if funds land on
+   * the address AFTER a cancel, `creditDeposit` still credits them, because its claim is on
+   * `creditedAt: null`, not on the status this writes.
+   *
+   * @returns true when THIS call flipped the row; false for anything else — unknown id, another
+   *          team's deposit, or a row no longer pending. All are the same harmless no-op.
+   */
+  cancelDeposit(teamId: string, depositId: string): Promise<boolean>;
+
+  /**
+   * Write off every pending, uncredited deposit older than `createdBefore`, across all teams —
+   * the housekeeping half of the same cleanup.
+   *
+   * The normal fate of a deposit address is that nobody ever sends to it, and nothing in the
+   * request path had a reason to close such a row — so they accumulated as `pending` forever, and
+   * the newest one was what the billing page kept re-surfacing. Same money-safety shape as
+   * {@link cancelDeposit}: `creditedAt: null` in the predicate, and a late payment still credits
+   * because `creditDeposit` claims on `creditedAt`, never on status.
+   *
+   * @returns how many rows this sweep expired, for the caller's log line.
+   */
+  expireStaleDeposits(createdBefore: Date): Promise<number>;
+
   /** Record a non-crediting status change (waiting → confirming, or a terminal failure). */
   updateDepositStatus(
     providerPaymentId: string,

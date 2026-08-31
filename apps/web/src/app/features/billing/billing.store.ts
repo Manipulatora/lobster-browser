@@ -87,6 +87,20 @@ export class BillingStore {
   }
 
   /**
+   * Tell the server an open deposit is abandoned, then re-fetch the list that proves it.
+   *
+   * The POST is the part that matters: cancelling used to clear only this store's signals, so the
+   * row underneath stayed `pending` forever and `load()` re-surfaced its address on every visit.
+   * The refresh afterwards is what makes the change visible to every reader of `deposits` at once
+   * — including the banner that offered the cancel, which disappears because the row really
+   * changed, not because a flag was set.
+   */
+  async cancelDeposit(depositId: string): Promise<void> {
+    await this.api.post(`/billing/deposits/${encodeURIComponent(depositId)}/cancel`);
+    await this.refreshDeposits();
+  }
+
+  /**
    * What buying a package would do — the exact debit, the balance it leaves, and whether the
    * change is allowed at all.
    *

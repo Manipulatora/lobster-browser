@@ -41,6 +41,18 @@ import {
 } from './deposit-chains';
 import { PAYMENT_PROVIDER, type PaymentProvider } from './payments/payment-provider';
 
+/**
+ * How long an unpaid deposit address stays open before housekeeping writes it off.
+ *
+ * 7 days DELIBERATELY MATCHES `LOOKBACK_MS` in deposit-reconciliation.service.ts: reconciliation
+ * stops polling the processor about a deposit once it is older than that window, so expiring at
+ * the same age means nothing is ever expired while reconciliation still considers it live — the
+ * two sweeps agree on when a deposit stops being anyone's concern. And expiry is safe even when
+ * they would disagree: `creditDeposit` claims on `creditedAt: null`, not on status, so funds that
+ * land after this cutoff still credit the wallet exactly as they would have before it.
+ */
+const DEPOSIT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 /** What the dashboard needs to render the billing page in one request. */
 export interface BillingOverview {
   balanceCents: number;
@@ -71,6 +83,15 @@ export interface BillingOverview {
    * being absent is a fact we already know at render time.
    */
   depositsAvailable: boolean;
+  /**
+   * The smallest deposit the API will accept, in USD cents — `MIN_DEPOSIT_CENTS`, forwarded.
+   *
+   * Sent for the same reason `depositsAvailable` is: the floor is a fact known at render time, and
+   * a client that does not know it lets the user type "0.001", press Pay, and only then meet a
+   * 400. With the figure in hand the amount field can refuse below-minimum entries as they are
+   * typed and NAME the floor, instead of hard-coding a copy that drifts when this one moves.
+   */
+  minDepositCents: number;
 }
 
 /** A newly issued deposit address for the user to send to. */
@@ -133,6 +154,7 @@ export class BillingService {
       // list into a trap: the user picks it, confirms, and only then meets the refusal.
       chains: DEPOSIT_CHAINS.filter((c) => this.payments.supportsCurrency(c.code)),
       depositsAvailable: this.payments.isConfigured(),
+      minDepositCents: MIN_DEPOSIT_CENTS,
       freePlanProfileLimit: FREE_PLAN_PROFILE_LIMIT,
       nextBillingAt: nextBillingAt(subscription),
       entitledProfileLimit: entitledProfileLimit(subscription),
@@ -234,6 +256,40 @@ export class BillingService {
       amountCents,
       hostedUrl: created.hostedUrl,
     };
+  }
+
+  /**
+   * Abandon an open deposit at the user's request — the server half of the payment page's Cancel.
+   *
+   * Cancelling used to clear only the client's signals, which is why one abandoned NOWPayments
+   * address kept coming back on every visit to the billing page: the row underneath stayed
+   * `pending` forever, and nothing anywhere ever closed it. The membership check and the
+   * tenant-scoped predicate in the repository together are what keep this from being a way to
+   * expire someone else's payment; the `pending` + uncredited predicate is what keeps it from
+   * ever being a way to touch money (see `BillingRepository.cancelDeposit`).
+   *
+   * `canceled: false` is an answer, not an error: it is what a double-click, a stale banner, or a
+   * deposit that confirmed mid-flight all look like, and none of them deserves a failure dialog.
+   */
+  async cancelDeposit(
+    userId: string,
+    depositId: string,
+    teamId?: string,
+  ): Promise<{ canceled: boolean }> {
+    const team = await resolveTeamId(this.teams, userId, teamId);
+    return { canceled: await this.repo.cancelDeposit(team, depositId) };
+  }
+
+  /**
+   * Write off deposits nobody ever paid — called from the housekeeping sweep, not from requests.
+   *
+   * The cutoff is `now - DEPOSIT_TTL_MS`; see that constant for why 7 days is not arbitrary (it
+   * matches reconciliation's lookback, so nothing is expired while reconciliation still polls it,
+   * and a late payment still credits because `creditDeposit` claims on `creditedAt: null`, not on
+   * status).
+   */
+  async expireStaleDeposits(now = new Date()): Promise<number> {
+    return this.repo.expireStaleDeposits(new Date(now.getTime() - DEPOSIT_TTL_MS));
   }
 
   /**

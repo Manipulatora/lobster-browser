@@ -186,6 +186,29 @@ export class InMemoryBillingRepository implements BillingRepository {
       .slice(0, args.limit);
   }
 
+  async cancelDeposit(teamId: string, depositId: string): Promise<boolean> {
+    // The map is keyed by providerPaymentId, but a cancel arrives with OUR id — the only one the
+    // client was ever given — so this scans. Same predicate as the Prisma conditional UPDATE:
+    // tenant-scoped, and only a pending, uncredited row can flip, so money is untouchable here.
+    const row = [...this.deposits.values()].find((d) => d.id === depositId && d.teamId === teamId);
+    if (!row || row.status !== 'pending' || row.creditedAt) return false;
+    row.status = 'expired';
+    return true;
+  }
+
+  async expireStaleDeposits(createdBefore: Date): Promise<number> {
+    // ISO-8601 sorts lexicographically, so the string comparison matches the Prisma `createdAt: lt`
+    // exactly — the same trick findUnsettledDeposits already relies on.
+    const cutoff = createdBefore.toISOString();
+    let expired = 0;
+    for (const row of this.deposits.values()) {
+      if (row.status !== 'pending' || row.creditedAt || row.createdAt >= cutoff) continue;
+      row.status = 'expired';
+      expired += 1;
+    }
+    return expired;
+  }
+
   async updateDepositStatus(
     providerPaymentId: string,
     status: DepositStatus,

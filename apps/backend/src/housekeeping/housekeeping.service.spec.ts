@@ -5,6 +5,7 @@ import type { ConfigService } from '@nestjs/config';
 
 import { InMemoryDesktopAuthRepository } from '../auth/desktop-auth.repository';
 import { InMemoryUsersRepository } from '../auth/in-memory-users.repository';
+import type { BillingService } from '../billing/billing.service';
 import { InMemoryLeasesRepository } from '../leases/in-memory-leases.repository';
 import { InMemoryTeamsRepository } from '../teams/in-memory-teams.repository';
 import { HousekeepingService } from './housekeeping.service';
@@ -20,6 +21,7 @@ function makeService(): {
   users: InMemoryUsersRepository;
   desktopAuth: InMemoryDesktopAuthRepository;
   leases: InMemoryLeasesRepository;
+  depositSweeps: Date[];
 } {
   const teams = new InMemoryTeamsRepository();
   const users = new InMemoryUsersRepository((ownerUserId, name) =>
@@ -27,18 +29,30 @@ function makeService(): {
   );
   const desktopAuth = new InMemoryDesktopAuthRepository();
   const leases = new InMemoryLeasesRepository();
+  // A recording stub, not a real BillingService: what deposit expiry DOES (the cutoff, the
+  // pending+uncredited predicate) is billing's contract and is tested in billing.e2e.spec.ts.
+  // Housekeeping's only obligation is to call it once per pass with the sweep's own clock, and
+  // that is exactly what this records.
+  const depositSweeps: Date[] = [];
+  const billing = {
+    expireStaleDeposits: async (now: Date) => {
+      depositSweeps.push(now);
+      return 0;
+    },
+  } as unknown as BillingService;
   // Never started: the tests drive `sweep` directly, and an interval would only add a timer.
   const config = { get: () => '0' } as unknown as ConfigService;
   return {
-    service: new HousekeepingService(users, desktopAuth, leases, config),
+    service: new HousekeepingService(users, desktopAuth, leases, billing, config),
     users,
     desktopAuth,
     leases,
+    depositSweeps,
   };
 }
 
 test('a sweep drops what has expired and keeps what has not', async () => {
-  const { service, users, desktopAuth, leases } = makeService();
+  const { service, users, desktopAuth, leases, depositSweeps } = makeService();
   const now = new Date();
   const past = new Date(now.getTime() - HOUR);
   const future = new Date(now.getTime() + HOUR);
@@ -113,6 +127,11 @@ test('a sweep drops what has expired and keeps what has not', async () => {
   // outlive the launch by the life of the deployment.
   assert.equal(await leases.current(dead, now), null);
   assert.ok(await leases.current(live, now), 'a held profile keeps its lease');
+
+  // The fifth table: abandoned deposit addresses. WHICH rows expire is billing's contract and is
+  // tested there; what belongs to housekeeping is that a pass asks billing to expire them at all,
+  // and hands over its own `now` so the cutoff moves with the sweep's clock, not a second one.
+  assert.deepEqual(depositSweeps, [now], 'one pass sweeps stale deposits exactly once');
 });
 
 test('a consumed verification code is swept even while inside its window', async () => {

@@ -219,6 +219,28 @@ export class PrismaBillingRepository implements BillingRepository {
     return rows.map(toStoredDeposit);
   }
 
+  async cancelDeposit(teamId: string, depositId: string): Promise<boolean> {
+    // The WHERE is the whole contract (see the interface): tenant-scoped by teamId, and matching
+    // only a pending, uncredited row — so a deposit that settled between the user's click and this
+    // write matches nothing and keeps both its status and its money. updateMany rather than update
+    // for the same reason updateDepositStatus uses it: a miss is a no-op, not a P2025 throw.
+    const res = await this.prisma.deposit.updateMany({
+      where: { id: depositId, teamId, status: 'pending', creditedAt: null },
+      data: { status: 'expired' },
+    });
+    return res.count > 0;
+  }
+
+  async expireStaleDeposits(createdBefore: Date): Promise<number> {
+    // Only `pending` — a `confirming` row has funds visibly in flight and belongs to the
+    // reconciliation sweep, not to housekeeping. `creditedAt: null` keeps this away from money.
+    const res = await this.prisma.deposit.updateMany({
+      where: { status: 'pending', creditedAt: null, createdAt: { lt: createdBefore } },
+      data: { status: 'expired' },
+    });
+    return res.count;
+  }
+
   async updateDepositStatus(
     providerPaymentId: string,
     status: DepositStatus,
