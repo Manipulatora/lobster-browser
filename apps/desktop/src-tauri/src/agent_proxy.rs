@@ -47,6 +47,11 @@ pub enum RefusalCode {
     PlanRequired,
     InsufficientCredit,
     SignedOut,
+    /// The backend failed, not the account. The panel already renders this code
+    /// (`packages/lobee-app/src/types.ts`) with the right copy — "This is on our side, not yours" —
+    /// and only ever showed the generic "Lobee is not connected yet" because the desktop had no
+    /// code to send for it.
+    ProviderUnavailable,
 }
 
 impl RefusalCode {
@@ -55,6 +60,7 @@ impl RefusalCode {
             RefusalCode::PlanRequired => "plan_required",
             RefusalCode::InsufficientCredit => "insufficient_credit",
             RefusalCode::SignedOut => "signed_out",
+            RefusalCode::ProviderUnavailable => "provider_unavailable",
         }
     }
 }
@@ -191,10 +197,17 @@ async fn mint() -> Result<Access> {
         }));
     }
 
+    classify_token_refusal(status, &body)
+}
+
+/// Map a NON-success `POST /agent/token` response to an [`Access`] decision, split out of
+/// [`mint`] so every branch is testable without a live HTTP round trip — which is why the 5xx
+/// branch below shipped untested. Pure: it touches neither the network nor the keychain.
+fn classify_token_refusal(status: reqwest::StatusCode, body: &str) -> Result<Access> {
     // 403 is the plan refusal and 402 the empty wallet. Both are product states with a next action,
     // so they are carried to the panel rather than raised as failures.
     if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::PAYMENT_REQUIRED {
-        let parsed: Option<RefusalBody> = serde_json::from_str(&body).ok();
+        let parsed: Option<RefusalBody> = serde_json::from_str(body).ok();
         let reason = parsed.as_ref().and_then(|b| b.reason.clone());
         let code = match reason.as_deref() {
             Some("insufficient_credit") => RefusalCode::InsufficientCredit,
@@ -218,6 +231,22 @@ async fn mint() -> Result<Access> {
         return Ok(Access::Denied(Refusal {
             code: RefusalCode::SignedOut,
             message: "Sign in to the Lobster app to use Lobee.".to_string(),
+            tier: None,
+        }));
+    }
+    // A 5xx is the SERVER failing, not a decision about this account. Falling through to Err here
+    // made the panel show "Lobee is not connected yet … this usually clears within a moment of
+    // signing in", which points the user at their own sign-in for a fault they cannot affect and
+    // sends them looking in entirely the wrong place. Observed against production returning 500
+    // from POST /agent/token while the account was signed in perfectly well.
+    if status.is_server_error() {
+        return Ok(Access::Denied(Refusal {
+            code: RefusalCode::ProviderUnavailable,
+            message: format!(
+                "The Lobster service could not authorise Lobee (HTTP {}). This is on our side — \
+                 your account and Credit are untouched.",
+                status.as_u16()
+            ),
             tier: None,
         }));
     }
@@ -296,7 +325,7 @@ pub async fn push(sidecar: &crate::sidecar::SidecarClient, force: bool) {
     let access = match access(force).await {
         Ok(access) => access,
         Err(err) => {
-            tracing::debug!(error = %format!("{err:#}"), "managed agent credential unavailable");
+            tracing::warn!(error = %format!("{err:#}"), "managed agent credential unavailable");
             return;
         }
     };
@@ -357,5 +386,59 @@ mod tests {
         assert_eq!(params["refusal"], "plan_required");
         assert_eq!(params["tier"], "light");
         assert!(params.get("token").is_none(), "a refusal carries no token");
+    }
+
+    fn denied(status: u16, body: &str) -> Refusal {
+        match classify_token_refusal(reqwest::StatusCode::from_u16(status).unwrap(), body)
+            .expect("a refusal must be Ok(Denied), never Err")
+        {
+            Access::Denied(r) => r,
+            Access::Granted(_) => panic!("a non-2xx status must not grant access"),
+        }
+    }
+
+    /// The whole point of extracting `classify_token_refusal`: a 5xx is the SERVER failing, and it
+    /// must reach the panel as `provider_unavailable` ("this is on our side"), NOT as `signed_out`
+    /// (which sends the user to re-authenticate for a fault they cannot affect) and NOT as an `Err`
+    /// (which the panel renders as the generic "not connected yet"). This branch shipped untested
+    /// and produced exactly that misdirection against a production 500.
+    #[test]
+    fn a_server_error_is_an_outage_on_our_side_not_a_sign_in_problem() {
+        for status in [500u16, 502, 503, 504] {
+            let r = denied(status, "");
+            assert_eq!(
+                r.code,
+                RefusalCode::ProviderUnavailable,
+                "HTTP {status} must map to provider_unavailable"
+            );
+            assert_eq!(r.code.as_str(), "provider_unavailable");
+            assert!(r.tier.is_none());
+            assert!(
+                r.message.contains("on our side"),
+                "the panel copy must not blame the user: {:?}",
+                r.message
+            );
+        }
+    }
+
+    /// The account-state branches this shares a function with must keep their existing mapping,
+    /// so the extraction cannot have silently changed them.
+    #[test]
+    fn the_account_state_branches_are_unchanged_by_the_extraction() {
+        assert_eq!(denied(401, "").code, RefusalCode::SignedOut);
+        assert_eq!(denied(402, "").code, RefusalCode::InsufficientCredit);
+        assert_eq!(denied(403, "").code, RefusalCode::PlanRequired);
+        // A 403 whose body names the empty wallet is the credit refusal, not the plan refusal.
+        assert_eq!(
+            denied(403, r#"{"reason":"insufficient_credit"}"#).code,
+            RefusalCode::InsufficientCredit,
+        );
+    }
+
+    /// A status this function has no rule for is a genuine failure, not a silent Denied — it must
+    /// stay an `Err` so it is logged rather than rendered as a calm panel state.
+    #[test]
+    fn an_unclassified_status_stays_an_error() {
+        assert!(classify_token_refusal(reqwest::StatusCode::IM_A_TEAPOT, "").is_err());
     }
 }
