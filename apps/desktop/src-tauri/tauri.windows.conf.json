@@ -17,11 +17,9 @@
         "compression": "lzma",
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
-        "headerImage": "installer/installer-header.bmp",
-        "uninstallerHeaderImage": "installer/installer-header.bmp",
         "sidebarImage": "installer/installer-sidebar.bmp",
-        "startMenuFolder": "Lobster Browser",
-        "installerHooks": "installer/hooks.nsh"
+        "installerHooks": "installer/hooks.nsh",
+        "template": "installer/installer.template.nsi"
       }
     }
   }
