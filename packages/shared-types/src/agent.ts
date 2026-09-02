@@ -306,6 +306,16 @@ export type AgentEvent =
   | { type: 'run.started'; sessionId: string; profileId: string; task: string; ts: string }
   /** The model call for this step began (UI shows a "thinking" state). */
   | { type: 'step.thinking'; sessionId: string; profileId: string; step: number; ts: string }
+  /** The model is still working on this step: streamed reasoning / argument bytes so far (throttled). */
+  | {
+      type: 'step.progress';
+      sessionId: string;
+      profileId: string;
+      step: number;
+      kind: 'reasoning' | 'text' | 'tool';
+      chars: number;
+      ts: string;
+    }
   /** The model chose an action for this step. */
   | {
       type: 'step.action';

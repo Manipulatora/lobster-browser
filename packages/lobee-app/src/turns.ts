@@ -103,6 +103,20 @@ export function applyEvent(turn: Turn, ev: AgentEvent): Turn {
       });
       return { ...turn, steps };
     }
+    case 'step.progress': {
+      // The model is still working: say so, and roughly how much it has produced, on the step that
+      // is thinking. A step that already settled (its action arrived) keeps its line.
+      const number = ev.step ?? 0;
+      const prior = turn.steps.get(number);
+      if (!prior?.thinking) return turn;
+      const chars = typeof ev.chars === 'number' ? ev.chars : 0;
+      const verb =
+        ev.kind === 'reasoning' ? 'Reasoning' : ev.kind === 'tool' ? 'Deciding' : 'Writing';
+      return upsert(number, {
+        label: chars >= 1000 ? `${verb}… ${(chars / 1000).toFixed(1)}k` : `${verb}…`,
+        ...(ev.ts ? { ts: ev.ts } : {}),
+      });
+    }
     case 'run.steered': {
       // The user's mid-run message sits in the rail where it landed — between the step it
       // interrupted and the next one — so the run reads as the conversation it was.

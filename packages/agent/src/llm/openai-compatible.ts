@@ -90,10 +90,13 @@ export class OpenAiCompatibleClient implements LlmClient {
       ...(cache && req.sessionId ? { session_id: req.sessionId.slice(0, 256) } : {}),
       ...providerPin(model, cache),
     };
-    // Stream only when the caller wants deltas AND no tool is in play. A forced tool call produces a
-    // single structured object with no prose to reveal progressively, so streaming it would add
-    // reassembly risk for no benefit — Ask mode is where the wait is actually felt.
-    const wantsStream = Boolean(req.onTextDelta) && req.tools.length === 0;
+    // Stream whenever the caller asks to hear from the response as it happens: text deltas for a
+    // chat answer, progress for a tool step. A tool step used to be buffered on the theory that a
+    // forced call has no prose to reveal — true, but buffering put the whole of the model's thinking
+    // behind the transport's wall clock, and the managed proxy's 55 s ceiling then ended any
+    // long-thinking step outright. Streamed, the thinking is activity: the idle watchdog below is
+    // the only clock, and it only fires when the model has gone quiet.
+    const wantsStream = Boolean(req.onTextDelta || req.onProgress);
     const response = await fetchWithRetry(
       `${this.baseUrl}/chat/completions`,
       {
@@ -129,7 +132,14 @@ export class OpenAiCompatibleClient implements LlmClient {
       );
     }
     if (wantsStream && response.body) {
-      return readSseCompletion(response.body, req.onTextDelta!, req.signal);
+      return readSseCompletion(
+        response.body,
+        {
+          ...(req.onTextDelta ? { onTextDelta: req.onTextDelta } : {}),
+          ...(req.onProgress ? { onProgress: req.onProgress } : {}),
+        },
+        req.signal,
+      );
     }
     const json = (await response.json()) as OpenAiResponse;
     const choice = json.choices?.[0];
@@ -267,7 +277,10 @@ const STREAM_IDLE_TIMEOUT_MS = 90_000;
 
 async function readSseCompletion(
   body: ReadableStream<Uint8Array>,
-  onTextDelta: (delta: string) => void,
+  callbacks: {
+    onTextDelta?: (delta: string) => void;
+    onProgress?: LlmRequest['onProgress'];
+  },
   signal?: AbortSignal,
 ): Promise<LlmResult> {
   const reader = body.getReader();
@@ -275,6 +288,10 @@ async function readSseCompletion(
   let buffer = '';
   let text = '';
   let stopReason = 'stop';
+  // Tool calls arrive as fragments keyed by index: the id and name on the first, the JSON
+  // `arguments` spread over the rest. Reassembled here so the caller gets the same LlmResult the
+  // buffered path builds.
+  const calls = new Map<number, { id?: string; name: string; args: string }>();
   const usage = { tokensIn: 0, tokensOut: 0, cachedTokensIn: undefined as number | undefined };
 
   // Cancelling the reader is what unblocks the pending `read()`; the loop then throws and the caller
@@ -314,7 +331,21 @@ async function readSseCompletion(
         const delta = choice?.delta?.content;
         if (delta) {
           text += delta;
-          onTextDelta(delta);
+          callbacks.onTextDelta?.(delta);
+          callbacks.onProgress?.({ kind: 'text', chars: delta.length });
+        }
+        const reasoning = choice?.delta?.reasoning;
+        if (reasoning) callbacks.onProgress?.({ kind: 'reasoning', chars: reasoning.length });
+        for (const fragment of choice?.delta?.tool_calls ?? []) {
+          const index = fragment.index ?? 0;
+          const entry = calls.get(index) ?? { name: '', args: '' };
+          if (fragment.id) entry.id = fragment.id;
+          if (fragment.function?.name) entry.name += fragment.function.name;
+          if (fragment.function?.arguments) {
+            entry.args += fragment.function.arguments;
+            callbacks.onProgress?.({ kind: 'tool', chars: fragment.function.arguments.length });
+          }
+          calls.set(index, entry);
         }
         if (choice?.finish_reason) stopReason = normalizeStop(choice.finish_reason);
         if (chunk.usage) {
@@ -330,13 +361,29 @@ async function readSseCompletion(
     reader.cancel().catch(() => {});
   }
 
+  const first = [...calls.entries()].sort((a, b) => a[0] - b[0]).find(([, c]) => c.name)?.[1];
+  let toolCall: LlmToolCall | undefined;
+  if (first) {
+    const id = first.id ?? `call_${Math.random().toString(36).slice(2, 10)}`;
+    try {
+      toolCall = {
+        id,
+        name: first.name,
+        input: JSON.parse(first.args || '{}') as Record<string, unknown>,
+      };
+    } catch {
+      toolCall = { id, name: first.name, input: {} };
+    }
+  }
+
   // A 200 that yields no content at all is a proxy failure mode, not an answer. Say so plainly rather
   // than returning an empty result the loop reports as "the model returned no answer".
-  if (!text.trim() && usage.tokensOut === 0) {
+  if (!text.trim() && !toolCall && usage.tokensOut === 0) {
     throw new Error('the model stream ended without producing any content');
   }
 
   return {
+    ...(toolCall ? { toolCall } : {}),
     ...(text ? { text } : {}),
     stopReason,
     usage: {
@@ -348,7 +395,19 @@ async function readSseCompletion(
 }
 
 interface OpenAiStreamChunk {
-  choices?: Array<{ delta?: { content?: string }; finish_reason?: string }>;
+  choices?: Array<{
+    delta?: {
+      content?: string;
+      /** OpenRouter's unified reasoning delta (present when `reasoning` was requested). */
+      reasoning?: string;
+      tool_calls?: Array<{
+        index?: number;
+        id?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+    finish_reason?: string;
+  }>;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;

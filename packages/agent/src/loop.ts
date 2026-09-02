@@ -921,6 +921,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
       emit({ type: 'step.thinking', ...base, step, ts: now() });
       pendingImage = undefined;
+      let progressChars = 0;
+      let progressEmittedAt = 0;
       const buildRequest = (
         overrides: { maxTokens?: number; messages?: LlmMessage[] } = {},
       ): Parameters<typeof llm.complete>[0] => ({
@@ -954,6 +956,16 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             'warn',
             `The model provider did not respond (${reason}). Retrying in ${Math.round(delayMs / 1000)}s — attempt ${attempt} of ${attempts}.`,
           ),
+        // Asking for progress is what makes the step STREAM (see the adapter): the model's thinking
+        // becomes activity for the idle watchdog instead of time against a wall clock, and the
+        // panel can say the model is still working. Throttled: one event a second and a half.
+        onProgress: ({ kind, chars }) => {
+          progressChars += chars;
+          const at = Date.now();
+          if (at - progressEmittedAt < 1500) return;
+          progressEmittedAt = at;
+          emit({ type: 'step.progress', ...base, step, kind, chars: progressChars, ts: now() });
+        },
         signal,
       });
       // A context-window 400 used to end the run outright: it is not in `retryableStatus`, so it

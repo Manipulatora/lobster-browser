@@ -279,3 +279,25 @@ test('a mid-run message from the user lands in the rail between the steps', () =
   // An empty message changes nothing.
   assert.equal(applyEvent(turn, { type: 'run.steered', step: 2, text: '  ' }), turn);
 });
+
+test('streamed progress keeps the thinking step alive with a rough size, and never touches a settled one', () => {
+  let turn = applyEvent(running(), {
+    type: 'step.thinking',
+    step: 3,
+    ts: '2026-09-02T10:00:00.000Z',
+  });
+  turn = applyEvent(turn, { type: 'step.progress', step: 3, kind: 'reasoning', chars: 420 });
+  assert.equal(turn.steps.get(3).label, 'Reasoning…');
+  assert.equal(turn.steps.get(3).thinking, true);
+  turn = applyEvent(turn, { type: 'step.progress', step: 3, kind: 'tool', chars: 2350 });
+  assert.equal(turn.steps.get(3).label, 'Deciding… 2.4k');
+  // Once the action lands the step is settled; late progress must not overwrite its line.
+  turn = applyEvent(turn, {
+    type: 'step.action',
+    step: 3,
+    action: { kind: 'click', note: 'open the inbox' },
+  });
+  const settled = turn.steps.get(3).label;
+  const late = applyEvent(turn, { type: 'step.progress', step: 3, kind: 'text', chars: 9000 });
+  assert.equal(late.steps.get(3).label, settled);
+});

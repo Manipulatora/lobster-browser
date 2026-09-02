@@ -79,6 +79,14 @@ export interface LlmRequest {
   /** Receive assistant text as it arrives. Adapters that stream call this; others never do. */
   onTextDelta?: (delta: string) => void;
   /**
+   * Liveness for a TOOL step. Nothing here is shown as text — a forced tool call is one structured
+   * object — but a caller that passes it gets the response streamed, which means (a) reasoning and
+   * argument bytes count as activity for the idle watchdog instead of a wall clock ending a
+   * long-thinking step, and (b) it can tell the user the model is still working, and roughly how
+   * hard. Adapters that cannot stream never call it.
+   */
+  onProgress?: (info: { kind: 'reasoning' | 'text' | 'tool'; chars: number }) => void;
+  /**
    * Called before each transport retry. The loop turns it into a visible event, so a run waiting out
    * a rate limit reads as "retrying in 8s" rather than as a hang the user is tempted to kill.
    */

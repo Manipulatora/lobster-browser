@@ -12,6 +12,7 @@ export interface AgentEvent {
     | 'step.action'
     | 'step.observation'
     | 'step.outcome'
+    | 'step.progress'
     | 'run.steered'
     | 'run.needsInput'
     | 'run.finished'
@@ -28,6 +29,9 @@ export interface AgentEvent {
   title?: string;
   /** Streamed fragment of the assistant reply (`answer.delta`). */
   text?: string;
+  /** step.progress: what is streaming and how much so far. */
+  kind?: string;
+  chars?: number;
   /** Provider-reported token counts (`usage`). */
   usage?: { tokensIn?: number; tokensOut?: number; cachedTokensIn?: number; costUsd?: number };
   prompt?: string;

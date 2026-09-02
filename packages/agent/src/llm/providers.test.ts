@@ -577,7 +577,7 @@ test('a streamed chat reports deltas as they arrive and still resolves one compl
   }
 });
 
-test('a tool-calling step never streams, because a forced call has no prose to reveal', async () => {
+test('a tool-calling step is buffered unless the caller asks to hear progress', async () => {
   const original = globalThis.fetch;
   let streamed: unknown = 'unset';
   globalThis.fetch = (async (_input, init) => {
@@ -597,9 +597,62 @@ test('a tool-calling step never streams, because a forced call has no prose to r
   }) as typeof fetch;
   try {
     const client = createLlmClient({ provider: 'openrouter', model: 'x/y', apiKey: 'k' });
-    const result = await client.complete({ ...request, onTextDelta: () => {} });
-    assert.equal(streamed, undefined, 'a request carrying tools must not set stream');
+    const result = await client.complete({ ...request });
+    assert.equal(streamed, undefined, 'without a progress callback the request stays buffered');
     assert.equal(result.toolCall?.name, 'act');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a streamed tool step reassembles the call from fragments and reports progress', async () => {
+  // What OpenRouter actually sends for a forced tool call with reasoning on: keep-alive comments
+  // while the model thinks, reasoning deltas, then the call's id + name on one fragment and its JSON
+  // arguments spread over several, then a finish and a usage-only chunk. The arguments frame is
+  // split across two network chunks on purpose.
+  const original = globalThis.fetch;
+  let sentBody: Record<string, unknown> = {};
+  const frames = [
+    ': OPENROUTER PROCESSING\n\n',
+    'data: {"choices":[{"delta":{"role":"assistant","content":null,"reasoning":"The user wants"}}]}\n\n',
+    'data: {"choices":[{"delta":{"reasoning":" a done call."}}]}\n\n',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","type":"function","function":{"name":"act","arguments":""}}]}}]}\n\n',
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"kind\\":\\"do"}}]}}]}\n\ndata: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"argu',
+    'ments":"ne\\",\\"summary\\":\\"hi\\"}"}}]}}]}\n\n',
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+    'data: {"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":12,"prompt_tokens_details":{"cached_tokens":30}}}\n\n',
+    'data: [DONE]\n\n',
+  ];
+  globalThis.fetch = (async (_input, init) => {
+    sentBody = JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>;
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(encoder.encode(frame));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    );
+  }) as typeof fetch;
+  try {
+    const client = createLlmClient({ provider: 'openrouter', model: 'x/y', apiKey: 'k' });
+    const progress: Array<{ kind: string; chars: number }> = [];
+    const result = await client.complete({ ...request, onProgress: (info) => progress.push(info) });
+    assert.equal(sentBody.stream, true, 'a progress callback opts the tool step into streaming');
+    assert.equal(result.toolCall?.id, 'call_9');
+    assert.equal(result.toolCall?.name, 'act');
+    assert.deepEqual(result.toolCall?.input, { kind: 'done', summary: 'hi' });
+    assert.equal(result.stopReason, 'tool');
+    assert.deepEqual(result.usage, { tokensIn: 40, tokensOut: 12, cachedTokensIn: 30 });
+    // Reasoning and argument bytes both count as the model working.
+    assert.ok(progress.some((p) => p.kind === 'reasoning'));
+    assert.ok(progress.some((p) => p.kind === 'tool'));
+    assert.equal(
+      progress.reduce((n, p) => n + p.chars, 0),
+      'The user wants'.length + ' a done call.'.length + '{"kind":"done","summary":"hi"}'.length,
+    );
   } finally {
     globalThis.fetch = original;
   }
