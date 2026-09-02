@@ -1,5 +1,12 @@
 import { IsEmail, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 
+/**
+ * Password length bounds, shared by sign-up, change and reset so the rule has exactly one
+ * definition — a reset that accepted a password sign-up would refuse is a rule nobody wrote.
+ */
+export const PASSWORD_MIN_LENGTH = 8;
+export const PASSWORD_MAX_LENGTH = 128;
+
 /** Body for POST /auth/register. Validated by the global ValidationPipe. */
 export class RegisterDto {
   /**
@@ -15,8 +22,8 @@ export class RegisterDto {
 
   // AuthService hashes this with bcrypt (cost 10) before persisting; plaintext is never stored.
   @IsString()
-  @MinLength(8)
-  @MaxLength(128)
+  @MinLength(PASSWORD_MIN_LENGTH)
+  @MaxLength(PASSWORD_MAX_LENGTH)
   password!: string;
 
   /** The person's name, as they wrote it. Required at sign-up. */

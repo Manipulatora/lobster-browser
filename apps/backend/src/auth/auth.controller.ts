@@ -1,12 +1,4 @@
-import {
-  Body,
-  Controller,
-  Get,
-  HttpCode,
-  Post,
-  Req,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Req, UnauthorizedException } from '@nestjs/common';
 import type { User } from '@lobster/shared-types';
 
 import { ok, type ApiResponse } from '../common/api-response';
@@ -14,14 +6,18 @@ import { AuthService, type AuthResult, type PendingRegistrationResult } from './
 import { DesktopAuthService } from './desktop-auth.service';
 import { DesktopExchangeDto, DesktopGrantDto } from './dto/desktop-auth.dto';
 import { LoginDto } from './dto/login.dto';
+import { ChangePasswordDto, ForgotPasswordDto, ResetPasswordDto } from './dto/password.dto';
 import { RegisterDto, ResendVerificationDto, VerifyEmailDto } from './dto/register.dto';
 import { type AuthenticatedRequest } from './jwt-auth.guard';
 import { Public } from './public.decorator';
 
 /**
  * Auth endpoints. Bodies are validated by the global ValidationPipe (whitelist).
- * `register`/`login` are public; `me` is protected by the JWT guard. All responses use
- * the shared `{ code, data, msg }` envelope.
+ *
+ * The public surface is exactly what has no session to present: sign-up and its code, sign-in, the
+ * launcher's code exchange, and the two halves of a password reset. Everything else — including
+ * signing out everywhere and changing a password — requires the JWT guard. All responses use the
+ * shared `{ code, data, msg }` envelope.
  */
 @Controller('auth')
 export class AuthController {
@@ -168,5 +164,71 @@ export class AuthController {
     if (!req.user) throw new UnauthorizedException();
     await this.authService.resendVerificationForUser(req.user.id);
     return ok({ sent: true });
+  }
+
+  // --- Sessions and passwords -----------------------------------------------------
+
+  /**
+   * Sign out everywhere.
+   *
+   * Bumps the account's session version, so every token minted before this call — on the web, in
+   * any launcher, this one included — is refused from now on. This is the server-side revocation a
+   * year-long launcher token needs and that no expiry substitutes for; see `AuthService.logoutAll`.
+   */
+  @Post('logout-all')
+  @HttpCode(200)
+  async logoutAll(@Req() req: AuthenticatedRequest): Promise<ApiResponse<{ revoked: true }>> {
+    if (!req.user) throw new UnauthorizedException();
+    await this.authService.logoutAll(req.user.id);
+    return ok({ revoked: true });
+  }
+
+  /**
+   * Change the password. Requires the current one — a token alone must not be able to do this —
+   * and ends every other session; the response carries the replacement token for this one.
+   */
+  @Post('password')
+  @HttpCode(200)
+  async changePassword(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: ChangePasswordDto,
+  ): Promise<ApiResponse<AuthResult>> {
+    if (!req.user) throw new UnauthorizedException();
+    return ok(
+      await this.authService.changePassword({
+        userId: req.user.id,
+        currentPassword: dto.currentPassword,
+        newPassword: dto.newPassword,
+        audience: req.audience ?? 'web',
+      }),
+    );
+  }
+
+  /**
+   * Start a password reset.
+   *
+   * Always `{ sent: true }`: whether an account exists behind the address is not something this
+   * public endpoint may reveal, and a mail that could not be sent is recoverable by asking again.
+   */
+  @Public()
+  @Post('password/forgot')
+  @HttpCode(200)
+  async forgotPassword(@Body() dto: ForgotPasswordDto): Promise<ApiResponse<{ sent: true }>> {
+    await this.authService.requestPasswordReset(dto.email);
+    return ok({ sent: true });
+  }
+
+  /**
+   * Finish a password reset with the emailed code.
+   *
+   * PUBLIC by necessity — there is no password and no session to authenticate with; the code,
+   * bounded by its attempt counter, is the proof. Returns a session, as `verify-email` does: a
+   * reset proves the same thing a sign-up does.
+   */
+  @Public()
+  @Post('password/reset')
+  @HttpCode(200)
+  async resetPassword(@Body() dto: ResetPasswordDto): Promise<ApiResponse<AuthResult>> {
+    return ok(await this.authService.resetPassword(dto.email, dto.code, dto.newPassword));
   }
 }

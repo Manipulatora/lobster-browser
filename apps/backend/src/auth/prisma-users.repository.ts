@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -28,6 +29,21 @@ interface UserRow {
   emailVerifiedAt: Date | null;
   failedLoginAttempts: number;
   lockedUntil: Date | null;
+  sessionVersion: number;
+}
+
+/**
+ * The one write a password change and a password reset share: the new hash, every session revoked,
+ * and the sign-in backoff forgotten — as ONE statement, so no reader can see the new password with
+ * the old sessions still valid, or a backoff still defending a password that no longer exists.
+ */
+function passwordChange(passwordHash: string): Prisma.UserUpdateInput {
+  return {
+    passwordHash,
+    sessionVersion: { increment: 1 },
+    failedLoginAttempts: 0,
+    lockedUntil: null,
+  };
 }
 
 /**
@@ -58,6 +74,31 @@ export class PrismaUsersRepository implements UsersRepository {
 
   // --- Pending sign-ups ------------------------------------------------------
 
+  async claimPendingRegistration(input: PendingRegistrationInput, now: Date): Promise<boolean> {
+    // A dead row is nobody's: clear it first — and only it, the predicate cannot touch a live one.
+    await this.prisma.pendingRegistration.deleteMany({
+      where: { email: input.email, expiresAt: { lte: now } },
+    });
+    // The insert IS the claim. `skipDuplicates` is ON CONFLICT DO NOTHING on the email primary key,
+    // so of any number of concurrent callers exactly one gets count 1, and a live row is never
+    // rewritten — which is the whole point. Two statements because Prisma has no conditional
+    // upsert; the gap between them can only lose to another claimant, never overwrite one.
+    const inserted = await this.prisma.pendingRegistration.createMany({
+      data: [
+        {
+          email: input.email,
+          passwordHash: input.passwordHash,
+          fullName: input.fullName,
+          company: input.company ?? null,
+          codeHash: input.codeHash,
+          expiresAt: input.expiresAt,
+        },
+      ],
+      skipDuplicates: true,
+    });
+    return inserted.count === 1;
+  }
+
   async upsertPendingRegistration(input: PendingRegistrationInput): Promise<void> {
     const data = {
       passwordHash: input.passwordHash,
@@ -84,6 +125,7 @@ export class PrismaUsersRepository implements UsersRepository {
       passwordHash: row.passwordHash,
       fullName: row.fullName,
       company: row.company ?? undefined,
+      expiresAt: row.expiresAt,
     };
   }
 
@@ -257,6 +299,89 @@ export class PrismaUsersRepository implements UsersRepository {
     });
   }
 
+  // --- Sessions ----------------------------------------------------------------
+
+  async revokeSessions(userId: string): Promise<StoredUser | null> {
+    // Incremented in the statement, never read-then-written: two revocations landing together must
+    // each move the version past every token minted before them, not collapse into one step.
+    return this.updateUser(userId, { sessionVersion: { increment: 1 } });
+  }
+
+  async changePassword(userId: string, passwordHash: string): Promise<StoredUser | null> {
+    return this.updateUser(userId, passwordChange(passwordHash));
+  }
+
+  // --- Password reset ------------------------------------------------------------
+
+  async createPasswordReset(userId: string, codeHash: string, expiresAt: Date): Promise<void> {
+    await this.prisma.passwordReset.upsert({
+      where: { userId },
+      create: { userId, codeHash, expiresAt },
+      // Supersedes: the previous code dies with its attempt count. The cap belongs to the code.
+      update: { codeHash, expiresAt, attempts: 0 },
+    });
+  }
+
+  /**
+   * The claim is the DELETE, predicated on everything that makes the code live — this user, this
+   * hash, unexpired, under the cap — so two correct submissions at the same instant cannot both
+   * match a row only one of them can remove, and a consumed code leaves nothing behind to replay.
+   * The password write follows inside the same transaction: a failure between them rolls the claim
+   * back rather than spending the code for nothing.
+   */
+  async resetPasswordWithCode(
+    userId: string,
+    codeHash: string,
+    passwordHash: string,
+    now: Date,
+  ): Promise<StoredUser | null> {
+    return this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.passwordReset.deleteMany({
+        where: {
+          userId,
+          codeHash,
+          expiresAt: { gt: now },
+          attempts: { lt: MAX_VERIFICATION_ATTEMPTS },
+        },
+      });
+
+      if (claimed.count === 0) {
+        // Wrong, expired or exhausted: burn an attempt against whatever this user has outstanding.
+        await tx.passwordReset.updateMany({
+          where: { userId },
+          data: { attempts: { increment: 1 } },
+        });
+        return null;
+      }
+
+      const row = await tx.user.update({
+        where: { id: userId },
+        data: passwordChange(passwordHash),
+      });
+      return this.toStoredUser(row);
+    });
+  }
+
+  async purgeExpiredPasswordResets(now: Date): Promise<void> {
+    await this.prisma.passwordReset.deleteMany({ where: { expiresAt: { lt: now } } });
+  }
+
+  /** One conditional write on the account row; null, not a throw, when the account is gone. */
+  private async updateUser(
+    userId: string,
+    data: Prisma.UserUpdateInput,
+  ): Promise<StoredUser | null> {
+    try {
+      const row = await this.prisma.user.update({ where: { id: userId }, data });
+      return this.toStoredUser(row);
+    } catch (error) {
+      // P2025: no such row. An account deleted under a still-valid token is a 401 for the caller,
+      // not an internal error.
+      if (this.isRecordNotFoundError(error)) return null;
+      throw error;
+    }
+  }
+
   private toStoredUser(row: UserRow): StoredUser {
     return {
       id: row.id,
@@ -270,15 +395,21 @@ export class PrismaUsersRepository implements UsersRepository {
       emailVerifiedAt: row.emailVerifiedAt?.toISOString(),
       failedLoginAttempts: row.failedLoginAttempts,
       lockedUntil: row.lockedUntil?.toISOString(),
+      sessionVersion: row.sessionVersion,
     };
   }
 
   private isUniqueConstraintError(error: unknown): boolean {
-    return (
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      (error as { code?: unknown }).code === 'P2002'
-    );
+    return this.prismaErrorCode(error) === 'P2002';
+  }
+
+  private isRecordNotFoundError(error: unknown): boolean {
+    return this.prismaErrorCode(error) === 'P2025';
+  }
+
+  private prismaErrorCode(error: unknown): unknown {
+    return typeof error === 'object' && error !== null && 'code' in error
+      ? (error as { code?: unknown }).code
+      : undefined;
   }
 }

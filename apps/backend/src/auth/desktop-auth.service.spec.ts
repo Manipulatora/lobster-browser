@@ -20,11 +20,13 @@ const CHALLENGE = createHash('sha256').update(VERIFIER).digest('base64url');
 
 function makeService(): DesktopAuthService {
   const auth = {
-    validateUser: async (id: string) => {
+    // The exchange must mint from the account as it stands at redemption (the current session
+    // version), so it hands the id back to AuthService rather than signing from a stale copy.
+    issueSessionFor: async (id: string, audience: string) => {
       assert.equal(id, USER.id);
-      return USER;
+      assert.equal(audience, 'desktop');
+      return { user: USER, token: 'desktop-token' };
     },
-    issueTokenFor: () => 'desktop-token',
   } as unknown as AuthService;
   return new DesktopAuthService(new InMemoryDesktopAuthRepository(), auth);
 }

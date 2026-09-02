@@ -134,6 +134,35 @@ test('a sweep drops what has expired and keeps what has not', async () => {
   assert.deepEqual(depositSweeps, [now], 'one pass sweeps stale deposits exactly once');
 });
 
+test('an expired password-reset code is swept and a live one is kept', async () => {
+  const { service, users } = makeService();
+  const abandoned = await users.create({ email: 'reset-abandoned@gmail.com', passwordHash: 'x' });
+  const inFlight = await users.create({ email: 'reset-in-flight@gmail.com', passwordHash: 'x' });
+  const now = new Date();
+  await users.createPasswordReset(abandoned.id, hash('444444'), new Date(now.getTime() - HOUR));
+  await users.createPasswordReset(inFlight.id, hash('555555'), new Date(now.getTime() + HOUR));
+
+  await service.sweep(now);
+
+  // The expired code already read as dead at `now`; what the sweep is for is that its row does not
+  // outlive the request. Proven through the only reader: at a clock BEFORE its expiry the code
+  // would still redeem if the row were there.
+  assert.equal(
+    await users.resetPasswordWithCode(
+      abandoned.id,
+      hash('444444'),
+      'new-hash',
+      new Date(now.getTime() - 2 * HOUR),
+    ),
+    null,
+    'the abandoned reset must be gone, not merely expired',
+  );
+  assert.ok(
+    await users.resetPasswordWithCode(inFlight.id, hash('555555'), 'new-hash', now),
+    'a reset still inside its window survives the sweep',
+  );
+});
+
 test('a consumed verification code is swept even while inside its window', async () => {
   const { service, users } = makeService();
   const user = await users.create({ email: 'verified@gmail.com', passwordHash: 'x' });

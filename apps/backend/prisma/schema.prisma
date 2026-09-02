@@ -116,11 +116,20 @@ model User {
   failedLoginAttempts Int       @default(0)
   lockedUntil         DateTime?
 
+  /// Which generation of sessions is current. Every session token carries the version it was minted
+  /// under and the guard refuses any other, so bumping this — sign-out-everywhere, a password change,
+  /// a password reset — ends every token the account holds, web and launcher alike, without the
+  /// server keeping a row per token. One integer rather than a sessions table because nothing yet
+  /// needs to name or end a single device; a device list can be layered on top later without
+  /// changing what a bump means.
+  sessionVersion Int @default(0)
+
   // Relations
   ownedTeams        Team[]              @relation("TeamOwner")
   memberships       Membership[]
   desktopAuthGrants DesktopAuthGrant[]
   emailVerifications EmailVerification[]
+  passwordReset     PasswordReset?
   vaultKey          VaultKey?
 
   @@map("users")
@@ -142,8 +151,11 @@ model User {
 /// brute force against an endpoint that must be public — it has no session to authenticate. The
 /// row is refused past a small number of wrong guesses and the sign-up has to be restarted.
 model PendingRegistration {
-  /// Unique: one live sign-up per address. Re-registering the same address overwrites the row and
-  /// supersedes the previous code rather than leaving several valid at once.
+  /// Unique: one live sign-up per address — and while it is live, it belongs to whoever started it.
+  /// A second registration for the address does NOT replace the row (`claimPendingRegistration`):
+  /// the mailbox owner enters whichever code reaches them, so whoever wrote the row last would be
+  /// choosing the password of the account the owner then proves. Only a re-send, or a retry that
+  /// proves the pending password, rotates the code; an expired row is nobody's and is replaced.
   email        String   @id
   passwordHash String
   fullName     String
@@ -213,6 +225,28 @@ model EmailVerification {
   @@index([userId])
   @@index([tokenHash])
   @@map("email_verifications")
+}
+
+/// A password reset in flight: the hash of the emailed six-digit code, at most one live per account.
+///
+/// Keyed by the user rather than by an id so a second request supersedes the first instead of
+/// leaving several valid codes outstanding, and consumed by DELETING the row — single-use, with
+/// nothing left behind. The public reset endpoint names the account by email and looks the code up
+/// under that user alone, which is what keeps one person's six digits from matching another's.
+model PasswordReset {
+  userId    String   @id
+  /// SHA-256 of the six-digit code. The code itself exists only in the email.
+  codeHash  String
+  expiresAt DateTime
+  /// Failed guesses against this code. Capped so a 6-digit secret cannot be brute-forced against an
+  /// endpoint that has to be public — the person asking has, by definition, no password to present.
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("password_resets")
 }
 
 // Mirrors shared-types `Team`.
