@@ -150,6 +150,29 @@ It bundles the sidecar, packages the Lobium runtime, vendors Node + fonts + Lobe
 `apps/desktop/src-tauri/resources/`, builds the `.deb` (`npm run tauri -- build --bundles deb`), then
 installs. Raw `npm run -w apps/desktop tauri build` produces only the `.deb`.
 
+**The manifest is what is published, not what was just packaged.** The web installer downloads the
+archive at the manifest's `linux-x64.url` and refuses it unless the digest equals `sha256`, so those two
+fields describe one published file. The build therefore settles the freshly packaged archive against
+the committed manifest instead of overwriting the digest:
+
+- same digest → nothing to write. This is rare on purpose: the attestation marker inside the archive
+  records `packagedAt` (pin it with `SOURCE_DATE_EPOCH=<epoch>`) AND the repo revision plus
+  working-tree dirtiness under `provenance`, so the published bytes only reproduce from the same
+  commit, clean, with the same epoch. Any later commit lands in the next case.
+- different digest, same engine tree (`artifacts.treeSha256` in the marker, compared against the
+  published archive kept in `dist-linux/` under the URL's basename) → the bundled stamp names the
+  published digest, the manifest is left alone, the duplicate archive is discarded. This is the
+  normal rebuild path; keep the published archive in `dist-linux/` (it is what the comparison
+  needs), and it is the ONLY input the web installer depends on.
+- different tree → a new engine, which is a publish, not a build side effect: the build fails with the
+  explanation unless `LOBSTER_RESTAMP_ENGINE=1`, in which case the manifest is restamped and you
+  must upload that archive at the manifest URL (bump the `-bN` suffix first; see §2.1's note on
+  same-name republishing) and commit the manifest.
+
+Before 2026-09-02 the digest was overwritten unconditionally, so every plain rebuild produced a web
+installer whose manifest named the published URL with a digest nothing at that URL ever had — every
+Linux first run through it would have failed the engine check after the install.
+
 Install topology — **as `build-linux-product.sh` actually installs it**:
 
 - `~/.local/share/lobster/` — `bin/lobster-desktop`, `lib/` (node, sidecar, fonts, lobee), `lobium/` (the

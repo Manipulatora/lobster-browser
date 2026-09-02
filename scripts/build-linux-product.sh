@@ -151,22 +151,71 @@ cp -a "$DIST/lobium-runtime" "$LOBIUM_DST"
 tar --sort=name --mtime="@0" --owner=0 --group=0 --numeric-owner \
     -C "$DIST/lobium-runtime" -cf - . | gzip -n -6 > "$DIST/$ENGINE_ARCHIVE"
 ENGINE_SHA=$(sha256sum "$DIST/$ENGINE_ARCHIVE" | cut -d" " -f1)
-printf 'version=%s\nsha256=%s\n' "$ENGINE_VERSION" "$ENGINE_SHA" > "$LOBIUM_DST/.lobium-engine-version"
 
-# ONE DIGEST, WRITTEN ONCE. The archive digest lives in two places that must agree - the stamp beside
-# the bundled engine, and the linux-x64 entry of the manifest both variants ship. Keeping them in
-# sync by hand failed the first time it was tried: the archive was rebuilt, its digest changed, the
-# manifest still named the old one, and a bundled install would have re-downloaded the engine on
-# every launch. The build now writes both from the same variable, so they cannot diverge.
-node -e '
-  const fs = require("fs");
-  const p = process.argv[1], sha = process.argv[2];
-  const m = JSON.parse(fs.readFileSync(p, "utf8"));
-  m.platforms["linux-x64"].sha256 = sha;
-  fs.writeFileSync(p, JSON.stringify(m, null, 2) + "\n");
-' "$ROOT/apps/desktop/src-tauri/resources/engine-manifest.json" "$ENGINE_SHA"
-echo "    manifest linux-x64 sha256 <- ${ENGINE_SHA:0:16}…"
-echo "    engine archive  $ENGINE_ARCHIVE  sha256 ${ENGINE_SHA:0:16}…"
+# THE MANIFEST IS WHAT IS PUBLISHED, NOT WHAT WAS JUST PACKAGED. The web installer downloads the
+# archive the manifest's URL names and refuses it unless its digest matches the manifest's sha256,
+# so those two fields describe ONE published file. This step used to overwrite the sha256 with the
+# digest of the archive it had just built, unconditionally — and that digest is new on every run,
+# because the attestation marker inside the archive carries a packagedAt timestamp. Measured
+# 2026-09-02: an identical 365-file engine tree, one byte of timestamp apart, and the resulting
+# web installer named the published -b2 URL with a digest nothing at that URL has ever had. Every
+# Linux first run through it would have failed the engine check after the install.
+#
+# So the digest is settled against the committed manifest:
+#   - same digest: the tree reproduces the published archive byte for byte (SOURCE_DATE_EPOCH pins
+#     the marker's timestamp; the publish log records the value used), nothing to write;
+#   - different digest, same engine tree (the marker's treeSha256 matches the published archive's,
+#     which must be on hand under the URL's basename): the bundled stamp names the PUBLISHED
+#     digest, the manifest is left alone, and the fresh archive is discarded as the duplicate it is;
+#   - different tree: this is a new engine and the manifest must change. That is a publish, not a
+#     side effect of a build — LOBSTER_RESTAMP_ENGINE=1 says so explicitly, and the operator then
+#     publishes THIS archive at the manifest URL (bump the -bN suffix first: same-name republishing
+#     opens a window in which installed manifests name the old digest of a replaced file).
+MANIFEST="$ROOT/apps/desktop/src-tauri/resources/engine-manifest.json"
+MANIFEST_SHA=$(node -p "require('$MANIFEST').platforms['linux-x64'].sha256")
+MANIFEST_URL=$(node -p "require('$MANIFEST').platforms['linux-x64'].url")
+PUBLISHED_ARCHIVE="$DIST/$(basename "$MANIFEST_URL")"
+STAMP_SHA="$ENGINE_SHA"
+if [[ "$ENGINE_SHA" == "$MANIFEST_SHA" ]]; then
+  echo "    engine archive reproduces the published digest ${ENGINE_SHA:0:16}…"
+elif [[ "${LOBSTER_RESTAMP_ENGINE:-0}" == "1" ]]; then
+  node -e '
+    const fs = require("fs");
+    const p = process.argv[1], sha = process.argv[2];
+    const m = JSON.parse(fs.readFileSync(p, "utf8"));
+    m.platforms["linux-x64"].sha256 = sha;
+    fs.writeFileSync(p, JSON.stringify(m, null, 2) + "\n");
+  ' "$MANIFEST" "$ENGINE_SHA"
+  echo "    manifest linux-x64 sha256 <- ${ENGINE_SHA:0:16}… (LOBSTER_RESTAMP_ENGINE=1)"
+  echo "    PUBLISH $DIST/$ENGINE_ARCHIVE at $MANIFEST_URL before shipping either installer, and"
+  echo "    commit the manifest; a web installer with this manifest is unusable until then."
+else
+  FRESH_TREE=$(node -p "require('$DIST/lobium-runtime/LOBSTER_ENGINE.json').artifacts.treeSha256")
+  PUBLISHED_TREE=""
+  if [[ -f "$PUBLISHED_ARCHIVE" ]] && [[ "$(sha256sum "$PUBLISHED_ARCHIVE" | cut -d" " -f1)" == "$MANIFEST_SHA" ]]; then
+    PUBLISHED_TREE=$(tar -xzOf "$PUBLISHED_ARCHIVE" ./LOBSTER_ENGINE.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).artifacts.treeSha256")
+  fi
+  if [[ -n "$PUBLISHED_TREE" && "$PUBLISHED_TREE" == "$FRESH_TREE" ]]; then
+    STAMP_SHA="$MANIFEST_SHA"
+    rm -f "$DIST/$ENGINE_ARCHIVE"
+    echo "    engine tree ${FRESH_TREE:0:16}… is the published one; keeping manifest digest ${MANIFEST_SHA:0:16}…"
+    echo "    (the freshly packaged archive differed only in its marker timestamp and was discarded)"
+  else
+    echo "error: the packaged engine (digest ${ENGINE_SHA:0:16}…, tree ${FRESH_TREE:0:16}…) is not the" >&2
+    echo "       archive the manifest publishes at $MANIFEST_URL (digest ${MANIFEST_SHA:0:16}…)." >&2
+    if [[ -z "$PUBLISHED_TREE" ]]; then
+      echo "       The published archive is not on hand at $PUBLISHED_ARCHIVE, so the trees could not be compared." >&2
+    else
+      echo "       The engine tree itself differs (published ${PUBLISHED_TREE:0:16}…): this is a NEW engine." >&2
+    fi
+    echo "       A web installer built now would download the published file and refuse it. Either" >&2
+    echo "       reproduce the published archive (SOURCE_DATE_EPOCH=<epoch of its packagedAt>), or" >&2
+    echo "       publish this one: LOBSTER_RESTAMP_ENGINE=1, then upload the archive at the manifest URL." >&2
+    exit 1
+  fi
+fi
+printf 'version=%s\nsha256=%s\n' "$ENGINE_VERSION" "$STAMP_SHA" > "$LOBIUM_DST/.lobium-engine-version"
+echo "    bundled stamp   $ENGINE_VERSION  sha256 ${STAMP_SHA:0:16}…"
 
 # Lobee: the first-party in-browser agent side-panel extension (React/TS/Tailwind, MV3), auto-loaded
 # into every profile. Rebuild it from source (packages/lobee-app → packages/lobee) so the shipped

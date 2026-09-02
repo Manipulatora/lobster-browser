@@ -196,7 +196,14 @@ json.dump({
     "chrome": "chrome",
     "fonts": "fonts/font-pack.manifest.json",
     "version": chromium_ref,
-    "packagedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    # SOURCE_DATE_EPOCH (the reproducible-builds convention) pins this timestamp. Without it the
+    # marker — and therefore the archive digest — changes on every re-package of an IDENTICAL tree,
+    # and build-linux-product.sh then restamps the manifest with a digest nothing published has.
+    "packagedAt": (
+        datetime.datetime.fromtimestamp(int(os.environ["SOURCE_DATE_EPOCH"]), datetime.timezone.utc)
+        if os.environ.get("SOURCE_DATE_EPOCH")
+        else datetime.datetime.now(datetime.timezone.utc)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "artifacts": {"treeSha256": tree.hexdigest(), "files": files},
     "provenance": {
         "chromiumRef": chromium_ref,
