@@ -782,10 +782,13 @@ pub fn set_status(conn: &Connection, id: &str, status: &str) -> Result<bool> {
     ) {
         anyhow::bail!("invalid profile status {status}");
     }
-    let now = chrono::Utc::now().to_rfc3339();
+    // `updated_at` is deliberately NOT touched. Status is lifecycle bookkeeping — what this machine's
+    // sidecar is doing right now — not an edit to the profile. Bumping it made dirtiness (derived as
+    // updated_at > synced_at) true for every running profile, so the 60 s reconcile re-uploaded a
+    // launched profile forever, and the 2 s status poll kept re-dirtying it between uploads.
     Ok(conn.execute(
-        "UPDATE profiles SET status = ?2, updated_at = ?3 WHERE id = ?1",
-        params![id, status, now],
+        "UPDATE profiles SET status = ?2 WHERE id = ?1 AND status <> ?2",
+        params![id, status],
     )? > 0)
 }
 
@@ -880,24 +883,26 @@ pub fn reconcile_statuses(
     running_ids: &[String],
     error_ids: &[String],
 ) -> Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
+    // No `updated_at` writes anywhere in here, for the reason given at `set_status`: this runs on
+    // every list refresh (a 2 s poll), and a lifecycle stamp that counted as an edit kept every
+    // running profile permanently dirty and re-uploaded on each reconcile.
     conn.execute(
-        "UPDATE profiles SET status = 'idle', updated_at = ?1 \
+        "UPDATE profiles SET status = 'idle' \
          WHERE status IN ('launching', 'running', 'stopping')",
-        [now.as_str()],
+        [],
     )?;
     for id in error_ids {
         conn.execute(
-            "UPDATE profiles SET status = 'error', updated_at = ?2 \
-             WHERE id = ?1 AND trashed_at IS NULL",
-            params![id, now],
+            "UPDATE profiles SET status = 'error' \
+             WHERE id = ?1 AND trashed_at IS NULL AND status <> 'error'",
+            params![id],
         )?;
     }
     for id in running_ids {
         conn.execute(
-            "UPDATE profiles SET status = 'running', updated_at = ?2 \
-             WHERE id = ?1 AND trashed_at IS NULL",
-            params![id, now],
+            "UPDATE profiles SET status = 'running' \
+             WHERE id = ?1 AND trashed_at IS NULL AND status <> 'running'",
+            params![id],
         )?;
     }
     Ok(())
