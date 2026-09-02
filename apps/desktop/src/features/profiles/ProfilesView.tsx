@@ -19,10 +19,23 @@ import {
   type ProfilePatch,
 } from '../../api/tauri';
 import { LaunchPanel } from '../automation/LaunchPanel';
-import { ActionDialog, Button, EmptyState, Modal, Skeleton, useErrorModal } from '../../ui';
+import {
+  ActionDialog,
+  Button,
+  EmptyState,
+  Modal,
+  Pager,
+  Skeleton,
+  clampPage,
+  pageCountFor,
+  pageSlice,
+  useErrorModal,
+} from '../../ui';
 import { EditProfileForm } from './EditProfileForm';
 import { ExportProfileDialog } from './ExportProfileDialog';
+import { FolderBar } from './FolderBar';
 import { ImportProfileDialog } from './ImportProfileDialog';
+import { MoveToFolderDialog } from './MoveToFolderDialog';
 import { ENGINE_OPTIONS, OS_OPTIONS, STATUS_META, profileCount } from './options';
 import { ProfileList, type ProfileSortKey, type SortDir } from './ProfileList';
 import { TrashModal } from './TrashModal';
@@ -50,7 +63,11 @@ type PendingProfileAction =
   | { kind: 'launch'; profile: Profile }
   | { kind: 'password'; profile: Profile }
   | { kind: 'trash'; ids: string[]; label: string }
-  | { kind: 'permanent-delete'; id: string; label: string };
+  | { kind: 'permanent-delete'; id: string; label: string }
+  // Folder actions ride the same dialog rail as the rest: one confirm surface, one busy state.
+  | { kind: 'create-folder' }
+  | { kind: 'rename-folder'; folder: string }
+  | { kind: 'remove-folder'; folder: string; count: number };
 
 function pendingActionCopy(action: PendingProfileAction | null): {
   title: string;
@@ -79,6 +96,28 @@ function pendingActionCopy(action: PendingProfileAction | null): {
       title: 'Permanently delete profile?',
       description: `${action.label} and its local data will be deleted. This cannot be undone.`,
       confirmLabel: 'Delete permanently',
+    };
+  }
+  if (action.kind === 'create-folder') {
+    return {
+      title: 'New folder',
+      description:
+        'Name the folder. Folders are labels on profiles — assign profiles to one from a row’s menu or a selection.',
+      confirmLabel: 'Create folder',
+    };
+  }
+  if (action.kind === 'rename-folder') {
+    return {
+      title: 'Rename folder',
+      description: `Rename “${action.folder}”. Every profile filed under it moves along; renaming onto an existing folder merges the two.`,
+      confirmLabel: 'Rename folder',
+    };
+  }
+  if (action.kind === 'remove-folder') {
+    return {
+      title: 'Remove folder?',
+      description: `Remove “${action.folder}”. ${profileCount(action.count)} will be left unfiled — no profile is deleted.`,
+      confirmLabel: 'Remove folder',
     };
   }
   return {
@@ -132,13 +171,27 @@ export function ProfilesView({
   const [exportingProfile, setExportingProfile] = useState<Profile | null>(null);
   const [showImport, setShowImport] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [query, setQuery] = useState('');
   const [showFilters, setShowFilters] = useState(false);
   const [engineFilter, setEngineFilter] = useState<'all' | EngineKind>('all');
   const [osFilter, setOsFilter] = useState<'all' | ProfileOsTarget>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | ProfileStatus>('all');
   const [proxyFilter, setProxyFilter] = useState<'all' | 'with' | 'without'>('all');
   const [tagFilter, setTagFilter] = useState('');
+  /** Selected folder tab; null is "All". Folder names are arbitrary, so null is the sentinel. */
+  const [activeFolder, setActiveFolder] = useState<string | null>(null);
+  /**
+   * Folders created in the rail that no profile carries YET. Folders are derived from profiles
+   * (they are just string labels), so an empty one has nowhere to live except this UI state — it
+   * survives until a profile is filed under it (then the derive owns it) or it is removed.
+   */
+  const [draftFolders, setDraftFolders] = useState<string[]>([]);
+  const [page, setPage] = useState(1);
+  /** Row(s) the Move-to-folder dialog is about; label pre-phrased for the dialog copy. */
+  const [moveTarget, setMoveTarget] = useState<{
+    ids: string[];
+    label: string;
+    currentFolder?: string;
+  } | null>(null);
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
   const [trashProfiles, setTrashProfiles] = useState<Profile[]>([]);
   const [trashLoading, setTrashLoading] = useState(false);
@@ -519,6 +572,9 @@ export function ProfilesView({
       if (action.kind === 'password') await updateProfilePassword(action.profile.id, actionInput);
       if (action.kind === 'trash') await moveProfilesToTrash(action.ids);
       if (action.kind === 'permanent-delete') await permanentlyDeleteProfile(action.id);
+      if (action.kind === 'create-folder') createFolder(actionInput);
+      if (action.kind === 'rename-folder') await renameFolder(action.folder, actionInput);
+      if (action.kind === 'remove-folder') await removeFolder(action.folder);
       setPendingAction(null);
       setActionInput('');
     } finally {
@@ -535,6 +591,128 @@ export function ProfilesView({
     }
   }
 
+  /* ----- Folders --------------------------------------------------------------------------------
+     Folders are plain string labels on profiles (`Profile.folder`) — no backend entity — so the
+     rail is DERIVED from the loaded list, and every folder operation is a batch of profile
+     updates. */
+
+  const folders = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const profile of profiles) {
+      const name = profile.folder?.trim();
+      if (!name) continue;
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    // Freshly created, still-empty folders exist only as UI state; they join at count 0.
+    for (const name of draftFolders) {
+      if (!counts.has(name)) counts.set(name, 0);
+    }
+    return [...counts.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [profiles, draftFolders]);
+
+  const folderNames = useMemo(() => folders.map((folder) => folder.name), [folders]);
+
+  // A selected folder can vanish under the view (its last profile trashed from another window, its
+  // draft consumed by a rename) — snap back to All rather than filtering on a ghost.
+  useEffect(() => {
+    if (activeFolder !== null && !folders.some((folder) => folder.name === activeFolder)) {
+      setActiveFolder(null);
+    }
+  }, [activeFolder, folders]);
+
+  function createFolder(raw: string): void {
+    const name = raw.trim();
+    if (!name) return;
+    // Creating a name that already exists just selects it — two folders one keystroke apart is
+    // exactly the mess folders are supposed to prevent.
+    setDraftFolders((prev) => (prev.includes(name) ? prev : [...prev, name]));
+    setActiveFolder(name);
+  }
+
+  /** Re-label every profile in `ids`, then refresh ONCE — not once per profile. */
+  async function relabelProfiles(ids: string[], folder: string): Promise<void> {
+    try {
+      for (const id of ids) {
+        await profilesClient.update_profile(id, { folder });
+      }
+    } finally {
+      // Partial failure still refreshes: whatever DID move must be what the list shows.
+      await refresh();
+    }
+  }
+
+  async function moveProfilesToFolder(ids: string[], folder: string): Promise<void> {
+    await relabelProfiles(ids, folder);
+    // The target folder now derives from the profiles themselves; a draft entry of it is redundant
+    // but harmless (the derive dedupes). What must not linger is nothing — selection is kept, so a
+    // bulk file-then-launch flow keeps working.
+  }
+
+  async function renameFolder(folder: string, rawNext: string): Promise<void> {
+    const next = rawNext.trim();
+    if (!next || next === folder) return;
+    const ids = profiles
+      .filter((profile) => (profile.folder ?? '').trim() === folder)
+      .map((profile) => profile.id);
+    try {
+      await relabelProfiles(ids, next);
+    } catch (e: unknown) {
+      showError('Folder failed to rename', e);
+      return;
+    }
+    // Renaming onto an existing folder merges them — the copy in the dialog says so.
+    setDraftFolders((prev) => prev.filter((name) => name !== folder));
+    if (activeFolder === folder) setActiveFolder(next);
+    if (ids.length === 0) setDraftFolders((prev) => (prev.includes(next) ? prev : [...prev, next]));
+  }
+
+  /** Removing a folder clears the label off its profiles; nothing is deleted. */
+  async function removeFolder(folder: string): Promise<void> {
+    const ids = profiles
+      .filter((profile) => (profile.folder ?? '').trim() === folder)
+      .map((profile) => profile.id);
+    try {
+      await relabelProfiles(ids, '');
+    } catch (e: unknown) {
+      showError('Folder failed to remove', e);
+      return;
+    }
+    setDraftFolders((prev) => prev.filter((name) => name !== folder));
+    if (activeFolder === folder) setActiveFolder(null);
+  }
+
+  function handleCreateFolder(): void {
+    setActionInput('');
+    setPendingAction({ kind: 'create-folder' });
+  }
+
+  function handleRenameFolder(folder: string): void {
+    // Prefilled: a rename usually edits the tail of the name rather than retyping it.
+    setActionInput(folder);
+    setPendingAction({ kind: 'rename-folder', folder });
+  }
+
+  function handleRemoveFolder(folder: string): void {
+    const count = profiles.filter((profile) => (profile.folder ?? '').trim() === folder).length;
+    setPendingAction({ kind: 'remove-folder', folder, count });
+  }
+
+  function handleMoveToFolder(profile: Profile): void {
+    setMoveTarget({
+      ids: [profile.id],
+      label: `“${profile.name}”`,
+      ...(profile.folder ? { currentFolder: profile.folder } : {}),
+    });
+  }
+
+  function handleBulkMoveToFolder(): void {
+    const ids = [...selectedIds].filter((id) => profiles.some((profile) => profile.id === id));
+    if (ids.length === 0) return;
+    setMoveTarget({ ids, label: profileCount(ids.length) });
+  }
+
   const isEmpty = !loading && profiles.length === 0;
   const filtersActive =
     engineFilter !== 'all' ||
@@ -545,28 +723,8 @@ export function ProfilesView({
 
   const filteredProfiles = useMemo(() => {
     const list = profiles.filter((profile) => {
-      const needle = query.trim().toLowerCase();
-      // Search everything the row can show, not just the name/tags — so searching by ID, OS, status,
-      // engine, version, or proxy actually matches (the box previously ignored all of these).
-      const text = [
-        profile.name,
-        profile.id,
-        profile.folder,
-        profile.notes,
-        profile.engine,
-        profile.osVersion,
-        profile.os,
-        OS_OPTIONS.find((option) => option.value === profile.os)?.label,
-        STATUS_META[profile.status]?.label,
-        profile.proxy?.label,
-        profile.proxy ? `${profile.proxy.host}:${profile.proxy.port}` : undefined,
-        profile.proxyId,
-        ...profile.tags,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-      if (needle !== '' && !text.includes(needle)) return false;
+      // The folder rail is a filter like the others, applied first because it is the coarsest.
+      if (activeFolder !== null && (profile.folder ?? '').trim() !== activeFolder) return false;
       if (engineFilter !== 'all' && profile.engine !== engineFilter) return false;
       if (osFilter !== 'all' && profile.os !== osFilter) return false;
       if (statusFilter !== 'all' && profile.status !== statusFilter) return false;
@@ -608,12 +766,38 @@ export function ProfilesView({
     return list;
   }, [
     profiles,
-    query,
+    activeFolder,
     engineFilter,
     osFilter,
     statusFilter,
     proxyFilter,
     tagFilter,
+    sortKey,
+    sortDir,
+  ]);
+
+  /* ----- Pagination -----------------------------------------------------------------------------
+     The page number is CLAMPED at render rather than corrected in state, so a list that shrinks
+     under the view (delete the last row of the last page, a poll that drops rows) degrades to the
+     new last page in the same frame — no flash of an empty page, no effect race. */
+  const pageCount = pageCountFor(filteredProfiles.length);
+  const currentPage = clampPage(page, pageCount);
+  const pageProfiles = useMemo(
+    () => pageSlice(filteredProfiles, currentPage),
+    [filteredProfiles, currentPage],
+  );
+
+  // A changed filter (or folder, or sort order) changes WHICH list is being paged — page 3 of the
+  // old list is meaningless in the new one, so every such change starts over at page 1.
+  useEffect(() => {
+    setPage(1);
+  }, [
+    engineFilter,
+    osFilter,
+    statusFilter,
+    proxyFilter,
+    tagFilter,
+    activeFolder,
     sortKey,
     sortDir,
   ]);
@@ -642,31 +826,18 @@ export function ProfilesView({
             </>
           )}
         </div>
-        <div className="toolbar-search">
-          <label className="search-field">
-            <Icon name="MagnifyingGlassIcon" aria-hidden />
-            <input
-              type="search"
-              value={query}
-              placeholder="Search by name or ID"
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            <button
-              type="button"
-              className={
-                filtersActive
-                  ? 'search-filter-button search-filter-button--active'
-                  : 'search-filter-button'
-              }
-              aria-label="Filters"
-              aria-expanded={showFilters}
-              onClick={() => setShowFilters((current) => !current)}
-            >
-              <Icon name="FunnelIcon" aria-hidden />
-            </button>
-          </label>
-        </div>
         <div className="toolbar-actions">
+          {/* The toolbar search box is gone (owner decision): pagination + the folder rail are the
+              navigation story for a long list now. The funnel used to ride inside the search field,
+              so the structured filters keep their door as a plain button here. */}
+          <Button
+            leadingIcon={<Icon name="FunnelIcon" aria-hidden />}
+            className={filtersActive ? 'toolbar-filter--active' : ''}
+            aria-expanded={showFilters}
+            onClick={() => setShowFilters((current) => !current)}
+          >
+            Filters
+          </Button>
           <Button
             variant="primary"
             leadingIcon={<Icon name="PlusIcon" aria-hidden />}
@@ -697,6 +868,22 @@ export function ProfilesView({
           </Button>
         </div>
       </header>
+
+      {/* Folder rail: always rendered (even with zero folders) because it also carries the only
+          "New folder" affordance — a rail that appears only once a folder exists cannot ever grow
+          the first one. Hidden while loading (an "All 0" flash would be a lie about the workspace)
+          and while the workspace itself is empty; there is nothing to file. */}
+      {!loading && !isEmpty ? (
+        <FolderBar
+          folders={folders}
+          totalCount={profiles.length}
+          active={activeFolder}
+          onSelect={setActiveFolder}
+          onCreate={handleCreateFolder}
+          onRename={handleRenameFolder}
+          onRemove={handleRemoveFolder}
+        />
+      ) : null}
 
       {showFilters ? (
         <div className="filter-bar" aria-label="Profile filters">
@@ -809,6 +996,11 @@ export function ProfilesView({
           >
             Stop
           </Button>
+          {/* Filing a batch is the point of selection — moving twelve profiles one row menu at a
+              time is the workflow folders exist to kill. */}
+          <Button variant="secondary" size="sm" onClick={handleBulkMoveToFolder}>
+            Move to folder
+          </Button>
           <Button
             variant="danger"
             size="sm"
@@ -851,7 +1043,7 @@ export function ProfilesView({
           />
         ) : (
           <ProfileList
-            profiles={filteredProfiles}
+            profiles={pageProfiles}
             availableProxies={availableProxies}
             busyIds={busyIds}
             launchInfo={launchInfo}
@@ -868,15 +1060,26 @@ export function ProfilesView({
               });
             }}
             onToggleSelectAll={() => {
-              const ids = filteredProfiles.map((p) => p.id);
+              // Select-all covers the VISIBLE page — what the header checkbox appears to govern.
+              // It only ADDS or REMOVES this page's rows, so a selection built across several
+              // pages survives toggling one of them, and the bulk bar keeps operating on all of it.
+              const ids = pageProfiles.map((p) => p.id);
               const allOn = ids.length > 0 && ids.every((id) => selectedIds.has(id));
-              setSelectedIds(allOn ? new Set() : new Set(ids));
+              setSelectedIds((prev) => {
+                const next = new Set(prev);
+                for (const id of ids) {
+                  if (allOn) next.delete(id);
+                  else next.add(id);
+                }
+                return next;
+              });
             }}
             onLaunch={handleLaunch}
             onStop={handleStop}
             onClone={handleClone}
             onMoveToTrash={handleMoveToTrash}
             onEditProfile={setEditingProfile}
+            onMoveToFolder={handleMoveToFolder}
             onSetPassword={handleSetPassword}
             onShowConnection={handleShowConnection}
             onExportCookies={(id) => {
@@ -903,6 +1106,17 @@ export function ProfilesView({
         )}
       </div>
 
+      {/* Outside the scrolling list pane on purpose: the pinned profiles layout scrolls only the
+          table, so the pager stays reachable however long the page is. Renders nothing at ≤1 page. */}
+      {!loading && !isEmpty ? (
+        <Pager
+          page={currentPage}
+          pageCount={pageCount}
+          onPageChange={setPage}
+          label="Profile pages"
+        />
+      ) : null}
+
       {showForm ? (
         <Suspense
           fallback={
@@ -919,6 +1133,7 @@ export function ProfilesView({
           <NewProfileForm
             proxies={availableProxies}
             templates={availableTemplates}
+            folders={folderNames}
             onCreate={handleCreate}
             onCreateProxy={handleCreateProxyFromProfile}
             onTestProxy={(config) => proxiesClient.test_proxy(null, config)}
@@ -955,6 +1170,7 @@ export function ProfilesView({
           onCancel={() => setEditingProfile(null)}
           proxies={availableProxies}
           templates={availableTemplates}
+          folders={folderNames}
           onCreateProxy={handleCreateProxyFromProfile}
           onTestProxy={(config) => proxiesClient.test_proxy(null, config)}
           loadFontFamilies={loadFontFamilies}
@@ -981,6 +1197,16 @@ export function ProfilesView({
         />
       ) : null}
 
+      {moveTarget ? (
+        <MoveToFolderDialog
+          label={moveTarget.label}
+          folders={folderNames}
+          {...(moveTarget.currentFolder ? { currentFolder: moveTarget.currentFolder } : {})}
+          onMove={(folder) => moveProfilesToFolder(moveTarget.ids, folder)}
+          onClose={() => setMoveTarget(null)}
+        />
+      ) : null}
+
       <LaunchPanel
         open={launchPanel !== null}
         onClose={() => setLaunchPanel(null)}
@@ -1004,7 +1230,16 @@ export function ProfilesView({
                 type: 'password',
                 required: pendingAction.kind === 'launch',
               }
-            : undefined
+            : pendingAction?.kind === 'create-folder' || pendingAction?.kind === 'rename-folder'
+              ? {
+                  label: 'Folder name',
+                  value: actionInput,
+                  onChange: setActionInput,
+                  type: 'text',
+                  placeholder: 'Enter folder name',
+                  required: true,
+                }
+              : undefined
         }
         onConfirm={() => {
           void confirmPendingAction();

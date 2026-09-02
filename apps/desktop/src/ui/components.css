@@ -544,9 +544,9 @@
   place-items: center;
   flex: 0 0 auto;
   /* 24px mark + 2px gap + 2px ring = 32px. The ring is a laid-out box rather than a box-shadow so
-     it cannot eat the title cell's gap. 24px, up from 20px, because the mark now carries the
-     lobster silhouette rather than one or two fat glyphs — a silhouette's limbs collapse into each
-     other below roughly 30 device px, where initials were still legible. */
+     it cannot eat the title cell's gap. 24px, up from 20px, because the mark carries pictorial art
+     (the product icon) rather than one or two fat glyphs — detailed art collapses into itself
+     below roughly 30 device px, where initials were still legible. */
   width: 32px;
   height: 32px;
   border-radius: var(--radius-md);
@@ -599,39 +599,16 @@
   }
 }
 
-/* The mark inside the ring: a tinted rounded square carrying the lobster silhouette. The tint is an
-   inline style because it is per-profile data, not a theme decision — and for now the tint is the
-   cue that matches this row to its window: the taskbar/engine icon still draws initials until the
-   engine-side lobster change ships, so the two surfaces meet on the colour, not the glyph.
-
-   `border-radius` is a PERCENTAGE, not a token: the engine draws the corner at 22% of the side
-   (lobium_profile_icon.cc, kCornerRadiusRatio) because that still reads as a square at 16px, and a
-   fixed radius here would agree at one size and disagree at every other. */
-.profile-mark__square {
-  position: relative;
+/* The mark inside the ring: the product icon itself, raw (owner decision — this replaced the
+   per-profile tinted square masking assets/brand/lobster-mark.png, which nothing references now).
+   The art is full-colour on a transparent ground, so there is deliberately NO background behind
+   it: a tint would fight the icon's own palette, and the ring above stays the row's only
+   meaningful colour. `object-fit: contain` keeps the shield aspect-true if the asset is ever
+   re-exported at a non-square size. */
+.profile-mark__icon {
   width: 24px;
   height: 24px;
-  border-radius: 22%;
-  overflow: hidden;
-}
-
-/* The lobster itself. The PNG is a MASK — the CSS reads only its alpha channel and paints
-   var(--on-brand) through it — so one white-on-transparent asset serves every tint on the ramp
-   instead of one recoloured image per stop. Both the prefixed and standard properties, because
-   WebKitGTK on Linux still ships only the -webkit- form. The image is a 128px square with the
-   silhouette pre-centred at 88% of the side, so stretching it 100% 100% over this square box is
-   aspect-true and needs no extra positioning. */
-.profile-mark__square::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background-color: var(--on-brand);
-  -webkit-mask-image: url('../assets/brand/lobster-mark.png');
-  mask-image: url('../assets/brand/lobster-mark.png');
-  -webkit-mask-size: 100% 100%;
-  mask-size: 100% 100%;
-  -webkit-mask-repeat: no-repeat;
-  mask-repeat: no-repeat;
+  object-fit: contain;
 }
 
 /* --- Tabs --------------------------------------------------------------------------------------- */
@@ -1171,18 +1148,74 @@
 } /* Actions           */
 
 /* Truncate rather than wrap: a wrapped cell changes the row height and knocks the table out of
-   alignment. The Location cell is exempt because it deliberately stacks two lines. */
-.proxies-table td:not(:nth-child(4)) {
+   alignment. Endpoint and Location are exempt because they deliberately stack two lines
+   (endpoint + credentials, location + timezone) — their lines truncate individually below. The
+   last cell is exempt HERE, not only via the `overflow: visible` override further down: each
+   `:not()` raises this selector's specificity, and at three of them it out-ranked that override —
+   which re-clipped the Check button and failed the table-fit e2e spec. */
+.proxies-table td:not(:nth-child(3)):not(:nth-child(4)):not(:last-child) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.proxies-table td:nth-child(3) .table-title,
 .proxies-table td:nth-child(4) .table-title,
 .proxies-table td:nth-child(4) .table-subtitle {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The credentials line under an endpoint: username, the masked password, and the reveal toggle.
+   This page is the ONE place the full credentials show (the profile list carries title + flag
+   only), so the affordance lives here and nowhere else. */
+.proxy-credentials {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.proxy-credentials__user {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Mono for the same reason the endpoint reads as one token — and revealed secrets are compared
+   character by character against a provider panel, where l/I/1 must be tellable apart. */
+.proxy-credentials__secret {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+/* A quiet text control, not a boxed button: it sits inside a subtitle line that is already small,
+   and the accent colour alone is enough to say "pressable". */
+.proxy-credentials__toggle {
+  flex: 0 0 auto;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.proxy-credentials__toggle:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.proxy-credentials__toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
 }
 
 /* Actions must never be clipped — they are controls, not text. */
@@ -1196,4 +1229,79 @@
   color: var(--danger);
   text-align: center;
   font-weight: var(--fw-medium);
+}
+
+/* --- Pager (Profiles / Proxies / Templates tables) ----------------------------------------------
+   Centred under its table and self-spacing, so the three views that render it cannot each invent a
+   different placement. The component removes itself entirely at one page (Pager.tsx), so these
+   rules never have to style an idle state. */
+.lb-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: var(--space-3) 0;
+}
+
+.lb-pager__page,
+.lb-pager__arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+.lb-pager__page:hover:not(:disabled),
+.lb-pager__arrow:hover:not(:disabled) {
+  background: var(--active-muted);
+  color: var(--text);
+}
+
+.lb-pager__page:focus-visible,
+.lb-pager__arrow:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* The current page is a settled fact, not an action: bordered and accent-coloured, and left
+   clickable (a no-op) rather than disabled so it never renders in the faded disabled style. */
+.lb-pager__page--current {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: var(--fw-medium);
+  background: var(--surface);
+  cursor: default;
+}
+
+/* ‹ › are punctuation glyphs, drawn a step larger so they weigh the same as the digits beside
+   them. */
+.lb-pager__arrow {
+  font-size: var(--fs-lg);
+}
+
+.lb-pager__arrow:disabled {
+  color: var(--text-soft);
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* The elision marker is text, not a control — it must not light up under the pointer. */
+.lb-pager__gap {
+  min-width: 22px;
+  text-align: center;
+  color: var(--text-soft);
+  user-select: none;
 }

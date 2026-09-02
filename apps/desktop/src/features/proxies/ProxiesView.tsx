@@ -3,7 +3,17 @@ import { useEffect, useState } from 'react';
 import type { ProxyConfig, ProxyTestResult, ProxyType, StoredProxy } from '@lobster/shared-types';
 
 import { proxiesClient } from '../../api/tauri';
-import { ActionDialog, Button, EmptyState, Skeleton, useErrorModal } from '../../ui';
+import {
+  ActionDialog,
+  Button,
+  EmptyState,
+  Pager,
+  Skeleton,
+  clampPage,
+  pageCountFor,
+  pageSlice,
+  useErrorModal,
+} from '../../ui';
 import { Icon } from '../../ui/Icon';
 import { RowMenu } from '../../ui/RowMenu';
 import type { RowMenuItem } from '../../ui/RowMenu';
@@ -94,6 +104,13 @@ export function ProxiesView(): JSX.Element {
   const [checkingIds, setCheckingIds] = useState<ReadonlySet<string>>(() => new Set());
   const [pendingAction, setPendingAction] = useState<PendingProxyAction | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  /**
+   * Rows whose password is currently readable. Masked is the resting state — this page is the one
+   * place the full credentials show (the profile list shows title + flag only), and it is routinely
+   * on screen while screen-sharing. Never persisted; a reload re-masks everything.
+   */
+  const [revealedIds, setRevealedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [page, setPage] = useState(1);
 
   // EVERY SOURCE, not just `mine`. Hive proxies are selectable in the template and profile pickers,
   // so a screen that hides them offers no way to see — let alone manage — a proxy the rest of the
@@ -119,6 +136,15 @@ export function ProxiesView(): JSX.Element {
       const next = new Set(prev);
       if (on) next.add(id);
       else next.delete(id);
+      return next;
+    });
+  }
+
+  function toggleRevealed(id: string): void {
+    setRevealedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   }
@@ -271,6 +297,12 @@ export function ProxiesView(): JSX.Element {
     return items;
   }
 
+  // Clamped at render (not corrected in state) so deleting the last row of the last page lands on
+  // the new last page in the same frame. This view has no filters; the pager is the only navigation.
+  const pageCount = pageCountFor(rows.length);
+  const currentPage = clampPage(page, pageCount);
+  const pageRows = pageSlice(rows, currentPage);
+
   return (
     <section className="page">
       <header className="table-toolbar table-toolbar--simple">
@@ -338,9 +370,12 @@ export function ProxiesView(): JSX.Element {
               </tr>
             </thead>
             <tbody>
-              {rows.map((proxy) => {
+              {pageRows.map((proxy) => {
                 const checking = checkingIds.has(proxy.id);
                 const status = statusLabel(proxy, checking);
+                const revealed = revealedIds.has(proxy.id);
+                const username = proxy.config.username;
+                const password = proxy.config.password;
                 return (
                   <tr key={proxy.id}>
                     <td>
@@ -359,9 +394,54 @@ export function ProxiesView(): JSX.Element {
                     <td>{typeLabel(proxy.config.type)}</td>
                     {/* host:port is one token to a reader and must not break across lines; it wrapped
                         as "us-" / "east.proxy.local:9443", which reads as two different addresses.
-                        Nowrap comes from the table rule; `title` gives back the full value when the
-                        column is too narrow for it. */}
-                    <td title={endpointLabel(proxy)}>{endpointLabel(proxy)}</td>
+                        `title` gives back the full value when the column is too narrow for it — the
+                        title is the ENDPOINT only, never the password: a masked value that surfaces
+                        on hover is not masked.
+
+                        The credentials live here as the endpoint's second line (title/subtitle, the
+                        same stacking Location uses) rather than as an eighth column — eight columns
+                        do not fit 976px, which is why Location and Timezone were merged in the
+                        first place. This page is where the full proxy details belong; the profile
+                        list shows title + flag only (owner decision). */}
+                    <td title={endpointLabel(proxy)}>
+                      <div className="table-title">{endpointLabel(proxy)}</div>
+                      <div className="table-subtitle proxy-credentials">
+                        {username ? (
+                          <>
+                            <span className="proxy-credentials__user" title={username}>
+                              {username}
+                            </span>
+                            {password ? (
+                              <>
+                                {/* Eight dots regardless of length — a mask that mirrors the
+                                    password's length leaks half of what it hides. */}
+                                <span
+                                  className="proxy-credentials__secret"
+                                  title={revealed ? password : undefined}
+                                >
+                                  {revealed ? password : '••••••••'}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="proxy-credentials__toggle"
+                                  aria-pressed={revealed}
+                                  aria-label={
+                                    revealed
+                                      ? `Hide password for ${proxy.label}`
+                                      : `Show password for ${proxy.label}`
+                                  }
+                                  onClick={() => toggleRevealed(proxy.id)}
+                                >
+                                  {revealed ? 'Hide' : 'Show'}
+                                </button>
+                              </>
+                            ) : null}
+                          </>
+                        ) : (
+                          <span>No credentials</span>
+                        )}
+                      </div>
+                    </td>
                     {/* LOCATION AND TIMEZONE ARE ONE FACT — where this proxy comes out — and they
                         were two columns. Eight columns do not fit 976px without something wrapping
                         to three lines or being clipped, and the fix is not narrower columns but
@@ -399,6 +479,15 @@ export function ProxiesView(): JSX.Element {
             </tbody>
           </table>
         </div>
+      ) : null}
+
+      {!loading && rows.length > 0 ? (
+        <Pager
+          page={currentPage}
+          pageCount={pageCount}
+          onPageChange={setPage}
+          label="Proxy pages"
+        />
       ) : null}
 
       {showAddProxy ? (

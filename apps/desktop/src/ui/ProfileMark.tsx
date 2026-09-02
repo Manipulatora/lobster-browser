@@ -1,30 +1,27 @@
-import { profileMark } from './profile-mark';
+import appIcon from '../assets/brand/icon.png';
 
 /** The five states `profile_store` accepts; each one colours the ring in `components.css`. */
 export type ProfileMarkStatus = 'idle' | 'launching' | 'running' | 'stopping' | 'error';
 
 /**
- * A profile's row avatar: the live-state ring, and inside it a tinted rounded square carrying the
- * lobster silhouette (painted in CSS — `.profile-mark__square::after` masks one shared PNG).
+ * A profile's row avatar: the live-state ring, and inside it the product icon itself — the raw
+ * full-colour shield from `assets/brand/icon.png`, exactly as shipped, not masked and not tinted.
  *
- * The square is not decoration — it is how an operator matches a row in this list to one of a dozen
- * identical-looking windows on the taskbar, so its tint comes from `profileMark`, the same rule the
- * engine renders from. NOTE: the taskbar/engine icon still shows INITIALS until the engine-side
- * lobster change ships, so for now the TINT is the cue that matches the two surfaces — which is why
- * the ramp in profile-mark.ts spreads across eight distinguishable hues rather than four violets.
+ * This replaced a per-profile tinted square carrying a white lobster silhouette (owner decision):
+ * the row shows the PRODUCT, and the ring alone carries the row's meaningful colour. The icon is
+ * full-colour art, so no background sits behind it — a tint would fight the artwork's own palette.
+ * The per-profile tint rule itself (`profile-mark.ts`) is deliberately untouched: the engine-side
+ * window icon still renders from its byte-identical twin in packages/engine-runner, and
+ * profile-mark.test.ts fails the build if the two files drift. `assets/brand/lobster-mark.png` is
+ * unused now that nothing masks it, but stays on disk for the engine-side lobster work.
  */
 export function ProfileMark({
-  name,
-  profileId,
   status,
   statusLabel,
 }: {
-  name: string;
-  profileId: string;
   status: ProfileMarkStatus;
   statusLabel: string;
 }): JSX.Element {
-  const mark = profileMark(name, profileId);
   return (
     <span
       className="lb-tooltip lb-tooltip--right profile-mark"
@@ -33,7 +30,7 @@ export function ProfileMark({
       aria-label={`Status: ${statusLabel}`}
       tabIndex={0}
     >
-      <span className="profile-mark__square" style={{ background: mark.tint }} aria-hidden />
+      <img className="profile-mark__icon" src={appIcon} alt="" aria-hidden />
       <span className="lb-tooltip__bubble" aria-hidden>
         {statusLabel}
       </span>

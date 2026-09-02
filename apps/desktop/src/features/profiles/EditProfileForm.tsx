@@ -25,6 +25,8 @@ interface EditProfileFormProps {
   onTestProxy?: (config: ProxyConfig) => Promise<ProxyTestResult>;
   proxies?: StoredProxy[];
   templates?: ProfileTemplate[];
+  /** Existing folder names, forwarded to the editor's Folder-field suggestions. */
+  folders?: string[];
   loadFontFamilies?: (os: ProfileOsTarget) => Promise<string[]>;
 }
 
@@ -38,6 +40,7 @@ export function EditProfileForm({
   onTestProxy,
   proxies,
   templates,
+  folders,
   loadFontFamilies,
 }: EditProfileFormProps): JSX.Element {
   return (
@@ -50,6 +53,7 @@ export function EditProfileForm({
         onTestProxy={onTestProxy}
         proxies={proxies}
         templates={templates}
+        folders={folders}
         loadFontFamilies={loadFontFamilies}
       />
     </Suspense>

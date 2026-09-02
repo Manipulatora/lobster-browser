@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 
 import type { LaunchInfo } from '../../api/tauri';
 import { EmptyState, ProfileMark } from '../../ui';
+import { countryCodeFrom } from '../../ui/country-flag';
 import { isAndroidTarget, osLabel, STATUS_META } from './options';
 import { OsIcon } from './OsIcon';
 import { FlagChip } from './FlagChip';
@@ -42,6 +43,8 @@ interface ProfileListProps {
   onClone: (id: string) => void;
   onMoveToTrash: (id: string) => void;
   onEditProfile: (profile: Profile) => void;
+  /** Assign this profile to a folder (or a new one) — folders are plain labels on profiles. */
+  onMoveToFolder: (profile: Profile) => void;
   onSetPassword: (id: string) => void;
   /** Explicit CDP / automation details (never auto-shown on launch). */
   onShowConnection: (id: string) => void;
@@ -79,36 +82,35 @@ function formatDate(value: string): string {
 }
 
 interface ResolvedProxy {
-  /** `host:port` from the store — what the cell shows until a check returns a real exit IP. */
-  address: string;
-  /** 2-letter country code from the stored location, when known. */
+  /**
+   * The proxy's human title — the ONLY text the profile row shows for it (owner decision: no
+   * credentials, host, port or username in this list; the full details live on the Proxies page).
+   */
+  title: string;
+  /** Country (code or name) from the stored location, when known; the flag is derived from it. */
   countryCode?: string;
   present: boolean;
 }
 
-/** A stored `location` is built as "CC · region · city" (see ProxiesView); take the leading country. */
-function countryCodeFromLocation(location?: string): string | undefined {
-  const first = location?.split(/[·,|/]/)[0]?.trim();
-  return first && /^[A-Za-z]{2}$/.test(first) ? first : undefined;
-}
-
 function resolveProxy(profile: Profile, stored: StoredProxy[]): ResolvedProxy {
   if (profile.proxy) {
-    const { host, port } = profile.proxy;
-    return { address: `${host}:${port}`, present: true };
+    // An inline proxy without a label stays anonymous here rather than leaking its host:port.
+    return { title: profile.proxy.label ?? 'Custom proxy', present: true };
   }
   if (profile.proxyId) {
     const match = stored.find((p) => p.id === profile.proxyId);
     if (match) {
       return {
-        address: `${match.config.host}:${match.config.port}`,
-        countryCode: countryCodeFromLocation(match.location),
+        title: match.label,
+        countryCode: countryCodeFrom(match.location),
         present: true,
       };
     }
-    return { address: profile.proxyId, present: true };
+    // A dangling reference (proxy deleted elsewhere). The raw id is neither a title nor a secret,
+    // but showing it would read as a bug — name the situation instead.
+    return { title: 'Unknown proxy', present: true };
   }
-  return { address: '', present: false };
+  return { title: '', present: false };
 }
 
 function SortHeader({
@@ -233,6 +235,7 @@ export function ProfileList({
   onClone,
   onMoveToTrash,
   onEditProfile,
+  onMoveToFolder,
   onSetPassword,
   onShowConnection,
   onExportCookies,
@@ -428,15 +431,9 @@ export function ProfileList({
                 </td>
                 <td>
                   <div className="profile-title-cell">
-                    {/* The ring IS the status. The mark inside it is the same violet initials square
-                        the launched window wears, so a row and its taskbar button are recognisably
-                        the same profile. */}
-                    <ProfileMark
-                      name={profile.name}
-                      profileId={profile.id}
-                      status={ringStatus}
-                      statusLabel={statusWord}
-                    />
+                    {/* The ring IS the status. Inside it sits the raw product icon (owner decision —
+                        see ProfileMark.tsx); per-profile identity is the name beside it. */}
+                    <ProfileMark status={ringStatus} statusLabel={statusWord} />
                     <div className="profile-title-text">
                       <div className="table-title cell-ellipsis" title={profile.name}>
                         {profile.name}
@@ -470,19 +467,18 @@ export function ProfileList({
                     </button>
                   ) : (
                     <div className="proxy-cell">
+                      {/* A completed check knows the real exit country, which beats the stored
+                          location (often the gateway's advertised region, or nothing at all). */}
                       <FlagChip
                         code={
                           (check?.state === 'ok' ? check.countryCode : undefined) ??
                           proxy.countryCode
                         }
                       />
-                      {/* The stored value is often a rotating gateway hostname; the real exit IP
-                          only exists once a check has run, so show host:port until then. */}
-                      <span
-                        className="proxy-cell__ip cell-ellipsis"
-                        title={check?.state === 'ok' && check.ip ? check.ip : proxy.address}
-                      >
-                        {check?.state === 'ok' && check.ip ? check.ip : proxy.address}
+                      {/* Title + flag and NOTHING else (owner decision): no host, port or
+                          credentials in the profile row — those live on the Proxies page. */}
+                      <span className="proxy-cell__title cell-ellipsis" title={proxy.title}>
+                        {proxy.title}
                       </span>
                       <span className="proxy-cell__actions">
                         <button
@@ -628,6 +624,19 @@ export function ProfileList({
                 }}
               >
                 Clone
+              </button>
+              {/* Folders are labels, so "moving" is a one-field edit — but burying it inside the
+                  full profile editor made the most common organisation gesture a five-tab trip. */}
+              <button
+                type="button"
+                className="menu-item"
+                role="menuitem"
+                onClick={() => {
+                  setOpenMenuId(null);
+                  onMoveToFolder(openProfile);
+                }}
+              >
+                Move to folder…
               </button>
               {/* NOT gated on running, unlike Export cookies above. That gate exists because cookie
                   export needs a live CDP session; a profile export is a filesystem capture, and the

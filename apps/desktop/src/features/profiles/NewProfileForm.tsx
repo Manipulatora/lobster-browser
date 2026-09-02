@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { parseJson, parseNetscape } from '@lobster/cookies';
 import type {
   CookieImportDraft,
@@ -63,6 +63,8 @@ interface NewProfileFormProps {
   onTestProxy?: (config: ProxyConfig) => Promise<ProxyTestResult>;
   proxies?: StoredProxy[];
   templates?: ProfileTemplate[];
+  /** Existing folder names (derived from the loaded profiles) — the Folder field's suggestions. */
+  folders?: string[];
   loadFontFamilies?: (os: ProfileOsTarget) => Promise<string[]>;
 }
 
@@ -602,9 +604,12 @@ export function NewProfileForm({
   onTestProxy,
   proxies = [],
   templates = [],
+  folders = [],
   loadFontFamilies,
 }: NewProfileFormProps): JSX.Element {
   const [step, setStep] = useState<WizardStep>('general');
+  // Ties the Folder input to its suggestion <datalist>; useId so two editors never share one list.
+  const folderListId = useId();
   const [form, setForm] = useState<FormState>(() => {
     const hydrated = profile ? hydrateProfileDraft(profile) : initialDraft();
     const initial =
@@ -1153,14 +1158,23 @@ export function NewProfileForm({
 
               <label className="lb-field lb-field--wide">
                 <span className="lb-field__label">Folder</span>
+                {/* A datalist rather than a bare input: the existing folders are one keypress away,
+                    so "Shopping" does not gain a sibling "shopping" from memory-typing — while a
+                    NEW folder is still just typing its name (folders are labels, not entities). */}
                 <input
                   className="lb-input"
                   type="text"
                   value={form.folder}
                   maxLength={240}
                   placeholder="Enter folder name"
+                  list={folderListId}
                   onChange={(e) => set('folder', e.target.value)}
                 />
+                <datalist id={folderListId}>
+                  {folders.map((name) => (
+                    <option key={name} value={name} />
+                  ))}
+                </datalist>
               </label>
 
               <label className="lb-field lb-field--wide">

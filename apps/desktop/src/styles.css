@@ -392,13 +392,18 @@ input[type='checkbox'] {
   background: var(--green);
 }
 
-.toolbar-search {
-  flex: 1;
-  max-width: 518px;
-}
-
 .toolbar-actions {
   gap: 8px;
+}
+
+/* The Filters button when any structured filter is applied: the accent says "the list you are
+   looking at is narrowed" even while the filter bar itself is collapsed. (The profiles toolbar
+   search box was removed — owner decision; pagination and the folder rail navigate long lists —
+   and this button inherits the funnel that used to ride inside it.) */
+.toolbar-filter--active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .search-field {
@@ -434,23 +439,6 @@ input[type='checkbox'] {
   color: var(--text-soft);
 }
 
-.search-filter-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 52px;
-  height: 100%;
-  border: 0;
-  border-left: 1px solid var(--border);
-  background: transparent;
-  cursor: pointer;
-}
-
-.search-filter-button--active,
-.search-filter-button:hover {
-  background: var(--accent-soft);
-}
-
 .filter-bar {
   display: grid;
   grid-template-columns: repeat(5, minmax(132px, 1fr)) auto;
@@ -471,6 +459,109 @@ input[type='checkbox'] {
 .search-field:focus-within {
   border-color: var(--accent);
   box-shadow: var(--shadow-focus);
+}
+
+/* --- Folder rail (profiles) --------------------------------------------------------------------
+   One slim band above the list: All + each folder with its count + New folder, plus rename/remove
+   for the selected one. Chips rather than underlined tabs because the row also carries controls
+   (New folder, manage icons) that are not "tabs", and a mixed underline row reads as a broken tab
+   strip. Wraps rather than scrolls: every folder stays reachable without inventing an overflow
+   affordance for what is usually a handful of labels. */
+.folder-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.folder-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  max-width: 240px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--fs-base);
+  font-weight: var(--fw-control);
+  cursor: pointer;
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+.folder-tab:hover {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.folder-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Selection outranks hover, same rule the sidebar nav had to learn. */
+.folder-tab--active,
+.folder-tab--active:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* A user-written folder name can be arbitrarily long; the chip clips it and the title shows it. */
+.folder-tab__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-tab__count {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The active chip's count keeps the accent so the chip reads as one piece, not text + grey dust. */
+.folder-tab--active .folder-tab__count {
+  color: inherit;
+  opacity: 0.75;
+}
+
+/* Dashed like .proxy-add: an empty slot to fill, not another folder. */
+.folder-tab--new {
+  border-style: dashed;
+}
+
+.folder-tab--new svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* Rename/remove for the SELECTED folder, kept at the end of the rail. */
+.folder-bar__manage {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* The move-to-folder dialog's body: sentence, picker, (maybe) a new-name field. */
+.folder-move-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.folder-move-form__what {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-md);
+  line-height: 1.5;
 }
 
 /* THE APP DRAWS ITS OWN ARROW.
@@ -716,13 +807,12 @@ select.lb-select:disabled {
   height: 12px;
 }
 
-/* Proxy cell → country chip, exit IP (host:port until a check runs), then check + edit.
-   One line, not two: the old two-line name/address stack spent the row's tallest element on a label
-   the user chose and already knows. */
-.proxy-cell__ip {
+/* Proxy cell → emoji flag, then the proxy's TITLE, then check + edit. Title and flag only (owner
+   decision): host, port and credentials belong to the Proxies page, not this list. Proportional
+   type, not mono — this is a name the user wrote, no longer an address. */
+.proxy-cell__title {
   flex: 1 1 auto;
   min-width: 0;
-  font-family: var(--font-mono);
   font-size: var(--fs-base);
   color: var(--text);
 }
@@ -794,33 +884,41 @@ select.lb-select:disabled {
   height: 13px;
 }
 
-/* Country marker: the alpha-2 code in a flag-shaped box. Monochrome on purpose — the status ring is
-   the row's only meaningful colour, and any per-country palette would be invented. */
+/* Windows ships NO emoji flag glyphs: Segoe UI Emoji renders a regional-indicator pair as two
+   boxed letters ("U S"), which is precisely not the tiny national flag the owner asked for. This
+   78 KB woff2 (country-flag-emoji-polyfill, MIT; glyph art Twemoji, CC-BY 4.0) carries ONLY the
+   flag codepoints, is bundled by Vite as a local asset (no runtime fetch — the launcher must work
+   offline), and is scoped to .flag-chip via font-family below. It sits FIRST in the stack on
+   purpose: every OS then draws the same Twemoji flag art, instead of three platforms rendering
+   three different flags (or Windows rendering none). */
+@font-face {
+  font-family: 'Twemoji Country Flags';
+  src: url('./assets/TwemojiCountryFlags.woff2') format('woff2');
+  font-display: swap;
+  unicode-range:
+    U+1F1E6-1F1FF, U+1F3F4, U+E0062-E0063, U+E0065, U+E0067, U+E006C, U+E006E, U+E0073-E0074,
+    U+E0077, U+E007F;
+}
+
+/* Country marker: the emoji flag. No border and no ground — the glyph carries its own shape; a box
+   around an emoji reads as a broken image. Fixed width so titles align across rows whose flags
+   differ in width. The face order matters: the polyfill face is unicode-range-limited to flag
+   codepoints, so ordinary text in this span still falls through to the UI stack. */
 .flag-chip {
+  font-family:
+    'Twemoji Country Flags', 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  /* 3:2, the aspect of most national flags, so it reads as a flag slot without pretending to be one. */
-  width: 21px;
-  height: 14px;
-  border: 1px solid var(--border-strong);
-  border-radius: 3px;
-  background: var(--surface-muted);
-  color: var(--text-muted);
-  font-size: 9px;
-  font-weight: var(--fw-medium);
+  min-width: 18px;
+  font-size: 14px;
   line-height: 1;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
   cursor: default;
 }
+/* The globe stands for "not known yet", so it is set back from the text it annotates. */
 .flag-chip--unknown {
-  color: var(--text-soft);
-}
-.flag-chip svg {
-  width: 10px;
-  height: 10px;
+  opacity: 0.7;
 }
 
 /* OS picker rendered as an icon segmented control (native <select> can't show per-option icons). */

@@ -10,7 +10,17 @@ import type {
 
 import { profilesClient, proxiesClient, templatesClient } from '../../api/tauri';
 import appIcon from '../../assets/brand/icon.png';
-import { ActionDialog, Button, EmptyState, Skeleton, useErrorModal } from '../../ui';
+import {
+  ActionDialog,
+  Button,
+  EmptyState,
+  Pager,
+  Skeleton,
+  clampPage,
+  pageCountFor,
+  pageSlice,
+  useErrorModal,
+} from '../../ui';
 import { OS_OPTIONS } from '../profiles/options';
 import { Icon } from '../../ui/Icon';
 import { RowMenu } from '../../ui/RowMenu';
@@ -45,12 +55,22 @@ export function TemplatesView(): JSX.Element {
   const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
   const rows = templates.filter((template) =>
     [template.name, template.os, presetText(template), proxyTitle(template), ...template.tags]
       .join(' ')
       .toLowerCase()
       .includes(query.trim().toLowerCase()),
   );
+  // Clamped at render so a shrinking result set (a delete, a narrower search) lands on the new
+  // last page in the same frame; the effect below restarts a CHANGED search from page 1.
+  const pageCount = pageCountFor(rows.length);
+  const currentPage = clampPage(page, pageCount);
+  const pageRows = pageSlice(rows, currentPage);
+
+  useEffect(() => {
+    setPage(1);
+  }, [query]);
 
   async function refresh(): Promise<void> {
     setLoading(true);
@@ -213,7 +233,7 @@ export function TemplatesView(): JSX.Element {
               </tr>
             </thead>
             <tbody>
-              {rows.map((template) => (
+              {pageRows.map((template) => (
                 <tr key={template.id}>
                   <td>
                     <div className="profile-title-cell profile-title-cell--compact">
@@ -275,6 +295,15 @@ export function TemplatesView(): JSX.Element {
             </tbody>
           </table>
         </div>
+      ) : null}
+
+      {!loading && rows.length > 0 ? (
+        <Pager
+          page={currentPage}
+          pageCount={pageCount}
+          onPageChange={setPage}
+          label="Template pages"
+        />
       ) : null}
 
       {showCreate ? (
