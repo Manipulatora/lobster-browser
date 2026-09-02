@@ -1,7 +1,16 @@
-import type { Effort, ModelInfo } from './types';
+import type { Effort, Mode, ModelInfo } from './types';
 
 export const ALL_EFFORTS: Effort[] = ['low', 'medium', 'high'];
 export const EFFORT_LABEL: Record<Effort, string> = { low: 'Low', medium: 'Medium', high: 'High' };
+export const MODE_LABEL: Record<Mode, string> = { auto: 'Auto', agent: 'Agent', ask: 'Ask' };
+
+/**
+ * The mode the sidecar is told. It knows two — `ask` is one tool-less chat completion, `agent` is
+ * the loop — and answers anything else with a 400 before a run exists. `auto` is a panel choice,
+ * not a run kind: the message goes to the loop, whose prompt answers a chat-shaped message on its
+ * first step and browses for the rest, so on the wire it is `agent`.
+ */
+export const wireMode = (mode: Mode): 'ask' | 'agent' => (mode === 'ask' ? 'ask' : 'agent');
 
 // Offline fallback roster (used before the live sync lands or when the bridge is unreachable).
 // Pinned to the seven managed models, in roster order; the backend remains the source of truth.
@@ -74,7 +83,7 @@ export const brandTitle = (b: string): string =>
   BRAND_TITLE[b] ?? b.charAt(0).toUpperCase() + b.slice(1);
 
 export interface Persisted {
-  mode: string;
+  mode: Mode;
   model: string;
   effort: Effort;
   /** Panel-owned run policy. These values are copied into every new run request. */
@@ -84,7 +93,9 @@ export interface Persisted {
   tokenBudget: number | null;
 }
 const DEFAULTS: Persisted = {
-  mode: 'agent',
+  // Nobody should have to decide "is this a chat or a task?" before typing. The loop decides per
+  // message; Ask and Agent remain as explicit overrides for the user who wants one behaviour only.
+  mode: 'auto',
   model: 'anthropic/claude-opus-4.8',
   effort: 'medium',
   // A new install is deliberately review-first and bounded. Users may opt into uninterrupted runs;
@@ -192,7 +203,9 @@ function normalizePersisted(raw: Partial<Persisted>): Persisted {
     : DEFAULTS.allowedDomains;
   const parsedDomains = parseAllowedDomains(storedDomains.join(','));
   return {
-    mode: raw.mode === 'ask' ? 'ask' : 'agent',
+    // An explicit Ask or Agent survives as the override it was; anything else — nothing stored, a
+    // value from a panel that had other modes — is the default, which decides per message.
+    mode: raw.mode === 'ask' || raw.mode === 'agent' ? raw.mode : 'auto',
     model: typeof raw.model === 'string' && raw.model ? raw.model : DEFAULTS.model,
     effort: ALL_EFFORTS.includes(raw.effort as Effort) ? (raw.effort as Effort) : DEFAULTS.effort,
     autonomy: raw.autonomy === 'auto' ? 'auto' : 'confirm',
