@@ -49,16 +49,16 @@ import type {
 } from './journal/index.js';
 import type { RunJournalStore } from './journal/index.js';
 import {
+  addUsage,
   appendSafe,
+  createRunLog,
+  createStepTimer,
   hostOf,
   instrumentDriver,
   journalHostOf,
-  newStepTiming,
   safe,
   safeError,
-  TIMING_PHASES,
 } from './loop/record.js';
-import type { StepTiming, TimedPhase } from './loop/record.js';
 import {
   movesBrowserOnly,
   verifyBrowserStateObserved,
@@ -219,45 +219,20 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     (llm.sendsEffort?.(llmConfig.stepModel || llmConfig.model, llmConfig.effort) ?? false);
   const history: string[] = [];
   const base = { sessionId, profileId };
-  /**
-   * Milliseconds on the clock the events are stamped with, so a step's phase durations and its
-   * events' `ts` are measured the same way — and a test that injects `now` controls both.
-   */
-  const clock = (): number => {
-    const ms = Date.parse(now());
-    return Number.isNaN(ms) ? Date.now() : ms;
-  };
-  /** Phase accumulators for the step in progress; reported by `flushStepTiming`. */
-  let stepTiming: StepTiming | undefined;
-  const timed = async <T>(phase: TimedPhase, operation: () => Promise<T>): Promise<T> => {
-    const startedAt = clock();
-    try {
-      return await operation();
-    } finally {
-      if (stepTiming) stepTiming.phases[phase] += Math.max(0, clock() - startedAt);
-    }
-  };
-  /**
-   * The dispatch window NET of the primitives measured inside it, so `execute` is the driver's own
-   * work — cursor paths, key cadence, the executor's checks — and not a second copy of the settle,
-   * journal and verification-read time that `dispatchJournaled` also spends.
-   */
-  const timedExecute = async <T>(operation: () => Promise<T>): Promise<T> => {
-    const startedAt = clock();
-    const inner = (): number =>
-      stepTiming
-        ? stepTiming.phases.perceive + stepTiming.phases.settle + stepTiming.phases.journal
-        : 0;
-    const innerBefore = inner();
-    try {
-      return await operation();
-    } finally {
-      if (stepTiming) {
-        stepTiming.phases.execute += Math.max(0, clock() - startedAt - (inner() - innerBefore));
-      }
-    }
-  };
+  const { log, memoryDegraded } = createRunLog({ emit, base, now });
+  const timer = createStepTimer({ now, emit, base, log });
+  const { timed, timedExecute } = timer;
   const driver = instrumentDriver(deps.driver, timed);
+  /** The per-step memory record, best-effort: a failure lands on the memory channel, never in the step. */
+  const recordStep = (
+    step: number,
+    url: string,
+    action: AgentAction,
+    outcome: string,
+  ): Promise<void> =>
+    appendSafe(memory, runId, step, url, action, outcome, now, log, (reason) =>
+      memoryDegraded('step', reason),
+    );
   const safeTask = redactCredentialLikeText(task);
   let memoryStarted = false;
   let journalSnapshot: RunJournalSnapshot | undefined;
@@ -470,59 +445,13 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     );
   };
 
-  const log = (level: 'debug' | 'info' | 'warn' | 'error', message: string): void =>
-    emit({
-      type: 'log',
-      ...base,
-      level,
-      message: redactCredentialLikeText(message).text,
-      ts: now(),
-    });
-  /**
-   * Report a memory degradation on its own typed channel as well as the log. Memory failing is
-   * survivable but must never be INVISIBLE: a profile that has silently stopped remembering anything
-   * looked exactly like one that was working.
-   */
-  const memoryDegraded = (scope: 'run' | 'thread' | 'step', reason: string): void => {
-    emit({
-      type: 'memory.degraded',
-      ...base,
-      scope,
-      reason: redactCredentialLikeText(reason).text,
-      ts: now(),
-    });
-  };
-  const addUsage = (value: AgentUsage): void => {
-    usage.tokensIn += value.tokensIn;
-    usage.tokensOut += value.tokensOut;
-    if (value.cachedTokensIn)
-      usage.cachedTokensIn = (usage.cachedTokensIn ?? 0) + value.cachedTokensIn;
-    if (value.costUsd) usage.costUsd = (usage.costUsd ?? 0) + value.costUsd;
-  };
-  /**
-   * Report where the finished step's time went. Called at the step BOUNDARY — the top of the next
-   * iteration, and from `finish` — rather than at each of the step's dozen exits, so every path
-   * through a step (executed, blocked, asked, retried) reports exactly once. A step is over when the
-   * next one begins or the run ends, and that is when its number is final.
-   */
-  const flushStepTiming = (): void => {
-    if (!stepTiming) return;
-    const { step, startedAt, phases } = stepTiming;
-    stepTiming = undefined;
-    phases.total = Math.max(0, clock() - startedAt);
-    emit({ type: 'step.timing', ...base, step, phases: { ...phases }, ts: now() });
-    log(
-      'debug',
-      `Step ${step} timing: ${TIMING_PHASES.map((phase) => `${phase} ${phases[phase]}ms`).join(', ')} (total ${phases.total}ms).`,
-    );
-  };
   const finish = async (
     status: 'done' | 'error' | 'stopped',
     result: string,
     error?: string,
   ): Promise<void> => {
     // The step that ended the run is over too; its timing goes out before the terminal event.
-    flushStepTiming();
+    timer.flush();
     // Terminal text is model-/page-derived and crosses the UI plus thread-memory boundaries. A model
     // echoing a token it saw must not turn `run.finished` into a credential exfiltration event.
     const safeResult = redactCredentialLikeText(result).text;
@@ -643,7 +572,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         ...(llmConfig.effort ? { effort: llmConfig.effort } : {}),
         signal,
       });
-      addUsage(result.usage);
+      addUsage(usage, result.usage);
       emit({ type: 'usage', ...base, usage: { ...result.usage }, ts: now() });
       if (tokenBudgetExceeded(config.tokenBudget, usage)) {
         return await finish(
@@ -842,8 +771,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     for (let step = 1; step <= config.maxSteps; step += 1) {
       // A step retried after a truncated reply (`step -= 1` below) keeps accumulating into its own
       // record: the retry is part of what that step cost.
-      if (stepTiming && stepTiming.step !== step) flushStepTiming();
-      stepTiming ??= newStepTiming(step, clock());
+      timer.begin(step);
       if (signal.aborted) return await finish('stopped', 'Stopped by user.');
       for (const text of deps.takeSteering?.() ?? []) {
         const safe = redactCredentialLikeText(text).text.trim();
@@ -1113,7 +1041,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         }
       }
       recovery = false;
-      addUsage(result.usage);
+      addUsage(usage, result.usage);
       emit({ type: 'usage', ...base, usage: { ...result.usage }, ts: now() });
       // Provider usage is authoritative. Estimation is necessarily conservative-but-imperfect across
       // tokenizers and image accounting, so quarantine the returned tool call if the provider says the
@@ -1228,9 +1156,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         const outcome = `blocked: ${reason}`;
         noteBlocked(reason);
         history.push(`${step}. ${outcome}`);
-        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-          memoryDegraded('step', r),
-        );
+        await recordStep(step, raw.url, safeAction, outcome);
         continue;
       }
 
@@ -1256,9 +1182,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           'credential-like text must use the direct secure human-input channel, not model-authored typing',
         );
         history.push(`${step}. ${outcome}`);
-        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (reason) =>
-          memoryDegraded('step', reason),
-        );
+        await recordStep(step, raw.url, safeAction, outcome);
         continue;
       }
 
@@ -1322,9 +1246,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           'blocked: this is a privileged browser page outside the vetted settings surface. Leave it (switch tabs, go back, or navigate to a normal site) before continuing.';
         noteBlocked('this is a privileged browser page outside the vetted settings surface');
         history.push(`${step}. ${outcome}`);
-        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-          memoryDegraded('step', r),
-        );
+        await recordStep(step, raw.url, safeAction, outcome);
         recovery = true;
         continue;
       }
@@ -1345,9 +1267,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
               : (settingsAssessment.reason ?? 'blocked: browser setting is not permitted');
           noteBlocked(outcome.replace(/^blocked: /, ''));
           history.push(`${step}. ${outcome}`);
-          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-            memoryDegraded('step', r),
-          );
+          await recordStep(step, raw.url, safeAction, outcome);
           continue;
         }
       }
@@ -1382,9 +1302,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           const outcome = `blocked: ${decision.reason}`;
           noteBlocked(decision.reason);
           history.push(`${step}. ${outcome}`);
-          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-            memoryDegraded('step', r),
-          );
+          await recordStep(step, raw.url, safeAction, outcome);
           continue;
         }
       }
@@ -1464,9 +1382,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             'blocked: the page or commit target changed before dispatch; inspect the fresh page and act again';
           noteBlocked('the page or commit target changed before dispatch');
           history.push(`${step}. ${outcome}`);
-          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-            memoryDegraded('step', r),
-          );
+          await recordStep(step, raw.url, safeAction, outcome);
           await appendJournal({
             type: 'action.cancelled',
             actionId: journalActionId,
@@ -1482,9 +1398,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
               'blocked: the visual page changed before dispatch; capture a fresh screenshot and act again';
             noteBlocked('the visual page changed before dispatch');
             history.push(`${step}. ${outcome}`);
-            await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-              memoryDegraded('step', r),
-            );
+            await recordStep(step, raw.url, safeAction, outcome);
             await appendJournal({
               type: 'action.cancelled',
               actionId: journalActionId,
@@ -1557,9 +1471,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // An action that actually ran clears the consecutive streak (but not the total): the agent found
       // something it is allowed to do, so it is no longer stuck against the same wall.
       consecutiveBlocks = 0;
-      await appendSafe(memory, runId, step, raw.url, safeAction, outcome.outcome, now, log, (r) =>
-        memoryDegraded('step', r),
-      );
+      await recordStep(step, raw.url, safeAction, outcome.outcome);
 
       if (outcome.terminal) {
         // A collected dataset is the ACTUAL result of a scrape. Appending it verbatim means a

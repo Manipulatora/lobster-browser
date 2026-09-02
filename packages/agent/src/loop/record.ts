@@ -3,22 +3,23 @@
  * the journal correlates on. Recording is never allowed to change what the run does — a failure
  * here is logged and survived, never raised into the step.
  */
-import type { AgentAction } from '@lobster/shared-types';
+import type { AgentAction, AgentEvent, AgentUsage } from '@lobster/shared-types';
 import type { BrowserDriver } from '../driver.js';
 import type { MemoryStore } from '../memory/index.js';
 import { EXTRACT_SCRIPT } from '../perception/extract-script.js';
+import { redactCredentialLikeText } from '../sensitive-text.js';
 
 /** The phases a step's time is attributed to, in the order the debug line reports them. */
-export const TIMING_PHASES = ['perceive', 'llm', 'execute', 'settle', 'journal'] as const;
+const TIMING_PHASES = ['perceive', 'llm', 'execute', 'settle', 'journal'] as const;
 export type TimedPhase = (typeof TIMING_PHASES)[number];
 
-export interface StepTiming {
+interface StepTiming {
   step: number;
   startedAt: number;
   phases: Record<TimedPhase | 'total', number>;
 }
 
-export function newStepTiming(step: number, startedAt: number): StepTiming {
+function newStepTiming(step: number, startedAt: number): StepTiming {
   return {
     step,
     startedAt,
@@ -111,4 +112,144 @@ export async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
   } catch {
     return fallback;
   }
+}
+
+/** The identity every event of a run is stamped with. */
+export interface RunIdentity {
+  sessionId: string;
+  profileId: string;
+}
+
+/**
+ * The run's own voice. Both channels stamp the run's identity and scrub credential-like text before
+ * anything leaves the process, so a model or page echoing a token cannot turn a log line into an
+ * exfiltration event.
+ */
+export interface RunLog {
+  log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void;
+  /**
+   * Report a memory degradation on its own typed channel as well as the log. Memory failing is
+   * survivable but must never be INVISIBLE: a profile that has silently stopped remembering anything
+   * looked exactly like one that was working.
+   */
+  memoryDegraded: (scope: 'run' | 'thread' | 'step', reason: string) => void;
+}
+
+export function createRunLog(input: {
+  emit: (event: AgentEvent) => void;
+  base: RunIdentity;
+  now: () => string;
+}): RunLog {
+  const { emit, base, now } = input;
+  return {
+    log: (level, message) =>
+      emit({
+        type: 'log',
+        ...base,
+        level,
+        message: redactCredentialLikeText(message).text,
+        ts: now(),
+      }),
+    memoryDegraded: (scope, reason) => {
+      emit({
+        type: 'memory.degraded',
+        ...base,
+        scope,
+        reason: redactCredentialLikeText(reason).text,
+        ts: now(),
+      });
+    },
+  };
+}
+
+/** Fold one response's usage into the run's running total. */
+export function addUsage(usage: AgentUsage, value: AgentUsage): void {
+  usage.tokensIn += value.tokensIn;
+  usage.tokensOut += value.tokensOut;
+  if (value.cachedTokensIn)
+    usage.cachedTokensIn = (usage.cachedTokensIn ?? 0) + value.cachedTokensIn;
+  if (value.costUsd) usage.costUsd = (usage.costUsd ?? 0) + value.costUsd;
+}
+
+/** The stopwatch a step's phases are charged to; `TIMING_PHASES` lists what is measured. */
+export interface StepTimer {
+  /** Charge `operation` to `phase` of the step in progress (nothing is recorded between steps). */
+  timed: <T>(phase: TimedPhase, operation: () => Promise<T>) => Promise<T>;
+  /**
+   * The dispatch window NET of the primitives measured inside it, so `execute` is the driver's own
+   * work — cursor paths, key cadence, the executor's checks — and not a second copy of the settle,
+   * journal and verification-read time that `dispatchJournaled` also spends.
+   */
+  timedExecute: <T>(operation: () => Promise<T>) => Promise<T>;
+  /**
+   * Open `step`'s record, reporting the previous step's first. A record that is already open under
+   * the same number is kept: a step retried after a truncated reply keeps accumulating into its own
+   * record, because the retry is part of what that step cost.
+   */
+  begin: (step: number) => void;
+  /**
+   * Report where the finished step's time went. Called at the step BOUNDARY — the top of the next
+   * iteration, and from `finish` — rather than at each of the step's dozen exits, so every path
+   * through a step (executed, blocked, asked, retried) reports exactly once. A step is over when the
+   * next one begins or the run ends, and that is when its number is final.
+   */
+  flush: () => void;
+}
+
+export function createStepTimer(input: {
+  now: () => string;
+  emit: (event: AgentEvent) => void;
+  base: RunIdentity;
+  log: RunLog['log'];
+}): StepTimer {
+  const { now, emit, base, log } = input;
+  /**
+   * Milliseconds on the clock the events are stamped with, so a step's phase durations and its
+   * events' `ts` are measured the same way — and a test that injects `now` controls both.
+   */
+  const clock = (): number => {
+    const ms = Date.parse(now());
+    return Number.isNaN(ms) ? Date.now() : ms;
+  };
+  /** Phase accumulators for the step in progress; reported by `flush`. */
+  let stepTiming: StepTiming | undefined;
+  const timed = async <T>(phase: TimedPhase, operation: () => Promise<T>): Promise<T> => {
+    const startedAt = clock();
+    try {
+      return await operation();
+    } finally {
+      if (stepTiming) stepTiming.phases[phase] += Math.max(0, clock() - startedAt);
+    }
+  };
+  const timedExecute = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const startedAt = clock();
+    const inner = (): number =>
+      stepTiming
+        ? stepTiming.phases.perceive + stepTiming.phases.settle + stepTiming.phases.journal
+        : 0;
+    const innerBefore = inner();
+    try {
+      return await operation();
+    } finally {
+      if (stepTiming) {
+        stepTiming.phases.execute += Math.max(0, clock() - startedAt - (inner() - innerBefore));
+      }
+    }
+  };
+  const flush = (): void => {
+    if (!stepTiming) return;
+    const { step, startedAt, phases } = stepTiming;
+    stepTiming = undefined;
+    phases.total = Math.max(0, clock() - startedAt);
+    emit({ type: 'step.timing', ...base, step, phases: { ...phases }, ts: now() });
+    log(
+      'debug',
+      `Step ${step} timing: ${TIMING_PHASES.map((phase) => `${phase} ${phases[phase]}ms`).join(', ')} (total ${phases.total}ms).`,
+    );
+  };
+  const begin = (step: number): void => {
+    if (stepTiming && stepTiming.step !== step) flush();
+    stepTiming ??= newStepTiming(step, clock());
+  };
+  return { timed, timedExecute, begin, flush };
 }
