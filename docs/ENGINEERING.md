@@ -235,7 +235,10 @@ trusted Input.* / DOM command through CdpBrowserDriver ── fresh browser obse
   files, 0600 permissions, atomic replacement, strict wrong-key reads, and credential-scrubbing migration
   of legacy plaintext/encrypted records. A wrong-key append cannot overwrite the last known-good file. A
   path-authenticated encrypted run journal records only non-executable action digests and fsyncs a dispatch
-  boundary after deterministic preflight and immediately before effects. Mutating browser actions then
+  boundary after deterministic preflight and immediately before effects. The dispatch marker and the
+  terminal markers are the only synchronous writes; the other lifecycle events are accepted in memory and
+  written with the next such barrier or within 250 ms, so a crash loses nothing a barrier covered and an
+  ordinary step costs one fsynced rewrite instead of four to six. Mutating browser actions then
   require a fresh readable observation with matching full-URL identity; this confirms current browser
   state, not semantic business success. Unexpected denied/rejected navigation uses a separately journaled,
   verified rollback. On restart, clean/pending/read-only checkpoints are closed without replay; ambiguous
