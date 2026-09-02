@@ -6,7 +6,7 @@
  */
 import 'reflect-metadata';
 
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import rateLimit from 'express-rate-limit';
@@ -38,6 +38,29 @@ async function bootstrap(): Promise<void> {
   // restore is one pull per profile) 429s every other user, including sign-in. `1` — not `true` —
   // because trusting the whole chain would let a client spoof its own key via X-Forwarded-For.
   app.set('trust proxy', 1);
+
+  // REQUEST LOG. Until 2026-09-02 the backend logged nothing per request — module init lines and
+  // provider chatter only — so when a second machine signed in and then went silent, the only way
+  // to reconstruct what its launcher had and had not called was the nginx access log by client IP.
+  // One line per request, after the response, method + path + status + duration. Health probes are
+  // skipped (systemd polls them), query strings are dropped (they can carry state/challenge tokens),
+  // and the authenticated user is NOT logged here — the guard has not run yet when this attaches.
+  const requestLog = new Logger('http');
+  app.use(
+    (
+      req: { method: string; path: string },
+      res: { statusCode: number; on: (ev: string, cb: () => void) => void },
+      next: () => void,
+    ) => {
+      if (req.path.startsWith('/health')) return next();
+      const startedAt = process.hrtime.bigint();
+      res.on('finish', () => {
+        const ms = Number(process.hrtime.bigint() - startedAt) / 1e6;
+        requestLog.log(`${req.method} ${req.path} ${res.statusCode} ${ms.toFixed(0)}ms`);
+      });
+      next();
+    },
+  );
   const windowMs = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000);
   const max = Number(process.env.RATE_LIMIT_MAX ?? 120);
   app.use(

@@ -28,6 +28,10 @@ EnvironmentFile=/etc/lobster/backend.env
 # and choose the address used by the application rate limiter. A systemd drop-in can replace this
 # for an intentionally different topology, but the shipped single-host layout must fail closed.
 Environment=HOST=127.0.0.1
+# NODE_ENV was set by nothing in the tree, and every production-only guard keys on it: the
+# JWT dev-secret fallback, the plaintext-vault-key refusal, the ephemeral-blob-store refusal
+# and the readiness DB check. Unset, all of them silently ran in development mode in prod.
+Environment=NODE_ENV=production
 ExecStart=/usr/bin/node dist/main.js
 
 # `/health` is unconditional liveness; `/health/ready` additionally proves Postgres answers, which
