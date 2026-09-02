@@ -77,7 +77,14 @@ sha2 = "0.10"
 chrono = "0.4"
 
 # HTTP client used for proxy testing and streaming the engine download from the Tauri core.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks", "stream"] }
+# `system-proxy` is a reqwest DEFAULT feature that `default-features = false` had silently dropped.
+# Without it the launcher honours only HTTP(S)_PROXY env vars and ignores the OS proxy the user's
+# browser uses (Windows Settings → Proxy, VPN clients, corporate networks). Field evidence, 2026-09-02:
+# a second machine completed the browser-side sign-in (login + desktop/grant landed on the API) and
+# then the launcher never reached the API once — no manifest fetch, no exchange, no profile list —
+# so the user saw an empty app and blamed download speed. The launcher must behave like any other
+# desktop app on the machine's network: through the system proxy when one is configured.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks", "stream", "system-proxy"] }
 
 # First-run engine provisioning: stream-download the engine runtime and extract it. Both archive
 # forms are needed, and which one arrives is not ours to choose: the Linux runtime is packaged as a
