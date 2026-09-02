@@ -18,11 +18,16 @@ import type { BrowserDriver } from './driver.js';
 import { MAX_SCREENSHOT_BASE64_CHARS } from './driver.js';
 import { executeAction } from './executor.js';
 import type { Sleep } from './executor.js';
-import type { LlmClient } from './llm/index.js';
+import type { LlmClient, LlmResult } from './llm/index.js';
 import { usesAutomaticToolChoice } from './llm/index.js';
 import type { LlmMessage, LlmTool } from './llm/types.js';
 import { normalizeMessages } from './llm/types.js';
-import { budgetedMaxTokens, contextOverflowHeadroom, tokenBudgetExceeded } from './loop/decide.js';
+import {
+  budgetedMaxTokens,
+  createStepRequestBuilder,
+  recoverFromContextOverflow,
+  tokenBudgetExceeded,
+} from './loop/decide.js';
 import { handleAsk, restoreNavigationJournaled } from './loop/execute.js';
 import type { DispatchContext } from './loop/execute.js';
 import {
@@ -534,7 +539,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     /** True while a token-truncated response is being retried, so the retry cannot itself loop. */
     let truncatedRetry = false;
     /** A context-overflow recovery is attempted at most once per run. */
-    let oversizeRetried = false;
+    const overflow = { retried: false };
     /**
      * A correction for the NEXT step, delivered through the ordinary nudge channel rather than as its
      * own message. A standalone user message would sit next to the step prompt (also a user message
@@ -779,81 +784,34 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
       emit({ type: 'step.thinking', ...base, step, ts: now() });
       pendingImage = undefined;
-      let progressChars = 0;
-      let progressEmittedAt = 0;
-      const buildRequest = (
-        overrides: { maxTokens?: number; messages?: LlmMessage[] } = {},
-      ): Parameters<typeof llm.complete>[0] => ({
-        model: step === 1 || recovery ? llmConfig.model : (llmConfig.stepModel ?? llmConfig.model),
+      const buildRequest = createStepRequestBuilder({
+        llmConfig,
+        step,
+        recovery,
         system,
-        messages: overrides.messages ?? requestMessages,
+        messages: requestMessages,
         tools,
-        forceTool: ACT_TOOL.name,
-        maxTokens: overrides.maxTokens ?? requestMaxTokens,
-        cachePrefix: true,
-        sessionId: runId,
-        attribution: { profileId, sessionId: runId },
-        // A routine step on the step model runs at the step model's effort: the whole point of a
-        // cheaper model for navigation is latency, and asking it to think hard gives that back.
-        ...((
-          step === 1 || recovery || !llmConfig.stepModel
-            ? llmConfig.effort
-            : (llmConfig.stepEffort ?? llmConfig.effort)
-        )
-          ? {
-              effort:
-                step === 1 || recovery || !llmConfig.stepModel
-                  ? llmConfig.effort
-                  : (llmConfig.stepEffort ?? llmConfig.effort),
-            }
-          : {}),
-        // A silent retry is indistinguishable from a hang: three BYOK attempts plus backoff is minutes
-        // of a panel showing only "thinking", which invites killing a run that was recovering fine.
-        onRetry: ({ attempt, attempts, delayMs, reason }) =>
-          log(
-            'warn',
-            `The model provider did not respond (${reason}). Retrying in ${Math.round(delayMs / 1000)}s — attempt ${attempt} of ${attempts}.`,
-          ),
-        // Asking for progress is what makes the step STREAM (see the adapter): the model's thinking
-        // becomes activity for the idle watchdog instead of time against a wall clock, and the
-        // panel can say the model is still working. Throttled: one event a second and a half.
-        onProgress: ({ kind, chars }) => {
-          progressChars += chars;
-          const at = Date.now();
-          if (at - progressEmittedAt < 1500) return;
-          progressEmittedAt = at;
-          emit({ type: 'step.progress', ...base, step, kind, chars: progressChars, ts: now() });
-        },
+        maxTokens: requestMaxTokens,
+        runId,
+        profileId,
         signal,
+        log,
+        onProgress: (kind, chars) =>
+          emit({ type: 'step.progress', ...base, step, kind, chars, ts: now() }),
       });
-      // A context-window 400 used to end the run outright: it is not in `retryableStatus`, so it
-      // propagated straight to the catch that calls `finish('error')`. Recover in the cheapest order —
-      // ask for fewer OUTPUT tokens first (the whole conversation survives), and only then start
-      // dropping history. `normalizeMessages` already repairs an arbitrarily head-dropped list, so the
-      // dangerous part of the second tier is already built.
-      let result: Awaited<ReturnType<typeof llm.complete>>;
+      let result: LlmResult;
       try {
         result = await timed('llm', () => llm.complete(buildRequest()));
       } catch (error) {
-        const headroom = contextOverflowHeadroom(error);
-        if (headroom === null || oversizeRetried) throw error;
-        oversizeRetried = true;
-        // Only take the cheap path when it actually CHANGES the request. A headroom at or above the
-        // current cap would re-send an identical body and burn a call to get the same 400.
-        if (headroom >= 512 && headroom < requestMaxTokens) {
-          log('warn', `Context limit reached; retrying this step with a smaller output budget.`);
-          result = await timed('llm', () => llm.complete(buildRequest({ maxTokens: headroom })));
-        } else {
-          log('warn', 'Context limit reached; retrying this step with the conversation trimmed.');
-          result = await timed('llm', () =>
-            llm.complete(
-              buildRequest({
-                messages: normalizeMessages(pruneObservations(stepMessages).slice(-4)),
-                maxTokens: Math.min(requestMaxTokens, 1024),
-              }),
-            ),
-          );
-        }
+        result = await recoverFromContextOverflow(error, {
+          llm,
+          buildRequest,
+          timed,
+          requestMaxTokens,
+          stepMessages,
+          overflow,
+          log,
+        });
       }
       recovery = false;
       addUsage(usage, result.usage);

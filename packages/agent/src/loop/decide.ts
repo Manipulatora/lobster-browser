@@ -1,10 +1,15 @@
 /**
- * How a step's model request is shaped: the token-budget arithmetic that caps its output, and the
- * recognition of a provider's context-window rejection so the step can be retried smaller.
+ * How a step's model request is shaped: which model and effort it runs at, the token-budget
+ * arithmetic that caps its output, and the recovery when a provider rejects it for exceeding the
+ * context window.
  */
 import { Buffer } from 'node:buffer';
-import type { AgentUsage } from '@lobster/shared-types';
-import type { LlmMessage, LlmTool } from '../llm/types.js';
+import type { AgentLlmConfig, AgentUsage } from '@lobster/shared-types';
+import { ACT_TOOL } from '../actions.js';
+import type { LlmClient, LlmMessage, LlmRequest, LlmResult, LlmTool } from '../llm/types.js';
+import { normalizeMessages } from '../llm/types.js';
+import { pruneObservations } from './observe.js';
+import type { RunLog, StepTimer } from './record.js';
 
 /**
  * A response smaller than this is not a useful budget for either a chat answer or a structured agent
@@ -119,4 +124,131 @@ function messageText(message: LlmMessage): string {
     return (message.content ?? '') + JSON.stringify(message.toolCalls ?? []);
   }
   return message.content;
+}
+
+/**
+ * Which model a step runs on, and at what effort. Step 1 and every recovery step go to the primary
+ * model; a routine step goes to the cheaper step model when one is configured.
+ */
+export function selectStepModel(
+  llmConfig: AgentLlmConfig,
+  step: number,
+  recovery: boolean,
+): { model: string; effort?: NonNullable<LlmRequest['effort']> } {
+  const model = step === 1 || recovery ? llmConfig.model : (llmConfig.stepModel ?? llmConfig.model);
+  // A routine step on the step model runs at the step model's effort: the whole point of a
+  // cheaper model for navigation is latency, and asking it to think hard gives that back.
+  const effort =
+    step === 1 || recovery || !llmConfig.stepModel
+      ? llmConfig.effort
+      : (llmConfig.stepEffort ?? llmConfig.effort);
+  return { model, ...(effort ? { effort } : {}) };
+}
+
+/** What a recovery retry may change about a step's request; everything else stays put. */
+export interface StepRequestOverrides {
+  maxTokens?: number;
+  messages?: LlmMessage[];
+}
+
+export interface StepRequestInput {
+  llmConfig: AgentLlmConfig;
+  step: number;
+  /** A recovery step goes back to the primary model at its full effort. */
+  recovery: boolean;
+  system: string;
+  messages: LlmMessage[];
+  tools: LlmTool[];
+  maxTokens: number;
+  runId: string;
+  profileId: string;
+  signal: AbortSignal;
+  log: RunLog['log'];
+  /** Streaming progress for the panel, already throttled: the cumulative `chars` of `kind` so far. */
+  onProgress: (kind: 'reasoning' | 'text' | 'tool', chars: number) => void;
+}
+
+/**
+ * The request for one step, as a builder: a context-overflow retry re-issues it with a smaller
+ * output cap or a trimmed conversation while the model, tools and attribution stay identical.
+ */
+export function createStepRequestBuilder(
+  input: StepRequestInput,
+): (overrides?: StepRequestOverrides) => LlmRequest {
+  const { llmConfig, step, recovery, log, signal } = input;
+  let progressChars = 0;
+  let progressEmittedAt = 0;
+  return (overrides = {}) => ({
+    ...selectStepModel(llmConfig, step, recovery),
+    system: input.system,
+    messages: overrides.messages ?? input.messages,
+    tools: input.tools,
+    forceTool: ACT_TOOL.name,
+    maxTokens: overrides.maxTokens ?? input.maxTokens,
+    cachePrefix: true,
+    sessionId: input.runId,
+    attribution: { profileId: input.profileId, sessionId: input.runId },
+    // A silent retry is indistinguishable from a hang: three BYOK attempts plus backoff is minutes
+    // of a panel showing only "thinking", which invites killing a run that was recovering fine.
+    onRetry: ({ attempt, attempts, delayMs, reason }) =>
+      log(
+        'warn',
+        `The model provider did not respond (${reason}). Retrying in ${Math.round(delayMs / 1000)}s — attempt ${attempt} of ${attempts}.`,
+      ),
+    // Asking for progress is what makes the step STREAM (see the adapter): the model's thinking
+    // becomes activity for the idle watchdog instead of time against a wall clock, and the
+    // panel can say the model is still working. Throttled: one event a second and a half.
+    onProgress: ({ kind, chars }) => {
+      progressChars += chars;
+      const at = Date.now();
+      if (at - progressEmittedAt < 1500) return;
+      progressEmittedAt = at;
+      input.onProgress(kind, progressChars);
+    },
+    signal,
+  });
+}
+
+/**
+ * A context-window 400 used to end the run outright: it is not in `retryableStatus`, so it
+ * propagated straight to the catch that calls `finish('error')`. Recover in the cheapest order —
+ * ask for fewer OUTPUT tokens first (the whole conversation survives), and only then start
+ * dropping history. `normalizeMessages` already repairs an arbitrarily head-dropped list, so the
+ * dangerous part of the second tier is already built.
+ *
+ * Rethrows `error` untouched when it is not a recognised overflow, or when the run has already
+ * spent its one recovery.
+ */
+export async function recoverFromContextOverflow(
+  error: unknown,
+  input: {
+    llm: LlmClient;
+    buildRequest: (overrides?: StepRequestOverrides) => LlmRequest;
+    timed: StepTimer['timed'];
+    requestMaxTokens: number;
+    stepMessages: readonly LlmMessage[];
+    /** Shared by every step of the run: the recovery is attempted at most once per run. */
+    overflow: { retried: boolean };
+    log: RunLog['log'];
+  },
+): Promise<LlmResult> {
+  const { llm, buildRequest, timed, requestMaxTokens, stepMessages, overflow, log } = input;
+  const headroom = contextOverflowHeadroom(error);
+  if (headroom === null || overflow.retried) throw error;
+  overflow.retried = true;
+  // Only take the cheap path when it actually CHANGES the request. A headroom at or above the
+  // current cap would re-send an identical body and burn a call to get the same 400.
+  if (headroom >= 512 && headroom < requestMaxTokens) {
+    log('warn', `Context limit reached; retrying this step with a smaller output budget.`);
+    return timed('llm', () => llm.complete(buildRequest({ maxTokens: headroom })));
+  }
+  log('warn', 'Context limit reached; retrying this step with the conversation trimmed.');
+  return timed('llm', () =>
+    llm.complete(
+      buildRequest({
+        messages: normalizeMessages(pruneObservations(stepMessages).slice(-4)),
+        maxTokens: Math.min(requestMaxTokens, 1024),
+      }),
+    ),
+  );
 }
