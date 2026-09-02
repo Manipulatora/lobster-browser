@@ -1,20 +1,28 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ConfigService } from '@nestjs/config';
 
-import { BlobVersionConflictError } from './blob-store';
+import { BlobQuotaExceededError, BlobVersionConflictError } from './blob-store';
 import { FilesystemBlobStore } from './filesystem-blob-store';
 
-async function store(): Promise<{ store: FilesystemBlobStore; root: string }> {
+async function store(
+  env: Record<string, string> = {},
+): Promise<{ store: FilesystemBlobStore; root: string }> {
   const root = await mkdtemp(join(tmpdir(), 'blobstore-test-'));
-  const config = { get: (k: string) => (k === 'BLOB_STORE_PATH' ? root : undefined) };
+  const values: Record<string, string> = { BLOB_STORE_PATH: root, ...env };
+  const config = { get: (k: string) => values[k] };
   return { store: new FilesystemBlobStore(config as unknown as ConfigService), root };
 }
 
 const META = { teamId: 'team-1', profileId: 'p1' };
+
+/** The version files present for a key, in version order — what an operator would `ls`. */
+async function versionFiles(root: string, ...segments: string[]): Promise<string[]> {
+  return (await readdir(join(root, ...segments))).filter((name) => name.endsWith('.blob')).sort();
+}
 
 test('put assigns monotonically increasing versions and getLatest/head read them back', async () => {
   const { store: s, root } = await store();
@@ -29,16 +37,127 @@ test('put assigns monotonically increasing versions and getLatest/head read them
   await rm(root, { recursive: true, force: true });
 });
 
-test('every version is retained, so a point-in-time restore is possible', async () => {
+test('recent history is retained, so a point-in-time restore is possible', async () => {
   const { store: s, root } = await store();
   for (const body of ['one', 'two', 'three']) {
     await s.put('team-1/p1', Buffer.from(body), META);
   }
-  // The in-memory store keeps only the latest; this one keeps the history on purpose.
+  // The in-memory store keeps only the latest; this one keeps recent history on purpose.
   assert.equal((await readFile(join(root, 'team-1', 'p1', 'v0000000001.blob'))).toString(), 'one');
   assert.equal(
     (await readFile(join(root, 'team-1', 'p1', 'v0000000003.blob'))).toString(),
     'three',
+  );
+  await rm(root, { recursive: true, force: true });
+});
+
+test('only the newest BLOB_RETAIN_VERSIONS versions survive a write; the latest is never pruned', async () => {
+  const { store: s, root } = await store({ BLOB_RETAIN_VERSIONS: '3' });
+  for (let i = 1; i <= 5; i += 1) {
+    await s.put('team-1/p1', Buffer.from(`body-${i}`), META);
+  }
+
+  assert.deepEqual(await versionFiles(root, 'team-1', 'p1'), [
+    'v0000000003.blob',
+    'v0000000004.blob',
+    'v0000000005.blob',
+  ]);
+  // Version numbers keep climbing past the pruned ones — the history is trimmed, never renumbered,
+  // so a client's baseVersion stays meaningful.
+  assert.deepEqual(await s.head('team-1/p1'), { version: 5 });
+  assert.equal((await s.getLatest('team-1/p1'))?.bytes.toString(), 'body-5');
+  await rm(root, { recursive: true, force: true });
+});
+
+test('BLOB_RETAIN_VERSIONS defaults to five and never drops below one', async () => {
+  const { store: byDefault, root: rootA } = await store();
+  for (let i = 1; i <= 7; i += 1) {
+    await byDefault.put('team-1/p1', Buffer.from(`v${i}`), META);
+  }
+  assert.equal((await versionFiles(rootA, 'team-1', 'p1')).length, 5);
+  await rm(rootA, { recursive: true, force: true });
+
+  // Zero would make the version just written a pruning candidate; the floor keeps it.
+  const { store: floored, root: rootB } = await store({ BLOB_RETAIN_VERSIONS: '0' });
+  await floored.put('team-1/p1', Buffer.from('first'), META);
+  await floored.put('team-1/p1', Buffer.from('second'), META);
+  assert.deepEqual(await versionFiles(rootB, 'team-1', 'p1'), ['v0000000002.blob']);
+  assert.equal((await floored.getLatest('team-1/p1'))?.bytes.toString(), 'second');
+  await rm(rootB, { recursive: true, force: true });
+});
+
+test('a put that would take the team over its quota is refused before anything is written', async () => {
+  const { store: s, root } = await store();
+  await s.put('team-1/p1', Buffer.alloc(6), META);
+  await s.put('team-1/p2', Buffer.alloc(3), { teamId: 'team-1', profileId: 'p2' });
+
+  // p1 (6) + p2 (3) = 9 live bytes; a 2-byte third profile would make 11 > 10.
+  await assert.rejects(
+    () =>
+      s.put('team-1/p3', Buffer.alloc(2), {
+        teamId: 'team-1',
+        profileId: 'p3',
+        teamQuotaBytes: 10,
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof BlobQuotaExceededError);
+      assert.equal(err.teamId, 'team-1');
+      assert.equal(err.usedBytes, 9);
+      assert.equal(err.quotaBytes, 10);
+      assert.equal(err.requestedBytes, 2);
+      return true;
+    },
+  );
+  assert.equal(await s.head('team-1/p3'), null, 'nothing was written for the refused key');
+  await assert.rejects(() => readdir(join(root, 'team-1', 'p3')), /ENOENT/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("the quota measures LIVE bytes: replacing a key's latest counts the difference, and retained history counts for nothing", async () => {
+  const { store: s, root } = await store({ BLOB_RETAIN_VERSIONS: '5' });
+  await s.put('team-1/p1', Buffer.alloc(6), META);
+  await s.put('team-1/p2', Buffer.alloc(3), { teamId: 'team-1', profileId: 'p2' });
+
+  // p1's 6 bytes are being replaced, so only p2's 3 stay: 3 + 7 = 10 fits a 10-byte quota…
+  await s.put('team-1/p1', Buffer.alloc(7), { ...META, teamQuotaBytes: 10 });
+  // …and the two versions of p1 now on disk (6 and 7) are history plus live, not 13 live bytes:
+  // p2 replaced with 3 keeps 7 + 3 = 10.
+  assert.equal((await versionFiles(root, 'team-1', 'p1')).length, 2);
+  await s.put('team-1/p2', Buffer.alloc(3), {
+    teamId: 'team-1',
+    profileId: 'p2',
+    teamQuotaBytes: 10,
+  });
+  // But 7 (p1 live) + 4 does not.
+  await assert.rejects(
+    () =>
+      s.put('team-1/p2', Buffer.alloc(4), {
+        teamId: 'team-1',
+        profileId: 'p2',
+        teamQuotaBytes: 10,
+      }),
+    BlobQuotaExceededError,
+  );
+  await rm(root, { recursive: true, force: true });
+});
+
+test('the quota is per team: another team’s bytes are not counted', async () => {
+  const { store: s, root } = await store();
+  await s.put('team-2/p1', Buffer.alloc(100), { teamId: 'team-2', profileId: 'p1' });
+
+  await s.put('team-1/p1', Buffer.alloc(8), { ...META, teamQuotaBytes: 10 });
+  assert.deepEqual(await s.head('team-1/p1'), { version: 1 });
+  await rm(root, { recursive: true, force: true });
+});
+
+test('a stale expectedVersion is reported as a conflict even when the team is also over quota', async () => {
+  // The caller's cue for a conflict is "pull and retry"; for a quota it is "free space". A stale
+  // push must get the first, or the launcher re-pushes into a conflict it cannot see.
+  const { store: s, root } = await store();
+  await s.put('team-1/p1', Buffer.alloc(8), META);
+  await assert.rejects(
+    () => s.put('team-1/p1', Buffer.alloc(50), { ...META, expectedVersion: 0, teamQuotaBytes: 10 }),
+    BlobVersionConflictError,
   );
   await rm(root, { recursive: true, force: true });
 });

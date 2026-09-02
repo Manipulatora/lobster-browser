@@ -3,11 +3,12 @@ import { Prisma } from '@prisma/client';
 import type { Membership, Role, Team } from '@lobster/shared-types';
 
 import { PrismaService } from '../prisma/prisma.service';
-import type {
-  LeaveTeamResult,
-  RemoveMemberResult,
-  SetRoleResult,
-  TeamsRepository,
+import {
+  OwnedTeamLimitExceededError,
+  type LeaveTeamResult,
+  type RemoveMemberResult,
+  type SetRoleResult,
+  type TeamsRepository,
 } from './teams.repository';
 
 /** Prisma reports a serializable write conflict/deadlock as P2034 and explicitly requires retry. */
@@ -39,14 +40,30 @@ interface MembershipRow {
 export class PrismaTeamsRepository implements TeamsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  async createTeam(ownerUserId: string, name: string): Promise<Team> {
-    return this.prisma.$transaction(async (tx) => {
-      const row = await tx.team.create({ data: { name, ownerUserId } });
-      await tx.membership.create({
-        data: { teamId: row.id, userId: ownerUserId, role: 'admin' },
-      });
-      return this.toTeam(row);
-    });
+  async createTeam(ownerUserId: string, name: string, maxOwnedTeams: number): Promise<Team> {
+    return this.prisma.$transaction(
+      async (tx) => {
+        // The owner's user row is the lock for "how many teams does this account own". Under READ
+        // COMMITTED every statement takes a fresh snapshot, so without it two concurrent creates
+        // both count N-1 and both insert; queued on the row, the second one counts the first.
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "users" WHERE "id" = ${ownerUserId} FOR UPDATE
+        `;
+        if (locked.length !== 1) {
+          throw new Error('team owner does not exist');
+        }
+        const ownedCount = await tx.team.count({ where: { ownerUserId } });
+        if (ownedCount + 1 > maxOwnedTeams) {
+          throw new OwnedTeamLimitExceededError(maxOwnedTeams, ownedCount);
+        }
+        const row = await tx.team.create({ data: { name, ownerUserId } });
+        await tx.membership.create({
+          data: { teamId: row.id, userId: ownerUserId, role: 'admin' },
+        });
+        return this.toTeam(row);
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
+    );
   }
 
   async addMember(teamId: string, userId: string, role: Role): Promise<Membership> {

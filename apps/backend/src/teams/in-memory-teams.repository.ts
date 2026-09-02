@@ -3,11 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import type { Membership, Role, Team } from '@lobster/shared-types';
 
-import type {
-  LeaveTeamResult,
-  RemoveMemberResult,
-  SetRoleResult,
-  TeamsRepository,
+import {
+  OwnedTeamLimitExceededError,
+  type LeaveTeamResult,
+  type RemoveMemberResult,
+  type SetRoleResult,
+  type TeamsRepository,
 } from './teams.repository';
 
 /** Staged write used to compose registration across the two in-memory repository instances. */
@@ -28,9 +29,28 @@ export class InMemoryTeamsRepository implements TeamsRepository {
   /** Memberships keyed by `${teamId}::${userId}` so a (team, user) pair is unique. */
   private readonly memberships = new Map<string, Membership>();
 
-  async createTeam(ownerUserId: string, name: string): Promise<Team> {
-    // No await: team + first admin become visible in the same JavaScript turn.
+  async createTeam(ownerUserId: string, name: string, maxOwnedTeams: number): Promise<Team> {
+    // No await: the count, the cap check and the write all happen in one JavaScript turn, so two
+    // concurrent creates for the same owner cannot both observe room for one more — the guarantee
+    // the Prisma repository gets from locking the owner's row. Team + first admin likewise become
+    // visible together.
+    const ownedCount = this.ownedCount(ownerUserId);
+    if (ownedCount + 1 > maxOwnedTeams) {
+      throw new OwnedTeamLimitExceededError(maxOwnedTeams, ownedCount);
+    }
     return this.prepareTeamWithOwner(ownerUserId, name).commit();
+  }
+
+  /**
+   * Synchronous owner probe for the in-memory profiles repository, whose profile allowance is
+   * counted per owner (the billing account) rather than per team.
+   */
+  ownerOf(teamId: string): string | undefined {
+    return this.teams.get(teamId)?.ownerUserId;
+  }
+
+  private ownedCount(ownerUserId: string): number {
+    return [...this.teams.values()].filter((team) => team.ownerUserId === ownerUserId).length;
   }
 
   /**

@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  HttpException,
+} from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import type { Profile } from '@lobster/shared-types';
 
@@ -12,8 +17,10 @@ import { InMemoryBlobStore } from './blob/in-memory-blob-store';
 import { InMemoryProfilesRepository } from './in-memory-profiles.repository';
 import type { ProfilesRepository } from './profiles.repository';
 import {
+  DEFAULT_BLOB_TEAM_QUOTA_BYTES,
   DEFAULT_FREE_PROFILE_LIMIT,
   ProfilesService,
+  resolveBlobTeamQuotaBytes,
   type SyncProfileInput,
 } from './profiles.service';
 
@@ -26,7 +33,10 @@ const config = { get: () => undefined } as unknown as ConfigService;
  * a no-op audit). Driving it in-process lets us interleave two pushes deterministically — HTTP e2e
  * can't guarantee interleaving because Nest may serialise the two request handlers.
  */
-function makeService(cfg: ConfigService = config): {
+function makeService(
+  cfg: ConfigService = config,
+  entitledProfileLimit: number | null = null,
+): {
   service: ProfilesService;
   blobs: InMemoryBlobStore;
 } {
@@ -37,9 +47,18 @@ function makeService(cfg: ConfigService = config): {
   const profiles = {
     findById: async (teamId: string, id: string) =>
       ({ id, ownerTeamId: teamId, name: 'Racy' }) as unknown as Profile,
+    getProfileLimit: async () => entitledProfileLimit,
   } as unknown as ProfilesRepository;
   const audit = { record: async () => {} } as unknown as AuditService;
   return { service: new ProfilesService(profiles, teams, blobs, audit, cfg), blobs };
+}
+
+function configOf(values: Record<string, string>): ConfigService {
+  return { get: (key: string) => values[key] } as unknown as ConfigService;
+}
+
+function pushOf(marker: string, baseVersion = 0): SyncProfileInput {
+  return { direction: 'push', payload: Buffer.from(marker).toString('base64'), baseVersion };
 }
 
 function makeProfileCreationService(): {
@@ -172,6 +191,83 @@ test('a failed best-effort audit write cannot turn a committed bulk create into 
 
   assert.equal(created.length, 2);
   assert.equal((await repository.findAllByTeam('team-1')).length, 2);
+});
+
+test('the profile allowance belongs to the billing account: a second owned team shares it', async () => {
+  // Both teams are owned by user-1, which is what the in-memory probe reports; the teams stub
+  // admits the caller to either.
+  const repository = new InMemoryProfilesRepository(
+    () => true,
+    (teamId) => (teamId === 'team-1' || teamId === 'team-2' ? 'user-1' : undefined),
+  );
+  const teams = {
+    getMembership: async (teamId: string) => ({ teamId, userId: 'user-1', role: 'admin' }),
+  } as unknown as TeamsRepository;
+  const audit = { record: async () => {} } as unknown as AuditService;
+  const service = new ProfilesService(repository, teams, new InMemoryBlobStore(), audit, config);
+
+  for (let index = 0; index < DEFAULT_FREE_PROFILE_LIMIT; index += 1) {
+    await service.create(
+      'user-1',
+      { name: `Own ${index}`, engine: 'lobium', os: 'windows' },
+      'team-1',
+    );
+  }
+
+  // Before this rule, `POST /teams` + `?teamId=<new>` was another three free profiles.
+  await assert.rejects(
+    () => service.create('user-1', { name: 'Overflow', engine: 'lobium', os: 'windows' }, 'team-2'),
+    (err: unknown) => {
+      assert.ok(err instanceof ForbiddenException);
+      assert.match(err.message, /reached for this account/);
+      return true;
+    },
+  );
+  assert.equal((await repository.findAllByTeam('team-2')).length, 0);
+});
+
+test('a push the team has no storage quota left for is a 507 whose message says what to do', async () => {
+  // 16 bytes on the free allowance, so two 10-byte snapshots from two profiles cannot both fit.
+  const { service, blobs } = makeService(configOf({ BLOB_TEAM_QUOTA_BYTES: '16' }));
+  await service.sync('user-1', 'p1', pushOf('0123456789'), 'team-1');
+
+  await assert.rejects(
+    () => service.sync('user-1', 'p2', pushOf('abcdefghij'), 'team-1'),
+    (err: unknown) => {
+      assert.ok(err instanceof HttpException);
+      assert.equal(err.getStatus(), 507);
+      assert.match(err.message, /storage quota exceeded/);
+      assert.match(err.message, /delete unused profiles or upgrade the plan/);
+      // The launcher prints the first 200 characters of the envelope; the message must fit.
+      assert.ok(err.message.length <= 170, `message too long for the launcher: ${err.message}`);
+      return true;
+    },
+  );
+  assert.equal(await blobs.head('team-1/p2'), null, 'the refused push stored nothing');
+
+  // Replacing p1's own snapshot is measured net, so the same profile keeps syncing.
+  const replaced = await service.sync('user-1', 'p1', pushOf('9876543210', 1), 'team-1');
+  assert.equal(replaced.version, 2);
+});
+
+test('the storage quota scales with the account’s entitled profile count, and 0 disables it', async () => {
+  // Entitled to twice the free profile count → twice the quota: both 10-byte snapshots fit in 32.
+  const scaled = makeService(
+    configOf({ BLOB_TEAM_QUOTA_BYTES: '16' }),
+    DEFAULT_FREE_PROFILE_LIMIT * 2,
+  );
+  await scaled.service.sync('user-1', 'p1', pushOf('0123456789'), 'team-1');
+  await scaled.service.sync('user-1', 'p2', pushOf('abcdefghij'), 'team-1');
+
+  const disabled = makeService(configOf({ BLOB_TEAM_QUOTA_BYTES: '0' }));
+  await disabled.service.sync('user-1', 'p1', pushOf('0123456789'), 'team-1');
+  await disabled.service.sync('user-1', 'p2', pushOf('abcdefghij'), 'team-1');
+
+  // A typo is the default figure, never "no quota".
+  assert.equal(resolveBlobTeamQuotaBytes('plenty'), DEFAULT_BLOB_TEAM_QUOTA_BYTES);
+  assert.equal(resolveBlobTeamQuotaBytes(undefined), DEFAULT_BLOB_TEAM_QUOTA_BYTES);
+  assert.equal(resolveBlobTeamQuotaBytes('0'), undefined);
+  assert.equal(resolveBlobTeamQuotaBytes('1024'), 1024);
 });
 
 test('two interleaved pushes at the same baseVersion resolve to exactly one success and one 409 (atomic compare-and-set)', async () => {

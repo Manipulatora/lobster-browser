@@ -18,7 +18,9 @@ import { sanitizeCookieImportMetadata } from './sanitize-cookie-import';
  * lifetime of the process only; it is intentionally NOT durable.
  *
  * There is no in-memory subscription store, so creation and {@link getProfileLimit} use the
- * default free-tier entitlement.
+ * default free-tier entitlement. The allowance is still counted per BILLING ACCOUNT — every team
+ * with the same owner shares it — through the `billingAccountOf` probe the module wires to the
+ * in-memory teams repository.
  */
 @Injectable()
 export class InMemoryProfilesRepository implements ProfilesRepository {
@@ -26,6 +28,11 @@ export class InMemoryProfilesRepository implements ProfilesRepository {
 
   constructor(
     private readonly isTeamAdmin: (teamId: string, userId: string) => boolean = () => false,
+    /**
+     * The owner a team's profiles count against. A team the probe does not know is its own
+     * account, so a repository built without a team store (unit tests) still meters per team.
+     */
+    private readonly billingAccountOf: (teamId: string) => string | undefined = () => undefined,
   ) {}
 
   async createManyWithinLimit(inputs: readonly CreateProfileRecord[]): Promise<Profile[]> {
@@ -35,8 +42,11 @@ export class InMemoryProfilesRepository implements ProfilesRepository {
     if (inputs.some((input) => input.ownerTeamId !== ownerTeamId)) {
       throw new Error('profile creation batch must belong to one team');
     }
+    // No await between this count and the writes below: the check and the insert are one turn.
+    const account = this.accountOf(ownerTeamId);
     const currentCount = [...this.byId.values()].filter(
-      (profile) => profile.ownerTeamId === ownerTeamId,
+      (profile) =>
+        profile.ownerTeamId !== undefined && this.accountOf(profile.ownerTeamId) === account,
     ).length;
     if (currentCount + inputs.length > FREE_PLAN_PROFILE_LIMIT) {
       throw new ProfileLimitExceededError(FREE_PLAN_PROFILE_LIMIT, currentCount, inputs.length);
@@ -132,5 +142,9 @@ export class InMemoryProfilesRepository implements ProfilesRepository {
   async getProfileLimit(_teamId: string): Promise<number | null> {
     // No subscription store in memory — the service applies the default free-tier limit.
     return null;
+  }
+
+  private accountOf(teamId: string): string {
+    return this.billingAccountOf(teamId) ?? teamId;
   }
 }
