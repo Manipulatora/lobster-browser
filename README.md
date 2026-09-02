@@ -75,7 +75,7 @@ packages/
 lobium/            Chromium fork: build scripts, GN args, quilt patch series, native hook reference
 ci/validation/     anti-detect validation harnesses, audit oracles, real-GPU gate
 scripts/           build/packaging/deploy drivers
-deploy/            production nginx + systemd for the backend and the site
+deploy/            production nginx + systemd for the backend and the site; deploy-backend.sh ships the backend
 docs/              see docs/README.md
 ```
 
