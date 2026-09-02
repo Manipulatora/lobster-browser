@@ -90,6 +90,14 @@ export class PrismaLeasesRepository implements LeasesRepository {
     return this.toLease(row as LeaseRow);
   }
 
+  async listLive(profileIds: readonly string[], now: Date): Promise<ProfileLease[]> {
+    if (profileIds.length === 0) return [];
+    const rows = await this.prisma.profileLease.findMany({
+      where: { profileId: { in: [...profileIds] }, expiresAt: { gt: now } },
+    });
+    return rows.map((row) => this.toLease(row as LeaseRow));
+  }
+
   async purgeExpired(now: Date): Promise<void> {
     await this.prisma.profileLease.deleteMany({ where: { expiresAt: { lt: now } } });
   }

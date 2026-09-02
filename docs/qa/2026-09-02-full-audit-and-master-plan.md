@@ -125,13 +125,24 @@ rows in the rail); cache-stable message layout (nudges + both ledgers moved into
 trailing user message that the loop removes before appending the next step; tool results are never
 rewritten; pruning moves in batches of 3); observation diet (element hrefs clipped to 256,
 verbatim window 4); budget default 1M for managed runs (the wallet meters); same-URL navigate waits
-on `performance.timeOrigin` turnover instead of a 10 s dead poll. *Still open:* steering RPC + trusted user channel;
+on `performance.timeOrigin` turnover instead of a 10 s dead poll. *Second slice shipped 2026-09-02 (652d9e1):* streamed tool steps — the adapter reassembles the
+forced tool call from OpenRouter's fragments, reasoning/argument bytes are activity for the 90 s
+idle watchdog (no more 55 s wall clock ending a long-thinking step), `step.progress` → "Reasoning…
+2.4k" on the thinking step. Shipped state at 22:00 Berlin: backend redeployed (request log live),
+Linux .debs and Windows installers republished from d4a8438 (streaming lands in the next build).
+*Still open:* steering RPC + trusted user channel;
 working memory; intent router ("auto" mode); situation-change transitions as events; streamed
 agent steps with idle watchdog instead of a wall clock; cache-stable message layout; observation
 diet (href clip, 2–3 snapshots, diffs); bounded action batches; budget arithmetic; journal
 cost decision; `loop.ts` split into observe/decide/gate/execute/verify/record.
 
-**Wave 3 — presence + lazy first run:** device identity + label; lease acquire/refresh/release
+**Wave 3 — presence + lazy first run.** *First slice shipped 2026-09-02 (solo):* the version
+probe (`GET /profiles` carries `syncVersion` from the blob store's `head`; the launcher's
+`reconcile` skips the pull when the account has not moved — ends the full-blob download of every
+clean profile every 60 s); presence end to end (`presence.rs`: stable device id + hostname label,
+lease acquire on launch / refresh every 60 s / release on stop, a 20 s poll of the new bulk
+`GET /leases`, merged into `list_profiles` as `presence`; the profile list shows "Running on
+<machine>"). *Still open:* device identity + label; lease acquire/refresh/release
 around launch; `GET /profiles/leases`; lease on the Profile row; "running on <machine>" and
 proxy "used by"; sync version probe + `blobVersion` on the row + conditional pull; download
 progress in the list; restore deferred to launch; blob retention + quota.

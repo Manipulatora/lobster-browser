@@ -326,6 +326,9 @@ pub struct RemoteProfile {
     pub tags: Vec<String>,
     #[serde(default)]
     pub folder: Option<String>,
+    /// The account's latest blob version, when the server reports it (older backends do not).
+    #[serde(default)]
+    pub sync_version: Option<u64>,
 }
 
 /// The projection of a local row that is allowed to sit on the server IN THE CLEAR.
@@ -410,6 +413,19 @@ pub async fn update_remote_row(remote_id: &str, row: &PortableRow) -> Result<()>
     Ok(())
 }
 
+/// Whether the account has a blob version this machine has not applied yet.
+///
+/// The version probe. Before it, the only way to learn whether the account had moved was to
+/// download the whole blob — up to 25 MiB per profile — and compare its version afterwards, which
+/// `reconcile` did for every clean profile on every tick. A backend that does not report the
+/// version (None) keeps the old behaviour: pull and compare.
+fn needs_pull(server_version: Option<u64>, last_seen: u64) -> bool {
+    match server_version {
+        Some(version) => version > last_seen,
+        None => true,
+    }
+}
+
 /// Every profile the account holds. This is how a second machine learns what there is to restore.
 pub async fn list_remote_rows() -> Result<Vec<RemoteProfile>> {
     api_call(reqwest::Method::GET, "/profiles", None)
@@ -438,7 +454,7 @@ fn client() -> Result<reqwest::Client> {
 }
 
 /// One `{code,data,msg}` call against the account API, decoded into `T`.
-async fn api_call<T: serde::de::DeserializeOwned>(
+pub(crate) async fn api_call<T: serde::de::DeserializeOwned>(
     method: reqwest::Method,
     path: &str,
     body: Option<serde_json::Value>,
@@ -882,6 +898,15 @@ pub async fn reconcile(state: &AppState) -> Result<SyncSummary> {
             continue;
         }
         let last_seen = link.map(|l| l.remote_version).unwrap_or(0);
+        if !needs_pull(remote.sync_version, last_seen) {
+            summary.profiles.push(SyncedProfile {
+                profile_id: local.id.clone(),
+                name: local.name.clone(),
+                action: "current".into(),
+                detail: Some(format!("version {last_seen}")),
+            });
+            continue;
+        }
 
         match pull_profile(state, &local.id).await {
             Ok(outcome) => {
@@ -1043,7 +1068,12 @@ fn apply_portable_row(
         },
     )
     .map_err(|e| anyhow!("{e}"))?
-    .ok_or_else(|| anyhow!("profile {} vanished while applying the pulled row", local.id))?;
+    .ok_or_else(|| {
+        anyhow!(
+            "profile {} vanished while applying the pulled row",
+            local.id
+        )
+    })?;
 
     // A DIFFERENT cookie-import draft re-arms the applied stamp inside `update`; if the machine
     // that pushed it had already injected it, carry that fact across so this machine's next launch
@@ -1185,7 +1215,7 @@ fn finish_materialise(
 
 /// Whether this install can sync at all right now. Everything below is a no-op without it, silently:
 /// a signed-out user has not asked for an account and must not be nagged by one.
-fn signed_in() -> bool {
+pub(crate) fn signed_in() -> bool {
     cloud_auth::load_token().is_some()
 }
 
@@ -1434,6 +1464,27 @@ pub(crate) fn measure_encodings(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_version_probe_pulls_only_when_the_account_moved_on() {
+        assert!(
+            !super::needs_pull(Some(3), 3),
+            "same version: nothing to fetch"
+        );
+        assert!(
+            !super::needs_pull(Some(2), 3),
+            "server behind (after a push): nothing to fetch"
+        );
+        assert!(super::needs_pull(Some(4), 3), "server ahead: pull");
+        assert!(
+            super::needs_pull(None, 3),
+            "a backend that cannot say: pull and compare, as before"
+        );
+        assert!(
+            !super::needs_pull(Some(0), 0),
+            "never synced anywhere: nothing to fetch"
+        );
+    }
+
     use super::*;
     use crate::blob_crypto;
     use crate::snapshot::manifest::{

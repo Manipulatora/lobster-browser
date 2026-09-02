@@ -18,6 +18,7 @@ mod cloud_auth;
 mod engine_provision;
 mod keychain;
 mod local_api;
+mod presence;
 mod profile_portable;
 mod profile_store;
 mod profile_sync;
@@ -148,6 +149,8 @@ struct AppState {
     account_key: Arc<Mutex<Option<vault_key::AccountKey>>>,
     /// Exact-id ownership and cancellation for the browser loopback sign-in flow.
     sign_in: cloud_auth::SignInCoordinator,
+    /// This install's identity and the leases it holds / sees (see `presence.rs`).
+    presence: presence::Presence,
 }
 
 /// Returns the desktop agent version, sourced from Cargo at compile time.
@@ -516,7 +519,10 @@ fn user_engine_runtime_dir() -> Option<PathBuf> {
 /// even though the bundled copy is byte-for-byte what the manifest points at. The packager writes
 /// the same stamp beside the bundled engine that provisioning writes beside a downloaded one, so the
 /// two are compared the same way.
-fn bundled_engine_satisfies(app: &tauri::AppHandle, source: &engine_provision::EngineSource) -> bool {
+fn bundled_engine_satisfies(
+    app: &tauri::AppHandle,
+    source: &engine_provision::EngineSource,
+) -> bool {
     app_resource_dir(app)
         .map(|resources| resources.join("lobium"))
         .is_some_and(|bundled| engine_provision::engine_matches_source(&bundled, source))
@@ -791,7 +797,18 @@ async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, Strin
             .map_err(|e| e.to_string())?;
     }
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    profile_store::list(&conn, &state.cipher).map_err(|e| e.to_string())
+    let mut profiles = profile_store::list(&conn, &state.cipher).map_err(|e| e.to_string())?;
+    // Presence is the account's view, keyed by the account's id for the profile; a profile that has
+    // never synced has no account id and therefore no presence — this machine is the only one that
+    // could be running it.
+    for profile in &mut profiles {
+        if let Ok(Some(link)) = profile_store::sync_link(&conn, &profile.id) {
+            if let Some(remote_id) = link.remote_id {
+                profile.presence = state.presence.presence_for(&remote_id);
+            }
+        }
+    }
+    Ok(profiles)
 }
 
 #[tauri::command]
@@ -1106,6 +1123,7 @@ async fn test_proxy(
 /// return its CDP endpoints (`{ profileId, pid, ws, debuggerAddress }`) so the UI can show/connect.
 #[tauri::command]
 async fn launch_profile(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: String,
     password: Option<String>,
@@ -1115,7 +1133,7 @@ async fn launch_profile(
         .as_ref()
         .ok_or("engine-runner sidecar is not available (failed to start)")?;
     // The desktop Launch button opens the browser headful; a headless toggle is future UI (DSK-13).
-    local_api::start_profile_via_sidecar(
+    let started = local_api::start_profile_via_sidecar(
         &state.db,
         &state.cipher,
         sidecar,
@@ -1125,7 +1143,10 @@ async fn launch_profile(
         false,
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // Tell the account this machine has the profile open (advisory; never blocks the launch).
+    presence::spawn_acquire(app, id);
+    Ok(started)
 }
 
 /// SEC-2: encrypt a UTF-8 profile blob payload with a raw 32-byte PCK (hex) into LBv1 base64.
@@ -1495,9 +1516,8 @@ fn publish_lobee_env(app: &tauri::AppHandle) {
     }
     // Dev: the source tree next to this crate, same fallback shape resolve_sidecar_js uses. Baked at
     // compile time, so in a packaged build it simply names a path that does not exist and is skipped.
-    candidates.push(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packages/lobee"),
-    );
+    candidates
+        .push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packages/lobee"));
 
     let resolved = lobee_dir_to_publish(inherited.as_deref(), candidates.clone());
     match resolved {
@@ -1546,6 +1566,7 @@ async fn stop_profile(
     let result = local_api::stop_profile_via_sidecar(&state.db, sidecar, &id)
         .await
         .map_err(|e| e.to_string())?;
+    presence::spawn_release(app.clone(), id.clone());
     // A stopped profile is the one moment every store is mutually consistent, which is why the backup
     // is triggered here and not on a timer. It runs behind the returned result: the Stop button must
     // not wait on a capture, let alone on an upload.
@@ -1892,7 +1913,11 @@ impl std::io::Write for SharedFileWriter {
 /// `LOBSTER_LOG` overrides the level (`trace`/`debug`/`info`/`warn`/`error`). The previous log is
 /// kept as `.1` so a crash-and-relaunch does not destroy the evidence of the crash.
 fn init_logging() -> Option<PathBuf> {
-    let level = match std::env::var("LOBSTER_LOG").unwrap_or_default().to_ascii_lowercase().as_str() {
+    let level = match std::env::var("LOBSTER_LOG")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "trace" => tracing::Level::TRACE,
         "debug" => tracing::Level::DEBUG,
         "warn" => tracing::Level::WARN,
@@ -1913,7 +1938,11 @@ fn init_logging() -> Option<PathBuf> {
                 let _ = std::fs::rename(&path, path.with_extension("log.1"));
             }
         }
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let writer = SharedFileWriter(std::sync::Arc::new(std::sync::Mutex::new(file)));
             // WINDOWS ONLY takes the file-only path. The no-console problem this exists for is
             // specific to the Windows GUI subsystem; on Linux and macOS the app is routinely run
@@ -2283,12 +2312,18 @@ pub fn run() {
                 cipher: cipher.clone(),
                 account_key: Arc::new(Mutex::new(None)),
                 sign_in: cloud_auth::SignInCoordinator::default(),
+                presence: presence::Presence::new(
+                    profiles_dir.parent().unwrap_or(profiles_dir.as_path()),
+                ),
             });
 
             // Bring this machine and the account into agreement, behind first paint. A second machine
             // has nothing to restore into until this runs: it is what creates the local rows for
             // profiles the account holds and this install has never seen.
             profile_sync::spawn_startup_reconcile(app.handle().clone());
+            // And keep the account's presence view current, so "running on <machine>" shows here
+            // for a profile another machine has open.
+            presence::spawn_presence_poll(app.handle().clone());
 
             // Start the local automation API on the same runtime, sharing the store + sidecar.
             if let Some(sidecar) = sidecar {

@@ -35,8 +35,32 @@ export interface Profile {
   sharing?: ProfileSharing;
   /** Store-owned soft-delete marker; active profile lists omit rows where this is set. */
   trashedAt?: string;
+  /**
+   * The account's latest sync blob version for this profile (server-side; 0 or absent = never
+   * synced from any machine). A launcher compares it with the version it last applied and pulls
+   * only when the account has moved on — without it, every clean profile's full blob was
+   * downloaded on every reconcile tick just to learn nothing had changed.
+   */
+  syncVersion?: number;
+  /** The machine running this profile right now, when another (or this) machine holds its lease. */
+  presence?: ProfilePresence;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Who is running a profile right now, as the account sees it: the machine that holds the profile's
+ * lease. Present on a listed profile only while a live (unexpired) lease exists.
+ */
+export interface ProfilePresence {
+  /** Stable per-install id of the holder. */
+  deviceId: string;
+  /** Human label of the holder (its hostname, by default). */
+  deviceLabel: string;
+  /** The lease dies at this instant unless the holder refreshes it. */
+  expiresAt: string;
+  /** True when the holder is THIS machine (filled in by the launcher, never by the server). */
+  mine?: boolean;
 }
 
 /** Fields accepted when creating a profile (server/store fills the rest). */

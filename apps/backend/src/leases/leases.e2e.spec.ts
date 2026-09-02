@@ -289,3 +289,33 @@ test('every lease route requires a token', async () => {
     assert.equal(res.status, 401, `${method.toUpperCase()} ${path} must require auth`);
   }
 });
+
+test('the presence view lists every live lease the caller can see, and nothing they cannot', async () => {
+  const mine = await userWithProfile('presence-a@gmail.com');
+  const theirs = await userWithProfile('presence-b@gmail.com');
+  await request(app.getHttpServer())
+    .post(`/profiles/${mine.profileId}/lease`)
+    .set('Authorization', `Bearer ${mine.token}`)
+    .send({ deviceId: 'dev-a', deviceLabel: 'Office PC' })
+    .expect(200);
+  await request(app.getHttpServer())
+    .post(`/profiles/${theirs.profileId}/lease`)
+    .set('Authorization', `Bearer ${theirs.token}`)
+    .send({ deviceId: 'dev-b', deviceLabel: 'Laptop' })
+    .expect(200);
+
+  const view = await request(app.getHttpServer())
+    .get('/leases')
+    .set('Authorization', `Bearer ${mine.token}`);
+  assert.equal(view.status, 200);
+  const rows = view.body.data as Array<{
+    profileId: string;
+    deviceLabel: string;
+    leaseId?: string;
+  }>;
+  assert.deepEqual(
+    rows.map((row) => [row.profileId, row.deviceLabel]),
+    [[mine.profileId, 'Office PC']],
+    "another team's lease is invisible in the view",
+  );
+});

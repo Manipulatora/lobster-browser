@@ -5,7 +5,7 @@ import { AuthModule } from '../auth/auth.module';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProfilesModule } from '../profiles/profiles.module';
 import { InMemoryLeasesRepository } from './in-memory-leases.repository';
-import { LeasesController } from './leases.controller';
+import { LeasesController, LeasesListController } from './leases.controller';
 import { LEASES_REPOSITORY } from './leases.repository';
 import { LeasesService } from './leases.service';
 import { PrismaLeasesRepository } from './prisma-leases.repository';
@@ -21,7 +21,7 @@ import { PrismaLeasesRepository } from './prisma-leases.repository';
  */
 @Module({
   imports: [AuthModule, ProfilesModule],
-  controllers: [LeasesController],
+  controllers: [LeasesController, LeasesListController],
   providers: [
     LeasesService,
     {

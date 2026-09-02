@@ -152,6 +152,10 @@ pub struct Profile {
     pub trashed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// The machine running this profile right now, as the account sees it (see `presence.rs`).
+    /// Never stored: merged into the list from the account's lease view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<crate::presence::ProfilePresence>,
     /// Columns whose stored value could not be decrypted or parsed on this machine.
     ///
     /// DEGRADED, NOT FATAL. A single unreadable cell used to fail the whole row mapping, which fails
@@ -399,6 +403,7 @@ fn row_to_profile(cipher: &SecretCipher, row: &Row) -> rusqlite::Result<Profile>
         trashed_at: row.get("trashed_at")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        presence: None,
         unreadable_secrets,
     })
 }

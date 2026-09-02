@@ -446,6 +446,17 @@ export function ProfileList({
                         <span>{osLabel(profile.os)}</span> · {formatDate(profile.updatedAt)}
                         {profile.passwordProtected ? ' · Locked' : ''}
                       </div>
+                      {/* The account's view: another machine holds this profile's lease, so it —
+                          and its proxy — are in use there right now. Running here shows on the
+                          ring; running elsewhere is only knowable from the account. */}
+                      {profile.presence && !profile.presence.mine ? (
+                        <div
+                          className="presence-chip"
+                          title={`Open on ${profile.presence.deviceLabel} — its proxy is in use there`}
+                        >
+                          Running on {profile.presence.deviceLabel}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </td>

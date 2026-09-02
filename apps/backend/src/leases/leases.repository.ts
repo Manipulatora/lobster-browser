@@ -51,6 +51,9 @@ export interface LeasesRepository {
   /** The current holder, or null when free. An expired lease reads as free. */
   current(profileId: string, now: Date): Promise<ProfileLease | null>;
 
+  /** Every live (unexpired) lease among the given profiles — the presence view of a profile list. */
+  listLive(profileIds: readonly string[], now: Date): Promise<ProfileLease[]>;
+
   /**
    * Housekeeping. An expired lease already reads as free and is already takeable, so this only
    * stops the table keeping one dead row per profile that was ever launched and never released.

@@ -56,6 +56,13 @@ export class InMemoryLeasesRepository implements LeasesRepository {
     return { ...existing };
   }
 
+  async listLive(profileIds: readonly string[], now: Date): Promise<ProfileLease[]> {
+    const wanted = new Set(profileIds);
+    return [...this.rows.values()]
+      .filter((lease) => wanted.has(lease.profileId) && new Date(lease.expiresAt) > now)
+      .map((lease) => ({ ...lease }));
+  }
+
   async purgeExpired(now: Date): Promise<void> {
     for (const [profileId, lease] of this.rows) {
       if (new Date(lease.expiresAt) <= now) this.rows.delete(profileId);

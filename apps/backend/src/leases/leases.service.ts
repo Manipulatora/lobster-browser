@@ -98,6 +98,19 @@ export class LeasesService {
   }
 
   /** Who holds it, or null when free. An expired lease reads as free. */
+  /**
+   * Every live lease on a profile the caller can see, across all their teams: the "running on
+   * <machine>" view a launcher shows beside each profile. One query, not one per profile.
+   */
+  async listVisible(userId: string): Promise<ProfileLease[]> {
+    const teams = await this.teams.findTeamsForUser(userId);
+    const ids: string[] = [];
+    for (const team of teams) {
+      for (const profile of await this.profiles.findAllByTeam(team.id)) ids.push(profile.id);
+    }
+    return this.repo.listLive(ids, new Date());
+  }
+
   async current(userId: string, profileId: string): Promise<ProfileLease | null> {
     await this.assertVisible(userId, profileId);
     return this.repo.current(profileId, new Date());

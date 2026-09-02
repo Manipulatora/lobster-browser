@@ -302,3 +302,36 @@ test('export projects only secret-free metadata and sanitizes legacy cookie rawT
   assert.equal(JSON.stringify(bundle).includes('private-password'), false);
   assert.equal(JSON.stringify(bundle).includes('private-cookie'), false);
 });
+
+test('the profile list carries the account blob version, so a launcher can skip pulls', async () => {
+  const repository = new InMemoryProfilesRepository();
+  const blobs = new InMemoryBlobStore();
+  const teams = {
+    getMembership: async () => ({ teamId: 'team-1', userId: 'user-1', role: 'admin' }),
+  } as unknown as TeamsRepository;
+  const audit = { record: async () => {} } as unknown as AuditService;
+  const service = new ProfilesService(repository, teams, blobs, audit, config);
+  const synced = await service.create(
+    'user-1',
+    { name: 'synced', engine: 'lobium', os: 'windows' },
+    'team-1',
+  );
+  const fresh = await service.create(
+    'user-1',
+    { name: 'fresh', engine: 'lobium', os: 'windows' },
+    'team-1',
+  );
+  await blobs.put(`team-1/${synced.id}`, Buffer.from('v1'), {
+    teamId: 'team-1',
+    profileId: synced.id,
+  });
+  await blobs.put(`team-1/${synced.id}`, Buffer.from('v2'), {
+    teamId: 'team-1',
+    profileId: synced.id,
+    expectedVersion: 1,
+  });
+  const listed = await service.findAll('user-1', 'team-1');
+  const byId = new Map(listed.map((p) => [p.id, p.syncVersion]));
+  assert.equal(byId.get(synced.id), 2, 'the latest version, not the count of writes');
+  assert.equal(byId.get(fresh.id), 0, 'never synced reads as 0, not undefined');
+});

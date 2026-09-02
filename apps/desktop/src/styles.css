@@ -753,6 +753,29 @@ select.lb-select:disabled {
 .profiles-table .table-subtitle {
   max-width: 100%;
 }
+
+/* The account's presence view: this profile is open on another machine right now. */
+.presence-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--color-warning-ink, #8a5a00);
+  background: var(--color-warning-soft, #fff4d6);
+  border: 1px solid var(--color-warning-line, #f0d59a);
+  white-space: nowrap;
+}
+.presence-chip::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
 .profile-title-text {
   min-width: 0;
 }

@@ -39,6 +39,17 @@ class LeaseIdDto {
  * Every route is scoped to a profile the caller's own teams own; a profile they cannot see reads as
  * missing. See {@link LeasesService.assertVisible}.
  */
+/** The presence view: every live lease on a profile the caller can see. */
+@Controller('leases')
+export class LeasesListController {
+  constructor(private readonly leases: LeasesService) {}
+
+  @Get()
+  async list(@CurrentUser() user: User): Promise<ApiResponse<ProfileLease[]>> {
+    return ok(await this.leases.listVisible(user.id));
+  }
+}
+
 @Controller('profiles/:id/lease')
 export class LeasesController {
   constructor(private readonly leases: LeasesService) {}

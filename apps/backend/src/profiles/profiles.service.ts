@@ -263,7 +263,17 @@ export class ProfilesService {
 
   async findAll(userId: string, teamId?: string): Promise<Profile[]> {
     const ownerTeamId = await resolveTeamId(this.teams, userId, teamId);
-    return this.profiles.findAllByTeam(ownerTeamId);
+    const profiles = await this.profiles.findAllByTeam(ownerTeamId);
+    // The version probe. Each row carries the account's latest blob version, so a launcher can tell
+    // whether it has anything to fetch WITHOUT fetching it. Before this, the only way to learn that
+    // nothing had changed was to download the whole blob — every clean profile, every reconcile
+    // tick, up to 25 MiB each. `head` is a directory listing (or an S3 HEAD), never a read.
+    return Promise.all(
+      profiles.map(async (profile) => ({
+        ...profile,
+        syncVersion: (await this.blobs.head(this.blobKey(ownerTeamId, profile.id)))?.version ?? 0,
+      })),
+    );
   }
 
   async findOne(userId: string, id: string, teamId?: string): Promise<Profile> {
