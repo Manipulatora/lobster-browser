@@ -36,8 +36,8 @@ import {
 } from './loop/execute.js';
 import type { DispatchContext } from './loop/execute.js';
 import {
-  actionIdentity,
   approvalContextFingerprint,
+  createRepeatDetector,
   isSettingsUiAction,
   sameNavigationAuthority,
   scopeWipeAllToNamedSite,
@@ -46,10 +46,12 @@ import {
 import {
   appendExtractedEvidence,
   attachImageToLastTurn,
+  budgetNudge,
+  createDataset,
+  createObservationRenderer,
   firstLine,
   observationFingerprint,
   pruneObservations,
-  renderDataset,
   runLedger,
 } from './loop/observe.js';
 import type { RunJournalStore } from './journal/index.js';
@@ -87,12 +89,10 @@ import {
   situationTransitions,
 } from './perception/situation.js';
 import type { SituationSignal } from './perception/situation.js';
-import { renderObservation, sameElements } from './perception/serialize.js';
 import {
   buildAskPrompt,
   buildStepPrompt,
   buildSystemPrompt,
-  VERBATIM_OBSERVATIONS,
   buildVolatileTail,
   userMessageBlock,
 } from './prompt.js';
@@ -432,8 +432,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       config,
       toolChoiceIsAdvisory: usesAutomaticToolChoice(llmConfig.provider, llmConfig.model),
     });
-    let previous: RawPerception | null = null;
-    let stepsSinceFullSnapshot = 0;
+    const observationRenderer = createObservationRenderer();
     /** This run's assistant/tool exchange — the WHOLE conversation the model sees, built per step. */
     const stepMessages: LlmMessage[] = [];
     // Trusted user turns (steering, answers) waiting to enter the conversation after this step's
@@ -446,16 +445,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     /** The call id the NEXT observation answers, so the pairing providers require stays intact. */
     let lastToolCallId: string | undefined;
     let readEvidence: string[] = [];
-    /** Rows the run has collected, in order, deduplicated by their full content. */
-    const dataset: Array<Record<string, string>> = [];
-    const datasetSeen = new Set<string>();
-    let datasetColumns: string[] = [];
+    const dataset = createDataset();
     let pendingImage: string | undefined;
-    let lastFingerprint = '';
-    let repeatCount = 0;
-    /** Same action AND an unchanged page: the genuine no-progress signal. */
-    let lastStateFingerprint = '';
-    let stuckCount = 0;
+    const repeats = createRepeatDetector();
     let recovery = false;
     let invalidActions = 0;
     /** True while a token-truncated response is being retried, so the retry cannot itself loop. */
@@ -540,20 +532,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           `Current page blocked by run policy: ${currentPageDecision.reason}`,
         );
       }
-      // A summarised observation is only safe while a FULL one is still in the verbatim window.
-      // Older tool results are pruned to their header line, so after enough consecutive unchanged
-      // steps — collect, wait, a blocked action — every surviving result would say only
-      // "unchanged" and the model would be acting on element indices it can no longer see anywhere.
-      // That is exactly how hallucinated indices and "no element [n]" loops start.
-      const unchanged =
-        previous !== null &&
-        sameElements(previous, raw) &&
-        stepsSinceFullSnapshot < VERBATIM_OBSERVATIONS - 1;
-      const rendered = unchanged
-        ? `url: ${raw.url} | ${JSON.stringify(raw.title)}\n(interactive elements unchanged from the previous step)`
-        : renderObservation(raw);
-      stepsSinceFullSnapshot = unchanged ? stepsSinceFullSnapshot + 1 : 0;
-      previous = raw;
+      const rendered = observationRenderer.render(raw);
       emit({
         type: 'step.observation',
         ...base,
@@ -588,18 +567,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         nudges.push(
           'RECOVERY: the last behavior repeated. Re-read the page and choose a materially different action.',
         );
-      // Escalate rather than repeat. The same "wrap up" line from 75% to 100% carried no new
-      // information after the first time, so the last quarter of a run read identically whether five
-      // steps remained or one.
-      if (step >= Math.ceil(config.maxSteps * 0.95)) {
-        nudges.push(
-          `BUDGET: step ${step} of ${config.maxSteps} — this is your LAST chance to answer. Call \`done\` NOW with whatever you have, and say plainly what is missing.`,
-        );
-      } else if (step >= Math.ceil(config.maxSteps * 0.75)) {
-        nudges.push(
-          `BUDGET: step ${step} of ${config.maxSteps}. Wrap up — consolidate what you already have and call \`done\`; do not start new exploration.`,
-        );
-      }
+      const budget = budgetNudge(step, config.maxSteps);
+      if (budget) nudges.push(budget);
       // Situation transitions. The snapshot's `page signals` line says what is on the page now; what
       // the model needs told is that it CHANGED — a login wall that was not there a step ago, a
       // CAPTCHA that has gone — compared against the page the previous iteration acted on. The
@@ -1103,22 +1072,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           'You just took a high-risk composition action. Verify from the next snapshot that it did what the task asked — and do not repeat it.';
       }
 
-      // Two different questions, previously answered by one counter keyed on URL + action.
-      //
-      // "Stuck" is the same action against a page that did not move at all — the real no-progress
-      // signal, and cheap to stop early. "Repeating" is the same action while the page KEEPS
-      // CHANGING, which is what reading an infinite list, polling for late-arriving content, or
-      // paging through an SPA that never changes its URL all look like. Killing the second case at
-      // the fifth attempt made an explicitly supported scenario impossible: five scrolls down a feed
-      // ended the run as a loop even though every scroll had appended new rows. It still cannot go on
-      // forever — a page with a ticking clock would otherwise never look stuck — so it keeps a much
-      // looser bound of its own, under the run's step and token ceilings.
-      const actionFingerprint = `${raw.url}|${actionIdentity(safeAction)}`;
-      const stateFingerprint = `${observationFingerprint(raw)}|${actionIdentity(safeAction)}`;
-      stuckCount = stateFingerprint === lastStateFingerprint ? stuckCount + 1 : 1;
-      repeatCount = actionFingerprint === lastFingerprint ? repeatCount + 1 : 1;
-      lastStateFingerprint = stateFingerprint;
-      lastFingerprint = actionFingerprint;
+      // Stuck and repeating are two different questions (see `createRepeatDetector`): only the
+      // first is a genuine no-progress signal, so it ends the run much sooner.
+      const { stuckCount, repeatCount } = repeats.note(raw, safeAction);
       if (stuckCount >= 5 || repeatCount >= 12) {
         return await finish(
           'error',
@@ -1146,10 +1102,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         // from memory — which is where transcription errors and dropped pages came from.
         const summary = outcome.terminal.summary || outcome.outcome;
         return outcome.terminal.success
-          ? await finish(
-              'done',
-              dataset.length ? `${summary}\n\n${renderDataset(dataset, datasetColumns)}` : summary,
-            )
+          ? await finish('done', dataset.size ? `${summary}\n\n${dataset.render()}` : summary)
           : await finish('error', '', summary);
       }
       const popupNote = adoptedPopupNote(driver);
@@ -1170,24 +1123,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         );
       }
       if (outcome.collected) {
-        if (outcome.collected.columns?.length) datasetColumns = outcome.collected.columns;
-        let added = 0;
-        for (const row of outcome.collected.rows) {
-          if (dataset.length >= 5_000) break;
-          // Dedupe on the whole row: re-visiting page 1 after paginating back is normal, and silently
-          // doubling every row is worse than dropping a genuine duplicate.
-          const key = JSON.stringify(row);
-          if (datasetSeen.has(key)) continue;
-          datasetSeen.add(key);
-          dataset.push(row);
-          added += 1;
-          for (const column of Object.keys(row)) {
-            if (!datasetColumns.includes(column)) datasetColumns.push(column);
-          }
-        }
-        const skipped = outcome.collected.rows.length - added;
+        const { added, skipped } = dataset.merge(outcome.collected);
         history[history.length - 1] =
-          `${step}. collected ${added} new row(s)${skipped > 0 ? `, ${skipped} duplicate(s) ignored` : ''} — ${dataset.length} total so far`;
+          `${step}. collected ${added} new row(s)${skipped > 0 ? `, ${skipped} duplicate(s) ignored` : ''} — ${dataset.size} total so far`;
       }
       // Only a read that produced something closes this view. An extract can legitimately fail — the
       // page was still loading, or its text renders in a cross-origin frame — and marking the view

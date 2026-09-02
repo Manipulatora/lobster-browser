@@ -8,6 +8,7 @@ import type { AgentAction } from '@lobster/shared-types';
 import { urlIdentity } from '../security.js';
 import { siteNamedIn } from '../site-families.js';
 import type { RawPerception } from '../types.js';
+import { observationFingerprint } from './observe.js';
 
 /**
  * A wipe-all is site-scoped BY CONSTRUCTION. "Remove all cookies of outlook.com" reads, to a model,
@@ -30,7 +31,7 @@ export function scopeWipeAllToNamedSite(action: AgentAction, task: string): Agen
 }
 
 /** The action minus the model's memo: a fresh `plan` on the same gesture must not read as a new gesture. */
-export function actionIdentity(action: AgentAction): string {
+function actionIdentity(action: AgentAction): string {
   return JSON.stringify({ ...action, plan: undefined });
 }
 
@@ -141,4 +142,43 @@ export function approvalContextFingerprint(action: AgentAction, raw: RawPercepti
       element.h,
     ]),
   ]);
+}
+
+/**
+ * Two different questions, previously answered by one counter keyed on URL + action.
+ *
+ * "Stuck" is the same action against a page that did not move at all — the real no-progress
+ * signal, and cheap to stop early. "Repeating" is the same action while the page KEEPS
+ * CHANGING, which is what reading an infinite list, polling for late-arriving content, or
+ * paging through an SPA that never changes its URL all look like. Killing the second case at
+ * the fifth attempt made an explicitly supported scenario impossible: five scrolls down a feed
+ * ended the run as a loop even though every scroll had appended new rows. It still cannot go on
+ * forever — a page with a ticking clock would otherwise never look stuck — so it keeps a much
+ * looser bound of its own, under the run's step and token ceilings.
+ */
+export interface RepeatDetector {
+  /** Count this step's gesture; each counter restarts at 1 when its fingerprint changes. */
+  note: (
+    raw: RawPerception,
+    safeAction: AgentAction,
+  ) => { stuckCount: number; repeatCount: number };
+}
+
+export function createRepeatDetector(): RepeatDetector {
+  let lastFingerprint = '';
+  let repeatCount = 0;
+  /** Same action AND an unchanged page: the genuine no-progress signal. */
+  let lastStateFingerprint = '';
+  let stuckCount = 0;
+  return {
+    note(raw, safeAction) {
+      const actionFingerprint = `${raw.url}|${actionIdentity(safeAction)}`;
+      const stateFingerprint = `${observationFingerprint(raw)}|${actionIdentity(safeAction)}`;
+      stuckCount = stateFingerprint === lastStateFingerprint ? stuckCount + 1 : 1;
+      repeatCount = actionFingerprint === lastFingerprint ? repeatCount + 1 : 1;
+      lastStateFingerprint = stateFingerprint;
+      lastFingerprint = actionFingerprint;
+      return { stuckCount, repeatCount };
+    },
+  };
 }

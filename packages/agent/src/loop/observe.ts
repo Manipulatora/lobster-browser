@@ -3,7 +3,9 @@
  * ledgers, the pruning that keeps the run's own conversation affordable, and the dataset the run
  * collects. Pure text/structure helpers — nothing here touches the driver or the provider.
  */
+import type { ExecOutcome } from '../executor.js';
 import type { LlmMessage } from '../llm/types.js';
+import { renderObservation, sameElements } from '../perception/serialize.js';
 import { EVIDENCE_PREAMBLE, PROGRESS_PREAMBLE, VERBATIM_OBSERVATIONS } from '../prompt.js';
 import { redactUrl, urlIdentity } from '../security.js';
 import type { RawPerception } from '../types.js';
@@ -69,7 +71,7 @@ export function appendExtractedEvidence(
  * user can copy straight into a spreadsheet. Falls back to listing rows when there are too many
  * columns for a table to stay readable.
  */
-export function renderDataset(
+function renderDataset(
   rows: ReadonlyArray<Record<string, string>>,
   columns: readonly string[],
 ): string {
@@ -225,4 +227,93 @@ export function attachImageToLastTurn(
     images: [{ mediaType: 'image/png', data: image }],
   });
   return out;
+}
+
+/**
+ * Renders each step's observation for the model, summarising a page whose interactive elements have
+ * not changed instead of re-sending it.
+ *
+ * A summarised observation is only safe while a FULL one is still in the verbatim window. Older
+ * tool results are pruned to their header line, so after enough consecutive unchanged steps —
+ * collect, wait, a blocked action — every surviving result would say only "unchanged" and the model
+ * would be acting on element indices it can no longer see anywhere. That is exactly how
+ * hallucinated indices and "no element [n]" loops start.
+ */
+export interface ObservationRenderer {
+  render: (raw: RawPerception) => string;
+}
+
+export function createObservationRenderer(): ObservationRenderer {
+  let previous: RawPerception | null = null;
+  let stepsSinceFullSnapshot = 0;
+  return {
+    render(raw) {
+      const unchanged =
+        previous !== null &&
+        sameElements(previous, raw) &&
+        stepsSinceFullSnapshot < VERBATIM_OBSERVATIONS - 1;
+      const rendered = unchanged
+        ? `url: ${raw.url} | ${JSON.stringify(raw.title)}\n(interactive elements unchanged from the previous step)`
+        : renderObservation(raw);
+      stepsSinceFullSnapshot = unchanged ? stepsSinceFullSnapshot + 1 : 0;
+      previous = raw;
+      return rendered;
+    },
+  };
+}
+
+/**
+ * The step-budget nudge, or undefined while there is budget to spare. Escalate rather than repeat:
+ * the same "wrap up" line from 75% to 100% carried no new information after the first time, so the
+ * last quarter of a run read identically whether five steps remained or one.
+ */
+export function budgetNudge(step: number, maxSteps: number): string | undefined {
+  if (step >= Math.ceil(maxSteps * 0.95)) {
+    return `BUDGET: step ${step} of ${maxSteps} — this is your LAST chance to answer. Call \`done\` NOW with whatever you have, and say plainly what is missing.`;
+  }
+  if (step >= Math.ceil(maxSteps * 0.75)) {
+    return `BUDGET: step ${step} of ${maxSteps}. Wrap up — consolidate what you already have and call \`done\`; do not start new exploration.`;
+  }
+  return undefined;
+}
+
+/** Rows the run has collected, in order, deduplicated by their full content. */
+export interface RunDataset {
+  readonly size: number;
+  /** Fold a `collect` result in; reports how many rows were new and how many were duplicates. */
+  merge: (collected: NonNullable<ExecOutcome['collected']>) => { added: number; skipped: number };
+  /** The rows as a Markdown table (see `renderDataset`). */
+  render: () => string;
+}
+
+export function createDataset(): RunDataset {
+  const rows: Array<Record<string, string>> = [];
+  const seen = new Set<string>();
+  let columns: string[] = [];
+  return {
+    get size() {
+      return rows.length;
+    },
+    merge(collected) {
+      if (collected.columns?.length) columns = collected.columns;
+      let added = 0;
+      for (const row of collected.rows) {
+        if (rows.length >= 5_000) break;
+        // Dedupe on the whole row: re-visiting page 1 after paginating back is normal, and silently
+        // doubling every row is worse than dropping a genuine duplicate.
+        const key = JSON.stringify(row);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push(row);
+        added += 1;
+        for (const column of Object.keys(row)) {
+          if (!columns.includes(column)) columns.push(column);
+        }
+      }
+      return { added, skipped: collected.rows.length - added };
+    },
+    render() {
+      return renderDataset(rows, columns);
+    },
+  };
 }
