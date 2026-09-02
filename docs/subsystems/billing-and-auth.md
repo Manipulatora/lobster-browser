@@ -251,6 +251,32 @@ the API is bearer-token based and the launcher needs the same token over the sam
 auth mechanisms in one backend is the worse trade. The mitigation that matters is keeping the origin
 free of injection.
 
+### Sessions, sign-out and password recovery
+
+A token is valid until it expires — a week for the web, a year for the launcher — so ending a
+session early needs server-side state. That state is one integer per account, `users.sessionVersion`:
+every session token carries the version it was minted under (`sv` in the claims), and `JwtAuthGuard`
+refuses any other (tokens from before the claim existed count as version 0). Three things bump it:
+
+| Route | Bumps because |
+| --- | --- |
+| `POST /auth/logout-all` | Sign out everywhere: every token, web and launcher alike, dies at once |
+| `POST /auth/password` (current + new password) | The old password's sessions must not outlive it; the response carries a replacement token for the screen making the change |
+| `POST /auth/password/reset` (email + mailed code + new password) | A reset is the answer to "someone else may have my password", and their sessions go with it |
+
+The reset code is requested through `POST /auth/password/forgot`, which answers `{ sent: true }`
+whether or not the address has an account — and does not await the mail, so the response time does
+not say what the body refuses to. The password paths bump the version in the same `UPDATE` that
+writes the new hash, so there is no instant at which the old password is gone but a token minted
+under it still works. Agent tokens are not versioned: they live thirty minutes and cannot open the
+account API.
+
+A sign-up in flight belongs to whoever started it. A second `POST /auth/register` for an address
+with a live pending row changes nothing: it gets the same acknowledgement, the mailbox owner gets a
+"a sign-up is already in progress" notice, and only the pending password (a retry by the same
+person) rotates the code. Before this, the second registration replaced the first one's password
+hash, and the mailbox owner then proved a code for credentials that were not theirs.
+
 ### Desktop launcher — loopback with PKCE
 
 The launcher never handles a password. Instead (RFC 8252):
@@ -330,7 +356,15 @@ The web app resolves its API origin from the page origin (`api.<host>`), falling
   real account, and guessing at a schema is what produced the `fixed_rate` bug.
 - **Network fee figures are a point-in-time measurement** (2026-08-14) and are not refreshed
   automatically.
-- **No password-reset backend.** `/auth/forgot-password` is still a UI-only shell.
+- **The web's `/auth/forgot-password` page does not call the backend yet.** `POST
+  /auth/password/forgot` and `POST /auth/password/reset` exist and are tested; the page still stops
+  after validation.
+- **A sign-up code is not bound to the person who chose the password.** `verify-email` takes only
+  the email and the code, so someone who pre-registers an address and gets its owner to enter the
+  resulting code completes the pre-registered credentials (the owner is warned by mail when their
+  own registration collides, which is the most the server can do alone). Closing it needs the web
+  client to send the password alongside the code — it holds it for the length of the dialog — and
+  the server to check it against the pending hash.
 - **No admin surface** for refunds or manual Credit adjustments. The `refund` and `adjustment`
   ledger kinds exist and the repository supports them, but nothing exposes them yet.
 - **The IPN endpoint uses the global 50 MB body limit.** It is rate-limited and behind whatever

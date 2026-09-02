@@ -10,12 +10,12 @@ import { JwtService } from '@nestjs/jwt';
 // object instead — the service's namespace delegates to it, so a spy here is observed by the service.
 const bcryptModule = require('bcryptjs') as typeof import('bcryptjs');
 
-import type { MailService } from '../mail/mail.service';
 import { AuthService, type JwtPayload } from './auth.service';
 import { DEV_JWT_SECRET } from './jwt-secret';
 import { InMemoryUsersRepository } from './in-memory-users.repository';
 import { LOGIN_ATTEMPTS_BEFORE_BACKOFF, LOGIN_BACKOFF_MAX_MS } from './users.repository';
 import { InMemoryTeamsRepository } from '../teams/in-memory-teams.repository';
+import { createMailCapture, type MailCapture } from '../testing/e2e-auth';
 
 /**
  * Addresses must be at an accepted provider now, so the fixtures are @gmail.com rather than
@@ -26,33 +26,12 @@ const EMAIL = 'alice@gmail.com';
 const PASSWORD = 'password123';
 const NAME = 'Alice Example';
 
-/** Captures the code that was mailed, which is the only place a test can legitimately read it. */
-interface MailSpy extends MailService {
-  lastCode(): string;
-  codes: string[];
-}
-
-function stubMail(): MailSpy {
-  const codes: string[] = [];
-  return {
-    codes,
-    lastCode: () => codes[codes.length - 1] ?? '',
-    isConfigured: () => true,
-    send: async () => true,
-    sendVerification: async (_to: string, code: string) => {
-      codes.push(code);
-      return true;
-    },
-    sendDepositReceipt: async () => true,
-  } as unknown as MailSpy;
-}
-
 function makeService(options: { failFirstTeamCommit?: boolean } = {}): {
   service: AuthService;
   jwt: JwtService;
   teams: InMemoryTeamsRepository;
   users: InMemoryUsersRepository;
-  mail: MailSpy;
+  mail: MailCapture;
   preparedOwnerIds: string[];
 } {
   const teams = new InMemoryTeamsRepository();
@@ -74,7 +53,8 @@ function makeService(options: { failFirstTeamCommit?: boolean } = {}): {
   });
   const jwt = new JwtService({ secret: DEV_JWT_SECRET });
   const config = { get: () => undefined } as unknown as ConfigService;
-  const mail = stubMail();
+  // The capturing mailer the e2e specs share: a mailed code is readable only where it was "sent".
+  const mail = createMailCapture();
   return {
     service: new AuthService(users, jwt, config, mail),
     jwt,
@@ -118,9 +98,10 @@ test('an abandoned sign-up leaves nothing behind', async () => {
 
   // The user closes the dialog and never returns.
   assert.equal(await users.findByEmail(EMAIL), null);
-  // ...and the address is still free for its real owner.
-  await service.register({ email: EMAIL, password: 'another-password', fullName: 'Someone Else' });
-  assert.equal(await users.findByEmail(EMAIL), null);
+  // ...and once its window has closed, the sweep leaves no trace of it either. (That the address
+  // is then free for whoever wants it is "an expired sign-up is nobody's", below.)
+  await users.purgeExpiredPendingRegistrations(new Date(Date.now() + 16 * 60 * 1000));
+  assert.equal(await users.findPendingRegistration(EMAIL), null);
 });
 
 test('the emailed code creates the account, the personal team, and a session', async () => {
@@ -453,10 +434,258 @@ test('a desktop token outlives a web token', async () => {
   const s = makeService();
   const { id } = await signUp(s);
 
-  const web = s.jwt.decode(s.service.issueTokenFor(id, EMAIL)) as { exp: number };
-  const desktop = s.jwt.decode(s.service.issueTokenFor(id, EMAIL, 'desktop')) as { exp: number };
+  const identity = { id, email: EMAIL, sessionVersion: 0 };
+  const web = s.jwt.decode(s.service.issueTokenFor(identity)) as { exp: number };
+  const desktop = s.jwt.decode(s.service.issueTokenFor(identity, 'desktop')) as { exp: number };
 
   assert.ok(desktop.exp > web.exp, 'the desktop token must expire later than the web token');
   const days = (desktop.exp - Math.floor(Date.now() / 1000)) / 86400;
   assert.ok(days > 300, `expected a long-lived desktop token, got ~${Math.round(days)} days`);
+});
+
+// --- A pending sign-up belongs to whoever started it ------------------------------
+
+test('a second registration while a sign-up is live cannot replace its credentials', async () => {
+  // THE TAKEOVER THIS CLOSES. The pending row used to be replaced wholesale, so whoever posted
+  // last chose the password — and the mailbox owner, entering the only code they had, proved it.
+  const s = makeService();
+  await s.service.register({ email: EMAIL, password: PASSWORD, fullName: NAME });
+  const ownerCode = s.mail.lastCode();
+
+  // Someone else, inside the fifteen-minute window, with their own password.
+  const result = await s.service.register({
+    email: EMAIL,
+    password: 'impostor-pass1',
+    fullName: 'Impostor',
+  });
+  assert.equal(result.pending, true, 'the acknowledgement is the same as for a fresh sign-up');
+  assert.equal(s.mail.codes.length, 1, 'no code is mailed for a sign-up that changed nothing');
+  assert.deepEqual(s.mail.alreadyPendingNotices, [EMAIL], 'the mailbox owner is told instead');
+
+  const created = await s.service.completeRegistration(EMAIL, ownerCode);
+  assert.equal(
+    created.user.displayName,
+    NAME,
+    "the account carries the first registrant's details",
+  );
+  assert.equal(
+    (await s.service.login({ email: EMAIL, password: PASSWORD })).user.id,
+    created.user.id,
+  );
+  await assert.rejects(
+    () => s.service.login({ email: EMAIL, password: 'impostor-pass1' }),
+    UnauthorizedException,
+  );
+});
+
+test('re-registering with the pending password is a re-send that keeps the newer details', async () => {
+  // A closed tab, a mail that never came, a name typo: the same person submits the form again.
+  // Knowing the pending password is what proves it is the same person.
+  const s = makeService();
+  await s.service.register({ email: EMAIL, password: PASSWORD, fullName: 'Alise Example' });
+  const first = s.mail.lastCode();
+
+  await s.service.register({
+    email: EMAIL,
+    password: PASSWORD,
+    fullName: NAME,
+    company: 'Example Ltd',
+  });
+  const second = s.mail.lastCode();
+  assert.notEqual(second, first, 'a retry gets a fresh code');
+  assert.equal(s.mail.alreadyPendingNotices.length, 0, 'nobody is warned about themselves');
+
+  await assert.rejects(
+    () => s.service.completeRegistration(EMAIL, first),
+    /incorrect or has expired/,
+  );
+  const created = await s.service.completeRegistration(EMAIL, second);
+  assert.equal(created.user.displayName, NAME);
+  assert.equal(created.user.company, 'Example Ltd');
+});
+
+test("an expired sign-up is nobody's: a new registration claims the address outright", async () => {
+  const s = makeService();
+  // A sign-up abandoned long enough ago that its window has closed.
+  await s.users.upsertPendingRegistration({
+    email: EMAIL,
+    passwordHash: 'stale-hash',
+    fullName: 'Abandoned',
+    codeHash: 'stale-code',
+    expiresAt: new Date(Date.now() - 1),
+  });
+
+  await s.service.register({ email: EMAIL, password: PASSWORD, fullName: NAME });
+  assert.equal(s.mail.codes.length, 1, 'the new sign-up gets its own code');
+  assert.equal(s.mail.alreadyPendingNotices.length, 0, 'a dead row is not "in progress"');
+  const created = await s.service.completeRegistration(EMAIL, s.mail.lastCode());
+  assert.equal(created.user.displayName, NAME);
+});
+
+test('re-sending does not revive an expired sign-up', async () => {
+  // Otherwise whoever asks — not necessarily whoever registered — extends a dead row's
+  // credentials by fifteen minutes, indefinitely.
+  const s = makeService();
+  await s.users.upsertPendingRegistration({
+    email: EMAIL,
+    passwordHash: 'stale-hash',
+    fullName: 'Abandoned',
+    codeHash: 'stale-code',
+    expiresAt: new Date(Date.now() - 1),
+  });
+
+  await s.service.resendRegistrationCode(EMAIL);
+  assert.equal(s.mail.codes.length, 0);
+});
+
+// --- Sessions and revocation ----------------------------------------------------
+
+/** The claims of a token, as the guard would see them after signature verification. */
+function claimsOf(s: ReturnType<typeof makeService>, token: string): JwtPayload {
+  return s.jwt.verify<JwtPayload>(token, { secret: DEV_JWT_SECRET });
+}
+
+test('a token minted before sign-out-everywhere is refused afterwards; a newer one is not', async () => {
+  const s = makeService();
+  const { id, token } = await signUp(s);
+  assert.equal((await s.service.authenticate(claimsOf(s, token))).id, id);
+
+  await s.service.logoutAll(id);
+
+  await assert.rejects(() => s.service.authenticate(claimsOf(s, token)), UnauthorizedException);
+  const fresh = (await s.service.login({ email: EMAIL, password: PASSWORD })).token;
+  assert.equal((await s.service.authenticate(claimsOf(s, fresh))).id, id);
+});
+
+test('a desktop token dies with the rest on sign-out-everywhere', async () => {
+  // The year-long token is the one that most needs revoking; the same version check covers it.
+  const s = makeService();
+  const { id } = await signUp(s);
+  const desktop = claimsOf(s, (await s.service.issueSessionFor(id, 'desktop')).token);
+  assert.equal(desktop.aud, 'desktop');
+  assert.equal((await s.service.authenticate(desktop)).id, id);
+
+  await s.service.logoutAll(id);
+  await assert.rejects(() => s.service.authenticate(desktop), UnauthorizedException);
+});
+
+test('a token from before revocation existed counts as version zero', async () => {
+  // Tokens already in the wild carry no `sv`. They keep working until the account is first
+  // revoked, and then die like any other — rather than forming a class that can never be signed out.
+  const s = makeService();
+  const { id } = await signUp(s);
+  const legacy: JwtPayload = { sub: id, email: EMAIL, aud: 'desktop' };
+  assert.equal((await s.service.authenticate(legacy)).id, id);
+
+  await s.service.logoutAll(id);
+  await assert.rejects(() => s.service.authenticate(legacy), UnauthorizedException);
+});
+
+test('changing the password needs the current one, and a wrong guess counts against the backoff', async () => {
+  const s = makeService();
+  const { id, token } = await signUp(s);
+
+  await assert.rejects(
+    () =>
+      s.service.changePassword({
+        userId: id,
+        currentPassword: 'not-it',
+        newPassword: 'brand-new-pass1',
+        audience: 'web',
+      }),
+    BadRequestException,
+  );
+  assert.equal(
+    (await s.users.findById(id))?.failedLoginAttempts,
+    1,
+    'the same secret guessed through another door counts the same',
+  );
+  // Nothing changed: the session and the password are both still the old ones.
+  assert.equal((await s.service.authenticate(claimsOf(s, token))).id, id);
+  assert.equal((await s.service.login({ email: EMAIL, password: PASSWORD })).user.id, id);
+
+  const changed = await s.service.changePassword({
+    userId: id,
+    currentPassword: PASSWORD,
+    newPassword: 'brand-new-pass1',
+    audience: 'desktop',
+  });
+  await assert.rejects(() => s.service.authenticate(claimsOf(s, token)), UnauthorizedException);
+  const replacement = claimsOf(s, changed.token);
+  assert.equal((await s.service.authenticate(replacement)).id, id);
+  assert.equal(replacement.aud, 'desktop', 'the replacement is minted for the audience that asked');
+  await assert.rejects(
+    () => s.service.login({ email: EMAIL, password: PASSWORD }),
+    UnauthorizedException,
+  );
+  assert.equal((await s.service.login({ email: EMAIL, password: 'brand-new-pass1' })).user.id, id);
+});
+
+test('a password reset needs the mailed code, is single-use, and ends every session', async () => {
+  const s = makeService();
+  const { id, token } = await signUp(s);
+
+  await s.service.requestPasswordReset('nobody@gmail.com');
+  assert.equal(s.mail.codes.length, 1, 'an unknown address gets no mail — and no error');
+
+  await s.service.requestPasswordReset(EMAIL);
+  assert.equal(s.mail.codes.length, 2);
+  const code = s.mail.lastCode();
+  const wrongCode = code === '000000' ? '000001' : '000000';
+
+  await assert.rejects(
+    () => s.service.resetPassword(EMAIL, wrongCode, 'reset-pass1'),
+    /incorrect or has expired/,
+  );
+  await assert.rejects(
+    () => s.service.resetPassword('nobody@gmail.com', code, 'reset-pass1'),
+    /incorrect or has expired/,
+  );
+  assert.equal((await s.service.authenticate(claimsOf(s, token))).id, id, 'a miss changes nothing');
+
+  const reset = await s.service.resetPassword(EMAIL, code, 'reset-pass1');
+  assert.equal(reset.user.id, id);
+  assert.equal((await s.service.authenticate(claimsOf(s, reset.token))).id, id);
+  await assert.rejects(() => s.service.authenticate(claimsOf(s, token)), UnauthorizedException);
+  await assert.rejects(
+    () => s.service.login({ email: EMAIL, password: PASSWORD }),
+    UnauthorizedException,
+  );
+  assert.equal((await s.service.login({ email: EMAIL, password: 'reset-pass1' })).user.id, id);
+  await assert.rejects(
+    () => s.service.resetPassword(EMAIL, code, 'again-pass1'),
+    /incorrect or has expired/,
+  );
+});
+
+test('a reset code dies after too many wrong guesses', async () => {
+  const s = makeService();
+  await signUp(s);
+  await s.service.requestPasswordReset(EMAIL);
+  const code = s.mail.lastCode();
+
+  for (let i = 0; i < 5; i += 1) {
+    await assert.rejects(
+      () => s.service.resetPassword(EMAIL, 'zzzzzz', 'reset-pass1'),
+      /incorrect or has expired/,
+    );
+  }
+  await assert.rejects(
+    () => s.service.resetPassword(EMAIL, code, 'reset-pass1'),
+    /incorrect or has expired/,
+  );
+
+  // A fresh request restores the budget: the cap belongs to the code, not to the account.
+  await s.service.requestPasswordReset(EMAIL);
+  const recovered = await s.service.resetPassword(EMAIL, s.mail.lastCode(), 'reset-pass1');
+  assert.equal(recovered.user.email, EMAIL);
+});
+
+test('the public user carries no server-only state', async () => {
+  const s = makeService();
+  const { id } = await signUp(s);
+  const user = await s.service.authenticate({ sub: id, email: EMAIL, sv: 0 });
+  for (const field of ['passwordHash', 'sessionVersion', 'failedLoginAttempts', 'lockedUntil']) {
+    assert.ok(!(field in user), `${field} must not cross the wire`);
+  }
 });

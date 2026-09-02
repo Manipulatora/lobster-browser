@@ -13,6 +13,13 @@ export interface StoredUser extends User {
   failedLoginAttempts?: number;
   /** ISO instant before which sign-in is refused regardless of the password. */
   lockedUntil?: string;
+  /**
+   * Which generation of sessions is current. Every session token carries the version it was minted
+   * under (`JwtPayload.sv`) and the guard refuses any other — so bumping this is how "sign out
+   * everywhere", a password change and a password reset end tokens that are otherwise valid for up
+   * to a year. See `AuthService.authenticate`.
+   */
+  sessionVersion: number;
 }
 
 /** Wrong passwords tolerated at full speed before sign-in starts backing off. */
@@ -65,12 +72,14 @@ export interface PendingRegistrationInput {
   expiresAt: Date;
 }
 
-/** A pending sign-up, as read back for completion or for re-sending its code. */
+/** A pending sign-up, as read back for completion, for re-sending its code, or for a retry. */
 export interface StoredPendingRegistration {
   email: string;
   passwordHash: string;
   fullName: string;
   company?: string;
+  /** Returned even when past, so the caller can tell a live sign-up from a dead one. */
+  expiresAt: Date;
 }
 
 /** Result of atomically turning a proven pending sign-up into its initial account graph. */
@@ -126,14 +135,34 @@ export interface UsersRepository {
   // --- Pending sign-ups ------------------------------------------------------
 
   /**
-   * Record (or replace) a sign-up awaiting its code.
+   * Install a sign-up for an address that has no LIVE one, atomically.
    *
-   * Replaces on conflict, so re-registering the same address supersedes the previous code instead
-   * of leaving several valid at once, and resets the attempt counter for the new code.
+   * Returns false, and changes nothing, when an unexpired pending row already holds the address —
+   * whoever wrote it. That refusal is the fix for a takeover: with an unconditional replace, a
+   * second registration for an address mid-sign-up swapped in the second caller's password hash,
+   * and the mailbox owner then proved the code for credentials that were not theirs. A dead row
+   * (past `expiresAt`) is nobody's and is replaced.
+   *
+   * Implementations must make the claim one conflict-arbitrated write, not a read followed by a
+   * write: two callers racing for a free address must not both believe they won.
+   */
+  claimPendingRegistration(input: PendingRegistrationInput, now: Date): Promise<boolean>;
+
+  /**
+   * Replace a pending sign-up outright: new code, fresh expiry, attempt counter back to zero.
+   *
+   * UNCONDITIONAL, so it is for callers that have already established a right to the row — a
+   * re-send, or a retry that proved the pending password. The sign-up path itself must use
+   * {@link claimPendingRegistration}; replacing from there is exactly the overwrite it exists to
+   * prevent. Resetting the attempts is deliberate: the cap belongs to the code, not to the address,
+   * or one exhausted code would lock the address out for the rest of its window.
    */
   upsertPendingRegistration(input: PendingRegistrationInput): Promise<void>;
 
-  /** Read a pending sign-up without consuming it — used to re-send its code. */
+  /**
+   * Read a pending sign-up without consuming it. An expired row is returned too — with its
+   * `expiresAt`, so the caller decides what expiry means for its purpose.
+   */
   findPendingRegistration(email: string): Promise<StoredPendingRegistration | null>;
 
   /**
@@ -162,6 +191,51 @@ export interface UsersRepository {
    * verification attempt for the life of the deployment unless something drops the dead ones.
    */
   purgeExpiredEmailVerifications(now: Date): Promise<void>;
+
+  // --- Sessions ----------------------------------------------------------------
+
+  /**
+   * Bump the session version, so every token minted before now is refused by the guard.
+   *
+   * Returns the user as it now stands — a caller that mints a replacement token must mint it from
+   * THAT version, never from a copy read earlier — or null when the account no longer exists.
+   */
+  revokeSessions(userId: string): Promise<StoredUser | null>;
+
+  /**
+   * Replace the password, revoke every session, and forget the sign-in backoff, in ONE write.
+   *
+   * One statement rather than three so there is no instant at which the new password is in place
+   * but a token minted under the old one still works, and none at which the backoff — which was
+   * defending a password that no longer exists — outlives it.
+   */
+  changePassword(userId: string, passwordHash: string): Promise<StoredUser | null>;
+
+  // --- Password reset ------------------------------------------------------------
+
+  /**
+   * Record an issued reset code for THIS user. Only its SHA-256 is ever stored, and it supersedes
+   * any code already outstanding, so re-requesting never leaves several valid at once.
+   */
+  createPasswordReset(userId: string, codeHash: string, expiresAt: Date): Promise<void>;
+
+  /**
+   * Consume a live reset code for THIS user and apply the new password as one atomic step — the
+   * same write as {@link changePassword}, so a reset also ends every session.
+   *
+   * Scoped by user, never looked up by hash: six digits collide across accounts. A miss burns an
+   * attempt and answers null whether the code was wrong, expired, exhausted or never issued; the
+   * caller cannot tell which and must not be able to.
+   */
+  resetPasswordWithCode(
+    userId: string,
+    codeHash: string,
+    passwordHash: string,
+    now: Date,
+  ): Promise<StoredUser | null>;
+
+  /** Housekeeping. Expiry is already enforced in `resetPasswordWithCode`. */
+  purgeExpiredPasswordResets(now: Date): Promise<void>;
 }
 
 /**

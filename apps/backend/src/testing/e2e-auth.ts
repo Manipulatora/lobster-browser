@@ -16,8 +16,11 @@ import type { MailService } from '../mail/mail.service';
 
 /** A MailService stand-in that records the codes it was asked to send. */
 export interface MailCapture extends MailService {
+  /** Every code mailed — sign-up and password reset alike — oldest first. */
   codes: string[];
   lastCode(): string;
+  /** Addresses told that a sign-up was already in progress (`sendRegistrationAlreadyPending`). */
+  alreadyPendingNotices: string[];
 }
 
 /**
@@ -30,13 +33,23 @@ export interface MailCapture extends MailService {
  */
 export function createMailCapture(): MailCapture {
   const codes: string[] = [];
+  const alreadyPendingNotices: string[] = [];
   return {
     codes,
+    alreadyPendingNotices,
     lastCode: () => codes[codes.length - 1] ?? '',
     isConfigured: () => true,
     send: async () => true,
     sendVerification: async (_to: string, code: string) => {
       codes.push(code);
+      return true;
+    },
+    sendPasswordReset: async (_to: string, code: string) => {
+      codes.push(code);
+      return true;
+    },
+    sendRegistrationAlreadyPending: async (to: string) => {
+      alreadyPendingNotices.push(to);
       return true;
     },
     sendDepositReceipt: async () => true,

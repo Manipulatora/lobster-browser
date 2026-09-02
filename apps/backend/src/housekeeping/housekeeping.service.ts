@@ -21,12 +21,14 @@ const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
 /**
  * Drops rows that have outlived their purpose.
  *
- * FIVE TABLES ARE WRITE-ONLY WITHOUT THIS. Pending sign-ups, desktop authorisation grants, email
- * verification codes, profile leases and unpaid deposit addresses are all short-lived by design,
- * and every one of them has its expiry enforced in the predicate that reads it — so a stale row is
- * harmless, and nothing in the request path ever had a reason to delete one. The result is that
- * they only ever grow, for the life of the deployment, which is what `PendingRegistration`'s
- * "expires and is swept, leaving nothing" was always supposed to mean.
+ * SIX TABLES ARE WRITE-ONLY WITHOUT THIS. Pending sign-ups, desktop authorisation grants, email
+ * verification codes, password-reset codes, profile leases and unpaid deposit addresses are all
+ * short-lived by design, and every one of them has its expiry enforced in the predicate that reads
+ * it — so a stale row is harmless, and nothing in the request path ever had a reason to delete
+ * one. The result is that they only ever grow, for the life of the deployment, which is what
+ * `PendingRegistration`'s "expires and is swept, leaving nothing" was always supposed to mean.
+ * (A reset code is consumed by deleting its row, so that table is bounded at one row per account
+ * regardless — the sweep is what keeps an abandoned request from sitting there for years.)
  *
  * DEPOSITS ARE EXPIRED, NOT DELETED, and the distinction matters twice over: the row is a money
  * record (it stays on the statement as `expired`), and a stale `pending` row was not harmless —
@@ -87,6 +89,7 @@ export class HousekeepingService implements OnModuleInit, OnModuleDestroy {
   async sweep(now = new Date()): Promise<void> {
     await this.users.purgeExpiredPendingRegistrations(now);
     await this.users.purgeExpiredEmailVerifications(now);
+    await this.users.purgeExpiredPasswordResets(now);
     await this.desktopAuth.purgeExpired(now);
     await this.leases.purgeExpired(now);
     await this.billing.expireStaleDeposits(now);

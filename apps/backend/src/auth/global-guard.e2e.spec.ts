@@ -75,6 +75,8 @@ test('the public surface is exactly the reviewed allowlist', async () => {
     'AuthController.desktopExchange',
     'AuthController.verifyEmail',
     'AuthController.resendVerification',
+    'AuthController.forgotPassword',
+    'AuthController.resetPassword',
     'HealthController.*',
     'BillingController.webhook',
     'BillingController.renewalSweep',
@@ -87,8 +89,10 @@ test('the public surface is exactly the reviewed allowlist', async () => {
   const full = await Test.createTestingModule({ imports: [AppModule] }).compile();
 
   const found = new Set<string>();
-  for (const module of (full as unknown as { container: { getModules(): Map<string, unknown> } })
-    .container.getModules()
+  for (const module of (
+    full as unknown as { container: { getModules(): Map<string, unknown> } }
+  ).container
+    .getModules()
     .values()) {
     const controllers = (module as { controllers: Map<unknown, { metatype?: unknown }> })
       .controllers;
