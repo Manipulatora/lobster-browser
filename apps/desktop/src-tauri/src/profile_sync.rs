@@ -39,9 +39,10 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
+use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::blob_crypto::{BlobCipher, LB_V1_KEY_ID_LEN, LB_V1_KEY_LEN};
 use crate::cloud_auth;
@@ -52,8 +53,9 @@ use crate::AppState;
 use tauri::Manager as _;
 
 /// Where each local profile's data stands while it is arriving from the account — what the profile
-/// list shows beside the row ("Downloading…", "Restoring 12/40 files"). In memory only: a phase
-/// outlives nothing, and a restart that finds no data simply shows "Not downloaded yet" again.
+/// list shows beside the row ("Downloading 3.2 / 12.5 MB", "Restoring 12/40 files"). In memory
+/// only: a phase outlives nothing, and a restart that finds no data simply shows "Not downloaded
+/// yet" again.
 static SYNC_PHASES: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, String>>,
 > = std::sync::OnceLock::new();
@@ -75,6 +77,133 @@ fn set_phase(profile_id: &str, phase: Option<&str>) {
 
 fn phase_of(profile_id: &str) -> Option<String> {
     SYNC_PHASES.get()?.lock().ok()?.get(profile_id).cloned()
+}
+
+/// Clears a profile's phase when dropped.
+///
+/// Whoever sets a phase holds one of these for exactly as long as the phase is true, so that every
+/// way out — the success path, an early `?`, a future dropped mid-download, a panic unwinding
+/// through a restore — leaves the row reading nothing rather than the last thing that happened to
+/// it. Clearing on one function's success path alone is how the reconcile path's restore left
+/// "Restoring…" beside a row whose data had long since arrived, until the app was restarted.
+struct PhaseScope<'a>(&'a str);
+
+impl Drop for PhaseScope<'_> {
+    fn drop(&mut self) {
+        set_phase(self.0, None);
+    }
+}
+
+/// A download reporter that writes the running figure into `profile_id`'s phase.
+fn phase_reporter(profile_id: &str) -> impl FnMut(u64, Option<u64>) + '_ {
+    move |received, total| set_phase(profile_id, Some(&download_phase(received, total)))
+}
+
+const KIB: u64 = 1024;
+const MIB: u64 = 1024 * 1024;
+
+/// The phrase the list shows while a snapshot is arriving: "Downloading 3.2 / 12.5 MB" when the
+/// server said how much is coming, "Downloading… 3.2 MB" when it did not (a chunked response has
+/// no Content-Length), and the bare "Downloading…" before the first byte of a body of unknown size.
+///
+/// Both figures share one unit — that of the larger of the two — so the line reads "3.2 / 12.5",
+/// not "3276 KB / 12.5 MB". Binary units, the same arithmetic as [`MAX_PAYLOAD_BYTES`], so a
+/// snapshot at the limit reads "25.0 MB" here and "25 MiB" in the error that names the limit
+/// rather than as two different numbers for one size.
+fn download_phase(received: u64, total: Option<u64>) -> String {
+    match total {
+        Some(total) => {
+            let unit = SizeUnit::for_bytes(received.max(total));
+            format!(
+                "Downloading {} / {} {}",
+                unit.figure(received),
+                unit.figure(total),
+                unit.label()
+            )
+        }
+        None if received == 0 => "Downloading…".to_string(),
+        None => {
+            let unit = SizeUnit::for_bytes(received);
+            format!("Downloading… {} {}", unit.figure(received), unit.label())
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SizeUnit {
+    Bytes,
+    Kilobytes,
+    Megabytes,
+}
+
+impl SizeUnit {
+    fn for_bytes(bytes: u64) -> Self {
+        if bytes >= MIB {
+            Self::Megabytes
+        } else if bytes >= KIB {
+            Self::Kilobytes
+        } else {
+            Self::Bytes
+        }
+    }
+
+    /// One decimal for megabytes — "3.2" is what a person reads off a progress line — and whole
+    /// numbers below that, where a decimal would be noise.
+    fn figure(self, bytes: u64) -> String {
+        match self {
+            Self::Megabytes => format!("{:.1}", bytes as f64 / MIB as f64),
+            Self::Kilobytes => ((bytes as f64 / KIB as f64).round() as u64).to_string(),
+            Self::Bytes => bytes.to_string(),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Megabytes => "MB",
+            Self::Kilobytes => "KB",
+            Self::Bytes => "B",
+        }
+    }
+}
+
+/// One phase write per this much time, not per chunk.
+///
+/// A 12 MB body arrives as thousands of chunks, the list re-reads the phase every couple of
+/// seconds, and a person takes in a changing number perhaps twice a second. Writing every chunk
+/// would be hundreds of lock-and-format rounds a second for text nobody sees change — each one
+/// contending with the `list_profiles` poll that reads the same map. Five a second is dense enough
+/// to look live on a slow line and costs nothing on a fast one.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Decides which body chunks earn a phase write; see [`PROGRESS_INTERVAL`].
+struct ProgressThrottle {
+    reported_at: Instant,
+    reported_bytes: u64,
+}
+
+impl ProgressThrottle {
+    /// Starts counting from a report of zero bytes made at `now`.
+    fn new(now: Instant) -> Self {
+        Self {
+            reported_at: now,
+            reported_bytes: 0,
+        }
+    }
+
+    /// Whether `received` bytes at `now` are worth a write — and if so, records that it was made.
+    fn admit(&mut self, now: Instant, received: u64) -> bool {
+        if now.duration_since(self.reported_at) < PROGRESS_INTERVAL {
+            return false;
+        }
+        self.reported_at = now;
+        self.reported_bytes = received;
+        true
+    }
+
+    /// Whether the figure last written is already `received`.
+    fn reported(&self, received: u64) -> bool {
+        self.reported_bytes == received
+    }
 }
 
 /// The phrase the list shows for a profile whose data is not (fully) here, or None when it is.
@@ -108,6 +237,16 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 /// The server refuses a body larger than this, so refuse locally with a message that says why rather
 /// than surfacing an opaque 413.
 const MAX_PAYLOAD_BYTES: usize = 25 * 1024 * 1024;
+
+/// The most a pull response may weigh on the wire before this side stops reading it.
+///
+/// [`MAX_PAYLOAD_BYTES`] bounds the SEALED payload; the wire carries that payload base64-encoded —
+/// four bytes for every three — inside a JSON envelope, so a snapshot the push side accepted right
+/// at the limit arrives as some 33 MiB of body. A cap at the payload figure would refuse exactly
+/// the largest snapshots that were allowed up, which are the ones a user most needs back. The cap
+/// exists because the body has to be whole before it can be decoded: a server answering with
+/// something other than a snapshot must not be able to grow this process without bound.
+const MAX_PULL_BODY_BYTES: u64 = (MAX_PAYLOAD_BYTES as u64).div_ceil(3) * 4 + 64 * KIB;
 
 /// Payload framing, ahead of the CBOR: magic then a codec byte.
 ///
@@ -285,7 +424,8 @@ pub async fn push(
         "payload": base64::engine::general_purpose::STANDARD.encode(&sealed),
         "baseVersion": base_version,
     });
-    let res = sync_request(remote_id, &body).await?;
+    // A push's answer is a version number; there is nothing to count.
+    let res = sync_request(remote_id, &body, |_, _| {}).await?;
 
     match res {
         SyncResponse::Ok(data) => Ok(PushOutcome {
@@ -304,14 +444,43 @@ pub async fn push(
 }
 
 /// Download the account's snapshot and write it into the local ledger under `profile_id`.
+///
+/// The running figure goes into `profile_id`'s phase — "Downloading 3.2 / 12.5 MB" beside that
+/// row in the list while the body streams in — and the caller holds the [`PhaseScope`] that
+/// clears it. A bare "Downloading…" over a 30 MB snapshot on a slow line is indistinguishable
+/// from a download that has hung; the number is what tells them apart.
 pub async fn pull(
     vault: &SnapshotVault,
     profile_id: &str,
     remote_id: &str,
     content_key: &[u8; LB_V1_KEY_LEN],
 ) -> Result<PullOutcome> {
+    pull_with_progress(
+        vault,
+        profile_id,
+        remote_id,
+        content_key,
+        phase_reporter(profile_id),
+    )
+    .await
+}
+
+/// [`pull`] with the reporter spelled out: `(bytes received, total when the server said)`.
+///
+/// For the one pull whose ledger entry is not the row the list shows: the sign-in path pulls
+/// under the REMOTE id as a scratch entry and reports against the local row.
+async fn pull_with_progress<F>(
+    vault: &SnapshotVault,
+    profile_id: &str,
+    remote_id: &str,
+    content_key: &[u8; LB_V1_KEY_LEN],
+    on_progress: F,
+) -> Result<PullOutcome>
+where
+    F: FnMut(u64, Option<u64>),
+{
     let body = serde_json::json!({ "direction": "pull" });
-    let SyncResponse::Ok(data) = sync_request(remote_id, &body).await? else {
+    let SyncResponse::Ok(data) = sync_request(remote_id, &body, on_progress).await? else {
         // A pull cannot conflict: it takes no baseVersion.
         bail!("unexpected conflict on pull for {profile_id}");
     };
@@ -491,6 +660,7 @@ struct SyncData {
     payload: Option<String>,
 }
 
+#[derive(Debug)]
 enum SyncResponse {
     Ok(SyncData),
     Conflict,
@@ -544,14 +714,34 @@ pub(crate) async fn api_call<T: serde::de::DeserializeOwned>(
         .ok_or_else(|| anyhow!("{path} answered with no data"))
 }
 
-async fn sync_request(remote_id: &str, body: &serde_json::Value) -> Result<SyncResponse> {
+async fn sync_request<F>(
+    remote_id: &str,
+    body: &serde_json::Value,
+    on_progress: F,
+) -> Result<SyncResponse>
+where
+    F: FnMut(u64, Option<u64>),
+{
     let token = cloud_auth::load_token().ok_or_else(|| anyhow!("not signed in"))?;
-    let res = client()?
-        .post(format!(
-            "{}/profiles/{remote_id}/sync",
-            cloud_auth::api_origin()
-        ))
-        .bearer_auth(&token)
+    let url = format!("{}/profiles/{remote_id}/sync", cloud_auth::api_origin());
+    sync_request_at(&client()?, &url, &token, body, on_progress).await
+}
+
+/// The sync round trip itself, against a URL rather than the account — so a test can point it at
+/// a throwaway local server and watch the body arrive in pieces.
+async fn sync_request_at<F>(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    body: &serde_json::Value,
+    on_progress: F,
+) -> Result<SyncResponse>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    let res = client
+        .post(url)
+        .bearer_auth(token)
         .json(body)
         .send()
         .await
@@ -571,13 +761,19 @@ async fn sync_request(remote_id: &str, body: &serde_json::Value) -> Result<SyncR
         );
     }
 
+    // Read chunk by chunk rather than letting reqwest buffer the body: being the one that counts
+    // the bytes is the only way to say how far a download has got. The client's total timeout
+    // still bounds the whole read, exactly as it bounded the buffered one.
+    let total = res.content_length();
+    let raw = read_body(res.bytes_stream(), total, MAX_PULL_BODY_BYTES, on_progress).await?;
+
     #[derive(Deserialize)]
     struct Envelope {
         code: i32,
         data: Option<SyncData>,
         msg: Option<String>,
     }
-    let envelope: Envelope = res.json().await.context("parsing the sync response")?;
+    let envelope: Envelope = serde_json::from_slice(&raw).context("parsing the sync response")?;
     if envelope.code != 0 {
         bail!(
             "sync refused: {}",
@@ -588,6 +784,59 @@ async fn sync_request(remote_id: &str, body: &serde_json::Value) -> Result<SyncR
         .data
         .map(SyncResponse::Ok)
         .ok_or_else(|| anyhow!("sync response carried no data"))
+}
+
+/// Read a response body to the end, reporting the count as it grows and refusing to grow past
+/// `cap`.
+///
+/// Generic over the chunk stream so the arithmetic — the count, the cap, the throttle — runs in a
+/// test against an in-memory stream, where "the server sent one byte more than allowed" is a
+/// fixture rather than a network condition nobody can reproduce on demand.
+async fn read_body<S, B, E, F>(
+    stream: S,
+    total: Option<u64>,
+    cap: u64,
+    mut on_progress: F,
+) -> Result<Vec<u8>>
+where
+    S: futures_util::Stream<Item = std::result::Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::error::Error + Send + Sync + 'static,
+    F: FnMut(u64, Option<u64>),
+{
+    if let Some(declared) = total.filter(|&declared| declared > cap) {
+        bail!(
+            "the sync response declares {declared} bytes, over the {cap} byte limit — not \
+             downloading it"
+        );
+    }
+    // The size is news the moment the headers are in: "0.0 / 12.5 MB" says what the wait is for
+    // before the first chunk lands.
+    on_progress(0, total);
+    let mut throttle = ProgressThrottle::new(Instant::now());
+    let mut body = Vec::with_capacity(total.unwrap_or(0) as usize);
+    let mut received: u64 = 0;
+    let mut stream = std::pin::pin!(stream);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading the sync response")?;
+        let chunk = chunk.as_ref();
+        received += chunk.len() as u64;
+        if received > cap {
+            bail!(
+                "the sync response passed the {cap} byte limit without ending — stopped reading it"
+            );
+        }
+        body.extend_from_slice(chunk);
+        if throttle.admit(Instant::now(), received) {
+            on_progress(received, total);
+        }
+    }
+    // The last word is the whole figure, whatever the throttle swallowed: the phase sits on this
+    // number while the payload is opened and unpacked, and "12.3 / 12.5 MB" there reads as stalled.
+    if !throttle.reported(received) {
+        on_progress(received, total);
+    }
+    Ok(body)
 }
 
 // --- Orchestration: the part that makes any of the above run ------------------------------------
@@ -830,6 +1079,12 @@ pub async fn pull_profile(state: &AppState, profile_id: &str) -> Result<PullOutc
     };
     let (key, _) = content_key(state, &remote_id)?;
     let vault = open_vault(state)?;
+    // Shown in the list while it runs, for a profile that is here as much as for one that is not:
+    // a reconcile fetching a newer version of a 30 MB profile is a download the user can watch the
+    // machine make, and the row-first sign-in's retry (a first download that failed lands here on
+    // the next tick) was otherwise a silent gap between "Not downloaded yet" and "Restoring…".
+    let _phase = PhaseScope(profile_id);
+    set_phase(profile_id, Some("Downloading…"));
     pull(&vault, profile_id, &remote_id, &key).await
 }
 
@@ -1008,6 +1263,7 @@ pub async fn reconcile(state: &AppState) -> Result<SyncSummary> {
                 // no user-data-dir yet: this pull IS its data, so restore it as well as record it.
                 let applied = match applied {
                     Ok(()) if !state.profiles_dir.join(&local.id).exists() => {
+                        let _phase = PhaseScope(&local.id);
                         match open_vault(state) {
                             Ok(vault) => {
                                 restore_pulled(state, &vault, &local.id, &local.id, &outcome)
@@ -1219,22 +1475,26 @@ async fn fetch_into(
     profile: &crate::profile_store::Profile,
     remote_id: &str,
 ) -> Result<()> {
+    let _phase = PhaseScope(&profile.id);
     set_phase(&profile.id, Some("Downloading…"));
-    let result = async {
-        let (key, _) = content_key(state, remote_id)?;
-        let vault = open_vault(state)?;
-        // Pulled under the REMOTE id as a scratch entry: the ledger is keyed by profile id, and the
-        // restore below adopts it under the local one.
-        let pulled = pull(&vault, remote_id, remote_id, &key).await?;
-        if let Some(row) = pulled.row.as_ref() {
-            let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
-            apply_portable_row(&conn, &state.cipher, profile, row)?;
-        }
-        restore_pulled(state, &vault, &profile.id, remote_id, &pulled)
+    let (key, _) = content_key(state, remote_id)?;
+    let vault = open_vault(state)?;
+    // Pulled under the REMOTE id as a scratch entry: the ledger is keyed by profile id, and the
+    // restore below adopts it under the local one. The progress goes to the LOCAL id, which is
+    // the row the list shows.
+    let pulled = pull_with_progress(
+        &vault,
+        remote_id,
+        remote_id,
+        &key,
+        phase_reporter(&profile.id),
+    )
+    .await?;
+    if let Some(row) = pulled.row.as_ref() {
+        let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
+        apply_portable_row(&conn, &state.cipher, profile, row)?;
     }
-    .await;
-    set_phase(&profile.id, None);
-    result
+    restore_pulled(state, &vault, &profile.id, remote_id, &pulled)
 }
 
 /// Make sure a profile's data is on this machine before it is used — the on-demand half of the
@@ -1267,6 +1527,7 @@ pub async fn ensure_materialised(state: &AppState, profile_id: &str) -> Result<b
 
 /// Put a pulled snapshot in place: adopt its artifacts under the local profile id, restore them into
 /// the user-data-dir, and only then advance the watermark — so a restore that fails is retried.
+/// Sets the "Restoring…" phases and clears none of them: the caller holds the [`PhaseScope`].
 fn restore_pulled(
     state: &AppState,
     vault: &SnapshotVault,
@@ -1621,6 +1882,360 @@ mod tests {
     use crate::snapshot::manifest::{
         ArtifactKind, ArtifactRecord, CaptureMode, Coherence, Fidelity, Identity, MANIFEST_VERSION,
     };
+
+    // --- Download progress -----------------------------------------------------------------------
+
+    #[test]
+    fn a_phase_scope_clears_the_phase_however_the_operation_ends() {
+        // The reconcile path's restore used to leave "Restoring…" beside a row for the life of the
+        // process, because only the success path of a different function cleared it.
+        let outcome: Result<()> = (|| {
+            let _phase = PhaseScope("p-scope");
+            set_phase("p-scope", Some("Restoring 1/2 files"));
+            assert_eq!(phase_of("p-scope").as_deref(), Some("Restoring 1/2 files"));
+            bail!("the restore failed half way");
+        })();
+        assert!(outcome.is_err());
+        assert_eq!(
+            phase_of("p-scope"),
+            None,
+            "an early exit must not leave the phase behind"
+        );
+    }
+
+    #[test]
+    fn the_download_phrase_carries_real_numbers() {
+        // Known total: one shared unit, one decimal for megabytes.
+        assert_eq!(
+            download_phase(3_355_443, Some(13_107_200)),
+            "Downloading 3.2 / 12.5 MB"
+        );
+        // The size shows before the first byte, and the whole figure at the end.
+        assert_eq!(
+            download_phase(0, Some(13_107_200)),
+            "Downloading 0.0 / 12.5 MB"
+        );
+        assert_eq!(
+            download_phase(13_107_200, Some(13_107_200)),
+            "Downloading 12.5 / 12.5 MB"
+        );
+        // The received figure takes the total's unit even while it is tiny.
+        assert_eq!(
+            download_phase(4_096, Some(13_107_200)),
+            "Downloading 0.0 / 12.5 MB"
+        );
+        // Under a megabyte: whole kilobytes, where a decimal would be noise.
+        assert_eq!(
+            download_phase(122_880, Some(655_360)),
+            "Downloading 120 / 640 KB"
+        );
+        assert_eq!(download_phase(0, Some(512)), "Downloading 0 / 512 B");
+
+        // Unknown total (a chunked response): a count, and the bare word before there is one.
+        assert_eq!(download_phase(0, None), "Downloading…");
+        assert_eq!(download_phase(3_355_443, None), "Downloading… 3.2 MB");
+        assert_eq!(download_phase(122_880, None), "Downloading… 120 KB");
+        assert_eq!(download_phase(512, None), "Downloading… 512 B");
+    }
+
+    #[test]
+    fn the_download_phrase_rounds_and_changes_unit_where_a_person_would() {
+        assert_eq!(
+            download_phase(1_150_000, None),
+            "Downloading… 1.1 MB",
+            "1.097 rounds up"
+        );
+        assert_eq!(
+            download_phase(1_100_000, None),
+            "Downloading… 1.0 MB",
+            "1.049 rounds down"
+        );
+        assert_eq!(
+            download_phase(1_600, None),
+            "Downloading… 2 KB",
+            "1.56 KB rounds up"
+        );
+        assert_eq!(
+            download_phase(1_500, None),
+            "Downloading… 1 KB",
+            "1.46 KB rounds down"
+        );
+        // Thresholds: a full unit is one of that unit; one byte less is still the smaller unit.
+        assert_eq!(download_phase(1_048_576, None), "Downloading… 1.0 MB");
+        assert_eq!(download_phase(1_048_575, None), "Downloading… 1024 KB");
+        assert_eq!(download_phase(1_024, None), "Downloading… 1 KB");
+        assert_eq!(download_phase(1_023, None), "Downloading… 1023 B");
+    }
+
+    #[test]
+    fn progress_is_written_at_most_a_few_times_a_second() {
+        let t0 = Instant::now();
+        let mut throttle = ProgressThrottle::new(t0);
+        assert!(
+            !throttle.admit(t0 + Duration::from_millis(50), 16 * KIB),
+            "too soon after the last write"
+        );
+        assert!(!throttle.admit(t0 + Duration::from_millis(199), 32 * KIB));
+        assert!(
+            throttle.admit(t0 + Duration::from_millis(200), 48 * KIB),
+            "the interval has elapsed"
+        );
+        // The interval restarts from the write that was admitted, not from the one refused.
+        assert!(!throttle.admit(t0 + Duration::from_millis(399), 64 * KIB));
+        assert!(throttle.admit(t0 + Duration::from_millis(400), 80 * KIB));
+        // What was last written is what the closing write is measured against.
+        assert!(throttle.reported(80 * KIB));
+        assert!(!throttle.reported(96 * KIB));
+    }
+
+    #[tokio::test]
+    async fn a_streamed_body_is_reassembled_counted_and_reported() {
+        // 120 chunks of 100 KiB, each filled with its own index, so a reordered or dropped chunk
+        // shows in the bytes and not only in the count.
+        const CHUNK: usize = 100 * 1024;
+        let chunks: Vec<std::result::Result<Vec<u8>, std::io::Error>> =
+            (0..120u8).map(|i| Ok(vec![i; CHUNK])).collect();
+        let total = (120 * CHUNK) as u64;
+        let mut reports: Vec<(u64, Option<u64>)> = Vec::new();
+        let body = read_body(
+            futures_util::stream::iter(chunks),
+            Some(total),
+            MAX_PULL_BODY_BYTES,
+            |received, total| reports.push((received, total)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(body.len() as u64, total);
+        assert!(body
+            .chunks(CHUNK)
+            .enumerate()
+            .all(|(i, chunk)| chunk.iter().all(|&b| b == i as u8)));
+        assert_eq!(
+            reports.first(),
+            Some(&(0, Some(total))),
+            "the size is announced before the first byte"
+        );
+        assert_eq!(
+            reports.last(),
+            Some(&(total, Some(total))),
+            "the last word is the whole figure"
+        );
+        assert!(
+            reports.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+            "the count never goes backwards: {reports:?}"
+        );
+        assert!(
+            reports.len() < 120,
+            "120 chunks must not become 120 phase writes; got {}",
+            reports.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_body_reports_as_it_trickles_in() {
+        // Three chunks, each a beat apart: a slow line must produce a moving number, not the start
+        // and end figures with silence in between.
+        let chunks = futures_util::stream::iter(
+            (1..=3u64).map(|i| Ok::<Vec<u8>, std::io::Error>(vec![0u8; (i * KIB) as usize])),
+        )
+        .then(|chunk| async move {
+            tokio::time::sleep(PROGRESS_INTERVAL + Duration::from_millis(20)).await;
+            chunk
+        });
+        let mut reports = Vec::new();
+        read_body(chunks, None, MAX_PULL_BODY_BYTES, |received, total| {
+            reports.push((received, total))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            reports,
+            vec![(0, None), (KIB, None), (3 * KIB, None), (6 * KIB, None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_over_the_limit_is_refused_before_or_during_the_read() {
+        // Declared over the limit: refused on the headers, before a byte is read — the stream here
+        // would fail the test with its own message if it were polled at all.
+        let never: Vec<std::result::Result<Vec<u8>, std::io::Error>> =
+            vec![Err(std::io::Error::other("the body must not be read"))];
+        let mut reports = 0;
+        let err = read_body(futures_util::stream::iter(never), Some(251), 250, |_, _| {
+            reports += 1
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("declares 251 bytes") && err.contains("250 byte limit"),
+            "{err}"
+        );
+        assert_eq!(
+            reports, 0,
+            "nothing to report about a download that never started"
+        );
+
+        // No declared size and the chunks keep coming: stopped at the first byte past the limit,
+        // holding at most one chunk over the cap rather than whatever the server felt like sending.
+        let endless: Vec<std::result::Result<Vec<u8>, std::io::Error>> =
+            (0..4).map(|_| Ok(vec![0u8; 100])).collect();
+        let err = read_body(futures_util::stream::iter(endless), None, 250, |_, _| {})
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("250 byte limit"), "{err}");
+    }
+
+    #[test]
+    fn the_pull_limit_admits_a_snapshot_the_push_side_accepted_at_its_limit() {
+        // The wire carries the sealed payload as base64 inside a JSON envelope. A cap at the
+        // payload figure would refuse the largest snapshots that were allowed up.
+        let sealed_at_limit = vec![0u8; MAX_PAYLOAD_BYTES];
+        let on_the_wire = serde_json::to_vec(&serde_json::json!({
+            "code": 0,
+            "data": {
+                "version": 1,
+                "payload": base64::engine::general_purpose::STANDARD.encode(&sealed_at_limit),
+            },
+            "msg": null,
+        }))
+        .unwrap();
+        assert!(
+            (on_the_wire.len() as u64) <= MAX_PULL_BODY_BYTES,
+            "{} bytes on the wire against a {} byte cap",
+            on_the_wire.len(),
+            MAX_PULL_BODY_BYTES
+        );
+    }
+
+    /// Answer every connection with `response`, byte for byte, and return the URL to post to.
+    fn serve_raw(response: Vec<u8>) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut stream) = conn else { break };
+                // The request is a few hundred bytes of head and a one-field JSON body; nothing in
+                // it decides the answer.
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(&response);
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}/profiles/rp_test/sync")
+    }
+
+    fn framed_with_length(body: &[u8], declared: u64) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {declared}\r\n\
+             Connection: close\r\n\r\n"
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// Chunked transfer encoding: the framing a server uses when it does not know the size up
+    /// front, and the one case in which the client cannot either.
+    fn framed_chunked(body: &[u8]) -> Vec<u8> {
+        let mut out = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                        Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            .to_vec();
+        for chunk in body.chunks(64 * 1024) {
+            out.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+            out.extend_from_slice(chunk);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    /// A pull envelope the size a real one is: a base64 payload of a megabyte or so.
+    fn sync_envelope_fixture() -> (Vec<u8>, String) {
+        let sealed: Vec<u8> = (0..1_200_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
+        let payload = base64::engine::general_purpose::STANDARD.encode(&sealed);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "code": 0,
+            "data": { "version": 7, "payload": payload },
+            "msg": null,
+        }))
+        .unwrap();
+        (body, payload)
+    }
+
+    #[tokio::test]
+    async fn a_pull_streams_its_body_and_says_how_far_it_has_got() {
+        let (body, payload) = sync_envelope_fixture();
+        let total = body.len() as u64;
+        let request = serde_json::json!({ "direction": "pull" });
+
+        // Framed with a Content-Length: figures against a total.
+        let url = serve_raw(framed_with_length(&body, total));
+        let mut reports = Vec::new();
+        let answer = sync_request_at(&client().unwrap(), &url, "token", &request, |r, t| {
+            reports.push((r, t))
+        })
+        .await
+        .unwrap();
+        let SyncResponse::Ok(data) = answer else {
+            panic!("a pull answered with a conflict")
+        };
+        assert_eq!(data.version, 7);
+        assert_eq!(
+            data.payload.as_deref(),
+            Some(payload.as_str()),
+            "the envelope parses exactly as it did when reqwest buffered it"
+        );
+        assert_eq!(reports.first(), Some(&(0, Some(total))));
+        assert_eq!(reports.last(), Some(&(total, Some(total))));
+        let (received, known) = *reports.last().unwrap();
+        assert_eq!(download_phase(received, known), "Downloading 1.5 / 1.5 MB");
+
+        // Chunked, no Content-Length: a count without a total.
+        let url = serve_raw(framed_chunked(&body));
+        let mut reports = Vec::new();
+        let answer = sync_request_at(&client().unwrap(), &url, "token", &request, |r, t| {
+            reports.push((r, t))
+        })
+        .await
+        .unwrap();
+        let SyncResponse::Ok(data) = answer else {
+            panic!("a pull answered with a conflict")
+        };
+        assert_eq!(data.payload.as_deref(), Some(payload.as_str()));
+        assert!(
+            reports.iter().all(|(_, total)| total.is_none()),
+            "a chunked body has no total to show: {reports:?}"
+        );
+        assert_eq!(reports.last().map(|report| report.0), Some(total));
+        assert_eq!(download_phase(total, None), "Downloading… 1.5 MB");
+    }
+
+    #[tokio::test]
+    async fn a_pull_declared_over_the_limit_is_refused_without_reading_it() {
+        // The head alone, with no body behind it: a client that tried to read the body it was told
+        // about would sit on the connection instead of answering at once.
+        let url = serve_raw(framed_with_length(b"", MAX_PULL_BODY_BYTES + 1));
+        let mut reports = 0;
+        let err = sync_request_at(
+            &client().unwrap(),
+            &url,
+            "token",
+            &serde_json::json!({ "direction": "pull" }),
+            |_, _| reports += 1,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("byte limit"), "{err}");
+        assert_eq!(reports, 0);
+    }
 
     fn row_fixture() -> PortableRow {
         PortableRow {
