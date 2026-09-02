@@ -190,12 +190,16 @@ pub fn meta_version(conn: &Connection, max_known: i64) -> Result<Option<i64>> {
     Ok(version)
 }
 
-/// What the liveness probe found. `Unknown` is a distinct outcome on purpose: on a machine where we
-/// cannot test pid liveness, claiming "quiesced" would put a false coherence label on the snapshot.
+/// What the liveness probe found. `Unknown` is a distinct outcome on purpose: claiming "quiesced"
+/// on evidence we could not actually test would put a false coherence label on the snapshot. Both
+/// shipping desktop platforms now have a real pid probe (`/proc` on Linux, `OpenProcess` on
+/// Windows), so `Unknown` is reserved for the genuinely unanswerable: a probe API failure, a lock
+/// file we cannot parse, or a platform with no probe at all (macOS, a container without `/proc`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveOwner {
     None,
-    /// A `SingletonLock` symlink or `DevToolsActivePort` naming a process that is still alive.
+    /// A `SingletonLock` symlink naming a process that is still alive. Only the lock can produce
+    /// this verdict: `DevToolsActivePort` carries a port, not a pid, so it cannot name an owner.
     Alive {
         detail: String,
     },
@@ -206,21 +210,42 @@ pub enum LiveOwner {
 
 /// Decide whether a user-data-dir is unowned, by reading the two files Chromium leaves behind.
 ///
-/// `SingletonLock` is a symlink whose target is `hostname-pid`; `DevToolsActivePort` holds the port
-/// on its first line. Both are routinely STALE — that is the whole reason the launcher clears
+/// `SingletonLock` is a symlink whose target is `hostname-pid`; `DevToolsActivePort` holds the CDP
+/// port on its first line. Both are routinely STALE — that is the whole reason the launcher clears
 /// `DevToolsActivePort` before spawning — so a file's existence proves nothing and only pid liveness
-/// does. A stale lock after a crash is the common case and must NOT block a capture, since the
+/// does. A stale leftover after a crash is the common case and must NOT block a capture, since the
 /// crashed profile is exactly the one whose session the user needs out.
 pub fn assert_no_live_owner(udd: &Path) -> Result<LiveOwner> {
+    classify_owner(udd, &pid_is_alive, pid_liveness_available())
+}
+
+/// The decision logic behind [`assert_no_live_owner`], with the platform facts injected. Tests use
+/// this to pin every verdict on every build platform: a blind platform is simulated on a sighted
+/// one (and vice versa), and a dead or live pid needs no spawned fixture process.
+fn classify_owner(
+    udd: &Path,
+    pid_is_alive: &dyn Fn(u32) -> Option<bool>,
+    liveness_available: bool,
+) -> Result<LiveOwner> {
     let lock = udd.join("SingletonLock");
-    if let Some(verdict) = read_singleton_lock(&lock)? {
+    if let Some(verdict) = read_singleton_lock(&lock, pid_is_alive)? {
         return Ok(verdict);
     }
-    // The lock says nobody owns the directory. `DevToolsActivePort` carries no pid, so it can only
-    // ever downgrade us to Unknown, and only where the platform cannot answer pid liveness at all —
-    // on Windows Chromium does not use `SingletonLock`, so the probe is structurally blind there and
-    // quiesce has to go through the sidecar, which owns the child handle.
-    if udd.join("DevToolsActivePort").exists() && !pid_liveness_available() {
+    // The lock says nobody owns the directory. `DevToolsActivePort` carries no pid — a CDP port and
+    // a browser-target path — so there is nothing in it a pid probe could test, and Chromium leaves
+    // it behind on EVERY unclean shutdown. On Windows, where the singleton is a named mutex we
+    // cannot see rather than a lock file, that leftover is the only file this probe ever finds, and
+    // treating bare presence as "maybe running" refused every post-crash export on the platform
+    // (PROFILE_OWNER_UNKNOWN with nothing running — the reported field failure). A browser that IS
+    // running on Windows is the sidecar's to report: it owns the child handle and knows liveness
+    // authoritatively, where this filesystem probe is structurally blind. So presence alone
+    // downgrades to Unknown only where the platform cannot test pid liveness AT ALL (macOS, a
+    // container with `/proc` unmounted): there a leftover and a live owner really are
+    // indistinguishable, and a false "quiesced" label is the worse lie. The stale file is
+    // deliberately NOT deleted here: the launcher already clears it before every spawn, and a probe
+    // that mutates the very directory it may be about to refuse to touch could no longer be run
+    // speculatively.
+    if udd.join("DevToolsActivePort").exists() && !liveness_available {
         return Ok(LiveOwner::Unknown {
             detail: "DevToolsActivePort is present and this platform cannot test pid liveness"
                 .into(),
@@ -230,7 +255,10 @@ pub fn assert_no_live_owner(udd: &Path) -> Result<LiveOwner> {
 }
 
 /// `Some(verdict)` when the lock settles the question, `None` when it says nobody owns the dir.
-fn read_singleton_lock(lock: &Path) -> Result<Option<LiveOwner>> {
+fn read_singleton_lock(
+    lock: &Path,
+    pid_is_alive: &dyn Fn(u32) -> Option<bool>,
+) -> Result<Option<LiveOwner>> {
     let target = match std::fs::read_link(lock) {
         Ok(target) => target.to_string_lossy().to_string(),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -240,19 +268,32 @@ fn read_singleton_lock(lock: &Path) -> Result<Option<LiveOwner>> {
             }))
         }
     };
-    let Some(pid) = parse_singleton_lock(&target) else {
-        return Ok(Some(LiveOwner::Unknown {
+    Ok(classify_lock_target(&target, pid_is_alive))
+}
+
+/// The verdict for a `SingletonLock` target string, split from the symlink read because Chromium
+/// writes this file on unix only: a Windows build meets one solely inside a directory restored from
+/// a unix-taken capture, and a Windows TEST cannot create the symlink fixture at all (that needs a
+/// privilege ordinary users and CI do not hold). The split lets both platforms pin the whole table.
+///
+/// `None` means "this lock names no live owner", mirroring [`read_singleton_lock`]'s contract.
+fn classify_lock_target(
+    target: &str,
+    pid_is_alive: &dyn Fn(u32) -> Option<bool>,
+) -> Option<LiveOwner> {
+    let Some(pid) = parse_singleton_lock(target) else {
+        return Some(LiveOwner::Unknown {
             detail: format!("SingletonLock -> {target} does not parse as hostname-pid"),
-        }));
+        });
     };
     match pid_is_alive(pid) {
-        Some(true) => Ok(Some(LiveOwner::Alive {
+        Some(true) => Some(LiveOwner::Alive {
             detail: format!("SingletonLock -> {target} (pid {pid} is running)"),
-        })),
-        Some(false) => Ok(None),
-        None => Ok(Some(LiveOwner::Unknown {
+        }),
+        Some(false) => None,
+        None => Some(LiveOwner::Unknown {
             detail: format!("SingletonLock -> {target}; pid liveness unavailable"),
-        })),
+        }),
     }
 }
 
@@ -261,7 +302,11 @@ fn parse_singleton_lock(target: &str) -> Option<u32> {
     target.rsplit_once('-')?.1.parse().ok()
 }
 
-/// `Some(true|false)` when the platform can answer, `None` when it cannot.
+/// `Some(true|false)` when the platform can answer whether `pid` is running, `None` when it cannot.
+/// `/proc` is the cheap answer: it needs no signal permission and shows every user's processes, so
+/// the pid directory existing IS the verdict. macOS lands here too (`cfg(unix)`) but ships no
+/// `/proc`, and [`pid_liveness_available`] reports that honestly rather than letting this return
+/// `Some(false)` for every pid on a platform that never mounted the answer.
 #[cfg(unix)]
 fn pid_is_alive(pid: u32) -> Option<bool> {
     if !pid_liveness_available() {
@@ -270,23 +315,84 @@ fn pid_is_alive(pid: u32) -> Option<bool> {
     Some(PathBuf::from(format!("/proc/{pid}")).exists())
 }
 
-/// Chromium does not use `SingletonLock` on Windows (it holds a named mutex), so the probe is
-/// structurally blind there and quiesce has to go through the sidecar, which owns the child handle and
-/// therefore knows liveness authoritatively. Guessing from a pid here would be strictly worse.
-#[cfg(not(unix))]
+/// The Windows answer, from the process table itself. `OpenProcess` with
+/// `PROCESS_QUERY_LIMITED_INFORMATION` — the weakest access right there is, grantable even on other
+/// users' processes — resolves the pid against the kernel's table:
+///
+/// * `ERROR_INVALID_PARAMETER` is the documented "no such process object" answer → dead. This is
+///   the branch that un-sticks the field failure: a `DevToolsActivePort` left behind by an unclean
+///   shutdown used to freeze every export as `Unknown` because this function had no Windows arm.
+/// * `ERROR_ACCESS_DENIED` proves the object EXISTS (the kernel found it, then refused the right)
+///   → alive. This mirrors unix, where `/proc/<pid>` of a protected process still exists.
+/// * A real handle is NOT yet proof of life: `OpenProcess` also succeeds on a terminated process
+///   whose pid stays pinned by someone's open handle — and our own sidecar/job object holds exactly
+///   such handles, so without `GetExitCodeProcess` a crashed engine would read as "running" until
+///   the app exits. `STILL_ACTIVE` (259) is the canonical check, with the canonical caveat that a
+///   live process which chose exit code 259 is indistinguishable from a dead one; nothing we spawn
+///   does.
+///
+/// We deliberately do NOT verify the pid's image name (lobium/chrome). Unix does not either —
+/// `/proc/<pid>` existence is its whole test — and the probe's contract has to stay "is this pid in
+/// the process table" so both platforms answer identically for the same facts, and so the tests can
+/// pin `Alive` with their own (non-browser) pid. The cost is pid reuse: a recycled pid behind a
+/// leftover `SingletonLock` reads as Alive. That exposure is exactly the one unix has always
+/// accepted, reaching it on Windows takes a unix-written lock file to begin with (see
+/// [`classify_lock_target`]), and the `detail` names the pid so an operator can see precisely which
+/// process blocked the capture.
+#[cfg(windows)]
+fn pid_is_alive(pid: u32) -> Option<bool> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: `OpenProcess` takes no pointers; it returns null or a handle this function owns and
+    // closes on every path below.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return match unsafe { GetLastError() } {
+            ERROR_INVALID_PARAMETER => Some(false),
+            ERROR_ACCESS_DENIED => Some(true),
+            // Anything else is a genuine API failure. Guessing here is what `Unknown` exists to
+            // avoid, and this is the only path left that produces it on Windows.
+            _ => None,
+        };
+    }
+    let mut exit_code: u32 = 0;
+    // SAFETY: `handle` is a live process handle we own; `exit_code` outlives the call.
+    let queried = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    // SAFETY: closing the handle `OpenProcess` gave us, exactly once.
+    unsafe { CloseHandle(handle) };
+    if queried == 0 {
+        return None;
+    }
+    Some(exit_code == STILL_ACTIVE as u32)
+}
+
+/// A target that is neither unix nor Windows has no probe wired up; saying so keeps the honest
+/// `Unknown` path instead of inventing a verdict on a platform nobody has tested.
+#[cfg(not(any(unix, windows)))]
 fn pid_is_alive(_pid: u32) -> Option<bool> {
     None
 }
 
-/// True when this platform can decide whether a pid is running. `/proc` is the cheap answer and needs
-/// no signal permission; a container with `/proc` unmounted cannot answer, and we say so rather than
-/// guess.
+/// True when this platform can decide whether a pid is running. Linux answers through `/proc` (a
+/// container with `/proc` unmounted cannot answer, and we say so rather than guess). Windows
+/// answers through `OpenProcess` — see [`pid_is_alive`] — so it is never platform-blind anymore: a
+/// failed call over there is a per-pid `Unknown`, not a platform-wide shrug that used to turn every
+/// leftover `DevToolsActivePort` into a refused export. macOS has no probe wired up yet and stays
+/// conservatively blind.
 fn pid_liveness_available() -> bool {
     #[cfg(unix)]
     {
         Path::new("/proc/self").exists()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         false
     }
@@ -544,6 +650,89 @@ mod tests {
             LiveOwner::Unknown { .. }
         ));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The reported field failure, pinned end to end: the browser crashed or was killed, Chromium
+    /// left `DevToolsActivePort` behind, nothing is running — and export refused with
+    /// PROFILE_OWNER_UNKNOWN because the platform "could not test pid liveness". On every platform
+    /// with a real probe (Linux via `/proc`, Windows via `OpenProcess`) the leftover must be
+    /// ignored — and left in place, because clearing it belongs to the launcher, not to a read-only
+    /// probe that callers run speculatively.
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn a_leftover_devtools_active_port_does_not_block_capture() {
+        let dir = temp_dir("stale-port");
+        std::fs::write(
+            dir.join("DevToolsActivePort"),
+            "39515\n/devtools/browser/2f2e6a9a-dead-beef\n",
+        )
+        .unwrap();
+        assert_eq!(assert_no_live_owner(&dir).unwrap(), LiveOwner::None);
+        assert!(
+            dir.join("DevToolsActivePort").exists(),
+            "the probe must not mutate the directory it inspects"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A platform with no pid probe at all (macOS, a `/proc`-less container) must keep refusing to
+    /// call a port-file-bearing directory quiesced, and a platform WITH one must not. Injected, so
+    /// both arms are pinned regardless of what the build machine itself can see.
+    #[test]
+    fn a_bare_port_file_downgrades_only_a_platform_that_cannot_probe_pids() {
+        let dir = temp_dir("blind");
+        std::fs::write(dir.join("DevToolsActivePort"), "1\n/devtools/browser/x\n").unwrap();
+        // No lock exists, so the probe is never consulted; only `liveness_available` decides.
+        let no_probe = |_pid: u32| -> Option<bool> { None };
+        assert!(matches!(
+            classify_owner(&dir, &no_probe, false).unwrap(),
+            LiveOwner::Unknown { .. }
+        ));
+        assert_eq!(
+            classify_owner(&dir, &no_probe, true).unwrap(),
+            LiveOwner::None
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The lock-target verdict table, runnable on Windows too — where the symlink fixture cannot be
+    /// created, which is exactly why `classify_lock_target` is split from the symlink read. The
+    /// real probe pins alive/dead on the two platforms that have one; the injected probes pin the
+    /// mapping itself everywhere.
+    #[test]
+    fn lock_targets_classify_by_pid_liveness_not_by_existence() {
+        // Our own pid is the one pid guaranteed alive for the duration of the test.
+        let ours = format!("build-box-{}", std::process::id());
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            assert!(matches!(
+                classify_lock_target(&ours, &pid_is_alive),
+                Some(LiveOwner::Alive { .. })
+            ));
+            assert_eq!(classify_lock_target("host-4294967294", &pid_is_alive), None);
+        }
+        // The mapping, independent of what this machine can actually see: dead → no owner,
+        // probe failure → Unknown, unparseable → Unknown even when the probe would say alive.
+        assert_eq!(classify_lock_target(&ours, &|_| Some(false)), None);
+        assert!(matches!(
+            classify_lock_target(&ours, &|_| None),
+            Some(LiveOwner::Unknown { .. })
+        ));
+        assert!(matches!(
+            classify_lock_target("host-not-a-pid", &|_| Some(true)),
+            Some(LiveOwner::Unknown { .. })
+        ));
+    }
+
+    /// The probe itself against the real OS. 4294967294 is allocatable on neither platform (Linux
+    /// pids stop at `pid_max`, at most 2^22; Windows pids are multiples of 4, and 0xFFFF_FFFE is
+    /// not), so `Some(false)` here exercises Windows' ERROR_INVALID_PARAMETER arm — the branch that
+    /// turns a stale lock into "no owner" instead of a refused export.
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn pid_probe_sees_our_own_process_and_not_a_never_allocated_pid() {
+        assert_eq!(pid_is_alive(std::process::id()), Some(true));
+        assert_eq!(pid_is_alive(0xFFFF_FFFE), Some(false));
     }
 
     #[test]
