@@ -58,7 +58,10 @@ export interface PageMeta {
   canScrollDown: boolean;
   /** Terse visible-page text; never includes form control values. */
   text?: string;
-  /** Situation flags such as `captcha`, `otp`, `dialog`, `login`, `canvas`. */
+  /**
+   * Situation flags: `captcha`, `otp`, `dialog`, `login`, `canvas`, … from the page script, plus
+   * `error-page` / `blocked` recognised harness-side (see `perception/situation.ts`).
+   */
   signals?: string[];
 }
 

@@ -162,10 +162,27 @@ export interface AgentConfig {
 }
 
 /**
- * The action space the model emits — ONE per step, as a structured tool call, so both the prompt and
- * the reply stay tiny. `id` indexes an element from the latest observation's numbered tree.
+ * Fields any action may carry whatever its kind: the model's notes to the harness, as opposed to the
+ * parameters of the action itself.
  */
-export type AgentAction =
+export interface AgentActionMemo {
+  /**
+   * The model's running plan and notes for later steps, at most 400 characters. It REPLACES the
+   * previous plan: the loop keeps only the latest and re-sends it every step inside the harness-owned
+   * working-memory block, so it survives the pruning that reduces old page snapshots to a header
+   * line. Nothing in it is executed — it is the model's own text, sanitized like every other block.
+   */
+  plan?: string;
+}
+
+/**
+ * The action space the model emits — ONE per step, as a structured tool call, so both the prompt and
+ * the reply stay tiny. `id` indexes an element from the latest observation's numbered tree. Every
+ * kind also carries the {@link AgentActionMemo} fields.
+ */
+export type AgentAction = AgentActionMemo & AgentActionBody;
+
+type AgentActionBody =
   | {
       kind: 'click';
       id: number;
@@ -357,6 +374,39 @@ export type AgentEvent =
       profileId: string;
       step: number;
       text: string;
+      ts: string;
+    }
+  /**
+   * A tracked page situation changed between steps: a login wall, CAPTCHA, one-time-code prompt,
+   * error page, or rate-limit/blocked page APPEARED (`appeared: true`) or CLEARED. The per-snapshot
+   * `page signals` line never carried this: a footer that says "sign in" trips `login` on every step,
+   * so the signal itself is not news — the transition is. The model receives the same transition as
+   * a harness note; this is the panel's copy.
+   */
+  | {
+      type: 'step.signal';
+      sessionId: string;
+      profileId: string;
+      step: number;
+      /** One of the tracked situations, e.g. `login`, `captcha`, `otp`, `error-page`, `blocked`. */
+      signal: string;
+      appeared: boolean;
+      ts: string;
+    }
+  /**
+   * Where one step's wall time went, in milliseconds per phase: `perceive` (DOM reads), `llm` (the
+   * model round trip, retries included), `execute` (driving the action, net of the phases below),
+   * `settle` (waiting for the page to go quiet), `journal` (the fsynced safety journal) and `total`
+   * (the whole step; what none of the others claim is harness work and waits for human input).
+   * Emitted once per step, when the step is over; a step retried after a truncated model reply
+   * reports the retry in the same record. Before this nobody had measured any of it.
+   */
+  | {
+      type: 'step.timing';
+      sessionId: string;
+      profileId: string;
+      step: number;
+      phases: Record<string, number>;
       ts: string;
     }
   /** The run paused: it needs a human (an `ask`, a `confirm`, or a required BYOK/login handoff). */

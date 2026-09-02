@@ -41,7 +41,14 @@ import {
   targetUrlForAction,
 } from './policy.js';
 import type { PolicyDecision } from './policy.js';
+import { EXTRACT_SCRIPT } from './perception/extract-script.js';
 import { perceive } from './perception/perceive.js';
+import {
+  describeSituationChange,
+  situationSignals,
+  situationTransitions,
+} from './perception/situation.js';
+import type { SituationSignal } from './perception/situation.js';
 import { renderObservation, sameElements } from './perception/serialize.js';
 import {
   buildAskPrompt,
@@ -53,6 +60,7 @@ import {
   buildVolatileTail,
   userMessageBlock,
 } from './prompt.js';
+import type { WorkingMemory } from './prompt.js';
 import {
   describeSafeAction,
   isSensitiveElement,
@@ -191,18 +199,116 @@ function scopeWipeAllToNamedSite(action: AgentAction, task: string): AgentAction
     op: 'clear_session',
     site,
     note: `scoped to ${site}: the request named that site, so its session is cleared and every other site's is kept`,
+    ...(action.plan ? { plan: action.plan } : {}),
   };
+}
+
+/** The phases a step's time is attributed to, in the order the debug line reports them. */
+const TIMING_PHASES = ['perceive', 'llm', 'execute', 'settle', 'journal'] as const;
+type TimedPhase = (typeof TIMING_PHASES)[number];
+
+interface StepTiming {
+  step: number;
+  startedAt: number;
+  phases: Record<TimedPhase | 'total', number>;
+}
+
+function newStepTiming(step: number, startedAt: number): StepTiming {
+  return {
+    step,
+    startedAt,
+    phases: { perceive: 0, llm: 0, execute: 0, settle: 0, journal: 0, total: 0 },
+  };
+}
+
+/**
+ * The driver with its two slow primitives on the stopwatch: the DOM walk (`evaluate` of the extract
+ * script, i.e. every `perceive`) and `waitForSettle`. Timing them HERE attributes the cost wherever
+ * it is paid — the top-of-step read, the pre-dispatch freshness read, the post-action verification,
+ * the executor's own settle waits — without threading a clock through each caller.
+ *
+ * A Proxy rather than a wrapper class: every other member is forwarded BOUND TO THE REAL DRIVER, so a
+ * driver that keeps private fields or compares `this` never meets a foreign receiver, and optional
+ * members (`ready`, `screenshot`, `takeAdoptedPopup`) stay absent when the driver lacks them — the
+ * loop decides behaviour by their presence.
+ */
+function instrumentDriver(
+  driver: BrowserDriver,
+  timed: <T>(phase: 'perceive' | 'settle', operation: () => Promise<T>) => Promise<T>,
+): BrowserDriver {
+  return new Proxy(driver, {
+    get(target, property) {
+      const value = Reflect.get(target, property) as unknown;
+      if (typeof value !== 'function') return value;
+      const method = value as (...args: unknown[]) => unknown;
+      if (property === 'evaluate') {
+        return (expression: string): unknown =>
+          expression === EXTRACT_SCRIPT
+            ? timed('perceive', () => method.call(target, expression) as Promise<unknown>)
+            : method.call(target, expression);
+      }
+      if (property === 'waitForSettle') {
+        return (...args: unknown[]): Promise<void> =>
+          timed('settle', () => method.call(target, ...args) as Promise<void>);
+      }
+      return method.bind(target);
+    },
+  });
+}
+
+/** The action minus the model's memo: a fresh `plan` on the same gesture must not read as a new gesture. */
+function actionIdentity(action: AgentAction): string {
+  return JSON.stringify({ ...action, plan: undefined });
 }
 
 export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Promise<void> {
   const { sessionId, profileId, task, runId, llmConfig, config } = params;
-  const { driver, llm, memory, emit, signal, now } = deps;
+  const { llm, memory, emit, signal, now } = deps;
   const usage: AgentUsage = { tokensIn: 0, tokensOut: 0 };
   const sendsEffort =
     llmConfig.effort !== undefined &&
     (llm.sendsEffort?.(llmConfig.stepModel || llmConfig.model, llmConfig.effort) ?? false);
   const history: string[] = [];
   const base = { sessionId, profileId };
+  /**
+   * Milliseconds on the clock the events are stamped with, so a step's phase durations and its
+   * events' `ts` are measured the same way — and a test that injects `now` controls both.
+   */
+  const clock = (): number => {
+    const ms = Date.parse(now());
+    return Number.isNaN(ms) ? Date.now() : ms;
+  };
+  /** Phase accumulators for the step in progress; reported by `flushStepTiming`. */
+  let stepTiming: StepTiming | undefined;
+  const timed = async <T>(phase: TimedPhase, operation: () => Promise<T>): Promise<T> => {
+    const startedAt = clock();
+    try {
+      return await operation();
+    } finally {
+      if (stepTiming) stepTiming.phases[phase] += Math.max(0, clock() - startedAt);
+    }
+  };
+  /**
+   * The dispatch window NET of the primitives measured inside it, so `execute` is the driver's own
+   * work — cursor paths, key cadence, the executor's checks — and not a second copy of the settle,
+   * journal and verification-read time that `dispatchJournaled` also spends.
+   */
+  const timedExecute = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const startedAt = clock();
+    const inner = (): number =>
+      stepTiming
+        ? stepTiming.phases.perceive + stepTiming.phases.settle + stepTiming.phases.journal
+        : 0;
+    const innerBefore = inner();
+    try {
+      return await operation();
+    } finally {
+      if (stepTiming) {
+        stepTiming.phases.execute += Math.max(0, clock() - startedAt - (inner() - innerBefore));
+      }
+    }
+  };
+  const driver = instrumentDriver(deps.driver, timed);
   const safeTask = redactCredentialLikeText(task);
   let memoryStarted = false;
   let journalSnapshot: RunJournalSnapshot | undefined;
@@ -222,8 +328,12 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
   }
 
   const appendJournal = async (event: AppendRunJournalEventV1): Promise<void> => {
-    if (!deps.journal || !journalSnapshot) return;
-    journalSnapshot = await deps.journal.append(runId, event, journalSnapshot.journal.revision);
+    const journal = deps.journal;
+    const snapshot = journalSnapshot;
+    if (!journal || !snapshot) return;
+    journalSnapshot = await timed('journal', () =>
+      journal.append(runId, event, snapshot.journal.revision),
+    );
   };
   const markJournalSensitive = async (
     reason: 'credential' | 'upload_path' | 'provider_configuration' | 'image_payload' | 'unknown',
@@ -440,11 +550,30 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       usage.cachedTokensIn = (usage.cachedTokensIn ?? 0) + value.cachedTokensIn;
     if (value.costUsd) usage.costUsd = (usage.costUsd ?? 0) + value.costUsd;
   };
+  /**
+   * Report where the finished step's time went. Called at the step BOUNDARY — the top of the next
+   * iteration, and from `finish` — rather than at each of the step's dozen exits, so every path
+   * through a step (executed, blocked, asked, retried) reports exactly once. A step is over when the
+   * next one begins or the run ends, and that is when its number is final.
+   */
+  const flushStepTiming = (): void => {
+    if (!stepTiming) return;
+    const { step, startedAt, phases } = stepTiming;
+    stepTiming = undefined;
+    phases.total = Math.max(0, clock() - startedAt);
+    emit({ type: 'step.timing', ...base, step, phases: { ...phases }, ts: now() });
+    log(
+      'debug',
+      `Step ${step} timing: ${TIMING_PHASES.map((phase) => `${phase} ${phases[phase]}ms`).join(', ')} (total ${phases.total}ms).`,
+    );
+  };
   const finish = async (
     status: 'done' | 'error' | 'stopped',
     result: string,
     error?: string,
   ): Promise<void> => {
+    // The step that ended the run is over too; its timing goes out before the terminal event.
+    flushStepTiming();
     // Terminal text is model-/page-derived and crosses the UI plus thread-memory boundaries. A model
     // echoing a token it saw must not turn `run.finished` into a credential exfiltration event.
     const safeResult = redactCredentialLikeText(result).text;
@@ -754,8 +883,18 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
      * Verification has already proved this observation agrees with the live URL.
      */
     let carriedPerception: RawPerception | undefined;
+    /** The tracked situation flags of the page the previous iteration acted on, and its step. */
+    let previousSituation: { step: number; signals: SituationSignal[] } | undefined;
+    /** Trusted mid-run amendments (steering, answers) in arrival order; the tail restates the newest. */
+    const amendments: Array<{ step: number; text: string }> = [];
+    /** The model's latest `plan`; every action that carries one replaces it. */
+    let plan = '';
 
     for (let step = 1; step <= config.maxSteps; step += 1) {
+      // A step retried after a truncated reply (`step -= 1` below) keeps accumulating into its own
+      // record: the retry is part of what that step cost.
+      if (stepTiming && stepTiming.step !== step) flushStepTiming();
+      stepTiming ??= newStepTiming(step, clock());
       if (signal.aborted) return await finish('stopped', 'Stopped by user.');
       for (const text of deps.takeSteering?.() ?? []) {
         const safe = redactCredentialLikeText(text).text.trim();
@@ -842,6 +981,24 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           `BUDGET: step ${step} of ${config.maxSteps}. Wrap up — consolidate what you already have and call \`done\`; do not start new exploration.`,
         );
       }
+      // Situation transitions. The snapshot's `page signals` line says what is on the page now; what
+      // the model needs told is that it CHANGED — a login wall that was not there a step ago, a
+      // CAPTCHA that has gone — compared against the page the previous iteration acted on. The
+      // panel gets the same transition as an event, so the rail can say "login wall" where the model
+      // is deciding what to do about it.
+      const situation = situationSignals(raw.signals);
+      for (const change of situationTransitions(previousSituation?.signals ?? [], situation)) {
+        nudges.push(describeSituationChange(change, previousSituation?.step));
+        emit({
+          type: 'step.signal',
+          ...base,
+          step,
+          signal: change.signal,
+          appeared: change.appeared,
+          ts: now(),
+        });
+      }
+      previousSituation = { step, signals: situation };
       // The tool result carries only what is STABLE for this step — header, outcome, snapshot. The
       // nudges and both ledgers change every step and go in the volatile tail below instead.
       const stepText = buildStepPrompt({
@@ -871,9 +1028,18 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       }
       for (const text of pendingUserMessages.splice(0)) {
         stepMessages.push({ role: 'user', content: userMessageBlock(text) });
+        amendments.push({ step, text });
       }
+      // The working memory is harness-owned state, so it rides in the regenerated tail with the
+      // ledgers: the task contract and the plan are restated every step and never age out.
+      const workingMemory: WorkingMemory = {
+        task,
+        amendments: [...amendments].reverse(),
+        ...(plan ? { plan } : {}),
+      };
       const tail = buildVolatileTail({
         nudges,
+        memory: workingMemory,
         ...(readEvidence.length ? { readState: readEvidence.join('\n\n') } : {}),
         ...(history.length ? { progress: runLedger(history) } : {}),
       });
@@ -975,7 +1141,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // dangerous part of the second tier is already built.
       let result: Awaited<ReturnType<typeof llm.complete>>;
       try {
-        result = await llm.complete(buildRequest());
+        result = await timed('llm', () => llm.complete(buildRequest()));
       } catch (error) {
         const headroom = contextOverflowHeadroom(error);
         if (headroom === null || oversizeRetried) throw error;
@@ -984,14 +1150,16 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         // current cap would re-send an identical body and burn a call to get the same 400.
         if (headroom >= 512 && headroom < requestMaxTokens) {
           log('warn', `Context limit reached; retrying this step with a smaller output budget.`);
-          result = await llm.complete(buildRequest({ maxTokens: headroom }));
+          result = await timed('llm', () => llm.complete(buildRequest({ maxTokens: headroom })));
         } else {
           log('warn', 'Context limit reached; retrying this step with the conversation trimmed.');
-          result = await llm.complete(
-            buildRequest({
-              messages: normalizeMessages(pruneObservations(stepMessages).slice(-4)),
-              maxTokens: Math.min(requestMaxTokens, 1024),
-            }),
+          result = await timed('llm', () =>
+            llm.complete(
+              buildRequest({
+                messages: normalizeMessages(pruneObservations(stepMessages).slice(-4)),
+                maxTokens: Math.min(requestMaxTokens, 1024),
+              }),
+            ),
           );
         }
       }
@@ -1073,6 +1241,10 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       invalidActions = Math.max(0, invalidActions - 1);
       const action = scopeWipeAllToNamedSite(parsed.action, task);
       const safeAction = redactAction(action, raw);
+      // The plan is the model's memo to itself and is kept whether or not the action it rode on is
+      // allowed to run: a blocked action is exactly when the notes matter. The redacted copy, so a
+      // credential-shaped string cannot be re-sent to the model through its own notes.
+      if (safeAction.plan) plan = safeAction.plan;
       // Record the model's own choice as an assistant turn. Every path below may `continue`, and the
       // next step answers THIS call id — so the assistant/tool pairing stays well-formed even when the
       // action is blocked, rejected, or never executed.
@@ -1162,7 +1334,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
               runId,
               history,
               base,
-              deps,
+              { ...deps, driver },
               memory,
               now,
               beginEffect,
@@ -1393,8 +1565,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // ended the run as a loop even though every scroll had appended new rows. It still cannot go on
       // forever — a page with a ticking clock would otherwise never look stuck — so it keeps a much
       // looser bound of its own, under the run's step and token ceilings.
-      const actionFingerprint = `${raw.url}|${JSON.stringify(safeAction)}`;
-      const stateFingerprint = `${observationFingerprint(raw)}|${JSON.stringify(safeAction)}`;
+      const actionFingerprint = `${raw.url}|${actionIdentity(safeAction)}`;
+      const stateFingerprint = `${observationFingerprint(raw)}|${actionIdentity(safeAction)}`;
       stuckCount = stateFingerprint === lastStateFingerprint ? stuckCount + 1 : 1;
       repeatCount = actionFingerprint === lastFingerprint ? repeatCount + 1 : 1;
       lastStateFingerprint = stateFingerprint;
@@ -1409,27 +1581,29 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       if (stuckCount >= 3 || repeatCount >= 8) recovery = true;
 
       let verifiedPerception: RawPerception | undefined;
-      const outcome = await dispatchJournaled(
-        journalActionId,
-        journalEffect,
-        (beginEffect) =>
-          executeAction(action, raw, driver, {
-            ...(deps.sleep ? { sleep: deps.sleep } : {}),
-            config,
-            signal,
-            navigationApproved,
-            beforeEffect: beginEffect,
-          }),
-        (value) => value.outcome,
-        journalEffect === 'read'
-          ? undefined
-          : async () => {
-              verifiedPerception = await verifyBrowserStateObserved(
-                driver,
-                movesBrowserOnly(action),
-              );
-            },
-        (value) => value.delivery,
+      const outcome = await timedExecute(() =>
+        dispatchJournaled(
+          journalActionId,
+          journalEffect,
+          (beginEffect) =>
+            executeAction(action, raw, driver, {
+              ...(deps.sleep ? { sleep: deps.sleep } : {}),
+              config,
+              signal,
+              navigationApproved,
+              beforeEffect: beginEffect,
+            }),
+          (value) => value.outcome,
+          journalEffect === 'read'
+            ? undefined
+            : async () => {
+                verifiedPerception = await verifyBrowserStateObserved(
+                  driver,
+                  movesBrowserOnly(action),
+                );
+              },
+          (value) => value.delivery,
+        ),
       );
       // An action that actually ran clears the consecutive streak (but not the total): the agent found
       // something it is allowed to do, so it is no longer stuck against the same wall.
