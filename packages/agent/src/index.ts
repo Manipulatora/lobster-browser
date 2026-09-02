@@ -42,6 +42,12 @@ export type { ExecOutcome, ExecOptions, Sleep } from './executor.js';
 
 export { buildSystemPrompt, buildStepPrompt } from './prompt.js';
 export { BUILTIN_SKILLS, formatSkills, selectSkills } from './skills.js';
+export {
+  domainInFamily,
+  registrableDomain,
+  resolveSiteFamily,
+  siteNamedIn,
+} from './site-families.js';
 export type { BuiltinSkill } from './skills.js';
 
 export { createLlmClient, AnthropicClient, listModels } from './llm/index.js';

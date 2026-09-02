@@ -116,6 +116,8 @@ export function actionCapability(kind: AgentAction['kind']): ActionCapability {
 
 const BROWSER_CONFIG_OPS = [
   'clear_cookies',
+  'clear_session',
+  'list_cookies',
   'clear_all_cookies',
   'clear_site_data',
   'clear_cache',
@@ -269,6 +271,12 @@ export const ACT_TOOL = {
         maxLength: 253,
         description: 'browser_config: registrable domain (clear_cookies) or a permission target.',
       },
+      site: {
+        type: 'string',
+        maxLength: 253,
+        description:
+          'browser_config: the site to log out of (clear_session) — any host of it, e.g. "outlook.com".',
+      },
       origin: {
         type: 'string',
         maxLength: 2_048,
@@ -347,7 +355,8 @@ export function buildActionReference(opts: {
     // while every neighbouring bullet was one short sentence. The prohibition wording is asserted by
     // tests and must stay byte-identical wherever it lives.
     '- browser_config {op,...}: change the BROWSER, not the page.',
-    "  · Live ops — applied instantly and invisibly, nothing opened: clear_cookies {domain}; clear_all_cookies {}; clear_site_data {origin|domain}; clear_cache {}; set_permission {origin|domain, permission (geolocation|notifications|camera|microphone|clipboard-read|clipboard-write|midi), setting (granted|denied|prompt)}; set_downloads {behavior (allow|deny|default)}. When the user says all/every site's cookies, that is clear_all_cookies — never hunt for it in the settings UI.",
+    '  · Live ops — applied instantly and invisibly, nothing opened: clear_session {site} logs the user out of ONE site — it clears cookies and storage for the site AND the identity domains its login actually lives on (Outlook signs in through live.com and microsoftonline.com, Google through google.com), then reloads the tab, and reports what went per domain; list_cookies {domain?} shows which domains hold cookies (and how many) when you need to see where a session lives; clear_cookies {domain} removes cookies for exactly one registrable domain; clear_site_data {origin|domain}; clear_cache {}; set_permission {origin|domain, permission (geolocation|notifications|camera|microphone|clipboard-read|clipboard-write|midi), setting (granted|denied|prompt)}; set_downloads {behavior (allow|deny|default)}.',
+    '  · "Remove/clear/delete all cookies of <site>", "log me out of <site>", "reset <site>" all mean clear_session {site} — "all" there means all of that site\'s cookies, not every site\'s. clear_all_cookies {} is ONLY for a request that names no site at all ("clear all cookies", "log me out everywhere"): it signs the user out of every site in this profile, which is irreversible, so never pick it to be thorough. Never hunt for any of these in the settings UI.',
     '  · Preference ops — also instant and invisible, and the PRECISE way to change one setting: set_pref {pref,value} (values for a list setting), get_pref {pref} to read the current state. Name the Chromium key, e.g. set_pref {pref:"download.prompt_for_download", value:"true"}. Try this BEFORE the settings UI; a key that is not settable comes back with the full list of the ones that are.',
     '  · Settings-page ops for the long tail: open_settings {value} for an area like "privacy", "appearance", "cookies", "content", "notifications", "downloads", "search", "site settings", "new tab"; plus set_theme {value:"dark"|"light"}, set_privacy {}, set_content_default {}. An unlisted area opens the settings search instead of failing.',
     "  · A settings op opens a vetted page in a SEPARATE BACKGROUND tab — the user's tab is untouched. Perceive it, operate the one control you came for, then CLOSE that tab.",
@@ -618,6 +627,7 @@ export function parseAction(raw: RawActionInput): ParseActionResult {
         return bad(`browser_config requires "op" one of: ${BROWSER_CONFIG_OPS.join(', ')}`);
       }
       const domain = str(raw.domain, 253);
+      const site = str(raw.site, 253);
       const origin = str(raw.origin, 2_048);
       const permission = str(raw.permission, 40);
       const pref = normalizePrefKey(str(raw.pref, 120));
@@ -632,6 +642,8 @@ export function parseAction(raw: RawActionInput): ParseActionResult {
           ? raw.behavior
           : undefined;
       if (op === 'clear_cookies' && !domain) return bad('clear_cookies requires a "domain"');
+      if (op === 'clear_session' && !site && !domain)
+        return bad('clear_session requires a "site" (e.g. "outlook.com")');
       if ((op === 'clear_site_data' || op === 'set_permission') && !origin && !domain)
         return bad(`${op} requires an "origin" (or "domain")`);
       if (op === 'set_permission' && !permission)
@@ -650,6 +662,15 @@ export function parseAction(raw: RawActionInput): ParseActionResult {
       if (op === 'clear_cookies' && !cookieDomain) {
         return bad('clear_cookies requires a specific site domain, not a public/private suffix');
       }
+      // A session is cleared for a SITE, and a site is a specific registrable domain: "com" or a
+      // bare suffix would be a wipe-all wearing a site's name.
+      const sessionSite =
+        op === 'clear_session' ? normalizeCookieDomain(site || domain) : undefined;
+      if (op === 'clear_session' && !sessionSite) {
+        return bad('clear_session requires a specific site, not a public/private suffix');
+      }
+      const listDomain =
+        op === 'list_cookies' && domain ? (normalizeCookieDomain(domain) ?? undefined) : undefined;
       const permissionOrigin =
         op === 'set_permission' ? normalizeBrowserPermissionOrigin(origin, domain) : undefined;
       if (op === 'set_permission' && !permissionOrigin) {
@@ -660,9 +681,12 @@ export function parseAction(raw: RawActionInput): ParseActionResult {
         op: op as (typeof BROWSER_CONFIG_OPS)[number],
         ...(cookieDomain
           ? { domain: cookieDomain }
-          : op !== 'set_permission' && domain
-            ? { domain }
-            : {}),
+          : listDomain
+            ? { domain: listDomain }
+            : op !== 'set_permission' && op !== 'clear_session' && op !== 'list_cookies' && domain
+              ? { domain }
+              : {}),
+        ...(sessionSite ? { site: sessionSite } : {}),
         ...(permissionOrigin ? { origin: permissionOrigin } : origin ? { origin } : {}),
         ...(permission ? { permission: normalizeBrowserPermission(permission) } : {}),
         ...(setting ? { setting } : {}),

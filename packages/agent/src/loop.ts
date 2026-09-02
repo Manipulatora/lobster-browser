@@ -61,6 +61,7 @@ import {
 } from './security.js';
 import { redactCredentialLikeText } from './sensitive-text.js';
 import type { PerceivedElement, RawPerception } from './types.js';
+import { siteNamedIn } from './site-families.js';
 
 export interface AgentRunDeps {
   driver: BrowserDriver;
@@ -164,6 +165,25 @@ export function resolveConfig(partial: Partial<AgentConfig> | undefined): AgentC
     allowPrivateNetwork: partial?.allowPrivateNetwork === true,
     crossDomainNavigation,
     ...(allowedUploadRoots.length ? { allowedUploadRoots } : {}),
+  };
+}
+
+/**
+ * A wipe-all is site-scoped BY CONSTRUCTION. "Remove all cookies of outlook.com" reads, to a model,
+ * as "all cookies" — and clear_all_cookies signs the user out of every site in an anti-detect
+ * profile, irreversibly. Whether that is what the user meant is not a judgment call the model gets to
+ * make: if the request names a site, the action becomes that site's clear_session; only a request
+ * that names no site at all ("clear all cookies", "log me out everywhere") keeps the wipe-all.
+ */
+function scopeWipeAllToNamedSite(action: AgentAction, task: string): AgentAction {
+  if (action.kind !== 'browser_config' || action.op !== 'clear_all_cookies') return action;
+  const site = siteNamedIn(task);
+  if (!site) return action;
+  return {
+    kind: 'browser_config',
+    op: 'clear_session',
+    site,
+    note: `scoped to ${site}: the request named that site, so its session is cleared and every other site's is kept`,
   };
 }
 
@@ -876,7 +896,20 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         cachePrefix: true,
         sessionId: runId,
         attribution: { profileId, sessionId: runId },
-        ...(llmConfig.effort ? { effort: llmConfig.effort } : {}),
+        // A routine step on the step model runs at the step model's effort: the whole point of a
+        // cheaper model for navigation is latency, and asking it to think hard gives that back.
+        ...((
+          step === 1 || recovery || !llmConfig.stepModel
+            ? llmConfig.effort
+            : (llmConfig.stepEffort ?? llmConfig.effort)
+        )
+          ? {
+              effort:
+                step === 1 || recovery || !llmConfig.stepModel
+                  ? llmConfig.effort
+                  : (llmConfig.stepEffort ?? llmConfig.effort),
+            }
+          : {}),
         // A silent retry is indistinguishable from a hang: three BYOK attempts plus backoff is minutes
         // of a panel showing only "thinking", which invites killing a run that was recovering fine.
         onRetry: ({ attempt, attempts, delayMs, reason }) =>
@@ -989,7 +1022,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // Decay rather than reset: a model that alternates one good action with one bad one would never
       // trip the limit on a hard reset, and would burn the whole step budget instead.
       invalidActions = Math.max(0, invalidActions - 1);
-      const action = parsed.action;
+      const action = scopeWipeAllToNamedSite(parsed.action, task);
       const safeAction = redactAction(action, raw);
       // Record the model's own choice as an assistant turn. Every path below may `continue`, and the
       // next step answers THIS call id — so the assistant/tool pairing stays well-formed even when the
@@ -1370,6 +1403,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // A popup the page opened has silently become the working target; say so in the same breath as
       // the action's outcome, so the model knows which page it is now on.
       const adopted = driver.takeAdoptedPopup?.();
+      // The per-step report the panel shows beside the rail dot. Same line the model receives as the
+      // step's result, so what the user reads and what the model reasons from cannot diverge.
+      emit({ type: 'step.outcome', ...base, step, text: outcome.outcome, ts: now() });
       history.push(
         `${step}. ${outcome.outcome}${adopted ? ` — the page opened a new tab (${redactUrl(adopted)}); you are now on it` : ''}`,
       );

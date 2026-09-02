@@ -641,6 +641,12 @@ function validateStartParams(params: AgentStartParams): void {
   ) {
     throw new Error('invalid LLM step model');
   }
+  if (
+    params.llm.stepEffort !== undefined &&
+    !['low', 'medium', 'high'].includes(params.llm.stepEffort)
+  ) {
+    throw new Error('invalid LLM step effort');
+  }
   if (!['anthropic', 'openai', 'google', 'xai', 'openrouter'].includes(params.llm.provider)) {
     throw new Error('unsupported LLM provider');
   }

@@ -238,3 +238,24 @@ test('metadata that verifies nothing is kept as its own row rather than shifted 
   assert.equal(merged[1].id, 77);
   assert.equal(merged[1].needsSecureMigration, true);
 });
+
+test('a step outcome becomes the brief line beside the rail dot', () => {
+  let turn = applyEvent(running(), {
+    type: 'step.action',
+    step: 2,
+    ts: '2026-09-02T10:00:01.000Z',
+    action: { kind: 'browser_config', op: 'clear_session', site: 'outlook.com' },
+  });
+  turn = applyEvent(turn, {
+    type: 'step.outcome',
+    step: 2,
+    ts: '2026-09-02T10:00:03.000Z',
+    text: 'result: cleared 4 cookie(s) and site storage for outlook.com',
+  });
+  assert.equal(turn.steps.get(2).kind, 'browser_config');
+  assert.match(turn.steps.get(2).outcome, /cleared 4 cookie/);
+  assert.equal(turn.steps.get(2).ts, '2026-09-02T10:00:03.000Z');
+  // An empty outcome never blanks a line the user already read.
+  const kept = applyEvent(turn, { type: 'step.outcome', step: 2, text: '' });
+  assert.match(kept.steps.get(2).outcome, /cleared 4 cookie/);
+});

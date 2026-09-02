@@ -19,6 +19,8 @@ export interface Step {
   ts?: string;
   /** The action kind behind the step (`navigate`, `click`, …); a thinking step carries none yet. */
   kind?: string;
+  /** What the action actually did — the harness's own one-line result, shown beside the dot. */
+  outcome?: string;
   thinking: boolean;
   done: boolean;
 }
@@ -101,6 +103,11 @@ export function applyEvent(turn: Turn, ev: AgentEvent): Turn {
       });
       return { ...turn, steps };
     }
+    case 'step.outcome':
+      return upsert(ev.step ?? 0, {
+        ...(typeof ev.text === 'string' && ev.text ? { outcome: ev.text } : {}),
+        ...(ev.ts ? { ts: ev.ts } : {}),
+      });
     case 'step.action':
       return upsert(ev.step ?? 0, {
         thinking: false,

@@ -50,6 +50,8 @@ export type PrefValue = boolean | number | string | string[];
 /** Live, page-invisible ops that run over leak-free CDP (applied instantly). */
 const LIVE_OPS: ReadonlySet<BrowserConfigOp> = new Set([
   'clear_cookies',
+  'clear_session',
+  'list_cookies',
   'clear_all_cookies',
   'clear_site_data',
   'clear_cache',
@@ -650,6 +652,14 @@ export function assessBrowserConfig(
   if (LIVE_OPS.has(op)) {
     if (op === 'clear_cookies' && !normalizeCookieDomain(action.domain)) {
       return block('clear_cookies needs a specific site domain, not a public/private suffix');
+    }
+    if (op === 'clear_session' && !normalizeCookieDomain(action.site ?? action.domain)) {
+      return block(
+        'clear_session needs a specific site (e.g. outlook.com), not a public/private suffix',
+      );
+    }
+    if (op === 'list_cookies' && action.domain && !normalizeCookieDomain(action.domain)) {
+      return block('list_cookies: give a specific site domain, or omit it to list every domain');
     }
     if (op === 'set_permission') {
       if (!normalizeBrowserPermissionOrigin(action.origin, action.domain)) {

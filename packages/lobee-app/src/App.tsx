@@ -193,18 +193,26 @@ function Status({ turn, hasThinking }: { turn: Turn; hasThinking: boolean }) {
  */
 function StepRail({ steps }: { steps: Array<[number, Step]> }) {
   return (
-    <div className="relative flex flex-col gap-[7px] py-1 pl-2.5">
+    <div className="relative flex flex-col gap-[5px] py-1 pl-2.5">
       <span
         aria-hidden="true"
-        className="absolute bottom-[7px] left-[12.5px] top-[7px] w-px bg-line"
+        className="absolute bottom-[9px] left-[12.5px] top-[9px] w-px bg-line"
       />
-      {steps.map(([n, s]) => (
-        <span
-          key={n}
-          title={s.ctx ? `${s.label || '…'} — ${s.ctx}` : s.label || '…'}
-          className={`lobee-dot ${s.thinking ? 'is-active' : s.done ? 'is-done' : ''}`}
-        />
-      ))}
+      {steps.map(([n, s]) => {
+        // One brief line per step: what the action DID once the harness knows, the action itself
+        // while it runs, the model's own note before that. The rail dot still carries the state.
+        const text = s.outcome || s.label || (s.thinking ? 'Thinking…' : '…');
+        return (
+          <div
+            key={n}
+            className="lobee-step-row"
+            title={s.ctx ? `${s.label || '…'} — ${s.ctx}` : s.label || '…'}
+          >
+            <span className={`lobee-dot ${s.thinking ? 'is-active' : s.done ? 'is-done' : ''}`} />
+            <span className={`lobee-step-text ${s.done ? 'is-done' : ''}`}>{text}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

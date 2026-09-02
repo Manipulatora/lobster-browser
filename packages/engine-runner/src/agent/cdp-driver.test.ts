@@ -166,3 +166,92 @@ test('modifier chords dispatch as shortcuts, not as typed characters', async () 
   );
   assert.equal(events.filter((event) => event.type === 'keyUp').length, 3);
 });
+
+const MICROSOFT_STORE = [
+  { name: 'pref', domain: '.outlook.com', path: '/' },
+  { name: 'MSPAuth', domain: 'login.live.com', path: '/' },
+  { name: 'ESTSAUTH', domain: 'login.microsoftonline.com', path: '/' },
+  { name: 'RPS', domain: '.office.com', path: '/' },
+  { name: 'sid', domain: '.example.test', path: '/' },
+];
+
+test('list_cookies reports the store per registrable domain, most cookies first', async () => {
+  const instance = driver(session(async () => ({ cookies: MICROSOFT_STORE })));
+  const all = await instance.browserConfig({ op: 'list_cookies' });
+  assert.match(all, /5 cookie\(s\) across 5 domain\(s\)/);
+  assert.match(all, /live\.com \(1\)/);
+  const one = await instance.browserConfig({ op: 'list_cookies', domain: 'outlook.com' });
+  assert.equal(one, '1 cookie(s) across 1 domain(s): outlook.com (1)');
+  assert.equal(
+    await instance.browserConfig({ op: 'list_cookies', domain: 'nothing.test' }),
+    'no cookies are set for nothing.test',
+  );
+});
+
+test('clear_cookies with nothing to clear is an error that says where the session lives', async () => {
+  // The owner's failure: "remove all cookies of outlook.com" while the login sits on live.com. A zero
+  // count reported as success let the run finish "done" with Outlook still signed in.
+  const store = MICROSOFT_STORE.filter((c) => c.domain !== '.outlook.com');
+  const instance = driver(session(async () => ({ cookies: store })));
+  await assert.rejects(
+    instance.browserConfig({ op: 'clear_cookies', domain: 'outlook.com' }),
+    (error: Error) => {
+      assert.match(error.message, /no cookies are set for outlook\.com/);
+      assert.match(error.message, /related cookies exist on .*live\.com \(1\)/);
+      assert.match(error.message, /clear_session/);
+      return true;
+    },
+  );
+});
+
+test('clear_session signs out of the whole login family, clears storage and reloads the tab', async () => {
+  const pageCalls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  let reads = 0;
+  const browser = session(async (method) => {
+    if (method !== 'Storage.getCookies') return {};
+    reads += 1;
+    // The first read is the live store; after deletion only the unrelated site remains.
+    return { cookies: reads === 1 ? MICROSOFT_STORE : MICROSOFT_STORE.slice(4) };
+  });
+  const page = session(async (method, params) => {
+    pageCalls.push({ method, ...(params ? { params } : {}) });
+    if (method === 'Runtime.evaluate')
+      return { result: { value: 'https://outlook.live.com/mail/0/' } };
+    return {};
+  });
+  const instance = driver(browser, page);
+  const outcome = await instance.browserConfig({ op: 'clear_session', site: 'outlook.com' });
+
+  const deleted = pageCalls
+    .filter((c) => c.method === 'Network.deleteCookies')
+    .map((c) => c.params?.domain);
+  assert.deepEqual(deleted, [
+    '.outlook.com',
+    'login.live.com',
+    'login.microsoftonline.com',
+    '.office.com',
+  ]);
+  assert.ok(!deleted.includes('.example.test'), "another site's session is untouched");
+  const storageOrigins = pageCalls
+    .filter((c) => c.method === 'Storage.clearDataForOrigin')
+    .map((c) => c.params?.origin);
+  assert.ok(storageOrigins.includes('https://live.com'));
+  assert.ok(storageOrigins.includes('https://outlook.com'));
+  assert.ok(!storageOrigins.includes('https://example.test'));
+  assert.ok(
+    pageCalls.some((c) => c.method === 'Page.reload'),
+    'the tab on the site is reloaded',
+  );
+  assert.match(outcome, /cleared 4 cookie\(s\) and site storage for outlook\.com/);
+  assert.match(outcome, /live\.com \(1\)/);
+  assert.match(outcome, /reloaded the tab/);
+  assert.doesNotMatch(outcome, /came back/);
+});
+
+test('clear_session on a site the user is not signed in to is an error, not a quiet success', async () => {
+  const instance = driver(session(async () => ({ cookies: MICROSOFT_STORE.slice(4) })));
+  await assert.rejects(
+    instance.browserConfig({ op: 'clear_session', site: 'outlook.com' }),
+    /no cookies are set for outlook\.com or its login domains/,
+  );
+});

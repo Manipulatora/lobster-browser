@@ -33,6 +33,8 @@ export interface BrowserTab {
 export interface BrowserConfigCommand {
   op:
     | 'clear_cookies'
+    | 'clear_session'
+    | 'list_cookies'
     | 'clear_all_cookies'
     | 'clear_site_data'
     | 'clear_cache'
@@ -43,6 +45,8 @@ export interface BrowserConfigCommand {
     /** Read Chromium preferences, to report current state or verify a write. */
     | 'get_prefs';
   domain?: string;
+  /** The site whose session `clear_session` ends (any host of it; resolved to its family). */
+  site?: string;
   origin?: string;
   permission?: string;
   setting?: 'granted' | 'denied' | 'prompt';

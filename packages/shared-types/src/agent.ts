@@ -38,6 +38,12 @@ export interface AgentLlmConfig {
    */
   stepModel?: string;
   /**
+   * Reasoning effort for the routine steps that `stepModel` handles. Planning (step 1) and
+   * recovery keep `effort`. The point of a step model is speed: a fast model asked to think hard is
+   * neither fast nor a better navigator, so this defaults low and is set beside `stepModel`.
+   */
+  stepEffort?: 'low' | 'medium' | 'high';
+  /**
    * Reasoning effort. Sent to OpenRouter as the unified `reasoning: { effort }` param: passed through
    * natively for OpenAI reasoning models and normalized to a thinking budget for Anthropic. Omit to use
    * the provider default.
@@ -59,6 +65,13 @@ export interface AgentLlmConfig {
  */
 export type BrowserConfigOp =
   | 'clear_cookies'
+  /**
+   * Log a SITE out: clear cookies and storage for the site AND the identity domains its session
+   * actually lives on (Outlook's is on live.com / microsoftonline.com, not outlook.com), then reload.
+   */
+  | 'clear_session'
+  /** Read-back: which domains hold cookies, and how many — so "cleared 0" is never mistaken for done. */
+  | 'list_cookies'
   | 'clear_all_cookies'
   | 'clear_site_data'
   | 'clear_cache'
@@ -242,6 +255,8 @@ export type AgentAction =
       op: BrowserConfigOp;
       /** Registrable domain (clear_cookies) or a site permission's origin/target. */
       domain?: string;
+      /** The site to log out of (clear_session): any host of it; resolved to its session family. */
+      site?: string;
       origin?: string;
       /** Permissions-API name for set_permission (e.g. `geolocation`, `notifications`, `camera`). */
       permission?: string;
@@ -310,6 +325,19 @@ export type AgentEvent =
       title: string;
       summary: string;
       elementCount: number;
+      ts: string;
+    }
+  /**
+   * What the action actually did, in the harness's own words — the same redacted line the model
+   * sees as the step's result. This is the per-step report the panel renders next to the rail dot;
+   * without it the UI could only show what was ATTEMPTED (`step.action`), never what happened.
+   */
+  | {
+      type: 'step.outcome';
+      sessionId: string;
+      profileId: string;
+      step: number;
+      text: string;
       ts: string;
     }
   /** The run paused: it needs a human (an `ask`, a `confirm`, or a required BYOK/login handoff). */

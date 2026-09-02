@@ -578,6 +578,7 @@ export async function executeAction(
             : {
                 op: action.op as BrowserConfigCommand['op'],
                 ...(action.domain ? { domain: action.domain } : {}),
+                ...(action.site ? { site: action.site } : {}),
                 ...(action.origin ? { origin: action.origin } : {}),
                 ...(action.permission ? { permission: action.permission } : {}),
                 ...(action.setting ? { setting: action.setting } : {}),

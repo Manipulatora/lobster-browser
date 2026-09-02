@@ -359,6 +359,10 @@ test('runs a type+submit then finishes done, emitting the expected event arc', a
   const types = events.map((e) => e.type);
   assert.equal(types[0], 'run.started');
   assert.ok(types.includes('step.action'));
+  // Every executed step reports what it did: the panel's per-step line comes from here.
+  const outcomes = events.filter((e) => e.type === 'step.outcome');
+  assert.ok(outcomes.length >= 2, 'one outcome per executed action');
+  assert.ok(outcomes.every((e) => e.type === 'step.outcome' && e.text.length > 0));
   const finished = events.find((e) => e.type === 'run.finished');
   assert.ok(finished && finished.type === 'run.finished');
   assert.equal(finished.status, 'done');
@@ -3265,4 +3269,121 @@ test('a credentials ask is the ONE stop that still pauses, as run.needsInput', a
     driver.typed.includes('hunter2-supplied-by-human'),
     'the supplied secret still reaches the page through the secure channel',
   );
+});
+
+test("a wipe-all for a request that names a site becomes that site's clear_session", async () => {
+  // "Remove all cookies of outlook.com" is what the owner typed; the model answered with
+  // clear_all_cookies, which signs the user out of EVERY site in the profile. The scope is a product
+  // gate, not model judgment: a named site is site-scoped by construction.
+  class ConfigDriver extends FakeDriver {
+    commands: unknown[] = [];
+    async browserConfig(command: unknown): Promise<string> {
+      this.commands.push(command);
+      return 'cleared 4 cookie(s) and site storage for outlook.com: live.com (2), outlook.com (2)';
+    }
+  }
+  const driver = new ConfigDriver();
+  const memory = new FakeMemory();
+  const events: AgentEvent[] = [];
+  const llm = new ScriptedLlm([
+    { kind: 'browser_config', op: 'clear_all_cookies' },
+    { kind: 'done', success: true, summary: 'signed out of outlook' },
+  ]);
+  let n = 0;
+  await runAgent(
+    {
+      sessionId: 's1',
+      profileId: 'p1',
+      task: 'remove all cookies of outlook.com in this browser',
+      runId: 's1',
+      llmConfig: { provider: 'anthropic', model: 'claude-opus-4-8', apiKey: 'x' },
+      config: resolveConfig({ maxSteps: 4 }),
+    },
+    {
+      driver,
+      llm,
+      memory,
+      emit: (event) => events.push(event),
+      waitForInput: async () => 'ok',
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+  assert.equal(driver.commands.length, 1);
+  const command = driver.commands[0] as { op: string; site?: string };
+  assert.equal(command.op, 'clear_session');
+  assert.equal(command.site, 'outlook.com');
+  const outcome = events.find((e) => e.type === 'step.outcome');
+  assert.ok(outcome && outcome.type === 'step.outcome');
+  assert.match(outcome.text, /outlook\.com/);
+
+  // A genuinely site-less request keeps the wipe-all.
+  const wipe = new ConfigDriver();
+  await runAgent(
+    {
+      sessionId: 's2',
+      profileId: 'p1',
+      task: 'clear all cookies',
+      runId: 's2',
+      llmConfig: { provider: 'anthropic', model: 'claude-opus-4-8', apiKey: 'x' },
+      config: resolveConfig({ maxSteps: 4 }),
+    },
+    {
+      driver: wipe,
+      llm: new ScriptedLlm([
+        { kind: 'browser_config', op: 'clear_all_cookies' },
+        { kind: 'done', success: true, summary: 'all cookies cleared' },
+      ]),
+      memory: new FakeMemory(),
+      emit: () => {},
+      waitForInput: async () => 'ok',
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+  assert.equal((wipe.commands[0] as { op: string }).op, 'clear_all_cookies');
+});
+
+test('routine steps run on the step model at the step effort; step 1 keeps the primary', async () => {
+  const driver = new FakeDriver();
+  const llm = new ScriptedLlm([
+    { kind: 'type', id: 0, text: 'shoes', submit: true },
+    { kind: 'click', id: 1 },
+    { kind: 'done', success: true, summary: 'searched for shoes' },
+  ]);
+  let n = 0;
+  await runAgent(
+    {
+      sessionId: 's1',
+      profileId: 'p1',
+      task: 'search for shoes',
+      runId: 's1',
+      llmConfig: {
+        provider: 'openrouter',
+        model: 'anthropic/claude-opus-4.8',
+        apiKey: 'x',
+        effort: 'medium',
+        stepModel: 'anthropic/claude-sonnet-5',
+        stepEffort: 'low',
+      },
+      config: resolveConfig({ maxSteps: 6 }),
+    },
+    {
+      driver,
+      llm,
+      memory: new FakeMemory(),
+      emit: () => {},
+      waitForInput: async () => 'ok',
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+  const calls = llm.requests.map((r) => [r.model, r.effort]);
+  assert.ok(calls.length >= 3);
+  assert.deepEqual(calls[0], ['anthropic/claude-opus-4.8', 'medium']);
+  assert.deepEqual(calls[1], ['anthropic/claude-sonnet-5', 'low']);
+  assert.deepEqual(calls[2], ['anthropic/claude-sonnet-5', 'low']);
 });

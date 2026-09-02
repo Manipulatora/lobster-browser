@@ -47,6 +47,13 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
       'Type the username/email. For a password use ask with sensitive:true and targetId; then click Sign in. For OTP use the same secure handoff. If a CAPTCHA appears, ask the human to complete it in the visible browser.',
   },
   {
+    name: 'clear-site-session',
+    trigger:
+      "the user wants to log out of a site, remove/delete/clear a site's cookies, or reset a site's login",
+    steps:
+      'Use browser_config {op:"clear_session", site:"<the site>"} — it clears cookies AND storage for the site and the identity domains its login actually lives on (Outlook: live.com, microsoftonline.com; Google: google.com, youtube.com), then reloads the tab. Read the result: it names how many cookies went per domain, and if it says 0 matched it lists where cookies remain — use browser_config {op:"list_cookies"} to see the store, then clear_session on the domain that holds the session. Never reach for clear_all_cookies for one site: that logs the user out of every site in this profile. Confirm the page shows a signed-out state before reporting done.',
+  },
+  {
     name: 'paginate-results',
     trigger: 'the data you need spans multiple pages',
     steps:

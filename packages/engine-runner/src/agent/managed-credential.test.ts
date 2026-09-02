@@ -4,6 +4,7 @@ import {
   __resetManagedCredentialForTests,
   clearManagedCredential,
   currentManagedCredential,
+  FAST_STEP_MODEL,
   managedEntitlement,
   managedLlmConfig,
   noteManagedRefusal,
@@ -173,6 +174,36 @@ test('the operator environment pair still authorises development and CI runs', a
     assert.equal(resolution.llm.apiKey, 'operator-token');
     assert.equal(resolution.llm.managed, true);
     assert.equal(resolution.llm.effort, 'high');
+  } finally {
+    if (previousUrl === undefined) delete process.env.LOBSTER_AGENT_PROXY_URL;
+    else process.env.LOBSTER_AGENT_PROXY_URL = previousUrl;
+    if (previousToken === undefined) delete process.env.LOBSTER_AGENT_PROXY_TOKEN;
+    else process.env.LOBSTER_AGENT_PROXY_TOKEN = previousToken;
+    __resetManagedCredentialForTests();
+  }
+});
+
+test('routine steps run on the fast model at low effort; the primary keeps planning and recovery', () => {
+  __resetManagedCredentialForTests();
+  const previousUrl = process.env.LOBSTER_AGENT_PROXY_URL;
+  const previousToken = process.env.LOBSTER_AGENT_PROXY_TOKEN;
+  process.env.LOBSTER_AGENT_PROXY_URL = 'https://proxy.example.test/agent/llm';
+  process.env.LOBSTER_AGENT_PROXY_TOKEN = 'operator-token';
+  try {
+    const opus = managedLlmConfig('anthropic/claude-opus-4.8', 'medium');
+    assert.equal(opus.ok, true);
+    if (!opus.ok) return;
+    assert.equal(opus.llm.model, 'anthropic/claude-opus-4.8');
+    assert.equal(opus.llm.effort, 'medium');
+    assert.equal(opus.llm.stepModel, FAST_STEP_MODEL);
+    assert.equal(opus.llm.stepEffort, 'low');
+
+    // A user who picks the fast model as their primary simply runs one model throughout.
+    const sonnet = managedLlmConfig(FAST_STEP_MODEL, 'low');
+    assert.equal(sonnet.ok, true);
+    if (!sonnet.ok) return;
+    assert.equal(sonnet.llm.stepModel, undefined);
+    assert.equal(sonnet.llm.stepEffort, undefined);
   } finally {
     if (previousUrl === undefined) delete process.env.LOBSTER_AGENT_PROXY_URL;
     else process.env.LOBSTER_AGENT_PROXY_URL = previousUrl;

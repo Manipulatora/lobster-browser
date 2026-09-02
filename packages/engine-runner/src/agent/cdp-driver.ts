@@ -3,6 +3,8 @@ import {
   normalizeBrowserPermission,
   normalizeBrowserPermissionOrigin,
   normalizeCookieDomain,
+  registrableDomain,
+  resolveSiteFamily,
   type BrowserConfigCommand,
   type BrowserDriver,
   type BrowserTab,
@@ -507,33 +509,38 @@ export class CdpBrowserDriver implements BrowserDriver {
 
   async waitForSettle(timeoutMs = 8000): Promise<void> {
     await this.adoptPopupIfPresent();
-    const deadline = Date.now() + timeoutMs;
-    const started = Date.now();
-    let last = '';
-    let stable = 0;
-    while (Date.now() < deadline) {
-      let signature = '';
-      try {
-        // Bound each probe by what is LEFT of this call's own budget. Without it a renderer blocked
-        // by a native dialog held the first probe for the session-wide command timeout, so
-        // `waitForSettle(8000)` returned after 30 seconds — a caller-supplied deadline that the
-        // implementation quietly ignored, on every navigation, click and key press.
-        signature = await cdpEvaluate<string>(
-          this.page,
-          `location.href + '|' + document.readyState + '|' + (document.body?.innerText?.length || 0) + '|' + document.getElementsByTagName('*').length`,
-          { timeoutMs: Math.max(250, deadline - Date.now()) },
-        );
-      } catch {
-        await sleep(120);
-        continue;
-      }
-      stable = signature === last ? stable + 1 : 0;
-      last = signature;
-      if (Date.now() - started >= 450 && stable >= 2 && signature.includes('|complete|')) break;
-      if (Date.now() - started >= 700 && stable >= 3 && signature.includes('|interactive|')) break;
-      await sleep(150);
-      await this.adoptPopupIfPresent();
+    // ONE awaited evaluate instead of a poll. The old loop sampled `innerText.length` and the
+    // element count every 150 ms and waited for three identical samples — a signature that never
+    // stabilises on a page that keeps painting (Outlook, Gmail, any feed), so those pages paid the
+    // full ceiling on EVERY action, and even a static page paid a 450-700 ms floor. A
+    // MutationObserver answers the actual question — "has the DOM stopped changing?" — from inside
+    // the page, resolves ~300 ms after the last mutation, and costs one round trip. It observes
+    // through a local promise only: no Runtime/DOM domain is enabled, nothing is left on the page.
+    const cap = Math.max(300, timeoutMs);
+    const expression = `(() => new Promise((resolve) => {
+      const quietMs = 300, capMs = ${cap};
+      let timer = null, done = false, obs = null;
+      const finish = () => {
+        if (done) return; done = true;
+        if (obs) { try { obs.disconnect(); } catch (_) {} }
+        resolve(location.href + '|' + document.readyState);
+      };
+      const arm = () => {
+        obs = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(finish, quietMs); });
+        obs.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true });
+        timer = setTimeout(finish, quietMs);
+      };
+      if (document.readyState === 'complete' || document.readyState === 'interactive') arm();
+      else window.addEventListener('DOMContentLoaded', arm, { once: true });
+      setTimeout(finish, capMs);
+    }))()`;
+    try {
+      await cdpEvaluate<string>(this.page, expression, { timeoutMs: cap + 500 });
+    } catch {
+      // A renderer that cannot answer at all (native dialog, mid-navigation teardown) is not one that
+      // is about to settle; callers already treat a stale observation as a normal outcome.
     }
+    await this.adoptPopupIfPresent();
   }
 
   async screenshot(clip?: {
@@ -588,7 +595,100 @@ export class CdpBrowserDriver implements BrowserDriver {
             path: c.path,
           });
         }
+        // Zero matches is not a success with a small number in it. "Remove all cookies of
+        // outlook.com" matched nothing here while the session sat on live.com — and the run reported
+        // "cleared 0 cookie(s)" as done. Say where the cookies actually are instead.
+        if (victims.length === 0) {
+          throw new Error(
+            `no cookies are set for ${domain}${whereCookiesLive(cookies, domain)} — use clear_session {site:"${domain}"} to clear the whole login, or list_cookies to see the store`,
+          );
+        }
         return `cleared ${victims.length} cookie(s) for ${domain}`;
+      }
+      case 'list_cookies': {
+        const { cookies = [] } = (await this.browser.send('Storage.getCookies')) as {
+          cookies?: Array<{ name: string; domain: string; path: string }>;
+        };
+        const filter = command.domain ? normalizeCookieDomain(command.domain) : '';
+        const counts = new Map<string, number>();
+        for (const c of cookies) {
+          const reg = registrableDomain(c.domain);
+          if (filter && reg !== filter && !reg.endsWith(`.${filter}`)) continue;
+          counts.set(reg, (counts.get(reg) ?? 0) + 1);
+        }
+        if (counts.size === 0) {
+          return filter ? `no cookies are set for ${filter}` : 'the cookie store is empty';
+        }
+        const rows = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+        const total = rows.reduce((sum, [, n]) => sum + n, 0);
+        const shown = rows.slice(0, 40);
+        const more = rows.length - shown.length;
+        return `${total} cookie(s) across ${rows.length} domain(s): ${shown
+          .map(([d, n]) => `${d} (${n})`)
+          .join(', ')}${more > 0 ? `, +${more} more` : ''}`;
+      }
+      case 'clear_session': {
+        // Log the user out of ONE site. The literal domain is rarely where a login lives (Outlook
+        // signs in through live.com and microsoftonline.com; Google through google.com), so the site
+        // is resolved to its session family against the real cookie store, cookies AND storage are
+        // cleared for every member, the tab is reloaded when it is on the site, and the store is read
+        // back so the result states what actually went — and what, if anything, remains.
+        const site = normalizeCookieDomain(command.site ?? command.domain);
+        if (!site)
+          throw new Error('clear_session needs a specific site, not a public/private suffix');
+        const { cookies = [] } = (await this.browser.send('Storage.getCookies')) as {
+          cookies?: Array<{ name: string; domain: string; path: string }>;
+        };
+        const family = resolveSiteFamily(
+          site,
+          cookies.map((c) => c.domain),
+        );
+        const perDomain = new Map<string, number>();
+        for (const c of cookies) {
+          const reg = registrableDomain(c.domain);
+          if (!family.includes(reg)) continue;
+          await this.page.send('Network.deleteCookies', {
+            name: c.name,
+            domain: c.domain,
+            path: c.path,
+          });
+          perDomain.set(reg, (perDomain.get(reg) ?? 0) + 1);
+        }
+        // Storage (localStorage, IndexedDB, service workers, cache) keeps a session alive on sites
+        // that restore their token from it. Best effort per origin: an origin without data is a no-op.
+        for (const reg of family) {
+          for (const origin of [`https://${reg}`, `https://www.${reg}`]) {
+            try {
+              await this.page.send('Storage.clearDataForOrigin', { origin, storageTypes: 'all' });
+            } catch {
+              // an unreachable origin is not a failed logout
+            }
+          }
+        }
+        const deleted = [...perDomain.values()].reduce((a, b) => a + b, 0);
+        if (deleted === 0) {
+          throw new Error(
+            `no cookies are set for ${site} or its login domains (${family.join(', ')})${whereCookiesLive(cookies, site)} — the user is not signed in there, or the session is under a domain not in the store's family; list_cookies shows the store`,
+          );
+        }
+        // Reload only a tab that is on the site: a stale page still shows a signed-in shell.
+        let reloaded = false;
+        try {
+          const href = await cdpEvaluate<string>(this.page, 'location.href', { timeoutMs: 2000 });
+          const host = new URL(href).hostname;
+          if (family.includes(registrableDomain(host))) {
+            await this.page.send('Page.reload', { ignoreCache: true });
+            reloaded = true;
+          }
+        } catch {
+          // no tab to reload is fine; the store is already cleared
+        }
+        const { cookies: after = [] } = (await this.browser.send('Storage.getCookies')) as {
+          cookies?: Array<{ domain: string }>;
+        };
+        const remaining = after.filter((c) => family.includes(registrableDomain(c.domain))).length;
+        const detail = [...perDomain.entries()].map(([d, n]) => `${d} (${n})`).join(', ');
+        return `cleared ${deleted} cookie(s) and site storage for ${site}: ${detail}${reloaded ? '; reloaded the tab' : ''}${remaining > 0 ? `; ${remaining} cookie(s) came back on reload (the site re-set them signed out)` : ''}`;
       }
       case 'clear_all_cookies': {
         const { cookies = [] } = (await this.browser.send('Storage.getCookies')) as {
@@ -940,6 +1040,30 @@ function normalizeDomain(raw?: string): string {
   }
   value = value.replace(/^\.+/, '').split('/')[0]?.split(':')[0] ?? '';
   return value;
+}
+
+/**
+ * For a zero-match cookie result: name the domains that DO hold cookies and look related to the
+ * asked-for site (same family, or sharing its distinctive label), so the model's next move is
+ * informed rather than a guess.
+ */
+function whereCookiesLive(cookies: ReadonlyArray<{ domain: string }>, site: string): string {
+  const family = resolveSiteFamily(
+    site,
+    cookies.map((c) => c.domain),
+  );
+  const label = registrableDomain(site).split('.')[0] ?? '';
+  const counts = new Map<string, number>();
+  for (const c of cookies) {
+    const reg = registrableDomain(c.domain);
+    if (reg === registrableDomain(site)) continue;
+    if (family.includes(reg) || (label.length >= 4 && reg.includes(label))) {
+      counts.set(reg, (counts.get(reg) ?? 0) + 1);
+    }
+  }
+  if (counts.size === 0) return '';
+  const rows = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  return `; related cookies exist on ${rows.map(([d, n]) => `${d} (${n})`).join(', ')}`;
 }
 
 /** Resolve the target origin from an explicit `origin` or by promoting a `domain` to https. */

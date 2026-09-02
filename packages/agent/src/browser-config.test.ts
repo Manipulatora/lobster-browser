@@ -646,3 +646,55 @@ test('the protected-content identity page is not reachable, by URL or by label',
     assert.equal(assessUiSettingsIntent(phrase).verdict, 'block', `intent allowed: ${phrase}`);
   }
 });
+
+test('clear_session takes a site, canonicalizes it, and refuses a bare suffix', () => {
+  const parsed = parseAction({ kind: 'browser_config', op: 'clear_session', site: 'Outlook.COM' });
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.deepEqual(parsed.action, {
+    kind: 'browser_config',
+    op: 'clear_session',
+    site: 'outlook.com',
+  });
+  assert.equal(assessBrowserConfig(parsed.action as never).verdict, 'allow');
+
+  // The domain field is accepted as the site too — the model will reach for it out of habit.
+  const viaDomain = parseAction({
+    kind: 'browser_config',
+    op: 'clear_session',
+    domain: 'live.com',
+  });
+  assert.equal(viaDomain.ok, true);
+  if (!viaDomain.ok) return;
+  assert.deepEqual(viaDomain.action, {
+    kind: 'browser_config',
+    op: 'clear_session',
+    site: 'live.com',
+  });
+
+  assert.equal(parseAction({ kind: 'browser_config', op: 'clear_session' }).ok, false);
+  for (const site of ['com', 'co.uk', 'github.io']) {
+    assert.equal(
+      parseAction({ kind: 'browser_config', op: 'clear_session', site }).ok,
+      false,
+      site,
+    );
+  }
+});
+
+test('list_cookies works with or without a domain, but not with a suffix', () => {
+  const all = parseAction({ kind: 'browser_config', op: 'list_cookies' });
+  assert.equal(all.ok, true);
+  if (!all.ok) return;
+  assert.deepEqual(all.action, { kind: 'browser_config', op: 'list_cookies' });
+  assert.equal(assessBrowserConfig(all.action as never).verdict, 'allow');
+  const one = parseAction({ kind: 'browser_config', op: 'list_cookies', domain: 'Live.com' });
+  assert.equal(one.ok, true);
+  if (!one.ok) return;
+  assert.deepEqual(one.action, { kind: 'browser_config', op: 'list_cookies', domain: 'live.com' });
+  assert.equal(
+    assessBrowserConfig({ kind: 'browser_config', op: 'list_cookies', domain: 'com' } as never)
+      .verdict,
+    'block',
+  );
+});

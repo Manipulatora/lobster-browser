@@ -120,9 +120,32 @@ body {
   }
 }
 
-/* Quiet run rail: one dot per agent step beside a thin vertical line. A settled step is a solid
-   mark, the active step breathes on the same rhythm as the status word, and the step's text lives
-   in the dot's hover title rather than narrating itself down the panel. */
+/* Run rail: one row per agent step beside a thin vertical line — a dot for the state and ONE brief
+   line for what the step did. A settled step is a solid mark, the active step breathes on the same
+   rhythm as the status word; the full action + page context stays in the row's hover title. */
+.lobee-step-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+.lobee-step-row .lobee-dot {
+  margin-top: 6px;
+}
+.lobee-step-text {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}
+.lobee-step-text.is-done {
+  color: var(--ink);
+}
 .lobee-dot {
   position: relative;
   display: inline-block;

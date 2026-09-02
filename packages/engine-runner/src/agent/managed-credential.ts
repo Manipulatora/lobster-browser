@@ -351,9 +351,24 @@ export function managedLlmConfig(
       baseUrl: entry.baseUrl,
       apiKey: entry.token,
       ...(effort ? { effort } : {}),
+      // THE SPEED LEVER THAT WAS NEVER PULLED. The loop has always supported a cheaper `stepModel`
+      // for routine steps (planning and recovery keep the primary), but nothing ever set it, so every
+      // scroll, click and wait paid for the primary model — with thinking on — end to end. That is
+      // most of "Lobee is very slow". Routine steps now run on a fast model at low effort; the
+      // model the user picked still does step 1 and every recovery, which is where judgment matters.
+      ...(FAST_STEP_MODEL === model
+        ? {}
+        : { stepModel: FAST_STEP_MODEL, stepEffort: 'low' as const }),
     },
   };
 }
+
+/**
+ * The model routine steps run on. Chosen from the seven the roster offers; Sonnet-class is the
+ * fastest of them that still navigates reliably. A user who picks it as their primary simply gets
+ * one model throughout.
+ */
+export const FAST_STEP_MODEL = 'anthropic/claude-sonnet-5';
 
 /**
  * HTTP status for a refusal: 402 is "you have not paid for this yet", 403 is "you may not", and 503
