@@ -21,6 +21,12 @@ export interface Step {
   kind?: string;
   /** What the action actually did — the harness's own one-line result, shown beside the dot. */
   outcome?: string;
+  /**
+   * How long the step's phases took altogether (`step.timing`). Shown only once it is long enough to
+   * explain a wait, and never while the step is still thinking — a duration on a live row would read
+   * as a countdown that never moves.
+   */
+  elapsedMs?: number;
   thinking: boolean;
   done: boolean;
 }
@@ -62,6 +68,12 @@ export interface Turn {
   await: AwaitPrompt | null;
   inputError: string;
   animateAnswer: boolean;
+  /**
+   * True when the run replied on its first step without touching the browser: the message was chat,
+   * and the answer is shown as a reply — no rail, because a lone "Finished" dot beside a greeting is
+   * a task's furniture on something that was never a task.
+   */
+  answeredDirectly: boolean;
 }
 
 export const blankStep = (): Step => ({ label: '', ctx: '', thinking: false, done: false });
@@ -72,6 +84,80 @@ function settleThinking(steps: Map<number, Step>): Map<number, Step> {
     settled.set(number, step.thinking ? { ...step, thinking: false, done: true } : step);
   }
   return settled;
+}
+
+/**
+ * Whether the browser was ever used. In auto mode every message goes through the loop, so the reducer
+ * cannot know from the run's shape alone whether the user asked a question or gave a task — but the
+ * steps say: a run that ended on step 1 with only its own `done` (a steer or a page signal is not an
+ * action, and cannot happen before the browser opens anyway) never acted on a page.
+ */
+export function repliedWithoutBrowser(steps: Map<number, Step>): boolean {
+  for (const [number, step] of steps) {
+    if (number >= 2) return false;
+    if (step.kind && step.kind !== 'done' && step.kind !== 'steer' && step.kind !== 'signal') {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** The one brief line the rail shows for a step: what it DID once known, else what it is doing. */
+export function stepText(step: Step): string {
+  return step.outcome || step.label || (step.thinking ? 'Thinking…' : '…');
+}
+
+/** Shown beside a step only when it explains a wait: two seconds or more, and never while thinking. */
+const SHOWN_DURATION_MS = 2_000;
+
+/** A short duration for the rail row ("12.3 s"), or '' when there is nothing worth saying. */
+export function stepDuration(step: Step): string {
+  if (step.thinking || !step.elapsedMs || step.elapsedMs < SHOWN_DURATION_MS) return '';
+  return `${(step.elapsedMs / 1000).toFixed(1)} s`;
+}
+
+/**
+ * The total of a `step.timing` event's phases. The shape is another module's to define and may
+ * still move — a `{ phase: ms }` record, a list of `{ ms }` entries, or a record that already
+ * carries its own total — so every reading is checked and anything unrecognisable counts as nothing
+ * rather than as a number.
+ */
+function phaseTotalMs(phases: unknown): number {
+  if (!phases || typeof phases !== 'object') return 0;
+  const record = phases as Record<string, unknown>;
+  const declared = record.total ?? record.totalMs;
+  if (typeof declared === 'number' && Number.isFinite(declared) && declared > 0) return declared;
+  let total = 0;
+  for (const value of Array.isArray(phases) ? phases : Object.values(record)) {
+    const ms: unknown =
+      value && typeof value === 'object' ? (value as Record<string, unknown>).ms : value;
+    if (typeof ms === 'number' && Number.isFinite(ms) && ms > 0) total += ms;
+  }
+  return total;
+}
+
+// The page conditions the harness tracks between steps, in the words a person would use for them.
+// A signal this table does not know still gets a row — humanised from its name — because a
+// condition the harness thought worth reporting is worth more than a blank line.
+const SIGNAL_LABEL: Record<string, string> = {
+  login: 'Login wall',
+  'login-wall': 'Login wall',
+  captcha: 'Captcha',
+  otp: 'Verification code prompt',
+  dialog: 'Dialog',
+  paywall: 'Paywall',
+  canvas: 'Canvas-only content',
+  'cross-origin-frame': 'Unreadable frame',
+  'page-unreadable': 'Unreadable page',
+  'too-many-candidates': 'Crowded page',
+};
+
+function describeSignal(signal: string, appeared: boolean): string {
+  // `cross-origin-frame:2` carries a count after the colon; the name is what gets a label.
+  const name = signal.split(':')[0]!.trim().toLowerCase();
+  const known = SIGNAL_LABEL[name];
+  const humanised = name.replace(/[-_]+/g, ' ').replace(/^./, (c) => c.toUpperCase());
+  return `${known ?? humanised} ${appeared ? 'appeared' : 'cleared'}`;
 }
 
 export function applyEvent(turn: Turn, ev: AgentEvent): Turn {
@@ -131,6 +217,31 @@ export function applyEvent(turn: Turn, ev: AgentEvent): Turn {
         thinking: false,
         ...(ev.ts ? { ts: ev.ts } : {}),
       });
+    }
+    case 'step.signal': {
+      // A page condition changed — a login wall, a captcha — between this step and the next. It
+      // sits in the same gap a steer would, just before it (0.25 against the steer's 0.5), so what
+      // the page did is read before what the user said about it.
+      const signal = typeof ev.signal === 'string' ? ev.signal.trim() : '';
+      if (!signal) return turn;
+      const key = (ev.step ?? 0) + 0.25;
+      const prior = turn.steps.get(key);
+      const text = describeSignal(signal, ev.appeared !== false);
+      return upsert(key, {
+        kind: 'signal',
+        label: prior?.label ? `${prior.label}\n${text}` : text,
+        done: true,
+        thinking: false,
+        ...(ev.ts ? { ts: ev.ts } : {}),
+      });
+    }
+    case 'step.timing': {
+      // Timing follows the step it measures; a total for a step the panel never saw (or a malformed
+      // one) has no row to sit on and is dropped rather than conjuring a blank row with a duration.
+      if (typeof ev.step !== 'number' || !turn.steps.has(ev.step)) return turn;
+      const elapsedMs = phaseTotalMs(ev.phases);
+      if (!elapsedMs) return turn;
+      return upsert(ev.step, { elapsedMs });
     }
     case 'step.outcome':
       return upsert(ev.step ?? 0, {
@@ -206,6 +317,10 @@ export function applyEvent(turn: Turn, ev: AgentEvent): Turn {
         stopError: '',
         animateAnswer:
           !turn.streamed && ok && !!answer && (turn.status !== 'done' || turn.answer !== answer),
+        // In auto mode the loop answers a chat-shaped message on its first step. Only a reply that
+        // succeeded, said something, and never used the browser reads as one; a failure keeps its
+        // trail so there is something to point at.
+        answeredDirectly: ok && !!answer && repliedWithoutBrowser(turn.steps),
         ...(ev.sessionId ? { sessionId: ev.sessionId } : {}),
       };
     }
@@ -258,6 +373,7 @@ export function storedToTurn(stored: StoredTurn): Turn {
     await: null,
     inputError: '',
     animateAnswer: false,
+    answeredDirectly: false,
   };
 }
 
@@ -306,6 +422,7 @@ export function snapshotToTurn(snapshot: AgentRunSnapshot, id: number, threadId:
         : null,
     inputError: '',
     animateAnswer: false,
+    answeredDirectly: false,
   };
 }
 
@@ -372,6 +489,7 @@ export function turnsFromThread(
       await: null,
       inputError: '',
       animateAnswer: false,
+      answeredDirectly: false,
     };
   });
 }

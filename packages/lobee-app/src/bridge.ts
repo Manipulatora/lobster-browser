@@ -9,7 +9,8 @@ export interface BridgeConfig {
   profileId: string;
 }
 export interface RunConfig {
-  mode: string;
+  /** The sidecar's two run kinds. The panel's `auto` is mapped before it gets here (`wireMode`). */
+  mode: 'ask' | 'agent';
   model: string;
   effort?: string;
   /** Conversation this message belongs to; the sidecar resolves prior turns from it. */

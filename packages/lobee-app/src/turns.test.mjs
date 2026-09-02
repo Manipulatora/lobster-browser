@@ -6,7 +6,10 @@ import { test } from 'node:test';
 const {
   applyEvent,
   mergeStoredMetadata,
+  repliedWithoutBrowser,
   snapshotToTurn,
+  stepDuration,
+  stepText,
   storedToTurn,
   toStoredTurn,
   turnsFromThread,
@@ -33,6 +36,7 @@ function running(overrides = {}) {
     await: null,
     inputError: '',
     animateAnswer: false,
+    answeredDirectly: false,
     ...overrides,
   };
 }
@@ -300,4 +304,157 @@ test('streamed progress keeps the thinking step alive with a rough size, and nev
   const settled = turn.steps.get(3).label;
   const late = applyEvent(turn, { type: 'step.progress', step: 3, kind: 'text', chars: 9000 });
   assert.equal(late.steps.get(3).label, settled);
+});
+
+test('a page signal lands in the rail between the steps, before any steer in the same gap', () => {
+  let turn = applyEvent(running(), { type: 'step.action', step: 3, action: { kind: 'click' } });
+  turn = applyEvent(turn, {
+    type: 'step.signal',
+    step: 3,
+    signal: 'login',
+    appeared: true,
+    ts: '2026-09-02T10:00:04.000Z',
+  });
+  turn = applyEvent(turn, { type: 'run.steered', step: 3, text: 'use the other account' });
+  turn = applyEvent(turn, { type: 'step.action', step: 4, action: { kind: 'type' } });
+  const order = [...turn.steps.entries()].sort((a, b) => a[0] - b[0]).map(([, s]) => s.kind);
+  assert.deepEqual(order, ['click', 'signal', 'steer', 'type']);
+  assert.equal(turn.steps.get(3.25).label, 'Login wall appeared');
+  assert.equal(turn.steps.get(3.25).done, true);
+  assert.equal(turn.steps.get(3.25).ts, '2026-09-02T10:00:04.000Z');
+  assert.equal(stepText(turn.steps.get(3.25)), 'Login wall appeared');
+
+  // A condition that cleared reads as such, and a second signal in the same gap joins the row.
+  const cleared = applyEvent(turn, {
+    type: 'step.signal',
+    step: 3,
+    signal: 'captcha',
+    appeared: false,
+  });
+  assert.equal(cleared.steps.get(3.25).label, 'Login wall appeared\nCaptcha cleared');
+  // A signal the panel has never heard of still gets a row, in words, instead of a raw token — and
+  // a count suffix (`cross-origin-frame:2`) is not part of the name.
+  const unknown = applyEvent(running(), {
+    type: 'step.signal',
+    step: 1,
+    signal: 'consent-banner',
+    appeared: true,
+  });
+  assert.equal(unknown.steps.get(1.25).label, 'Consent banner appeared');
+  const framed = applyEvent(running(), {
+    type: 'step.signal',
+    step: 1,
+    signal: 'cross-origin-frame:2',
+  });
+  assert.equal(framed.steps.get(1.25).label, 'Unreadable frame appeared');
+  // An event with no signal in it changes nothing.
+  assert.equal(applyEvent(turn, { type: 'step.signal', step: 3, signal: '' }), turn);
+  assert.equal(applyEvent(turn, { type: 'step.signal', step: 3 }), turn);
+});
+
+test('a slow step shows its duration once settled; a quick one, or a thinking one, shows none', () => {
+  let turn = applyEvent(running(), { type: 'step.thinking', step: 2 });
+  // Timing that arrives while the step is still thinking is kept but not shown: the row is live.
+  turn = applyEvent(turn, {
+    type: 'step.timing',
+    step: 2,
+    phases: { perceive: 900, llm: 9_400, execute: 1_200, settle: 800 },
+  });
+  assert.equal(turn.steps.get(2).elapsedMs, 12_300);
+  assert.equal(stepDuration(turn.steps.get(2)), '');
+  turn = applyEvent(turn, { type: 'step.action', step: 2, action: { kind: 'click' } });
+  assert.equal(stepDuration(turn.steps.get(2)), '12.3 s');
+  assert.equal(stepText(turn.steps.get(2)), 'Clicked an element');
+
+  // Under two seconds is not worth a number beside the line.
+  const quick = applyEvent(
+    applyEvent(running(), {
+      type: 'step.action',
+      step: 1,
+      action: { kind: 'scroll', direction: 'down' },
+    }),
+    { type: 'step.timing', step: 1, phases: { perceive: 300, llm: 1_400 } },
+  );
+  assert.equal(quick.steps.get(1).elapsedMs, 1_700);
+  assert.equal(stepDuration(quick.steps.get(1)), '');
+
+  // The shape is another module's: a declared total wins over the parts, a list of { ms } entries
+  // sums, and garbage counts as nothing rather than as a number.
+  const settled = applyEvent(running(), {
+    type: 'step.action',
+    step: 5,
+    action: { kind: 'click' },
+  });
+  const declared = applyEvent(settled, {
+    type: 'step.timing',
+    step: 5,
+    phases: { total: 2_500, llm: 2_000 },
+  });
+  assert.equal(declared.steps.get(5).elapsedMs, 2_500);
+  const listed = applyEvent(settled, {
+    type: 'step.timing',
+    step: 5,
+    phases: [
+      { name: 'llm', ms: 2_000 },
+      { name: 'settle', ms: 150 },
+    ],
+  });
+  assert.equal(listed.steps.get(5).elapsedMs, 2_150);
+  assert.equal(applyEvent(settled, { type: 'step.timing', step: 5, phases: 'fast' }), settled);
+  assert.equal(
+    applyEvent(settled, { type: 'step.timing', step: 5, phases: { llm: 'slow', settle: NaN } }),
+    settled,
+  );
+  // Timing for a step the panel never saw has no row to sit on.
+  assert.equal(
+    applyEvent(settled, { type: 'step.timing', step: 9, phases: { llm: 3_000 } }),
+    settled,
+  );
+});
+
+test('a reply on the first step with the browser closed is a chat answer, and a task is not', () => {
+  // Auto mode: every message runs through the loop, and a chat-shaped one ends on step 1 with `done`.
+  let chat = applyEvent(running(), { type: 'step.thinking', step: 1 });
+  chat = applyEvent(chat, { type: 'step.progress', step: 1, kind: 'tool', chars: 300 });
+  chat = applyEvent(chat, {
+    type: 'step.action',
+    step: 1,
+    action: { kind: 'done', success: true, summary: 'An apple is a fruit.' },
+  });
+  assert.equal(repliedWithoutBrowser(chat.steps), true);
+  chat = applyEvent(chat, { type: 'run.finished', status: 'done', result: 'An apple is a fruit.' });
+  assert.equal(chat.answeredDirectly, true);
+  assert.equal(chat.answer, 'An apple is a fruit.');
+
+  // Ask mode never emits steps at all; that is a chat answer too.
+  const ask = applyEvent(running(), { type: 'run.finished', status: 'done', result: 'Hello.' });
+  assert.equal(ask.answeredDirectly, true);
+
+  // One browser action — even on step 1 — makes it a task with a trail worth keeping.
+  let task = applyEvent(running(), { type: 'run.needsBrowser' });
+  task = applyEvent(task, {
+    type: 'step.action',
+    step: 1,
+    action: { kind: 'navigate', url: 'https://example.com/' },
+  });
+  task = applyEvent(task, {
+    type: 'step.action',
+    step: 2,
+    action: { kind: 'done', success: true, summary: 'The plans are…' },
+  });
+  assert.equal(repliedWithoutBrowser(task.steps), false);
+  task = applyEvent(task, { type: 'run.finished', status: 'done', result: 'The plans are…' });
+  assert.equal(task.answeredDirectly, false);
+
+  // A first-step failure keeps its trail: there is something to point at, and nothing to read
+  // instead.
+  const failed = applyEvent(
+    applyEvent(running(), {
+      type: 'step.action',
+      step: 1,
+      action: { kind: 'done', success: false },
+    }),
+    { type: 'run.finished', status: 'error', error: 'I cannot do that.' },
+  );
+  assert.equal(failed.answeredDirectly, false);
 });
