@@ -117,7 +117,15 @@ Wave 2 with the streaming work):**
 - `NODE_ENV=production` in the unit; request logging in the backend.
 - Status pollers must not bump `updated_at` (stops the every-60 s re-upload of running profiles).
 
-**Wave 2 — agent architecture (needs agent fan-out):** steering RPC + trusted user channel;
+**Wave 2 — agent architecture (needs agent fan-out).** *First slice shipped 2026-09-02 (solo):*
+steering RPC (`POST /steer` → `AgentManager.steer` → `deps.takeSteering`) + the trusted user
+channel (`BEGIN_USER_MESSAGE` fence, reserved in `sanitizeUntrusted`; steering and `ask` replies
+arrive as full user turns; the panel composer steers a live run instead of refusing; `run.steered`
+rows in the rail); cache-stable message layout (nudges + both ledgers moved into ONE regenerated
+trailing user message that the loop removes before appending the next step; tool results are never
+rewritten; pruning moves in batches of 3); observation diet (element hrefs clipped to 256,
+verbatim window 4); budget default 1M for managed runs (the wallet meters); same-URL navigate waits
+on `performance.timeOrigin` turnover instead of a 10 s dead poll. *Still open:* steering RPC + trusted user channel;
 working memory; intent router ("auto" mode); situation-change transitions as events; streamed
 agent steps with idle watchdog instead of a wall clock; cache-stable message layout; observation
 diet (href clip, 2–3 snapshots, diffs); bounded action batches; budget arithmetic; journal

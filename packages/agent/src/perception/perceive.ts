@@ -3,6 +3,9 @@ import type { PerceivedElement, RawPerception } from '../types.js';
 import { EXTRACT_SCRIPT, type ExtractResult } from './extract-script.js';
 import { redactUrl, urlIdentity } from '../security.js';
 
+/** Longest element href kept in an observation. */
+const ELEMENT_HREF_CHARS = 256;
+
 /** A defensive default when a page yields nothing (about:blank, mid-navigation, hostile CSP). */
 function emptyPerception(url: string, identity?: string): RawPerception {
   return {
@@ -151,7 +154,12 @@ function normalizeElement(candidate: unknown, index: number): PerceivedElement |
     ...(typeof raw.value === 'string' && !sensitive ? { value: text(raw.value, 90) } : {}),
     ...(raw.filled === true ? { filled: true } : {}),
     ...(sensitive ? { sensitive: true } : {}),
-    ...(typeof raw.href === 'string' ? { href: redactUrl(text(raw.href, 8192)) } : {}),
+    // An element's href only has to identify the link to the model; a tracking URL runs to
+    // thousands of characters and a dense page has hundreds of them, so the clip is what keeps a
+    // snapshot at a few thousand tokens instead of tens of thousands. The page URL keeps its length.
+    ...(typeof raw.href === 'string'
+      ? { href: redactUrl(text(raw.href, ELEMENT_HREF_CHARS)) }
+      : {}),
     ...(Array.isArray(raw.options)
       ? {
           options: raw.options

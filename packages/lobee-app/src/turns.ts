@@ -103,6 +103,21 @@ export function applyEvent(turn: Turn, ev: AgentEvent): Turn {
       });
       return { ...turn, steps };
     }
+    case 'run.steered': {
+      // The user's mid-run message sits in the rail where it landed — between the step it
+      // interrupted and the next one — so the run reads as the conversation it was.
+      const key = (ev.step ?? 0) + 0.5;
+      const prior = turn.steps.get(key);
+      const text = typeof ev.text === 'string' ? ev.text.trim() : '';
+      if (!text) return turn;
+      return upsert(key, {
+        kind: 'steer',
+        label: prior?.label ? `${prior.label}\n${text}` : text,
+        done: true,
+        thinking: false,
+        ...(ev.ts ? { ts: ev.ts } : {}),
+      });
+    }
     case 'step.outcome':
       return upsert(ev.step ?? 0, {
         ...(typeof ev.text === 'string' && ev.text ? { outcome: ev.text } : {}),

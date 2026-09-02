@@ -12,6 +12,7 @@ export interface AgentEvent {
     | 'step.action'
     | 'step.observation'
     | 'step.outcome'
+    | 'run.steered'
     | 'run.needsInput'
     | 'run.finished'
     | 'answer.delta'

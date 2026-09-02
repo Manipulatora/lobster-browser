@@ -147,7 +147,8 @@ test('loopback run requests preserve validated panel policy', async () => {
     assert.equal(defaulted.status, 200);
     assert.equal(starts[1]!.config?.mode, 'agent');
     assert.equal(starts[1]!.config?.autonomy, 'auto');
-    assert.equal(starts[1]!.config?.tokenBudget, 100_000);
+    // The sidecar default is a runaway stop, not the price cap — the wallet meters managed runs.
+    assert.equal(starts[1]!.config?.tokenBudget, 1_000_000);
 
     const unlimited = await fetch(`${origin}/run`, {
       method: 'POST',

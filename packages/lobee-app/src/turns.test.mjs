@@ -259,3 +259,23 @@ test('a step outcome becomes the brief line beside the rail dot', () => {
   const kept = applyEvent(turn, { type: 'step.outcome', step: 2, text: '' });
   assert.match(kept.steps.get(2).outcome, /cleared 4 cookie/);
 });
+
+test('a mid-run message from the user lands in the rail between the steps', () => {
+  let turn = applyEvent(running(), { type: 'step.action', step: 2, action: { kind: 'click' } });
+  turn = applyEvent(turn, {
+    type: 'run.steered',
+    step: 2,
+    ts: '2026-09-02T10:00:05.000Z',
+    text: 'actually, boots not shoes',
+  });
+  turn = applyEvent(turn, { type: 'step.action', step: 3, action: { kind: 'navigate' } });
+  const order = [...turn.steps.entries()].sort((a, b) => a[0] - b[0]).map(([, s]) => s.kind);
+  assert.deepEqual(order, ['click', 'steer', 'navigate']);
+  assert.equal(turn.steps.get(2.5).label, 'actually, boots not shoes');
+  assert.equal(turn.steps.get(2.5).done, true);
+  // A second message in the same gap joins the row rather than replacing it.
+  const twice = applyEvent(turn, { type: 'run.steered', step: 2, text: 'and size 42' });
+  assert.equal(twice.steps.get(2.5).label, 'actually, boots not shoes\nand size 42');
+  // An empty message changes nothing.
+  assert.equal(applyEvent(turn, { type: 'run.steered', step: 2, text: '  ' }), turn);
+});

@@ -19,6 +19,7 @@ import {
   resumeTask,
   runTask,
   sendInput,
+  steer,
   stopRun,
 } from './bridge';
 import {
@@ -201,6 +202,14 @@ function StepRail({ steps }: { steps: Array<[number, Step]> }) {
       {steps.map(([n, s]) => {
         // One brief line per step: what the action DID once the harness knows, the action itself
         // while it runs, the model's own note before that. The rail dot still carries the state.
+        if (s.kind === 'steer') {
+          return (
+            <div key={n} className="lobee-step-row is-user" title="Sent while Lobee was working">
+              <span className="lobee-dot is-user" />
+              <span className="lobee-step-text is-user">{s.label}</span>
+            </div>
+          );
+        }
         const text = s.outcome || s.label || (s.thinking ? 'Thinking…' : '…');
         return (
           <div
@@ -780,7 +789,32 @@ export function App() {
   const submit = useCallback(async () => {
     const el = inputRef.current;
     const task = (el?.value ?? '').trim();
-    if (!task || !canSubmit || busyRef.current) return;
+    if (!task) return;
+    if (busyRef.current) {
+      // A message while the agent works is not a new task: it goes INTO the run — as the answer if
+      // the agent is waiting on one, otherwise as steering the loop takes at its next step. That is
+      // what makes a change of mind land without Stop, and without the run starting over.
+      const live = turns.find((turn) => turn.status === 'running');
+      if (!live) return;
+      if (el) {
+        el.value = '';
+        autogrow();
+      }
+      if (live.await) {
+        await onReply(live, task);
+        return;
+      }
+      try {
+        await steer(task);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setTurns((prev) =>
+          prev.map((item) => (item.id === live.id ? { ...item, inputError: message } : item)),
+        );
+      }
+      return;
+    }
+    if (!canSubmit) return;
     if (!allowedDomains.ok) {
       setMenu('policy');
       return;
@@ -844,6 +878,8 @@ export function App() {
     }
   }, [
     canSubmit,
+    turns,
+    onReply,
     mode,
     model,
     effort,
@@ -1002,11 +1038,13 @@ export function App() {
             placeholder={
               resuming
                 ? 'Connecting…'
-                : composerReady
-                  ? 'Message Lobee…'
-                  : mode === 'agent'
-                    ? 'No Agent-compatible model is available'
-                    : 'No chat model is available'
+                : busy
+                  ? 'Change course, add detail, or answer — Lobee is working…'
+                  : composerReady
+                    ? 'Message Lobee…'
+                    : mode === 'agent'
+                      ? 'No Agent-compatible model is available'
+                      : 'No chat model is available'
             }
             onInput={autogrow}
             onKeyDown={(e) => {

@@ -340,6 +340,15 @@ export type AgentEvent =
       text: string;
       ts: string;
     }
+  /** A message the user sent mid-run (steering); the loop delivers it to the model as a trusted turn. */
+  | {
+      type: 'run.steered';
+      sessionId: string;
+      profileId: string;
+      step: number;
+      text: string;
+      ts: string;
+    }
   /** The run paused: it needs a human (an `ask`, a `confirm`, or a required BYOK/login handoff). */
   | {
       type: 'run.needsInput';

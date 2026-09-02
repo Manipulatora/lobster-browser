@@ -625,6 +625,34 @@ export async function runTask(
   return active === run || run.sessionId ? 'started' : 'failed';
 }
 
+/**
+ * Send the user's message INTO the run that is already going. Unlike `sendInput`, which answers a
+ * question the agent asked, this needs no pending question: the loop takes it at the top of its next
+ * step as a trusted instruction — a change of plan, a correction, "stop doing that".
+ */
+export async function steer(text: string): Promise<void> {
+  const run = active;
+  if (!run?.sessionId) throw new Error('There is no run to send this to.');
+  const body = JSON.stringify({ sessionId: run.sessionId, text });
+  const requestBridge = await getBridge();
+  if (!requestBridge) throw new Error('bridge not configured for this profile');
+  const res = await bridgeFetch(
+    '/steer',
+    { method: 'POST', body },
+    false,
+    true,
+    bridgeKey(requestBridge),
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    delivered?: boolean;
+    error?: string;
+  };
+  if (!res.ok || data.ok === false || data.delivered !== true) {
+    throw new Error(data.error || 'The run has already finished.');
+  }
+}
+
 export async function sendInput(text: string): Promise<void> {
   const run = active;
   if (!run?.sessionId) throw new Error('The agent is no longer waiting for that input.');

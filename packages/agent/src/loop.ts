@@ -50,6 +50,8 @@ import {
   EVIDENCE_PREAMBLE,
   PROGRESS_PREAMBLE,
   VERBATIM_OBSERVATIONS,
+  buildVolatileTail,
+  userMessageBlock,
 } from './prompt.js';
 import {
   describeSafeAction,
@@ -69,6 +71,11 @@ export interface AgentRunDeps {
   memory: MemoryStore;
   emit: (event: AgentEvent) => void;
   waitForInput: (prompt: string, kind: 'ask' | 'confirm', action?: AgentAction) => Promise<string>;
+  /**
+   * Drain the messages the user sent since the last step (steering). Each becomes a trusted user
+   * turn at the top of the next step, so a change of plan lands without stopping the run.
+   */
+  takeSteering?: () => string[];
   signal: AbortSignal;
   now: () => string;
   sleep?: Sleep;
@@ -680,6 +687,13 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     let stepsSinceFullSnapshot = 0;
     /** This run's assistant/tool exchange — the WHOLE conversation the model sees, built per step. */
     const stepMessages: LlmMessage[] = [];
+    // Trusted user turns (steering, answers) waiting to enter the conversation after this step's
+    // tool result — a tool result must directly follow its call, so they queue until then.
+    const pendingUserMessages: string[] = [];
+    // The previous step's regenerated tail (nudges, ledgers). It is REMOVED before this step's
+    // messages are appended rather than rewritten in place: everything before it stays byte-identical
+    // between requests, which is what keeps the provider's prompt cache warm.
+    let volatileTail: LlmMessage | undefined;
     /** The call id the NEXT observation answers, so the pairing providers require stays intact. */
     let lastToolCallId: string | undefined;
     let readEvidence: string[] = [];
@@ -743,6 +757,12 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
     for (let step = 1; step <= config.maxSteps; step += 1) {
       if (signal.aborted) return await finish('stopped', 'Stopped by user.');
+      for (const text of deps.takeSteering?.() ?? []) {
+        const safe = redactCredentialLikeText(text).text.trim();
+        if (!safe) continue;
+        pendingUserMessages.push(safe);
+        emit({ type: 'run.steered', ...base, step, text: safe, ts: now() });
+      }
       // Stop honestly rather than spending the remaining budget re-issuing refused actions. The user
       // gets a real reason instead of a run that quietly hit its step limit having done nothing.
       if (totalBlocks >= 10) {
@@ -822,17 +842,22 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           `BUDGET: step ${step} of ${config.maxSteps}. Wrap up — consolidate what you already have and call \`done\`; do not start new exploration.`,
         );
       }
+      // The tool result carries only what is STABLE for this step — header, outcome, snapshot. The
+      // nudges and both ledgers change every step and go in the volatile tail below instead.
       const stepText = buildStepPrompt({
-        history: nudges,
+        history: [],
         observation: rendered,
         step,
         url: raw.url,
         // Every path that ends a step appends its outcome here, so the newest entry is precisely what
         // the tool result should report.
         ...(history.length ? { outcome: history[history.length - 1]! } : {}),
-        ...(readEvidence.length ? { readState: readEvidence.join('\n\n') } : {}),
-        ...(history.length ? { progress: runLedger(history) } : {}),
       });
+      if (volatileTail) {
+        const at = stepMessages.lastIndexOf(volatileTail);
+        if (at !== -1) stepMessages.splice(at, 1);
+        volatileTail = undefined;
+      }
       // Step 1 opens the turn as a user message; every later step is the RESULT of the tool call the
       // model just made. Feeding observations back as tool results is what gives the model a genuine
       // record of its own actions — the old design re-narrated them as prose because a single-message
@@ -843,6 +868,18 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         stepMessages.push({ role: 'tool', toolCallId: lastToolCallId, content: stepText });
       } else {
         stepMessages.push({ role: 'user', content: stepText });
+      }
+      for (const text of pendingUserMessages.splice(0)) {
+        stepMessages.push({ role: 'user', content: userMessageBlock(text) });
+      }
+      const tail = buildVolatileTail({
+        nudges,
+        ...(readEvidence.length ? { readState: readEvidence.join('\n\n') } : {}),
+        ...(history.length ? { progress: runLedger(history) } : {}),
+      });
+      if (tail) {
+        volatileTail = { role: 'user', content: tail };
+        stepMessages.push(volatileTail);
       }
       // Reasoning effort consumes from `max_tokens` (OpenRouter converts effort→thinking budget for
       // Anthropic, up to ~0.8×max_tokens at High), so raise the cap when effort is on to leave room for
@@ -1118,6 +1155,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
               now,
               beginEffect,
               (prompt, pending) => confirmJournaled(prompt, pending, actionId),
+              (text) => pendingUserMessages.push(text),
             ),
           (value) => value.outcome,
           askEffect === 'read'
@@ -1571,6 +1609,7 @@ async function handleAsk(
   now: () => string,
   beforeEffect: () => Promise<void>,
   requestApproval: (prompt: string, action: AgentAction) => Promise<boolean>,
+  onReply: (text: string) => void,
 ): Promise<{ ok: boolean; outcome: string }> {
   const safeQuestion = redactCredentialLikeText(action.question).text;
   deps.emit({
@@ -1699,6 +1738,13 @@ async function handleAsk(
       ? `${step}. human completed the sensitive handoff (reply withheld)`
       : `${step}. human replied to ${JSON.stringify(clip(safeQuestion, 100))}: ${JSON.stringify(clip(safeAnswer, 120))}`,
   );
+  // The answer itself reaches the model in full, as a trusted user turn — not as a 120-character
+  // clip inside a fence the model is told never to obey, which is how a reply used to arrive.
+  if (!action.sensitive && safeAnswer.trim()) {
+    onReply(
+      `In answer to your question ${JSON.stringify(clip(safeQuestion, 200))}: ${safeAnswer.trim()}`,
+    );
+  }
   return { ok: true, outcome: 'human input received' };
 }
 
@@ -2091,10 +2137,13 @@ function messageText(message: LlmMessage): string {
  */
 function pruneObservations(messages: readonly LlmMessage[]): LlmMessage[] {
   const toolIndices = messages.flatMap((m, i) => (m.role === 'tool' ? [i] : []));
-  const cutoff =
-    toolIndices.length > VERBATIM_OBSERVATIONS
-      ? toolIndices[toolIndices.length - VERBATIM_OBSERVATIONS]!
-      : -1;
+  // Prune in batches: shrinking exactly one more tool result every step rewrites one message per
+  // request, and a rewritten message is a cache miss for itself and everything after it. Moving the
+  // cut every PRUNE_BATCH steps keeps the prefix stable in between, at the price of up to
+  // PRUNE_BATCH - 1 extra verbatim snapshots.
+  const prunable = Math.max(0, toolIndices.length - VERBATIM_OBSERVATIONS);
+  const pruned = prunable - (prunable % PRUNE_BATCH);
+  const cutoff = pruned > 0 ? toolIndices[pruned]! : -1;
   // The newest message that carries the re-sent blocks keeps them; every older copy is stale by
   // definition, since both blocks are rebuilt in full on every step.
   const newestWithBlocks = messages.reduce(
@@ -2116,6 +2165,9 @@ function pruneObservations(messages: readonly LlmMessage[]): LlmMessage[] {
     return message;
   });
 }
+
+/** How many aged tool results are pruned at once (see `pruneObservations`). */
+const PRUNE_BATCH = 3;
 
 /** Steps kept verbatim at each end of the ledger before the middle is elided. */
 const LEDGER_HEAD = 3;

@@ -21,7 +21,10 @@ import {
   refusalStatus,
 } from './managed-credential.js';
 
-const PANEL_DEFAULT_TOKEN_BUDGET = 100_000;
+// The wallet meters every managed step, so the run budget is a runaway stop, not the price cap:
+// at 100k a dense page (3-4k tokens a snapshot, six snapshots live) ended runs around step 8-12 —
+// most real tasks — and squeezed the thinking room on the steps before that.
+const PANEL_DEFAULT_TOKEN_BUDGET = 1_000_000;
 const MUTATION_DEDUP_TTL_MS = 15 * 60_000;
 const MUTATION_DEDUP_LIMIT = 2_048;
 
@@ -171,6 +174,17 @@ export class AgentBridge {
           this.input(profileId, body),
         );
         return json(res, result.status, result.body);
+      }
+      if (req.method === 'POST' && url.pathname === '/steer') {
+        const body = await readJson(req);
+        const text = typeof body.text === 'string' ? body.text.trim() : '';
+        if (!text) return json(res, 400, { ok: false, error: 'text required' });
+        const r = this.agents.steer(profileId, text.slice(0, 4_000));
+        return json(res, r.delivered ? 200 : 409, {
+          ok: r.delivered,
+          ...r,
+          ...(r.delivered ? {} : { error: 'no run is active on this profile' }),
+        });
       }
       if (req.method === 'POST' && url.pathname === '/stop') {
         const r = this.agents.stop(profileId);

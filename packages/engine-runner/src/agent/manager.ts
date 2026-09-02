@@ -61,6 +61,8 @@ interface Session {
   result?: string | undefined;
   error?: string | undefined;
   pendingInput?: { resolve: (text: string) => void; reject: (e: Error) => void } | undefined;
+  /** Messages the user sent mid-run, waiting for the loop to take them at its next step. */
+  steering: string[];
   /** Set while the run waits for the desktop core to launch the profile (`run.needsBrowser` round-trip). */
   pendingBrowser?: { resolve: (ws: string) => void; reject: (e: Error) => void } | undefined;
 }
@@ -215,6 +217,7 @@ export class AgentManager {
       startedAt: new Date().toISOString(),
       abort,
       driver,
+      steering: [],
     };
     this.sessions.set(params.profileId, session);
 
@@ -293,6 +296,7 @@ export class AgentManager {
         journal,
         emit,
         waitForInput,
+        takeSteering: () => session.steering.splice(0),
         signal: abort.signal,
         now: () => new Date().toISOString(),
       },
@@ -366,6 +370,20 @@ export class AgentManager {
     session.awaitingKind = undefined;
     session.awaitingSensitive = undefined;
     return { stopped: true };
+  }
+
+  /**
+   * Queue a mid-run message for the loop. It is NOT an answer to a pending question (that is
+   * `sendInput`, which also carries secrets); it is the user changing course while the agent works,
+   * and it reaches the model as a trusted user turn at the top of the next step.
+   */
+  steer(profileId: string, text: string): { delivered: boolean } {
+    const session = this.sessions.get(profileId);
+    if (!session || (session.status !== 'running' && session.status !== 'awaiting_input')) {
+      return { delivered: false };
+    }
+    session.steering.push(text);
+    return { delivered: true };
   }
 
   sendInput(profileId: string, text: string): { delivered: boolean } {

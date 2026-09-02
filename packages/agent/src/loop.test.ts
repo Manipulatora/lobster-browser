@@ -3387,3 +3387,150 @@ test('routine steps run on the step model at the step effort; step 1 keeps the p
   assert.deepEqual(calls[1], ['anthropic/claude-sonnet-5', 'low']);
   assert.deepEqual(calls[2], ['anthropic/claude-sonnet-5', 'low']);
 });
+
+test('a mid-run message becomes a trusted user turn at the next step, and the panel hears it', async () => {
+  const driver = new FakeDriver();
+  const llm = new ScriptedLlm([
+    { kind: 'type', id: 0, text: 'shoes', submit: true },
+    { kind: 'click', id: 1 },
+    { kind: 'done', success: true, summary: 'searched for boots instead' },
+  ]);
+  const events: AgentEvent[] = [];
+  const queue = ['actually, look for boots, not shoes'];
+  let n = 0;
+  await runAgent(
+    {
+      sessionId: 's1',
+      profileId: 'p1',
+      task: 'search for shoes',
+      runId: 's1',
+      llmConfig: { provider: 'anthropic', model: 'claude-opus-4-8', apiKey: 'x' },
+      config: resolveConfig({ maxSteps: 6 }),
+    },
+    {
+      driver,
+      llm,
+      memory: new FakeMemory(),
+      emit: (event) => events.push(event),
+      waitForInput: async () => 'ok',
+      // The message arrives after the first model call, i.e. before step 2 — the loop drains the
+      // queue at the top of each step.
+      takeSteering: () => (llm.requests.length >= 1 ? queue.splice(0) : []),
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+  const steered = events.find((e) => e.type === 'run.steered');
+  assert.ok(steered && steered.type === 'run.steered');
+  assert.equal(steered.text, 'actually, look for boots, not shoes');
+
+  // The model receives it as its own USER turn inside the trusted fence, after the tool result.
+  const carrying = llm.requests.find((r) =>
+    r.messages.some((m) => m.role === 'user' && /BEGIN_USER_MESSAGE/.test(m.content ?? '')),
+  );
+  assert.ok(carrying, 'a request carried the user message');
+  const turn = carrying.messages.find(
+    (m) => m.role === 'user' && /BEGIN_USER_MESSAGE/.test(m.content ?? ''),
+  )!;
+  assert.match(turn.content ?? '', /look for boots, not shoes/);
+  assert.match(turn.content ?? '', /END_USER_MESSAGE/);
+  const at = carrying.messages.indexOf(turn);
+  assert.equal(carrying.messages[at - 1]?.role, 'tool', "it follows the step's tool result");
+  // And it stays in every later request: it is part of the conversation, not a nudge.
+  const last = llm.requests[llm.requests.length - 1]!;
+  assert.ok(last.messages.some((m) => m.role === 'user' && /look for boots/.test(m.content ?? '')));
+});
+
+test('the conversation prefix is byte-identical between steps (prompt cache stays warm)', async () => {
+  const driver = new FakeDriver();
+  const llm = new ScriptedLlm([
+    { kind: 'type', id: 0, text: 'shoes', submit: true },
+    { kind: 'click', id: 1 },
+    { kind: 'click', id: 1 },
+    { kind: 'click', id: 1 },
+    { kind: 'done', success: true, summary: 'done' },
+  ]);
+  let n = 0;
+  await runAgent(
+    {
+      sessionId: 's1',
+      profileId: 'p1',
+      task: 'search for shoes',
+      runId: 's1',
+      llmConfig: { provider: 'anthropic', model: 'claude-opus-4-8', apiKey: 'x' },
+      config: resolveConfig({ maxSteps: 8 }),
+    },
+    {
+      driver,
+      llm,
+      memory: new FakeMemory(),
+      emit: () => {},
+      waitForInput: async () => 'ok',
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+  assert.ok(llm.requests.length >= 4);
+  for (let i = 1; i < llm.requests.length; i += 1) {
+    const prev = llm.requests[i - 1]!.messages;
+    const next = llm.requests[i]!.messages;
+    // Everything the previous request sent, minus its regenerated tail (a trailing user message),
+    // must reappear unchanged at the head of the next request.
+    const stable =
+      prev[prev.length - 1]?.role === 'user' && prev.length > 1 ? prev.length - 1 : prev.length;
+    assert.deepEqual(
+      next.slice(0, stable),
+      prev.slice(0, stable),
+      `request ${i} rewrote its prefix`,
+    );
+  }
+  // The regenerated state lives in exactly one trailing user message, never inside tool results.
+  const last = llm.requests[llm.requests.length - 1]!.messages;
+  const toolsWithLedger = last.filter(
+    (m) => m.role === 'tool' && /What this run has already done/.test(m.content ?? ''),
+  );
+  assert.equal(toolsWithLedger.length, 0);
+  assert.ok(
+    last[last.length - 1]?.role === 'user' &&
+      /Current run state/.test(last[last.length - 1]!.content ?? ''),
+  );
+});
+
+test('a reply to ask reaches the model in full as a trusted user turn', async () => {
+  const driver = new FakeDriver();
+  const llm = new ScriptedLlm([
+    { kind: 'ask', question: 'Which colour?' },
+    { kind: 'done', success: true, summary: 'ok' },
+  ]);
+  const answer = 'Dark green please, and only size 42 — nothing else.'.repeat(3);
+  let n = 0;
+  await runAgent(
+    {
+      sessionId: 's1',
+      profileId: 'p1',
+      task: 'buy a jacket',
+      runId: 's1',
+      llmConfig: { provider: 'anthropic', model: 'claude-opus-4-8', apiKey: 'x' },
+      config: resolveConfig({ maxSteps: 4 }),
+    },
+    {
+      driver,
+      llm,
+      memory: new FakeMemory(),
+      emit: () => {},
+      waitForInput: async () => answer,
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+  const last = llm.requests[llm.requests.length - 1]!;
+  const turn = last.messages.find(
+    (m) => m.role === 'user' && /BEGIN_USER_MESSAGE/.test(m.content ?? ''),
+  );
+  assert.ok(turn, 'the answer became a user turn');
+  assert.ok((turn.content ?? '').includes(answer), 'the full answer, not a 120-character clip');
+  assert.match(turn.content ?? '', /Which colour\?/);
+});

@@ -146,6 +146,15 @@ body {
 .lobee-step-text.is-done {
   color: var(--ink);
 }
+/* The user's own mid-run message: a hollow mark, their words in the accent colour. */
+.lobee-dot.is-user {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--violet-600);
+}
+.lobee-step-text.is-user {
+  color: var(--violet-600);
+  white-space: pre-wrap;
+}
 .lobee-dot {
   position: relative;
   display: inline-block;

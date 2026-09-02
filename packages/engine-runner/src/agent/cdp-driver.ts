@@ -391,22 +391,31 @@ export class CdpBrowserDriver implements BrowserDriver {
   }
 
   async navigate(url: string): Promise<void> {
-    const before = await cdpEvaluate<string>(this.page, 'location.href', {
-      timeoutMs: LOCATION_PROBE_TIMEOUT_MS,
-    }).catch(() => '');
+    // The document's own birth time identifies it: `performance.timeOrigin` is set once per document,
+    // so it changes on a reload or a same-URL navigation where `location.href` cannot. No global is
+    // left on the page — it is a read.
+    const before = await cdpEvaluate<{ href: string; origin: number }>(
+      this.page,
+      '({ href: location.href, origin: performance.timeOrigin })',
+      { timeoutMs: LOCATION_PROBE_TIMEOUT_MS },
+    ).catch(() => undefined);
     await this.page.send('Page.navigate', { url });
     // `Page.navigate` resolves when navigation STARTS, not when the new document exists. The settle
     // poll then samples the OLD page, and if the server's TTFB exceeds ~450ms it sees a stable,
     // `complete` document and returns immediately — so the agent perceives and acts on the page it
     // was trying to leave. Wait for the document to actually turn over first.
-    if (!before) return;
+    if (!before?.href) return;
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
-      const current = await cdpEvaluate<string>(this.page, 'location.href', {
-        timeoutMs: LOCATION_PROBE_TIMEOUT_MS,
-      }).catch(() => '');
-      // Any change counts, including a redirect to somewhere other than the requested URL.
-      if (current && current !== before) return;
+      const current = await cdpEvaluate<{ href: string; origin: number }>(
+        this.page,
+        '({ href: location.href, origin: performance.timeOrigin })',
+        { timeoutMs: LOCATION_PROBE_TIMEOUT_MS },
+      ).catch(() => undefined);
+      // Any change counts, including a redirect to somewhere other than the requested URL — and a
+      // fresh document at the SAME URL, which used to sit out the whole 10 s as a "dead" poll.
+      if (current?.href && (current.href !== before.href || current.origin !== before.origin))
+        return;
       await sleep(100);
     }
   }
