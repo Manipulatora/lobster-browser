@@ -364,7 +364,11 @@ preflight() {
     fi
     if [[ -n "$SUDO" ]] && ((!DRY_RUN)); then
         # One prompt up front, not one in the middle of a restart.
-        sudo -v
+        # `sudo -v` asks for a password whenever ANY rule for this user could require one, even
+        # when the commands the script runs are all NOPASSWD — and a non-interactive deploy has no
+        # terminal to type it into. `-n true` proves the same thing without ever prompting: it
+        # succeeds only when the rules let this user through unattended, and fails fast otherwise.
+        sudo -n true 2>/dev/null || die "sudo needs a password for $(id -un); run from a terminal or grant NOPASSWD for the deploy commands"
     fi
 
     load_workspace_closure

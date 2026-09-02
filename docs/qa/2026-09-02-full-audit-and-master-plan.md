@@ -156,5 +156,33 @@ sessions/revocation/password reset; pending-registration fix; team caps / allowa
 account; per-route rate limits; metering off the critical path; roster warmed at boot;
 `tool_choice` passthrough; engine/distribution audit; upstream rebase (.42 → .64).
 
+## Status at 2026-09-03 00:30 Berlin — all waves executed
+
+Merged into `main` (51db309) from nine parallel implementation branches, each with tests, then
+gated together (agent 237, engine-runner 305, panel 65, backend 433, launcher 252, UI 16, CI
+offline gates, PGlite migration gate, deploy-script suite — all green):
+
+- **Wave 2 (remaining):** working memory re-sent each step (task + trusted amendments + the model's
+  `plan`), situation-change events (`step.signal` + a harness nudge when a login wall / captcha /
+  OTP / error page / block appears or clears), per-step `step.timing`; journal batching (one fsynced
+  write at the dispatch barrier instead of 4-6 full re-encryptions per step); auto mode in the panel
+  (chat or task decided per message, Ask/Agent kept as overrides), signal rows and step durations
+  on the rail. The `loop.ts` split runs as its own reviewed branch (`wave/loop-split`).
+- **Wave 3 (remaining):** byte-level profile download progress ("Downloading 3.2 / 12.5 MB");
+  blob retention (newest 5 versions) and per-team storage quota.
+- **Wave 4:** staged deploy script `deploy/deploy-backend.sh` (releases, rollback, migrate gate);
+  sessions + revocation (`sessionVersion` claim, `POST /auth/logout-all`), password change and
+  emailed reset, pending-registration hijack closed; allowance per billing account + team cap +
+  own team by default; per-route rate limits (auth/sync/leases/agent/general) keyed by verified
+  principal; roster warmed at boot with a negative cache; `tool_choice` passed through; metering
+  settled after the response with a 5 s wallet snapshot; the engine/distribution audit
+  (`2026-09-02-engine-distribution-audit.md`, P0 list inside).
+- **Engine rebase:** stable is 152.0.7977.75. Pins bumped on branch `engine/152.0.7977.75` only;
+  the Windows engine build runs on the box (`lobengine75`), the Linux build follows on this host.
+  Nothing ships until both archives exist and the manifest is finalized per platform.
+
+Deployed: backend (migration 0017 applied; nginx auth throttle covers the password routes);
+installers rebuilt from 51db309 and published for both platforms.
+
 **Needs a real machine to verify:** every agent behaviour, the panel, installers, and the
 second-PC sign-in (its launcher log will confirm the proxy diagnosis).
