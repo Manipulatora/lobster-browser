@@ -21,7 +21,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #
 # 152.0.7977.42 is the M152 beta-frozen build (beta @ 100%, already trickling into stable); M152 is
 # scheduled stable 2026-08-25. Previous pin 152.0.7928.0 was a CANARY nightly.
-CHROMIUM_REF="${CHROMIUM_REF:-152.0.7977.42}"
+CHROMIUM_REF="${CHROMIUM_REF:-152.0.7977.75}"
 SRC_DIR="${SRC_DIR:-${HERE}/chromium/src}"
 OUT_DIR="${OUT_DIR:-out/Lobium}"
 RUN="${1:-}"

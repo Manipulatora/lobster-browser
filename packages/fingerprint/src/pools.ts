@@ -774,7 +774,7 @@ export const ENGINE_CHROME = {
   /** navigator.userAgent form (UA-reduced to major.0.0.0). */
   reduced: '152.0.0.0',
   /** getHighEntropyValues(['uaFullVersion'|'fullVersionList']) form (real build). */
-  full: '152.0.7977.42',
+  full: '152.0.7977.75',
 } as const;
 
 /** Split a full Chrome build (e.g. "152.0.7977.42") into the UA-reduced + major forms it must present. */

@@ -54,7 +54,7 @@ $Repo = Split-Path -Parent $Here
 # fails the build if the three ever disagree. It MUST be a build Google shipped on a release
 # channel - never a canary, whose `.0` patch component is itself a branch-point signature and
 # whose build number is near-unique in getHighEntropyValues(['fullVersionList']).
-$ChromiumRef = '152.0.7977.42'
+$ChromiumRef = '152.0.7977.75'
 
 function Step([string] $m) { Write-Host ''; Write-Host "==> $m" -ForegroundColor Cyan }
 function Ok([string] $m) { Write-Host "    OK   $m" -ForegroundColor Green }
