@@ -5,6 +5,10 @@ import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { PrismaTeamsRepository } from './prisma-teams.repository';
+import { OwnedTeamLimitExceededError } from './teams.repository';
+
+/** A cap high enough to be out of the way in fixtures that are about something else. */
+const UNCAPPED = 100;
 
 interface FakeMembershipRow {
   userId: string;
@@ -30,7 +34,9 @@ interface FakeTransaction {
 }
 
 interface FakeCreateTransaction {
+  $queryRaw<T>(query: TemplateStringsArray, ...values: readonly unknown[]): Promise<T>;
   team: {
+    count(input: { where: { ownerUserId: string } }): Promise<number>;
     create(input: { data: { ownerUserId: string; name: string } }): Promise<{
       id: string;
       ownerUserId: string;
@@ -114,22 +120,33 @@ function repositoryFixture(conflictsBeforeSuccess = 0): {
   };
 }
 
-function atomicCreateFixture(): {
+function atomicCreateFixture(options: { failFirstMembershipWrite?: boolean } = {}): {
   repository: PrismaTeamsRepository;
   teams: Map<string, { id: string; ownerUserId: string; name: string; createdAt: Date }>;
   memberships: Map<string, FakeMembershipRow>;
+  /** The raw SQL of every row lock the repository took, in order. */
+  locks: string[];
 } {
   const teams = new Map<
     string,
     { id: string; ownerUserId: string; name: string; createdAt: Date }
   >();
   const memberships = new Map<string, FakeMembershipRow>();
-  let failMembershipWrite = true;
+  const locks: string[] = [];
+  let failMembershipWrite = options.failFirstMembershipWrite ?? true;
+  let nextTeamId = 1;
 
   const tx: FakeCreateTransaction = {
+    async $queryRaw<T>(query: TemplateStringsArray, ...values: readonly unknown[]): Promise<T> {
+      locks.push(query.join('?'));
+      return [{ id: values[0] }] as T;
+    },
     team: {
+      async count({ where }) {
+        return [...teams.values()].filter((row) => row.ownerUserId === where.ownerUserId).length;
+      },
       async create({ data }) {
-        const row = { id: 'team-created', ...data, createdAt: new Date(0) };
+        const row = { id: `team-created-${nextTeamId++}`, ...data, createdAt: new Date(0) };
         teams.set(row.id, row);
         return row;
       },
@@ -165,23 +182,49 @@ function atomicCreateFixture(): {
     },
   } as unknown as PrismaService;
 
-  return { repository: new PrismaTeamsRepository(prisma), teams, memberships };
+  return { repository: new PrismaTeamsRepository(prisma), teams, memberships, locks };
 }
 
 test('team creation rolls back when its owner membership cannot be written', async () => {
   const fixture = atomicCreateFixture();
 
   await assert.rejects(
-    () => fixture.repository.createTeam('owner-1', 'Atomic Team'),
+    () => fixture.repository.createTeam('owner-1', 'Atomic Team', UNCAPPED),
     /injected owner-membership failure/,
   );
   assert.equal(fixture.teams.size, 0);
   assert.equal(fixture.memberships.size, 0);
 
-  const team = await fixture.repository.createTeam('owner-1', 'Atomic Team');
+  const team = await fixture.repository.createTeam('owner-1', 'Atomic Team', UNCAPPED);
   assert.equal(team.ownerUserId, 'owner-1');
   assert.equal(fixture.teams.size, 1);
   assert.equal(fixture.memberships.get(`${team.id}:owner-1`)?.role, 'admin');
+});
+
+test('team creation locks the owner row and refuses the create once the owner holds the cap', async () => {
+  const fixture = atomicCreateFixture({ failFirstMembershipWrite: false });
+
+  await fixture.repository.createTeam('owner-1', 'One', 2);
+  await fixture.repository.createTeam('owner-1', 'Two', 2);
+  await assert.rejects(
+    () => fixture.repository.createTeam('owner-1', 'Three', 2),
+    (err: unknown) => {
+      assert.ok(err instanceof OwnedTeamLimitExceededError);
+      assert.equal(err.limit, 2);
+      assert.equal(err.ownedCount, 2);
+      return true;
+    },
+  );
+  assert.equal(fixture.teams.size, 2, 'the refused create wrote nothing');
+
+  // Every attempt queued on the OWNER's user row before counting: that lock is what turns the
+  // count into an invariant under READ COMMITTED, and it must be the account, not a team.
+  assert.equal(fixture.locks.length, 3);
+  for (const sql of fixture.locks) assert.match(sql, /"users"[\s\S]*FOR UPDATE/);
+
+  // Another owner's count is their own.
+  await fixture.repository.createTeam('owner-2', 'Theirs', 2);
+  assert.equal(fixture.teams.size, 3);
 });
 
 test('admin-decreasing writes use SERIALIZABLE isolation and retry P2034 conflicts', async () => {

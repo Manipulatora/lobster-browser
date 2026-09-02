@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import {
+  BlobQuotaExceededError,
   BlobVersionConflictError,
   type BlobHead,
   type BlobPutMeta,
@@ -14,25 +15,45 @@ interface StoredBlob {
   bytes: Buffer;
   version: number;
   updatedAt: string;
+  /** Recorded so the quota can attribute the key to its team without parsing the key. */
+  teamId: string;
 }
 
 /**
  * In-memory `BlobStore` backed by a Map — the active provider until an object store (S3) is
  * provisioned. State lives for the lifetime of the process only; it is intentionally NOT durable.
  * Only the latest version per key is retained (older versions are overwritten), which is all the
- * push/pull + conflict-detection flow needs.
+ * push/pull + conflict-detection flow needs — and is the one retention window that needs no pruning.
  */
 @Injectable()
 export class InMemoryBlobStore implements BlobStore {
   private readonly byKey = new Map<string, StoredBlob>();
 
   async put(key: string, bytes: Buffer, meta: BlobPutMeta): Promise<BlobPutResult> {
-    const currentVersion = this.byKey.get(key)?.version ?? 0;
+    const stored = this.byKey.get(key);
+    const currentVersion = stored?.version ?? 0;
     // Compare-and-set: the read of the current version and the write below run with no await
     // between them, so this whole block is atomic on the single-threaded event loop. Two racing
     // pushes at the same `expectedVersion` can therefore never both pass the check.
     if (meta.expectedVersion !== undefined && meta.expectedVersion !== currentVersion) {
       throw new BlobVersionConflictError(key, meta.expectedVersion, currentVersion);
+    }
+    if (meta.teamQuotaBytes !== undefined) {
+      // Live bytes the team keeps after this write: every OTHER key's latest version. This key's
+      // own current version is being replaced, so it is not charged twice. Same turn as the write,
+      // so the measurement cannot go stale under it.
+      let retained = 0;
+      for (const [otherKey, other] of this.byKey) {
+        if (other.teamId === meta.teamId && otherKey !== key) retained += other.bytes.length;
+      }
+      if (retained + bytes.length > meta.teamQuotaBytes) {
+        throw new BlobQuotaExceededError(
+          meta.teamId,
+          retained + (stored?.bytes.length ?? 0),
+          meta.teamQuotaBytes,
+          bytes.length,
+        );
+      }
     }
     const nextVersion = currentVersion + 1;
     // Copy the buffer so a later mutation of the caller's array can't rewrite stored bytes.
@@ -40,6 +61,7 @@ export class InMemoryBlobStore implements BlobStore {
       bytes: Buffer.from(bytes),
       version: nextVersion,
       updatedAt: new Date().toISOString(),
+      teamId: meta.teamId,
     });
     return { version: nextVersion };
   }

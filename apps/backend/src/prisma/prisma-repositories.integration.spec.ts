@@ -149,7 +149,7 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
     });
 
     await t.test('teams: create, membership add/get/list, setRole, findTeamsForUser', async () => {
-      const team = await teams.createTeam(userId, `IT Team ${runId}`);
+      const team = await teams.createTeam(userId, `IT Team ${runId}`, 10);
       teamId = team.id;
       assert.equal(team.ownerUserId, userId);
 

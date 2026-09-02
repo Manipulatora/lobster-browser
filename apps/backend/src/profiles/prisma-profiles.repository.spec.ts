@@ -10,8 +10,16 @@ import type { PrismaService } from '../prisma/prisma.service';
 import type { TeamsRepository } from '../teams/teams.repository';
 import { InMemoryBlobStore } from './blob/in-memory-blob-store';
 import { PrismaProfilesRepository } from './prisma-profiles.repository';
-import type { CreateProfileRecord } from './profiles.repository';
+import { ProfileLimitExceededError, type CreateProfileRecord } from './profiles.repository';
 import { DEFAULT_FREE_PROFILE_LIMIT, ProfilesService } from './profiles.service';
+
+/** The `subscriptions` columns the allowance rule reads, as the fake client stores them. */
+interface FakeSubscriptionRow {
+  teamId: string;
+  status: 'active' | 'past_due' | 'canceled' | 'trialing';
+  profileLimit: number;
+  currentPeriodEnd: Date | null;
+}
 
 /** The `profiles` columns this repository reads/writes, as the fake client stores them. */
 interface FakeRow {
@@ -35,6 +43,13 @@ interface FakeRow {
 class FakePrisma {
   readonly rows: FakeRow[] = [];
   readonly adminUserIds = new Set(['user-1']);
+  /** Team → owner: the billing account every capacity count is scoped to. */
+  readonly teams = new Map<string, { ownerUserId: string }>([
+    ['team-1', { ownerUserId: 'user-1' }],
+  ]);
+  readonly subscriptions: FakeSubscriptionRow[] = [];
+  /** The raw SQL of every row lock taken, in order. */
+  readonly locks: string[] = [];
   private nextId = 1;
   createCalls = 0;
   failOnCreateCall: number | null = null;
@@ -120,14 +135,33 @@ class FakePrisma {
     },
   };
 
-  readonly subscription = {
-    // No subscription rows: the service falls back to the default free-tier limit.
-    findUnique: async (): Promise<null> => null,
+  readonly team = {
+    findUnique: async ({
+      where,
+    }: {
+      where: { id: string };
+    }): Promise<{ ownerUserId: string } | null> => {
+      const team = this.teams.get(where.id);
+      return team ? { ownerUserId: team.ownerUserId } : null;
+    },
   };
 
-  async $queryRaw<T>(_query: TemplateStringsArray, ..._values: readonly unknown[]): Promise<T> {
+  readonly subscription = {
+    /** Applies only the relation filter the repository passes: rows on teams the owner owns. */
+    findMany: async ({
+      where,
+    }: {
+      where: { team: { is: { ownerUserId: string } } };
+    }): Promise<FakeSubscriptionRow[]> =>
+      this.subscriptions.filter(
+        (row) => this.teams.get(row.teamId)?.ownerUserId === where.team.is.ownerUserId,
+      ),
+  };
+
+  async $queryRaw<T>(query: TemplateStringsArray, ...values: readonly unknown[]): Promise<T> {
     this.lockCalls += 1;
-    return [{ id: 'team-1' }] as T;
+    this.locks.push(query.join('?'));
+    return [{ id: values[0] }] as T;
   }
 
   async $transaction<T>(
@@ -147,10 +181,15 @@ class FakePrisma {
   }
 
   private match(where: Record<string, unknown>): FakeRow[] {
+    // The account-wide count filters on the owning team's owner, through the relation.
+    const ownerUserId = (where.ownerTeam as { is?: { ownerUserId?: string } } | undefined)?.is
+      ?.ownerUserId;
     return this.rows.filter(
       (row) =>
         (where.id === undefined || row.id === where.id) &&
         (where.ownerTeamId === undefined || row.ownerTeamId === where.ownerTeamId) &&
+        (ownerUserId === undefined ||
+          this.teams.get(row.ownerTeamId)?.ownerUserId === ownerUserId) &&
         (where.deletedAt === undefined || (where.deletedAt === null && row.deletedAt === null)),
     );
   }
@@ -182,9 +221,9 @@ async function createProfile(
   )[0]!;
 }
 
-function createRecord(name: string, seed: string): CreateProfileRecord {
+function createRecord(name: string, seed: string, ownerTeamId = 'team-1'): CreateProfileRecord {
   return {
-    ownerTeamId: 'team-1',
+    ownerTeamId,
     name,
     engine: 'lobium',
     os: 'windows',
@@ -192,6 +231,83 @@ function createRecord(name: string, seed: string): CreateProfileRecord {
     tags: [],
   };
 }
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+test('the allowance belongs to the billing account: every team the owner has draws on one limit', async () => {
+  const { repository, prisma } = makeRepository();
+  prisma.teams.set('team-2', { ownerUserId: 'user-1' });
+  prisma.teams.set('team-9', { ownerUserId: 'user-2' });
+
+  await repository.createManyWithinLimit([
+    createRecord('A', '11111111111111111111111111111111'),
+    createRecord('B', '22222222222222222222222222222222'),
+  ]);
+  await repository.createManyWithinLimit([
+    createRecord('C', '33333333333333333333333333333333', 'team-2'),
+  ]);
+
+  // team-2 holds one profile, yet the account's three free slots are taken across both teams.
+  await assert.rejects(
+    () =>
+      repository.createManyWithinLimit([
+        createRecord('D', '44444444444444444444444444444444', 'team-2'),
+      ]),
+    (err: unknown) => {
+      assert.ok(err instanceof ProfileLimitExceededError);
+      assert.equal(err.limit, DEFAULT_FREE_PROFILE_LIMIT);
+      assert.equal(err.currentCount, 3, 'counted across both owned teams');
+      return true;
+    },
+  );
+  // Another account is unaffected.
+  await repository.createManyWithinLimit([
+    createRecord('E', '55555555555555555555555555555555', 'team-9'),
+  ]);
+
+  // The lock that turns the count into an invariant is on the OWNER, not on either team: two
+  // creates in two of the owner's teams must queue on the same row.
+  assert.equal(prisma.locks.length, 4);
+  for (const sql of prisma.locks) assert.match(sql, /"users"[\s\S]*FOR UPDATE/);
+});
+
+test('a live package on one owned team extends the allowance to every team the account owns', async () => {
+  const { repository, prisma } = makeRepository();
+  prisma.teams.set('team-2', { ownerUserId: 'user-1' });
+  prisma.subscriptions.push({
+    teamId: 'team-1',
+    status: 'active',
+    profileLimit: 10,
+    currentPeriodEnd: new Date(Date.now() + DAY_MS),
+  });
+
+  // Four profiles in the team WITHOUT the subscription row — past the free three.
+  for (let i = 0; i < 4; i += 1) {
+    await repository.createManyWithinLimit([createRecord(`P${i}`, `${i}`.repeat(32), 'team-2')]);
+  }
+  assert.equal(await repository.getProfileLimit('team-2'), 10);
+  assert.equal(await repository.getProfileLimit('team-1'), 10);
+});
+
+test('getProfileLimit is null without any subscription row and the best live entitlement with several', async () => {
+  const { repository, prisma } = makeRepository();
+  prisma.teams.set('team-2', { ownerUserId: 'user-1' });
+  assert.equal(await repository.getProfileLimit('team-1'), null);
+  assert.equal(await repository.getProfileLimit('missing-team'), null);
+
+  // A lapsed Max on one team and a free-tier row on the other: the free allowance, not 1000.
+  prisma.subscriptions.push(
+    {
+      teamId: 'team-2',
+      status: 'active',
+      profileLimit: 1000,
+      currentPeriodEnd: new Date(Date.now() - 1000),
+    },
+    { teamId: 'team-1', status: 'trialing', profileLimit: 3, currentPeriodEnd: null },
+  );
+  assert.equal(await repository.getProfileLimit('team-1'), DEFAULT_FREE_PROFILE_LIMIT);
+  assert.equal(await repository.getProfileLimit('team-2'), DEFAULT_FREE_PROFILE_LIMIT);
+});
 
 test('a failed batch insert rolls back every row and can be retried without duplicates', async () => {
   const { repository, prisma } = makeRepository();
@@ -261,7 +377,9 @@ test('the tombstone UPDATE itself requires a current admin membership', async ()
 test('a tombstoned profile does not consume the team profile allowance', async () => {
   const { repository } = makeRepository();
   const teams = {
-    findTeamsForUser: async () => [{ id: 'team-1' }],
+    findTeamsForUser: async () => [
+      { id: 'team-1', name: 'Own', ownerUserId: 'user-1', createdAt: '2026-01-01T00:00:00.000Z' },
+    ],
     getMembership: async () => ({ teamId: 'team-1', userId: 'user-1', role: 'admin' }),
   } as unknown as TeamsRepository;
   const audit = { record: async () => {} } as unknown as AuditService;

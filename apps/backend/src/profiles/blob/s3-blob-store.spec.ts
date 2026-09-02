@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import type { ConfigService } from '@nestjs/config';
 import {
+  DeleteObjectsCommand,
   GetObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
@@ -10,7 +11,7 @@ import {
   type S3Client,
 } from '@aws-sdk/client-s3';
 
-import { BlobVersionConflictError } from './blob-store';
+import { BlobQuotaExceededError, BlobVersionConflictError } from './blob-store';
 import { S3BlobStore } from './s3-blob-store';
 
 /**
@@ -62,13 +63,22 @@ class FakeS3Client {
       const page = matching.slice(start, start + this.pageSize);
       const isTruncated = start + this.pageSize < matching.length;
       return {
-        Contents: page.map((Key) => ({ Key })),
+        Contents: page.map((Key) => ({ Key, Size: this.objects.get(Key)!.body.length })),
         IsTruncated: isTruncated,
         NextContinuationToken: isTruncated ? String(start + this.pageSize) : undefined,
       };
     }
+    if (command instanceof DeleteObjectsCommand) {
+      const keys = (command.input.Delete?.Objects ?? []).map((o) => o.Key!);
+      this.deletes.push(keys);
+      for (const key of keys) this.objects.delete(key);
+      return {};
+    }
     throw new Error(`FakeS3Client: unhandled command ${command?.constructor?.name}`);
   }
+
+  /** Every DeleteObjects batch the store issued, so tests can assert what was pruned and when. */
+  readonly deletes: string[][] = [];
 }
 
 function makeStore(env: Record<string, string> = {}): { store: S3BlobStore; s3: FakeS3Client } {
@@ -202,4 +212,74 @@ test('keys are isolated: writing one stream never affects another', async () => 
   await store.put('team-1/p2', Buffer.from('p2'), { teamId: 'team-1', profileId: 'p2' });
   assert.equal((await store.head('team-1/p1'))?.version, 1);
   assert.equal((await store.getLatest('team-1/p2'))?.bytes.toString(), 'p2');
+});
+
+test('only the newest BLOB_RETAIN_VERSIONS objects survive a put; the one just created never goes', async () => {
+  const { store, s3 } = makeStore({ BLOB_RETAIN_VERSIONS: '2' });
+  for (let i = 1; i <= 4; i += 1) {
+    await store.put('team-1/p1', Buffer.from(`v${i}`), meta);
+  }
+
+  assert.deepEqual([...s3.objects.keys()].sort(), ['team-1/p1/3.enc', 'team-1/p1/4.enc']);
+  // Pruning is a delete of what fell out of the window, issued after the create it follows.
+  assert.deepEqual(s3.deletes, [['team-1/p1/1.enc'], ['team-1/p1/2.enc']]);
+  assert.equal((await store.head('team-1/p1'))?.version, 4, 'numbering is never rewound');
+  assert.equal((await store.getLatest('team-1/p1'))?.bytes.toString(), 'v4');
+});
+
+test('a put that would take the team over its quota is refused before the PUT is issued', async () => {
+  const { store, s3 } = makeStore();
+  await store.put('team-1/p1', Buffer.alloc(6), meta);
+  await store.put('team-1/p2', Buffer.alloc(3), { teamId: 'team-1', profileId: 'p2' });
+  const putsBefore = s3.puts.length;
+
+  await assert.rejects(
+    () =>
+      store.put('team-1/p3', Buffer.alloc(2), {
+        teamId: 'team-1',
+        profileId: 'p3',
+        teamQuotaBytes: 10,
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof BlobQuotaExceededError);
+      assert.equal(err.usedBytes, 9);
+      assert.equal(err.quotaBytes, 10);
+      assert.equal(err.requestedBytes, 2);
+      return true;
+    },
+  );
+  assert.equal(s3.puts.length, putsBefore, 'the refused write never reached S3');
+});
+
+test('the quota measures live bytes across the team prefix: latest object per key, history and other teams excluded', async () => {
+  const { store } = makeStore({ BLOB_RETAIN_VERSIONS: '5', S3_KEY_PREFIX: 'blobs' });
+  await store.put('team-1/p1', Buffer.alloc(6), meta);
+  await store.put('team-1/p2', Buffer.alloc(3), { teamId: 'team-1', profileId: 'p2' });
+  await store.put('team-2/p1', Buffer.alloc(100), { teamId: 'team-2', profileId: 'p1' });
+
+  // p1's 6 live bytes are replaced: 3 (p2) + 7 = 10 fits, though 6 + 7 + 3 objects now exist.
+  await store.put('team-1/p1', Buffer.alloc(7), { ...meta, teamQuotaBytes: 10 });
+  // 7 (p1 live) + 4 does not.
+  await assert.rejects(
+    () =>
+      store.put('team-1/p2', Buffer.alloc(4), {
+        teamId: 'team-1',
+        profileId: 'p2',
+        teamQuotaBytes: 10,
+      }),
+    BlobQuotaExceededError,
+  );
+});
+
+test('deleteAll removes every version of a key and nothing else, and is idempotent', async () => {
+  const { store, s3 } = makeStore({ BLOB_RETAIN_VERSIONS: '5' });
+  await store.put('team-1/p1', Buffer.from('a'), meta);
+  await store.put('team-1/p1', Buffer.from('b'), meta);
+  await store.put('team-1/p2', Buffer.from('c'), { teamId: 'team-1', profileId: 'p2' });
+
+  await store.deleteAll('team-1/p1');
+  assert.equal(await store.head('team-1/p1'), null);
+  assert.deepEqual([...s3.objects.keys()], ['team-1/p2/1.enc']);
+  await store.deleteAll('team-1/p1');
+  await store.deleteAll('team-1/never');
 });

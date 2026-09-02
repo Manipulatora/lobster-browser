@@ -1,11 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { constants as fsConstants } from 'node:fs';
+import { constants as fsConstants, type Dirent } from 'node:fs';
 import { link, mkdir, mkdtemp, open, readdir, readFile, rm, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
+  BlobQuotaExceededError,
   BlobVersionConflictError,
+  resolveBlobRetainVersions,
   type BlobHead,
   type BlobPutMeta,
   type BlobPutResult,
@@ -35,16 +37,34 @@ import {
  * leave a torn file at a version number that readers already consider live. An `O_EXCL` create would
  * publish the version before the bytes were in it.
  *
- * ## Every version is kept
+ * ## Only the newest versions are kept
  *
- * Unlike the in-memory store, which keeps only the latest, this keeps the whole history — it is what
- * makes point-in-time recovery possible ("my session broke, give me yesterday's cookies"), and it is
- * what the version-as-filename scheme gives for free. Pruning is a policy decision that belongs above
- * this layer; there is deliberately no silent retention limit here.
+ * Each version being its own file makes history free — and growth unbounded. This store used to keep
+ * every version and call pruning "a policy decision that belongs above this layer"; no layer above
+ * ever made it, and the desktop pushes a snapshot after every stop and every dirty reconcile tick, so
+ * 20 profiles × 10 stops a day × 10 MiB was 2 GB a day per active user with nothing ever reclaimed.
+ * After every successful write the store now deletes this key's versions beyond the newest
+ * `BLOB_RETAIN_VERSIONS` (default 5): enough history for "my session broke, give me yesterday's
+ * cookies", and bounded disk. The latest version is never a candidate — it is what the write just
+ * published, and the window is at least one.
+ *
+ * Pruning runs AFTER the write is published and is best-effort: a failure to delete an old file
+ * leaves reclaimable bytes for the next write to clear, which is strictly better than failing a push
+ * whose bytes are already durable.
+ *
+ * ## Quota
+ *
+ * `meta.teamQuotaBytes` is checked before anything is written, against the team's LIVE bytes — the
+ * latest version of every key under `<root>/<teamId>/`, minus the version this write replaces. See
+ * {@link BlobPutMeta.teamQuotaBytes} for why retained history does not count. The measurement is one
+ * directory listing per profile plus one `stat`, not a walk of every version, so it stays cheap as
+ * history accumulates.
  */
 @Injectable()
 export class FilesystemBlobStore implements BlobStore {
+  private readonly logger = new Logger(FilesystemBlobStore.name);
   private readonly root: string;
+  private readonly retainVersions: number;
 
   /** `v` + 10 digits: sorts lexicographically in version order, and 10 digits will not run out. */
   private static readonly VERSION_DIGITS = 10;
@@ -62,48 +82,30 @@ export class FilesystemBlobStore implements BlobStore {
 
   constructor(config: ConfigService) {
     this.root = config.get<string>('BLOB_STORE_PATH') ?? '/var/lib/lobster/blobs';
+    this.retainVersions = resolveBlobRetainVersions(config.get<string>('BLOB_RETAIN_VERSIONS'));
   }
 
   async put(key: string, bytes: Buffer, meta: BlobPutMeta): Promise<BlobPutResult> {
     const dir = this.dirFor(key);
-    await mkdir(dir, { recursive: true, mode: 0o700 });
 
     if (meta.expectedVersion !== undefined) {
       const current = (await this.latestVersion(dir)) ?? 0;
       if (meta.expectedVersion !== current) {
         throw new BlobVersionConflictError(key, meta.expectedVersion, current);
       }
-      // The link below is the real check. The read above only produces a good error message for the
-      // common, uncontended case — between it and the link, another writer may still take this
-      // version, and that is exactly what EEXIST catches.
-      const target = meta.expectedVersion + 1;
-      try {
-        await this.writeVersion(dir, target, bytes);
-      } catch (err) {
-        if (isEexist(err)) {
-          throw new BlobVersionConflictError(
-            key,
-            meta.expectedVersion,
-            (await this.latestVersion(dir)) ?? 0,
-          );
-        }
-        throw err;
-      }
-      return { version: target };
+    }
+    // The quota is measured after the version precondition and before any byte lands: a stale push
+    // must read as a conflict (the caller's cue to pull) rather than as a full disk, and a refused
+    // push must leave the store exactly as it found it — which is why the key's directory is only
+    // created once both checks have passed (the listings above tolerate its absence).
+    if (meta.teamQuotaBytes !== undefined) {
+      await this.assertWithinQuota(dir, meta.teamId, bytes.length, meta.teamQuotaBytes);
     }
 
-    // Unconditional put: take the next free version, retrying when a concurrent writer takes it
-    // first. Bounded, because an unbounded retry against a busy key is a spin.
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      const target = ((await this.latestVersion(dir)) ?? 0) + 1;
-      try {
-        await this.writeVersion(dir, target, bytes);
-        return { version: target };
-      } catch (err) {
-        if (!isEexist(err)) throw err;
-      }
-    }
-    throw new Error(`could not allocate a blob version for ${key} after 8 attempts`);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const version = await this.publish(dir, key, bytes, meta.expectedVersion);
+    await this.prune(dir, key);
+    return { version };
   }
 
   async getLatest(key: string): Promise<BlobRecord | null> {
@@ -126,6 +128,128 @@ export class FilesystemBlobStore implements BlobStore {
     await rm(this.dirFor(key), { recursive: true, force: true });
   }
 
+  /**
+   * Allocate the next version and write it durably. A conditional put targets exactly
+   * `expectedVersion + 1`; an unconditional put takes the next free version, retrying when a
+   * concurrent writer takes it first. Bounded, because an unbounded retry against a busy key is a
+   * spin.
+   */
+  private async publish(
+    dir: string,
+    key: string,
+    bytes: Buffer,
+    expectedVersion: number | undefined,
+  ): Promise<number> {
+    if (expectedVersion !== undefined) {
+      // The link inside writeVersion is the real check. The read in `put` only produces a good error
+      // message for the common, uncontended case — between it and the link, another writer may still
+      // take this version, and that is exactly what EEXIST catches.
+      const target = expectedVersion + 1;
+      try {
+        await this.writeVersion(dir, target, bytes);
+      } catch (err) {
+        if (isEexist(err)) {
+          throw new BlobVersionConflictError(
+            key,
+            expectedVersion,
+            (await this.latestVersion(dir)) ?? 0,
+          );
+        }
+        throw err;
+      }
+      return target;
+    }
+
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const target = ((await this.latestVersion(dir)) ?? 0) + 1;
+      try {
+        await this.writeVersion(dir, target, bytes);
+        return target;
+      } catch (err) {
+        if (!isEexist(err)) throw err;
+      }
+    }
+    throw new Error(`could not allocate a blob version for ${key} after 8 attempts`);
+  }
+
+  /**
+   * Delete this key's versions beyond the newest `retainVersions`. Runs after the new version is
+   * published, so the file just written is always inside the window; a concurrent writer's newer
+   * version only moves the window forward, never onto a version anyone still reads as the latest.
+   */
+  private async prune(dir: string, key: string): Promise<void> {
+    try {
+      const versions = await this.listVersions(dir);
+      const stale = versions.slice(0, Math.max(0, versions.length - this.retainVersions));
+      for (const version of stale) {
+        // ENOENT is a concurrent pruner having got there first — the outcome is the same.
+        await unlink(join(dir, this.fileName(version))).catch((err: NodeJS.ErrnoException) => {
+          if (err.code !== 'ENOENT') throw err;
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `could not prune old versions of ${key}: ${err instanceof Error ? err.message : String(err)}. ` +
+          'The bytes are reclaimable on the next write.',
+      );
+    }
+  }
+
+  /** Refuse the write if the team's live bytes after it would exceed `quotaBytes`. */
+  private async assertWithinQuota(
+    dir: string,
+    teamId: string,
+    incomingBytes: number,
+    quotaBytes: number,
+  ): Promise<void> {
+    if (!FilesystemBlobStore.SEGMENT_RE.test(teamId)) {
+      throw new Error(`unsafe blob team segment: ${JSON.stringify(teamId)}`);
+    }
+    const live = await this.liveBytesByDir(join(this.root, teamId));
+    let used = 0;
+    for (const bytes of live.values()) used += bytes;
+    // This key's current version is being replaced, so only what the OTHER keys hold stays.
+    const retained = used - (live.get(dir) ?? 0);
+    if (retained + incomingBytes > quotaBytes) {
+      throw new BlobQuotaExceededError(teamId, used, quotaBytes, incomingBytes);
+    }
+  }
+
+  /**
+   * Size of the latest version in every key directory under `teamDir`, keyed by directory. Walks
+   * subdirectories because a key may have more than two segments; skips the `.tmp-*` scratch
+   * directories a write in flight leaves beside the versions.
+   */
+  private async liveBytesByDir(teamDir: string): Promise<Map<string, number>> {
+    const result = new Map<string, number>();
+    const pending = [teamDir];
+    while (pending.length > 0) {
+      const dir = pending.pop()!;
+      let entries: Dirent[];
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw err;
+      }
+      let latest: number | null = null;
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          if (!entry.name.startsWith('.tmp-')) pending.push(join(dir, entry.name));
+          continue;
+        }
+        const match = FilesystemBlobStore.FILE_RE.exec(entry.name);
+        if (!match) continue;
+        const version = Number(match[1]);
+        if (latest === null || version > latest) latest = version;
+      }
+      if (latest !== null) {
+        result.set(dir, (await stat(join(dir, this.fileName(latest)))).size);
+      }
+    }
+    return result;
+  }
+
   /** Absolute directory for a key, with every segment validated. */
   private dirFor(key: string): string {
     const segments = key.split('/').filter((s) => s.length > 0);
@@ -144,23 +268,27 @@ export class FilesystemBlobStore implements BlobStore {
     return `v${String(version).padStart(FilesystemBlobStore.VERSION_DIGITS, '0')}.blob`;
   }
 
-  /** Highest stored version, or null when the key has never been written. */
-  private async latestVersion(dir: string): Promise<number | null> {
+  /** Every stored version of a key, ascending; empty when the key has never been written. */
+  private async listVersions(dir: string): Promise<number[]> {
     let entries: string[];
     try {
       entries = await readdir(dir);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
       throw err;
     }
-    let highest: number | null = null;
+    const versions: number[] = [];
     for (const entry of entries) {
       const match = FilesystemBlobStore.FILE_RE.exec(entry);
-      if (!match) continue;
-      const version = Number(match[1]);
-      if (highest === null || version > highest) highest = version;
+      if (match) versions.push(Number(match[1]));
     }
-    return highest;
+    return versions.sort((a, b) => a - b);
+  }
+
+  /** Highest stored version, or null when the key has never been written. */
+  private async latestVersion(dir: string): Promise<number | null> {
+    const versions = await this.listVersions(dir);
+    return versions.length === 0 ? null : versions[versions.length - 1]!;
   }
 
   /**

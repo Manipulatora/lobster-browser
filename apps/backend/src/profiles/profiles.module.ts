@@ -82,7 +82,10 @@ export function resolveBlobStore(config: ConfigService): BlobStore {
         if (!(teams instanceof InMemoryTeamsRepository)) {
           throw new Error('in-memory profiles require the shared in-memory teams repository');
         }
-        return new InMemoryProfilesRepository((teamId, userId) => teams.isAdmin(teamId, userId));
+        return new InMemoryProfilesRepository(
+          (teamId, userId) => teams.isAdmin(teamId, userId),
+          (teamId) => teams.ownerOf(teamId),
+        );
       },
     },
     {

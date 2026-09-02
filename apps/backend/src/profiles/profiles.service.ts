@@ -4,6 +4,8 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
   Inject,
   Injectable,
   NotFoundException,
@@ -16,7 +18,12 @@ import type { Profile, ProfileExport, ProfileExportBundle } from '@lobster/share
 import { AuditService } from '../audit/audit.service';
 import { TEAMS_REPOSITORY, type TeamsRepository } from '../teams/teams.repository';
 import { resolveTeamId } from '../teams/resolve-team-id';
-import { BLOB_STORE, BlobVersionConflictError, type BlobStore } from './blob/blob-store';
+import {
+  BLOB_STORE,
+  BlobQuotaExceededError,
+  BlobVersionConflictError,
+  type BlobStore,
+} from './blob/blob-store';
 import { blobObjectKey, normalizeKeyPrefix } from './blob/s3-blob-store';
 import type { BulkCreateProfilesDto } from './dto/bulk-create-profiles.dto';
 import type { CreateProfileDto } from './dto/create-profile.dto';
@@ -86,10 +93,34 @@ export const DEFAULT_FREE_PROFILE_LIMIT = FREE_PLAN_PROFILE_LIMIT;
 export const DEFAULT_BLOB_MAX_BYTES = 25 * 1024 * 1024;
 
 /**
- * BE-3: soft per-team total blob storage quota (bytes). Free tier default 250 MiB.
- * Override via `BLOB_TEAM_QUOTA_BYTES`. Enforced best-effort on push when the store reports size.
+ * Per-team quota for LIVE blob bytes — the latest version of every profile — on the free
+ * allowance: 250 MiB unless `BLOB_TEAM_QUOTA_BYTES` says otherwise (`0` disables the check).
+ *
+ * SCALED BY THE PLAN, NOT FLAT. A team whose billing account is entitled to more profiles gets
+ * proportionally more: a Plus account (100 profiles) gets 100/3 of this figure. Plans are priced by
+ * profile count and every profile may legitimately be a 25 MiB snapshot, so a flat figure sized for
+ * three profiles would refuse a Pro team's tenth push — and a refused push is a session the second
+ * machine never receives. One knob, honest at every tier.
+ *
+ * Only live bytes count: the versions a store retains as history are bounded by
+ * `BLOB_RETAIN_VERSIONS` and are not something a user can delete (see
+ * `BlobPutMeta.teamQuotaBytes`). This constant was declared "enforced best-effort on push when the
+ * store reports size" and referenced by nothing; every store now measures and refuses before it
+ * writes, and the service turns the refusal into a 507 whose message says what to do.
  */
 export const DEFAULT_BLOB_TEAM_QUOTA_BYTES = 250 * 1024 * 1024;
+
+/**
+ * Parse `BLOB_TEAM_QUOTA_BYTES`: unset or empty is the default, `0` switches the quota off
+ * (undefined), and anything that is not a non-negative number is the default rather than "no
+ * quota" — a cap that a typo can switch off is not a cap.
+ */
+export function resolveBlobTeamQuotaBytes(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === '') return DEFAULT_BLOB_TEAM_QUOTA_BYTES;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_BLOB_TEAM_QUOTA_BYTES;
+  return parsed === 0 ? undefined : Math.floor(parsed);
+}
 
 /**
  * Profile CRUD + encrypted-blob sync.
@@ -106,6 +137,8 @@ export class ProfilesService {
   private readonly blobStorePath: string;
   /** Key namespace inside that bucket (`S3_KEY_PREFIX`), normalised exactly as the store does. */
   private readonly blobKeyPrefix: string;
+  /** Live-byte quota for a team on the free allowance, or undefined when the operator disabled it. */
+  private readonly blobTeamQuotaBytes: number | undefined;
 
   constructor(
     @Inject(PROFILES_REPOSITORY) private readonly profiles: ProfilesRepository,
@@ -117,6 +150,9 @@ export class ProfilesService {
     this.blobBucket = config.get<string>('S3_BUCKET') ?? '';
     this.blobStorePath = config.get<string>('BLOB_STORE_PATH') ?? '';
     this.blobKeyPrefix = normalizeKeyPrefix(config.get<string>('S3_KEY_PREFIX'));
+    this.blobTeamQuotaBytes = resolveBlobTeamQuotaBytes(
+      config.get<string>('BLOB_TEAM_QUOTA_BYTES'),
+    );
   }
 
   async create(userId: string, dto: CreateProfileDto, teamId?: string): Promise<Profile> {
@@ -409,16 +445,25 @@ export class ProfilesService {
     // Optimistic concurrency is enforced atomically inside the store (compare-and-set): passing
     // `baseVersion` as `expectedVersion` makes the version check and write one indivisible step,
     // so two concurrent pushes at the same base can't both succeed (one loses with a conflict).
+    // The quota travels the same way, so the store measures and refuses before any byte lands.
+    const teamQuotaBytes = await this.teamQuotaBytes(teamId);
     let version: number;
     try {
       ({ version } = await this.blobs.put(key, bytes, {
         teamId,
         profileId,
         expectedVersion: input.baseVersion,
+        ...(teamQuotaBytes !== undefined ? { teamQuotaBytes } : {}),
       }));
     } catch (err) {
       if (err instanceof BlobVersionConflictError) {
         throw new ConflictException('stale base version');
+      }
+      if (err instanceof BlobQuotaExceededError) {
+        // 507, not 413: the snapshot is not too large for the API, the account is out of room —
+        // distinct statuses let a client tell the two apart. The launcher prints the envelope's
+        // `msg` verbatim, so the message carries the figures and the way out.
+        throw new HttpException(describeQuotaExceeded(err), HttpStatus.INSUFFICIENT_STORAGE);
       }
       throw err;
     }
@@ -481,17 +526,47 @@ export class ProfilesService {
     return `memory://${objectKey}`;
   }
 
+  /**
+   * The team's live-byte quota: the configured free-allowance figure scaled by the billing
+   * account's entitled profile count, never below the free figure. Undefined when the operator
+   * disabled the check.
+   */
+  private async teamQuotaBytes(teamId: string): Promise<number | undefined> {
+    if (this.blobTeamQuotaBytes === undefined) return undefined;
+    const entitled = (await this.profiles.getProfileLimit(teamId)) ?? DEFAULT_FREE_PROFILE_LIMIT;
+    const slots = Math.max(entitled, DEFAULT_FREE_PROFILE_LIMIT);
+    return Math.floor((this.blobTeamQuotaBytes * slots) / DEFAULT_FREE_PROFILE_LIMIT);
+  }
+
   /** Translate the repository's atomic capacity rejection to the API's established 403. */
   private async createManyWithinLimit(inputs: readonly CreateProfileRecord[]): Promise<Profile[]> {
     try {
       return await this.profiles.createManyWithinLimit(inputs);
     } catch (error) {
       if (error instanceof ProfileLimitExceededError) {
+        // "For this account", not "for this team": the count spans every team the owner has, and a
+        // message naming one team would send the user looking for room in another that shares it.
         throw new ForbiddenException(
-          `profile limit (${error.limit}) reached for this team: ${error.currentCount} in use, cannot add ${error.requestedCount} more — upgrade the plan`,
+          `profile limit (${error.limit}) reached for this account: ${error.currentCount} in use across the teams you own, cannot add ${error.requestedCount} more — upgrade the plan`,
         );
       }
       throw error;
     }
   }
+}
+
+/**
+ * The quota refusal as the launcher shows it: it prints the first 200 characters of the response
+ * body, `{"code":1,"data":null,"msg":"…"}` included, so the figures and the way out have to fit in
+ * about 170 — no team ids, no byte counts with nine digits.
+ */
+function describeQuotaExceeded(err: BlobQuotaExceededError): string {
+  return (
+    `storage quota exceeded: snapshot ${mib(err.requestedBytes)}, team already stores ` +
+    `${mib(err.usedBytes)} of ${mib(err.quotaBytes)} — delete unused profiles or upgrade the plan`
+  );
+}
+
+function mib(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }

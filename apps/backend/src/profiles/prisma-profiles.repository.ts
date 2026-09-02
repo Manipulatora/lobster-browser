@@ -1,15 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import {
-  entitledProfileLimit,
-  type BrowserExtensionRef,
-  type EngineKind,
-  type FingerprintOverrides,
-  type Profile,
-  type ProfileOsTarget,
+import type {
+  BrowserExtensionRef,
+  EngineKind,
+  FingerprintOverrides,
+  Profile,
+  ProfileOsTarget,
 } from '@lobster/shared-types';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { accountProfileLimit, type AccountSubscription } from './account-profile-limit';
 import {
   ProfileLimitExceededError,
   type CreateProfileRecord,
@@ -73,28 +73,29 @@ export class PrismaProfilesRepository implements ProfilesRepository {
 
     return this.prisma.$transaction(
       async (tx) => {
-        // PostgreSQL READ COMMITTED takes a fresh snapshot for each statement. Locking the stable
-        // owning-team row first makes every capacity-bearing create for that team queue here; the
-        // next transaction's count therefore sees all profiles committed by its predecessor.
-        const lockedTeam = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT "id" FROM "teams" WHERE "id" = ${ownerTeamId} FOR UPDATE
-        `;
-        if (lockedTeam.length !== 1) {
+        const team = await tx.team.findUnique({
+          where: { id: ownerTeamId },
+          select: { ownerUserId: true },
+        });
+        if (!team) {
           throw new Error('profile owner team does not exist');
         }
 
-        const subscription = await tx.subscription.findUnique({ where: { teamId: ownerTeamId } });
-        const limit = entitledProfileLimit(
-          subscription
-            ? {
-                status: subscription.status,
-                profileLimit: subscription.profileLimit,
-                currentPeriodEnd: subscription.currentPeriodEnd?.toISOString(),
-              }
-            : null,
-        );
+        // PostgreSQL READ COMMITTED takes a fresh snapshot for each statement, so the count below
+        // is only meaningful behind a lock — and the lock must be the BILLING ACCOUNT, the owner's
+        // user row, not the team. The allowance is shared by every team the owner has, so two
+        // creates in two of their teams must queue on the same row; locking each team's own row
+        // would let both count the other's profiles as absent and both insert.
+        const lockedOwner = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "users" WHERE "id" = ${team.ownerUserId} FOR UPDATE
+        `;
+        if (lockedOwner.length !== 1) {
+          throw new Error('profile owner account does not exist');
+        }
+
+        const limit = accountProfileLimit(await this.accountSubscriptions(tx, team.ownerUserId));
         const currentCount = await tx.profile.count({
-          where: { ownerTeamId, deletedAt: null },
+          where: { ownerTeam: { is: { ownerUserId: team.ownerUserId } }, deletedAt: null },
         });
         if (currentCount + inputs.length > limit) {
           throw new ProfileLimitExceededError(limit, currentCount, inputs.length);
@@ -226,22 +227,39 @@ export class PrismaProfilesRepository implements ProfilesRepository {
   }
 
   /**
-   * The allowance the team is ENTITLED to, not the one on the row.
+   * The allowance the team's billing account is ENTITLED to, not the one on any row.
    *
    * `profileLimit` records what was bought and stays put when the package lapses or its period
    * simply runs out with auto-renew off. Returning it unconditionally would let a team turn
    * auto-renew off and keep a Max allowance indefinitely, for free — and would disagree with the
    * desktop, which shows the free cap for a lapsed package. `entitledProfileLimit` is the single
-   * rule both answer to.
+   * rule both answer to, and `accountProfileLimit` applies it across every team the owner has, so
+   * this answers the same figure `createManyWithinLimit` enforces. Null when no team the owner owns
+   * has a Subscription row at all.
    */
   async getProfileLimit(teamId: string): Promise<number | null> {
-    const subscription = await this.prisma.subscription.findUnique({ where: { teamId } });
-    if (!subscription) return null;
-    return entitledProfileLimit({
-      status: subscription.status,
-      profileLimit: subscription.profileLimit,
-      currentPeriodEnd: subscription.currentPeriodEnd?.toISOString(),
+    const team = await this.prisma.team.findUnique({
+      where: { id: teamId },
+      select: { ownerUserId: true },
     });
+    if (!team) return null;
+    const subscriptions = await this.accountSubscriptions(this.prisma, team.ownerUserId);
+    return subscriptions.length === 0 ? null : accountProfileLimit(subscriptions);
+  }
+
+  /** Every Subscription row on a team `ownerUserId` owns, in the shape the allowance rule reads. */
+  private async accountSubscriptions(
+    client: Pick<Prisma.TransactionClient, 'subscription'>,
+    ownerUserId: string,
+  ): Promise<AccountSubscription[]> {
+    const rows = await client.subscription.findMany({
+      where: { team: { is: { ownerUserId } } },
+    });
+    return rows.map((row) => ({
+      status: row.status,
+      profileLimit: row.profileLimit,
+      currentPeriodEnd: row.currentPeriodEnd?.toISOString(),
+    }));
   }
 
   /**

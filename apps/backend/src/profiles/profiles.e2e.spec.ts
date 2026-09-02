@@ -166,7 +166,7 @@ test('only an admin can delete a team profile and purge its encrypted blob versi
   const admin = await signUpOverHttp(app, mailCapture, 'profile-delete-admin@gmail.com');
   const member = await signUpOverHttp(app, mailCapture, 'profile-delete-member@gmail.com');
   const teams = app.get<TeamsRepository>(TEAMS_REPOSITORY, { strict: false });
-  const team = await teams.createTeam(admin.userId, 'Shared Profiles');
+  const team = await teams.createTeam(admin.userId, 'Shared Profiles', 10);
   await teams.addMember(team.id, member.userId, 'member');
 
   const created = await request(app.getHttpServer())
@@ -872,4 +872,84 @@ test('profile actions are recorded to the team audit log (newest first, with met
   );
   assert.equal(createEntry.targetType, 'profile');
   assert.equal(createEntry.metadata.name, 'Audited');
+});
+
+test("accepting an invitation does not move the default team: teamId-less calls stay on the account's own team", async () => {
+  // Ivy registers FIRST, so her team is older than Bob's — the case the old "oldest team the
+  // caller belongs to" rule got wrong. The desktop never sends a teamId.
+  const ivy = await signUpOverHttp(app, mailCapture, 'default-team-ivy@gmail.com');
+  const bob = await signUpOverHttp(app, mailCapture, 'default-team-bob@gmail.com');
+  const authIvy = { Authorization: `Bearer ${ivy.token}` };
+  const authBob = { Authorization: `Bearer ${bob.token}` };
+  const teams = app.get<TeamsRepository>(TEAMS_REPOSITORY, { strict: false });
+  const [ivysTeam] = await teams.findTeamsForUser(ivy.userId);
+  assert.ok(ivysTeam, 'registration creates the personal team');
+
+  const ivyOnly = await request(app.getHttpServer())
+    .post('/profiles')
+    .set(authIvy)
+    .send({ name: 'Ivy-only', engine: 'lobium', os: 'windows' });
+  assert.equal(ivyOnly.body.code, 0);
+  await teams.addMember(ivysTeam.id, bob.userId, 'member');
+
+  // Bob's list is Bob's team: empty, not Ivy's profile.
+  const bobList = await request(app.getHttpServer()).get('/profiles').set(authBob);
+  assert.equal(bobList.status, 200);
+  assert.equal(bobList.body.data.length, 0, "Bob must not be redirected into Ivy's team");
+
+  // Bob's create lands in Bob's team, not Ivy's.
+  const bobCreate = await request(app.getHttpServer())
+    .post('/profiles')
+    .set(authBob)
+    .send({ name: 'Bob-own', engine: 'lobium', os: 'windows' });
+  assert.equal(bobCreate.body.code, 0);
+  assert.notEqual(bobCreate.body.data.ownerTeamId, ivysTeam.id);
+
+  // Ivy's team is still reachable exactly as before — by naming it.
+  const explicit = await request(app.getHttpServer())
+    .get('/profiles')
+    .query({ teamId: ivysTeam.id })
+    .set(authBob);
+  assert.equal(explicit.status, 200);
+  assert.deepEqual(
+    explicit.body.data.map((p: { name: string }) => p.name),
+    ['Ivy-only'],
+  );
+});
+
+test('the profile allowance belongs to the account: a second owned team is not another free tier', async () => {
+  const owner = await signUpOverHttp(app, mailCapture, 'account-allowance@gmail.com');
+  const auth = { Authorization: `Bearer ${owner.token}` };
+  const teams = app.get<TeamsRepository>(TEAMS_REPOSITORY, { strict: false });
+  const second = await teams.createTeam(owner.userId, 'Second Team', 10);
+
+  const created: string[] = [];
+  for (let i = 0; i < DEFAULT_FREE_PROFILE_LIMIT; i += 1) {
+    const res = await request(app.getHttpServer())
+      .post('/profiles')
+      .set(auth)
+      .send({ name: `Personal ${i}`, engine: 'lobium', os: 'windows' });
+    assert.ok([200, 201].includes(res.status), `create ${i} status ${res.status}`);
+    created.push(res.body.data.id);
+  }
+
+  // Before the account rule this was three more profiles for free.
+  const overflow = await request(app.getHttpServer())
+    .post('/profiles')
+    .query({ teamId: second.id })
+    .set(auth)
+    .send({ name: 'Overflow', engine: 'lobium', os: 'windows' });
+  assert.equal(overflow.status, 403);
+  assert.match(overflow.body.msg, /reached for this account/);
+
+  // A slot freed in one team is usable in the other: it is one allowance.
+  const freed = await request(app.getHttpServer()).delete(`/profiles/${created[0]}`).set(auth);
+  assert.equal(freed.status, 200);
+  const fits = await request(app.getHttpServer())
+    .post('/profiles')
+    .query({ teamId: second.id })
+    .set(auth)
+    .send({ name: 'Fits now', engine: 'lobium', os: 'windows' });
+  assert.ok([200, 201].includes(fits.status), `create after delete status ${fits.status}`);
+  assert.equal(fits.body.data.ownerTeamId, second.id);
 });

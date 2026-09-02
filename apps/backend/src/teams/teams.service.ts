@@ -5,10 +5,38 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Membership, Role, Team } from '@lobster/shared-types';
 
 import { USERS_REPOSITORY, type UsersRepository } from '../auth/users.repository';
-import { TEAMS_REPOSITORY, type TeamsRepository } from './teams.repository';
+import {
+  OwnedTeamLimitExceededError,
+  TEAMS_REPOSITORY,
+  type TeamsRepository,
+} from './teams.repository';
+
+/**
+ * How many teams one account may OWN, the personal team included, unless `TEAMS_PER_ACCOUNT_LIMIT`
+ * says otherwise.
+ *
+ * Small on purpose. A team is a way to organise profiles and share them with people, not a unit of
+ * allowance — the profile limit belongs to the billing account and every team it owns draws on the
+ * same one — so nothing legitimate needs many of them, and before the cap `POST /teams` was the
+ * cheapest way for anyone with a JWT to create rows on this server without bound.
+ */
+export const DEFAULT_TEAMS_PER_ACCOUNT_LIMIT = 3;
+
+/**
+ * Parse `TEAMS_PER_ACCOUNT_LIMIT`. Unset or empty means the default; a value that is not a number
+ * ALSO means the default rather than "no limit", because a cap that a typo can switch off is not a
+ * cap. Never below one: the personal team always exists and always counts.
+ */
+export function resolveTeamsPerAccountLimit(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return DEFAULT_TEAMS_PER_ACCOUNT_LIMIT;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_TEAMS_PER_ACCOUNT_LIMIT;
+  return Math.max(1, Math.floor(parsed));
+}
 
 /**
  * Team + membership business logic. Identity always comes from the authenticated caller
@@ -18,18 +46,38 @@ import { TEAMS_REPOSITORY, type TeamsRepository } from './teams.repository';
  *
  * Authorization rules:
  *   - listing members requires membership,
- *   - inviting members and changing roles require the `admin` role.
+ *   - inviting members and changing roles require the `admin` role,
+ *   - creating a team requires the caller to own fewer than the configured cap.
  */
 @Injectable()
 export class TeamsService {
+  private readonly maxOwnedTeams: number;
+
   constructor(
     @Inject(TEAMS_REPOSITORY) private readonly teams: TeamsRepository,
     @Inject(USERS_REPOSITORY) private readonly users: UsersRepository,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.maxOwnedTeams = resolveTeamsPerAccountLimit(config.get<string>('TEAMS_PER_ACCOUNT_LIMIT'));
+  }
 
-  /** Create a team; the caller becomes its owner and first admin. */
+  /**
+   * Create a team; the caller becomes its owner and first admin. Refused once the caller owns the
+   * configured number of teams — the repository counts and inserts atomically, so two concurrent
+   * requests cannot both take the last slot.
+   */
   async createTeam(ownerUserId: string, name: string): Promise<Team> {
-    return this.teams.createTeam(ownerUserId, name);
+    try {
+      return await this.teams.createTeam(ownerUserId, name, this.maxOwnedTeams);
+    } catch (error) {
+      if (error instanceof OwnedTeamLimitExceededError) {
+        throw new ForbiddenException(
+          `team limit (${error.limit}) reached for this account: you already own ${error.ownedCount} ` +
+            'teams, your personal team included',
+        );
+      }
+      throw error;
+    }
   }
 
   /** Every team the caller belongs to. */
