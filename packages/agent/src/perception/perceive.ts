@@ -1,6 +1,7 @@
 import type { BrowserDriver } from '../driver.js';
 import type { PerceivedElement, RawPerception } from '../types.js';
 import { EXTRACT_SCRIPT, type ExtractResult } from './extract-script.js';
+import { detectHarnessSignals } from './situation.js';
 import { redactUrl, urlIdentity } from '../security.js';
 
 /** Longest element href kept in an observation. */
@@ -98,10 +99,25 @@ export async function perceive(driver: BrowserDriver): Promise<RawPerception> {
     .map((candidate, i): PerceivedElement | null => normalizeElement(candidate, i))
     .filter((element): element is PerceivedElement => element !== null)
     .map((element, index) => ({ ...element, index }));
+  const title = text(raw.title, 300);
+  const pageText = typeof raw.text === 'string' ? text(raw.text, 1600) : undefined;
+  // The script's own flags first, then the two the harness recognises from the title and text
+  // (error and block pages) — appended so the model's `page signals` line names them too, and the
+  // loop's situation tracking sees one list rather than two.
+  const scriptSignals = Array.isArray(raw.signals)
+    ? raw.signals.filter((s): s is string => typeof s === 'string').slice(0, 10)
+    : undefined;
+  const signals = [
+    ...(scriptSignals ?? []),
+    ...detectHarnessSignals({
+      title,
+      ...(pageText !== undefined ? { text: pageText } : {}),
+    }).filter((signal) => !scriptSignals?.includes(signal)),
+  ];
   return {
     url: pageUrl,
     urlIdentity: pageUrlIdentity,
-    title: text(raw.title, 300),
+    title,
     scrollY: number(raw.scrollY),
     viewportH: number(raw.viewportH),
     ...(raw.viewportW !== undefined ? { viewportW: number(raw.viewportW) } : {}),
@@ -111,10 +127,8 @@ export async function perceive(driver: BrowserDriver): Promise<RawPerception> {
     docH: number(raw.docH),
     canScrollUp: raw.canScrollUp === true,
     canScrollDown: raw.canScrollDown === true,
-    ...(typeof raw.text === 'string' ? { text: text(raw.text, 1600) } : {}),
-    ...(Array.isArray(raw.signals)
-      ? { signals: raw.signals.filter((s): s is string => typeof s === 'string').slice(0, 10) }
-      : {}),
+    ...(pageText !== undefined ? { text: pageText } : {}),
+    ...(scriptSignals || signals.length ? { signals } : {}),
     elements,
     truncated: Math.max(0, number(raw.truncated)),
   };

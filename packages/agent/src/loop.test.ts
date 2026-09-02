@@ -3534,3 +3534,162 @@ test('a reply to ask reaches the model in full as a trusted user turn', async ()
   assert.ok((turn.content ?? '').includes(answer), 'the full answer, not a 120-character clip');
   assert.match(turn.content ?? '', /Which colour\?/);
 });
+
+test('working memory restates the task, every amendment and the latest plan on every step', async () => {
+  // Snapshots age into header lines and the ledger elides its middle; the task contract and the
+  // model's own notes must not. A steering message arrives before step 2, and two plans are set —
+  // the later one must replace the earlier, and must persist through a step that sets none.
+  const llm = new ScriptedLlm([
+    {
+      kind: 'type',
+      id: 0,
+      text: 'shoes',
+      submit: true,
+      plan: 'search first, then open the top result',
+    },
+    { kind: 'click', id: 1, plan: 'top result opened; next compare prices, then finish' },
+    { kind: 'click', id: 1 },
+    { kind: 'done', success: true, summary: 'ok' },
+  ]);
+  const queue = ['only size 42'];
+  let n = 0;
+  await runAgent(
+    {
+      sessionId: 's1',
+      profileId: 'p1',
+      task: 'search for shoes',
+      runId: 's1',
+      llmConfig: { provider: 'anthropic', model: 'claude-opus-4-8', apiKey: 'x' },
+      config: resolveConfig({ maxSteps: 6 }),
+    },
+    {
+      driver: new FakeDriver(),
+      llm,
+      memory: new FakeMemory(),
+      emit: () => {},
+      waitForInput: async () => 'ok',
+      takeSteering: () => (llm.requests.length >= 1 ? queue.splice(0) : []),
+      signal: new AbortController().signal,
+      now: () => new Date(1700000000000 + n++ * 1000).toISOString(),
+      sleep: async () => {},
+    },
+  );
+  assert.equal(llm.requests.length, 4);
+  // Every request ends with the regenerated tail, and the tail carries the block — from step 1 on.
+  for (const request of llm.requests) {
+    const tail = request.messages[request.messages.length - 1]!;
+    assert.equal(tail.role, 'user');
+    assert.match(tail.content ?? '', /Working memory/);
+    assert.match(tail.content ?? '', /TASK, as given: search for shoes/);
+  }
+  const last = llm.requests[3]!.messages;
+  const memory = last[last.length - 1]!.content ?? '';
+  assert.match(memory, /step 2: only size 42/, 'the amendment, with the step it arrived at');
+  assert.match(memory, /YOUR PLAN[^\n]*\ntop result opened; next compare prices, then finish/);
+  assert.doesNotMatch(memory, /search first, then open/, 'the earlier plan was replaced');
+  // The block is the harness's own (and the model's own text), so it sits outside every fence.
+  const block = memory.slice(memory.indexOf('Working memory'), memory.indexOf('YOUR PLAN'));
+  assert.doesNotMatch(block, /UNTRUSTED|BEGIN_|END_/);
+  // Before any plan was set, the block said so instead of inventing one.
+  assert.match(llm.requests[0]!.messages.at(-1)!.content ?? '', /YOUR PLAN: none recorded yet/);
+  // The plan is part of the model's own turn too: it stays on the recorded tool call.
+  assert.ok(
+    last.some(
+      (m) => m.role === 'assistant' && JSON.stringify(m.toolCalls).includes('top result opened'),
+    ),
+  );
+});
+
+test('a situation that appears or clears between steps is a harness note and a step.signal event', async () => {
+  // A snapshot's `page signals` line trips `login` on every step a footer says "sign in"; what the
+  // model needs told is the CHANGE. Page 1 is plain, page 2 is a login wall, page 3 is plain again.
+  const login = { ...PAGE, title: 'Sign in', signals: ['login'] } as RawPerception;
+  const driver = new SequencedPerceptionDriver([
+    PAGE as RawPerception,
+    login,
+    PAGE as RawPerception,
+  ]);
+  const { events, promise, llm } = run(
+    [
+      { kind: 'click', id: 1 },
+      { kind: 'click', id: 1 },
+      { kind: 'click', id: 1 },
+      { kind: 'done', success: true, summary: 'ok' },
+    ],
+    'ok',
+    6,
+    driver,
+  );
+  await promise;
+
+  const signals = events.flatMap((e) =>
+    e.type === 'step.signal' ? [[e.step, e.signal, e.appeared]] : [],
+  );
+  assert.deepEqual(signals, [
+    [2, 'login', true],
+    [3, 'login', false],
+  ]);
+  const step2 = allText(llm.requests[1]!);
+  assert.match(
+    step2,
+    /BEGIN_HARNESS_HISTORY\n[^]*?A login wall appeared since step 1 — decide whether the task needs it or whether to ask for credentials through the secure channel\.[^]*?END_HARNESS_HISTORY/,
+  );
+  const step3 = allText(llm.requests[2]!);
+  assert.match(step3, /The login wall seen at step 2 has cleared/);
+  assert.doesNotMatch(step3, /login wall appeared/);
+  // A page that keeps its situation raises nothing: step 4 (still plain) carries no situation note.
+  assert.doesNotMatch(allText(llm.requests[3]!), /login wall/);
+});
+
+test('every step reports where its time went, once, at the step boundary', async () => {
+  const { events, promise } = run([
+    { kind: 'type', id: 0, text: 'shoes', submit: true },
+    { kind: 'click', id: 1 },
+    { kind: 'done', success: true, summary: 'ok' },
+  ]);
+  await promise;
+
+  const timings = events.flatMap((e) => (e.type === 'step.timing' ? [e] : []));
+  assert.deepEqual(
+    timings.map((e) => e.step),
+    [1, 2, 3],
+  );
+  for (const timing of timings) {
+    for (const phase of ['perceive', 'llm', 'execute', 'settle', 'journal', 'total']) {
+      const value = timing.phases[phase];
+      assert.ok(
+        typeof value === 'number' && Number.isFinite(value) && value >= 0,
+        `${phase} of step ${timing.step} must be a non-negative number`,
+      );
+    }
+  }
+  // The injected clock advances one second per reading, so the phases that ran are visibly non-zero
+  // and land in the right bucket: the model round trip in `llm`, the DOM reads in `perceive`, the
+  // executor's settle waits in `settle` — and `execute` does not count them a second time.
+  const first = timings[0]!;
+  assert.ok(first.phases.llm! >= 1000, `llm ${first.phases.llm}`);
+  assert.ok(first.phases.perceive! >= 1000, `perceive ${first.phases.perceive}`);
+  assert.ok(first.phases.settle! >= 1000, `settle ${first.phases.settle}`);
+  assert.ok(
+    first.phases.total! >=
+      first.phases.llm! + first.phases.perceive! + first.phases.settle! + first.phases.execute!,
+    'the phases partition the step; none is counted twice',
+  );
+  // Once per step, at the boundary: after the step's own outcome, before the next step starts
+  // thinking, and the last one before the run's terminal event.
+  const order = events.map((e) => `${e.type}${'step' in e ? `:${e.step}` : ''}`);
+  assert.ok(order.indexOf('step.timing:1') > order.indexOf('step.outcome:1'));
+  assert.ok(order.indexOf('step.timing:1') < order.indexOf('step.thinking:2'));
+  assert.ok(order.indexOf('step.timing:3') < order.indexOf('run.finished'));
+  // And the same in words, at debug level, for the sidecar log.
+  assert.ok(
+    events.some(
+      (e) =>
+        e.type === 'log' &&
+        e.level === 'debug' &&
+        /^Step 1 timing: perceive \d+ms, llm \d+ms, execute \d+ms, settle \d+ms, journal \d+ms \(total \d+ms\)\.$/.test(
+          e.message,
+        ),
+    ),
+  );
+});
