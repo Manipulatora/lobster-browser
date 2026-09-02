@@ -16,7 +16,6 @@ import {
 } from './browser-config-guard.js';
 import type { BrowserDriver } from './driver.js';
 import { MAX_SCREENSHOT_BASE64_CHARS } from './driver.js';
-import { executeAction } from './executor.js';
 import type { Sleep } from './executor.js';
 import type { LlmClient, LlmResult } from './llm/index.js';
 import { usesAutomaticToolChoice } from './llm/index.js';
@@ -28,12 +27,17 @@ import {
   recoverFromContextOverflow,
   tokenBudgetExceeded,
 } from './loop/decide.js';
-import { handleAsk, restoreNavigationJournaled } from './loop/execute.js';
+import {
+  adoptedPopupNote,
+  dispatchAction,
+  handleAsk,
+  openStartUrl,
+  restoreNavigationJournaled,
+} from './loop/execute.js';
 import type { DispatchContext } from './loop/execute.js';
 import {
   actionIdentity,
   approvalContextFingerprint,
-  canonicalNavigationUrl,
   isSettingsUiAction,
   sameNavigationAuthority,
   scopeWipeAllToNamedSite,
@@ -63,12 +67,7 @@ import {
   safe,
   safeError,
 } from './loop/record.js';
-import {
-  movesBrowserOnly,
-  verifyBrowserStateObserved,
-  visualTargetHeld,
-  visualTargetPatch,
-} from './loop/verify.js';
+import { verifyBrowserStateObserved, visualTargetHeld, visualTargetPatch } from './loop/verify.js';
 import type { MemoryStore } from './memory/index.js';
 import {
   actionCommitIntent,
@@ -225,7 +224,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
   const base = { sessionId, profileId };
   const { log, memoryDegraded } = createRunLog({ emit, base, now });
   const timer = createStepTimer({ now, emit, base, log });
-  const { timed, timedExecute } = timer;
+  const { timed } = timer;
   const driver = instrumentDriver(deps.driver, timed);
   /** The per-step memory record, best-effort: a failure lands on the memory channel, never in the step. */
   const recordStep = (
@@ -418,85 +417,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
   try {
     if (config.startUrl) {
-      let current = await safe(() => driver.currentUrl(), '');
-      const destination = canonicalNavigationUrl(config.startUrl, current);
-      if (!destination) {
-        return await finish('error', '', 'Start URL blocked: the destination is not a valid URL');
-      }
-
-      // Bind a possibly-relative start URL to the page that was actually observed, then re-check both
-      // source and absolute destination immediately before dispatch. A page may self-navigate while a
-      // human reads the prompt; the original relative string must never be re-based onto that new page.
-      let readyToNavigate = false;
-      let startNavigationActionId: string | undefined;
-      for (let attempt = 0; attempt < 3 && !readyToNavigate; attempt += 1) {
-        const currentDecision = assessCurrentPage(current, config);
-        if (currentDecision.verdict === 'deny') {
-          return await finish(
-            'error',
-            '',
-            `Start URL blocked because the current page changed: ${currentDecision.reason}`,
-          );
-        }
-        const decision = assessNavigation(destination, current, config);
-        if (decision.verdict === 'deny') {
-          return await finish('error', '', `Start URL blocked: ${decision.reason}`);
-        }
-        const actionId = await journal.propose('navigate', 'write', journalHostOf(destination));
-        if (decision.verdict === 'confirm') {
-          const safeDestination = redactUrl(destination);
-          const approved = await journal.confirm(
-            `Approve opening ${safeDestination}? (${decision.reason})`,
-            { kind: 'navigate', url: safeDestination },
-            actionId,
-          );
-          if (!approved) return await finish('stopped', 'The start navigation was rejected.');
-        }
-        const liveCurrent = await safe(() => driver.currentUrl(), '');
-        if (liveCurrent !== current) {
-          await journal.append({
-            type: 'action.cancelled',
-            actionId,
-            summary: 'The source page changed before navigation',
-          });
-          current = liveCurrent;
-          continue;
-        }
-        // The canonical destination is immutable, but policy may have changed with configuration only
-        // through code, not during a run. Reassess anyway so this line stays the dispatch boundary.
-        const finalDecision = assessNavigation(destination, liveCurrent, config);
-        if (finalDecision.verdict === 'deny') {
-          await journal.append({
-            type: 'action.cancelled',
-            actionId,
-            summary: 'Navigation was cancelled by policy',
-          });
-          return await finish('error', '', `Start URL blocked: ${finalDecision.reason}`);
-        }
-        readyToNavigate = true;
-        startNavigationActionId = actionId;
-      }
-      if (!readyToNavigate) {
-        return await finish(
-          'error',
-          '',
-          'Start URL blocked because the current page kept changing during confirmation.',
-        );
-      }
-      await journal.dispatch(
-        startNavigationActionId!,
-        'write',
-        async (beginEffect) => {
-          await beginEffect();
-          await driver.navigate(destination);
-          await driver.waitForSettle();
-          return 'navigation finished';
-        },
-        (outcome) => outcome,
-        async () => {
-          await verifyBrowserStateObserved(driver);
-        },
-      );
+      const end = await openStartUrl(ctx, config.startUrl);
+      if (end) return await finish(end.status, end.result, end.error);
     }
 
     // NO persisted memory reaches the prompt. Cross-run facts and learned skills used to be loaded
@@ -1206,31 +1128,13 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       }
       if (stuckCount >= 3 || repeatCount >= 8) recovery = true;
 
-      let verifiedPerception: RawPerception | undefined;
-      const outcome = await timedExecute(() =>
-        journal.dispatch(
-          journalActionId,
-          journalEffect,
-          (beginEffect) =>
-            executeAction(action, raw, driver, {
-              ...(deps.sleep ? { sleep: deps.sleep } : {}),
-              config,
-              signal,
-              navigationApproved,
-              beforeEffect: beginEffect,
-            }),
-          (value) => value.outcome,
-          journalEffect === 'read'
-            ? undefined
-            : async () => {
-                verifiedPerception = await verifyBrowserStateObserved(
-                  driver,
-                  movesBrowserOnly(action),
-                );
-              },
-          (value) => value.delivery,
-        ),
-      );
+      const { outcome, verifiedPerception } = await dispatchAction(ctx, {
+        action,
+        raw,
+        actionId: journalActionId,
+        effect: journalEffect,
+        navigationApproved,
+      });
       // An action that actually ran clears the consecutive streak (but not the total): the agent found
       // something it is allowed to do, so it is no longer stuck against the same wall.
       consecutiveBlocks = 0;
@@ -1248,15 +1152,11 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             )
           : await finish('error', '', summary);
       }
-      // A popup the page opened has silently become the working target; say so in the same breath as
-      // the action's outcome, so the model knows which page it is now on.
-      const adopted = driver.takeAdoptedPopup?.();
+      const popupNote = adoptedPopupNote(driver);
       // The per-step report the panel shows beside the rail dot. Same line the model receives as the
       // step's result, so what the user reads and what the model reasons from cannot diverge.
       emit({ type: 'step.outcome', ...base, step, text: outcome.outcome, ts: now() });
-      history.push(
-        `${step}. ${outcome.outcome}${adopted ? ` — the page opened a new tab (${redactUrl(adopted)}); you are now on it` : ''}`,
-      );
+      history.push(`${step}. ${outcome.outcome}${popupNote}`);
       // Keep a bounded evidence ledger across pagination. Unlike one-shot read state, page-one values
       // remain available after clicking Next, while a hard total cap prevents runaway prompt growth.
       if (outcome.extracted) {

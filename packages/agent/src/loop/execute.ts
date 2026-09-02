@@ -1,23 +1,31 @@
 /**
- * What actually TOUCHES the browser on the loop's behalf beyond the ordinary `executeAction` call:
- * the human-input handoff (including the direct secure typing path a sensitive answer takes), and
- * the rollback that undoes a navigation the policy refused after the fact.
+ * What actually TOUCHES the browser on the loop's behalf: opening the start URL, dispatching the
+ * model's action under the journal barrier, the human-input handoff (including the direct secure
+ * typing path a sensitive answer takes), the rollback that undoes a navigation the policy refused
+ * after the fact, and the note that a popup has become the working page.
  */
 import type { AgentAction, AgentConfig } from '@lobster/shared-types';
 import type { BrowserDriver } from '../driver.js';
 import { executeAction } from '../executor.js';
-import type { Sleep } from '../executor.js';
+import type { ExecOutcome, Sleep } from '../executor.js';
+import type { JournalActionEffect } from '../journal/index.js';
 import type { AgentRunDeps } from '../loop.js';
 import type { MemoryStore } from '../memory/index.js';
 import { perceive } from '../perception/perceive.js';
+import { assessCurrentPage, assessNavigation } from '../policy.js';
 import { isSensitiveElement, redactAction, redactUrl, urlIdentity } from '../security.js';
 import { redactCredentialLikeText } from '../sensitive-text.js';
 import type { PerceivedElement, RawPerception } from '../types.js';
-import { approvalContextFingerprint } from './gate.js';
+import { approvalContextFingerprint, canonicalNavigationUrl } from './gate.js';
 import { clip } from './observe.js';
-import { appendSafe } from './record.js';
+import { appendSafe, journalHostOf, safe } from './record.js';
 import type { RunJournal, RunLog, StepTimer } from './record.js';
-import { visualTargetHeld, visualTargetPatch } from './verify.js';
+import {
+  movesBrowserOnly,
+  verifyBrowserStateObserved,
+  visualTargetHeld,
+  visualTargetPatch,
+} from './verify.js';
 
 export async function handleAsk(
   action: Extract<AgentAction, { kind: 'ask' }>,
@@ -248,4 +256,160 @@ export async function restoreNavigationJournaled(
     'info',
     `Restored the prior page after refusing unexpected navigation from ${redactUrl(currentUrl)}.`,
   );
+}
+
+/** A verdict that ends the run, in the shape the orchestrator's `finish` takes. */
+export interface RunEnd {
+  status: 'done' | 'error' | 'stopped';
+  result: string;
+  error?: string;
+}
+
+/**
+ * Open the run's start URL under the navigation policy, journaled like any other write. Returns how
+ * the run must end when the page cannot be opened, or undefined once the browser is on it.
+ */
+export async function openStartUrl(
+  ctx: DispatchContext,
+  startUrl: string,
+): Promise<RunEnd | undefined> {
+  const { driver, config, journal } = ctx;
+  let current = await safe(() => driver.currentUrl(), '');
+  const destination = canonicalNavigationUrl(startUrl, current);
+  if (!destination) {
+    return {
+      status: 'error',
+      result: '',
+      error: 'Start URL blocked: the destination is not a valid URL',
+    };
+  }
+
+  // Bind a possibly-relative start URL to the page that was actually observed, then re-check both
+  // source and absolute destination immediately before dispatch. A page may self-navigate while a
+  // human reads the prompt; the original relative string must never be re-based onto that new page.
+  let readyToNavigate = false;
+  let startNavigationActionId: string | undefined;
+  for (let attempt = 0; attempt < 3 && !readyToNavigate; attempt += 1) {
+    const currentDecision = assessCurrentPage(current, config);
+    if (currentDecision.verdict === 'deny') {
+      return {
+        status: 'error',
+        result: '',
+        error: `Start URL blocked because the current page changed: ${currentDecision.reason}`,
+      };
+    }
+    const decision = assessNavigation(destination, current, config);
+    if (decision.verdict === 'deny') {
+      return { status: 'error', result: '', error: `Start URL blocked: ${decision.reason}` };
+    }
+    const actionId = await journal.propose('navigate', 'write', journalHostOf(destination));
+    if (decision.verdict === 'confirm') {
+      const safeDestination = redactUrl(destination);
+      const approved = await journal.confirm(
+        `Approve opening ${safeDestination}? (${decision.reason})`,
+        { kind: 'navigate', url: safeDestination },
+        actionId,
+      );
+      if (!approved) return { status: 'stopped', result: 'The start navigation was rejected.' };
+    }
+    const liveCurrent = await safe(() => driver.currentUrl(), '');
+    if (liveCurrent !== current) {
+      await journal.append({
+        type: 'action.cancelled',
+        actionId,
+        summary: 'The source page changed before navigation',
+      });
+      current = liveCurrent;
+      continue;
+    }
+    // The canonical destination is immutable, but policy may have changed with configuration only
+    // through code, not during a run. Reassess anyway so this line stays the dispatch boundary.
+    const finalDecision = assessNavigation(destination, liveCurrent, config);
+    if (finalDecision.verdict === 'deny') {
+      await journal.append({
+        type: 'action.cancelled',
+        actionId,
+        summary: 'Navigation was cancelled by policy',
+      });
+      return { status: 'error', result: '', error: `Start URL blocked: ${finalDecision.reason}` };
+    }
+    readyToNavigate = true;
+    startNavigationActionId = actionId;
+  }
+  if (!readyToNavigate) {
+    return {
+      status: 'error',
+      result: '',
+      error: 'Start URL blocked because the current page kept changing during confirmation.',
+    };
+  }
+  await journal.dispatch(
+    startNavigationActionId!,
+    'write',
+    async (beginEffect) => {
+      await beginEffect();
+      await driver.navigate(destination);
+      await driver.waitForSettle();
+      return 'navigation finished';
+    },
+    (outcome) => outcome,
+    async () => {
+      await verifyBrowserStateObserved(driver);
+    },
+  );
+  return undefined;
+}
+
+/**
+ * Run the model's action under the journal's durable barrier on the step's execute stopwatch, and —
+ * for anything but a read — verify the page can testify afterwards. The verified observation comes
+ * back with the outcome so the next step can reuse it instead of extracting the DOM again.
+ */
+export async function dispatchAction(
+  ctx: DispatchContext,
+  input: {
+    action: AgentAction;
+    raw: RawPerception;
+    actionId: string;
+    effect: JournalActionEffect;
+    /** The loop already cleared this action's cross-domain destination. */
+    navigationApproved: boolean;
+  },
+): Promise<{ outcome: ExecOutcome; verifiedPerception: RawPerception | undefined }> {
+  const { action, raw, actionId, effect, navigationApproved } = input;
+  let verifiedPerception: RawPerception | undefined;
+  const outcome = await ctx.timer.timedExecute(() =>
+    ctx.journal.dispatch(
+      actionId,
+      effect,
+      (beginEffect) =>
+        executeAction(action, raw, ctx.driver, {
+          ...(ctx.sleep ? { sleep: ctx.sleep } : {}),
+          config: ctx.config,
+          signal: ctx.signal,
+          navigationApproved,
+          beforeEffect: beginEffect,
+        }),
+      (value) => value.outcome,
+      effect === 'read'
+        ? undefined
+        : async () => {
+            verifiedPerception = await verifyBrowserStateObserved(
+              ctx.driver,
+              movesBrowserOnly(action),
+            );
+          },
+      (value) => value.delivery,
+    ),
+  );
+  return { outcome, verifiedPerception };
+}
+
+/**
+ * A popup the page opened has silently become the working target; say so in the same breath as
+ * the action's outcome, so the model knows which page it is now on.
+ */
+export function adoptedPopupNote(driver: BrowserDriver): string {
+  const adopted = driver.takeAdoptedPopup?.();
+  return adopted ? ` — the page opened a new tab (${redactUrl(adopted)}); you are now on it` : '';
 }
