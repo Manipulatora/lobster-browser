@@ -4,7 +4,7 @@ import test from 'node:test';
 // apps/desktop has no bundler-side test harness (its `build` is tsc --noEmit + vite), so these are
 // plain node:test files over the pure .ts module — Node's type stripping runs it directly:
 //   node --test apps/desktop/src/ui/*.test.mjs
-import { PAGE_SIZE, clampPage, pageCountFor, pageSlice, pagerItems } from './pager.ts';
+import { PAGE_SIZE, clampPage, pageCountFor, pageSlice, pagerItems } from './paging.ts';
 
 test('pageCountFor: an empty list still stands on page 1', () => {
   assert.equal(pageCountFor(0), 1);

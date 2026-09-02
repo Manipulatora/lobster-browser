@@ -13,6 +13,6 @@ export { ProfileMark } from './ProfileMark';
 export type { ProfileMarkStatus } from './ProfileMark';
 export { profileMark } from './profile-mark';
 export { Pager } from './Pager';
-export { PAGE_SIZE, clampPage, pageCountFor, pageSlice } from './pager';
+export { PAGE_SIZE, clampPage, pageCountFor, pageSlice } from './paging';
 export { Skeleton, EmptyState, CodeBlock } from './misc';
 export { ErrorBoundary } from './ErrorBoundary';

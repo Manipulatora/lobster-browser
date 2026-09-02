@@ -1,6 +1,6 @@
 /**
  * Pagination math for the catalog tables (Profiles, Proxies, Templates), kept separate from the
- * {@link Pager} component so it is pure data-in/data-out — `pager.test.mjs` runs these functions
+ * {@link Pager} component so it is pure data-in/data-out — `paging.test.mjs` runs these functions
  * under `node --test` with no DOM and no React.
  */
 

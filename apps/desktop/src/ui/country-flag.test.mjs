@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-// Plain node:test over the pure .ts module (Node's type stripping) — see pager.test.mjs for why:
+// Plain node:test over the pure .ts module (Node's type stripping) — see paging.test.mjs for why:
 //   node --test apps/desktop/src/ui/*.test.mjs
 import { UNKNOWN_REGION_FLAG, countryCodeFrom, countryFlag, countryName } from './country-flag.ts';
 
