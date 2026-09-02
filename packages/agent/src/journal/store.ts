@@ -1,4 +1,4 @@
-import { readdir } from 'node:fs/promises';
+import { readdir, rename } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { EncryptedJournalFile, JournalStorageError } from './encrypted-file.js';
 import { isTerminalPhase, reduceRunJournal, type RunJournalState } from './reducer.js';
@@ -244,6 +244,60 @@ export class RunJournalStore {
       });
     }
     return { deleted, retainedUnreadable };
+  }
+
+  /**
+   * Delete one journal, but only after a fresh authenticated read proves it terminal.
+   *
+   * The product contract is that NOTHING about a run persists once it is over — the journal exists to
+   * make an interruption recoverable, and a journal whose run has a terminal marker has discharged
+   * that duty. Leaving it behind was pure residue: every start decrypts and reduces every file in the
+   * directory (`listUnfinished`), so the residue also made admission slower forever. The terminal
+   * check is what keeps this primitive safe to call from anywhere: an unfinished journal — the one
+   * kind that still carries recovery meaning — is never deletable through it.
+   *
+   * Path safety is inherited from `pathFor` → `EncryptedJournalFile.resolveFile`, which validates the
+   * filename shape and asserts containment in the journals directory.
+   */
+  async removeFinished(runId: string): Promise<boolean> {
+    assertJournalRunId(runId);
+    return this.serialize(runId, async () => {
+      let snapshot: RunJournalSnapshot | null;
+      try {
+        snapshot = await this.loadInternal(runId);
+      } catch {
+        // Unreadable is not provably terminal; retain fail-closed exactly like pruneFinished.
+        return false;
+      }
+      if (!snapshot || !isTerminalPhase(snapshot.state.phase)) return false;
+      await this.files.remove(this.pathFor(runId));
+      return true;
+    });
+  }
+
+  /**
+   * Move a journal that cannot be read (corrupt bytes, failed authentication, schema violation) aside
+   * as `<runId>.journal.corrupt`, so it stops matching `listRunIds` and can never block admission
+   * again — while its bytes survive for forensics instead of being destroyed on an automated path.
+   *
+   * The load is re-attempted HERE, inside the per-run write queue, rather than trusting the caller's
+   * earlier failure: between the caller's read and this call the file could have been repaired or
+   * replaced, and renaming a journal that now reads fine would silently discard real recovery state.
+   * A readable journal is therefore refused (`false`), whatever the caller saw before.
+   */
+  async quarantineUnreadable(runId: string): Promise<boolean> {
+    assertJournalRunId(runId);
+    return this.serialize(runId, async () => {
+      try {
+        await this.loadInternal(runId);
+        return false; // readable — never quarantine a journal that still parses and authenticates
+      } catch {
+        // fall through: provably unreadable right now, under the write lock
+      }
+      const path = this.pathFor(runId); // validated + containment-asserted
+      await rename(path, `${path}.corrupt`);
+      return true;
+    });
   }
 
   private async loadRequired(runId: string): Promise<RunJournalSnapshot> {

@@ -13,7 +13,14 @@ test('every advertised action kind has a capability entry', () => {
       `action kind "${kind}" is offered to the model but has no capability entry`,
     );
   }
-  assert.equal(Object.keys(ACTION_CAPABILITIES).length, KINDS.length);
+  // The capability table is exhaustive over the shared-types union, which is wider than the offered
+  // KINDS by exactly the retired durable-memory actions: they were removed from the model's action
+  // set when persistence was dropped, but their union members (and pessimistic capability entries)
+  // remain for wire compatibility. Pin the difference so a new gap is caught, not absorbed.
+  const retired = Object.keys(ACTION_CAPABILITIES).filter(
+    (kind) => !(KINDS as readonly string[]).includes(kind),
+  );
+  assert.deepEqual(retired.sort(), ['learn', 'remember']);
 });
 
 test('capability defaults are pessimistic: mutating, and barred from privileged pages', () => {

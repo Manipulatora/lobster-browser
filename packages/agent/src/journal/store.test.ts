@@ -566,3 +566,62 @@ test('retention prunes only authenticated terminal journals and never unfinished
     await assert.rejects(store.listUnfinished(), /unsupported envelope version/);
   });
 });
+
+test('removeFinished deletes only a PROVABLY terminal journal, never an unfinished one', async () => {
+  await withStore(async ({ dir, store }) => {
+    await store.create({ runId: 'unfinished', task: 'task', mode: 'agent' });
+    let finished = await store.create({ runId: 'finished', task: 'task', mode: 'agent' });
+    finished = await store.append(
+      'finished',
+      { type: 'run.completed', summary: 'done' },
+      finished.journal.revision,
+    );
+    assert.equal(finished.state.phase, 'completed');
+
+    // The unfinished journal is the ONE kind that still carries recovery meaning: refusing to
+    // delete it — whatever the caller believes — is what makes the primitive safe to call from
+    // completion paths and admission sweeps alike.
+    assert.equal(await store.removeFinished('unfinished'), false);
+    assert.ok(await store.load('unfinished'), 'the unfinished journal must survive');
+
+    assert.equal(await store.removeFinished('finished'), true);
+    assert.equal(await store.load('finished'), null);
+    // The delete is idempotent and unreadable-safe: a second call finds nothing and says so.
+    assert.equal(await store.removeFinished('finished'), false);
+
+    // Corrupt bytes are not provably terminal → retained, exactly like pruneFinished.
+    await writeFile(join(dir, 'mangled.journal'), 'garbage', { mode: 0o600 });
+    assert.equal(await store.removeFinished('mangled'), false);
+    assert.equal(await stat(join(dir, 'mangled.journal')).then(() => true), true);
+  });
+});
+
+test('quarantineUnreadable moves only a journal that is unreadable RIGHT NOW, under the lock', async () => {
+  await withStore(async ({ dir, store }) => {
+    // A healthy journal is refused, whatever failure the caller previously observed — between the
+    // caller's read and this call the file could have been repaired, and renaming it would silently
+    // discard real recovery state.
+    await store.create({ runId: 'healthy', task: 'task', mode: 'agent' });
+    assert.equal(await store.quarantineUnreadable('healthy'), false);
+    assert.ok(await store.load('healthy'));
+
+    await writeFile(join(dir, 'mangled.journal'), 'lobee-run-journal-v1:garbage', { mode: 0o600 });
+    assert.equal(await store.quarantineUnreadable('mangled'), true);
+    // The bytes survive under a name listRunIds can never match again.
+    assert.equal(
+      await stat(join(dir, 'mangled.journal')).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    );
+    assert.equal(
+      await stat(join(dir, 'mangled.journal.corrupt')).then(
+        () => true,
+        () => false,
+      ),
+      true,
+    );
+    assert.deepEqual(await store.listRunIds(), ['healthy']);
+  });
+});

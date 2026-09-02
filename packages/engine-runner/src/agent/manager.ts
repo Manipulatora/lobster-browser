@@ -13,10 +13,10 @@ import {
   FileMemoryStore,
   projectRunRecovery,
   resolveConfig,
+  resolveRunRecovery,
   RunJournalStore,
   runAgent,
 } from '@lobster/agent';
-import type { RunJournalSnapshot } from '@lobster/agent';
 import type { AgentAction } from '@lobster/shared-types';
 import { LazyBrowserDriver } from './lazy-driver.js';
 import { createRunLlmClient } from './managed-llm.js';
@@ -532,85 +532,71 @@ function isFsCode(error: unknown, code: string): boolean {
 }
 
 /**
- * Close only checkpoints which prove no side effect needs reconciliation. Stored action digests are
- * never returned to the loop and never replayed. A write/consequential dispatch, an explicitly
- * unknown outcome, or any unfinished sensitive handoff blocks admission for operator review.
+ * SELF-HEALING admission. Every journal in the profile's directory is walked to a terminal state and
+ * then deleted, so a start can never be refused because of what a PREVIOUS run left behind.
+ *
+ * This used to throw for three classes of interrupted journal (sensitive, unreconciled navigation,
+ * ambiguous write) with instructions to "explicitly resolve or discard this encrypted journal" —
+ * but no product surface ever called the resolve endpoints, so the instruction had no in-product
+ * exit and one killed sidecar or CDP hiccup disabled the agent for that profile FOREVER. Blocking
+ * admission on an unresolved effect is only defensible while resolution exists and is reachable;
+ * with a fully autonomous agent the honest resolution is the one an operator would always have
+ * picked anyway: abandon the interrupted effect WITHOUT replaying it, warn, and move on.
+ *
+ * The never-replay property is inherited, not re-implemented: `resolveRunRecovery` walks the journal
+ * to `run.stopped` through the same reducer transitions a live run uses (`approval.resolved
+ * rejected` for a pending approval, `action.observed unknown` + `recovery.resolved abandoned` for an
+ * in-flight dispatch, `action.cancelled` for a proposal), and the stored digest is non-executable by
+ * construction — there is nothing in it that COULD be replayed. What is genuinely lost versus the
+ * old behavior is the operator's chance to verify a half-finished purchase/upload before the next
+ * run; that is exactly the trade the owner chose, and the warn line keeps the discard visible.
+ *
+ * Terminal journals are deleted rather than skipped: nothing about a finished run persists (the loop
+ * deletes its own journal at completion; this sweep also catches residue from older versions and
+ * from crashes between the terminal append and the delete). An UNREADABLE journal — corrupt bytes,
+ * wrong key, schema violation — is quarantined aside as `.journal.corrupt` instead of thrown, for
+ * the same reason the throws went: one bad file must cost a warning, never the profile.
  */
 export async function admitUnfinishedRunJournals(
   store: RunJournalStore,
   profileId: string,
+  warn: (message: string) => void = (message) => console.warn(message),
 ): Promise<void> {
-  for (const initial of await store.listUnfinished()) {
-    const projection = projectRunRecovery(initial.state);
-    if (projection.kind === 'non_resumable') {
-      throw recoveryRequired(
-        profileId,
-        initial,
-        'the interrupted run handled a credential, upload path, or image payload',
+  for (const runId of await store.listRunIds()) {
+    let snapshot;
+    try {
+      snapshot = await store.load(runId);
+    } catch (error) {
+      const quarantined = await store.quarantineUnreadable(runId);
+      warn(
+        `[lobee] profile ${profileId}: run journal ${runId} could not be read (${error instanceof Error ? error.message : String(error)}); ` +
+          (quarantined
+            ? `moved it aside as ${runId}.journal.corrupt so it cannot block future runs`
+            : 'it became readable again and was left for the next admission pass'),
+      );
+      continue;
+    }
+    if (!snapshot) continue; // deleted between listing and loading — nothing to heal
+    const projection = projectRunRecovery(snapshot.state);
+    if (projection.kind !== 'terminal') {
+      // 'abandoned' is the one disposition that is always truthful without a human: we verified
+      // nothing, we replay nothing, and the journal records exactly that.
+      await resolveRunRecovery(store, runId, 'abandoned');
+      const what =
+        projection.kind === 'non_resumable'
+          ? 'it had handled a credential, upload path, or image payload'
+          : projection.kind === 'recovery_required'
+            ? 'its last write or consequential action may already have taken effect'
+            : 'it was interrupted at a recoverable checkpoint';
+      warn(
+        `[lobee] profile ${profileId}: auto-closed interrupted run ${runId} without replay (${what}). ` +
+          'If that run was mid-purchase, mid-upload, or mid-submit, verify the site state manually.',
       );
     }
-    const activeAction = initial.state.activeAction;
-    if (activeAction?.actionKind === 'navigation_reconcile') {
-      throw recoveryRequired(
-        profileId,
-        initial,
-        'an unexpected navigation was not reconciled before interruption',
-      );
-    }
-    const recoverableRead =
-      activeAction?.effect === 'read' &&
-      (initial.state.phase === 'dispatching' || initial.state.phase === 'recovery_required')
-        ? activeAction.actionId
-        : undefined;
-    if (projection.kind === 'recovery_required' && !recoverableRead) {
-      throw recoveryRequired(
-        profileId,
-        initial,
-        'the last write or consequential action may already have taken effect',
-      );
-    }
-    if (projection.kind === 'terminal') continue;
-
-    let snapshot = initial;
-    if (recoverableRead && snapshot.state.phase === 'dispatching') {
-      // A read might have reached the browser, but it cannot create an external effect. Record the
-      // ambiguity and explicitly abandon it before closing; do not reconstruct/replay the digest.
-      snapshot = await store.append(
-        snapshot.journal.runId,
-        {
-          type: 'action.observed',
-          actionId: recoverableRead,
-          outcome: 'unknown',
-          summary: 'Interrupted read was not resumed',
-        },
-        snapshot.journal.revision,
-      );
-    }
-    if (recoverableRead && snapshot.state.phase === 'recovery_required') {
-      snapshot = await store.append(
-        snapshot.journal.runId,
-        {
-          type: 'recovery.resolved',
-          actionId: recoverableRead,
-          resolution: 'abandoned',
-          summary: 'Read action was discarded and will be replanned from a fresh observation',
-        },
-        snapshot.journal.revision,
-      );
-    }
-    await store.append(
-      snapshot.journal.runId,
-      { type: 'run.stopped', summary: 'Interrupted run closed without replay' },
-      snapshot.journal.revision,
-    );
+    // Now provably terminal (either it already was, or the resolve walk just made it so) — delete
+    // the residue. `removeFinished` re-proves terminality under the store's write lock.
+    await store.removeFinished(runId);
   }
-}
-
-function recoveryRequired(profileId: string, snapshot: RunJournalSnapshot, reason: string): Error {
-  const effect = snapshot.state.activeAction?.effect;
-  return new Error(
-    `Agent recovery required for profile ${profileId}, interrupted run ${snapshot.journal.runId}: ${reason}${effect ? ` (${effect})` : ''}. Verify the live browser and external service state, then explicitly resolve or discard this encrypted journal before starting another run. Lobee will not replay the action automatically.`,
-  );
 }
 
 function validateStartParams(params: AgentStartParams): void {

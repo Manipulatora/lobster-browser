@@ -29,7 +29,7 @@ import type {
   RunJournalSnapshot,
 } from './journal/index.js';
 import type { RunJournalStore } from './journal/index.js';
-import type { MemoryStore, ThreadMessage } from './memory/index.js';
+import type { MemoryStore } from './memory/index.js';
 import {
   actionCommitIntent,
   actionRisk,
@@ -49,7 +49,6 @@ import {
   buildSystemPrompt,
   EVIDENCE_PREAMBLE,
   PROGRESS_PREAMBLE,
-  SITE_MEMORY_PREAMBLE,
   VERBATIM_OBSERVATIONS,
 } from './prompt.js';
 import {
@@ -61,7 +60,6 @@ import {
   urlIdentity,
 } from './security.js';
 import { redactCredentialLikeText } from './sensitive-text.js';
-import { normalizeSkillHost } from './skills.js';
 import type { PerceivedElement, RawPerception } from './types.js';
 
 export interface AgentRunDeps {
@@ -76,8 +74,16 @@ export interface AgentRunDeps {
   /**
    * Durable safety journal. Optional only so focused loop tests and embedders can use an in-memory
    * harness; the production manager always supplies the encrypted per-profile implementation.
+   *
+   * `removeFinished` is separately optional so a minimal `{create, append}` harness keeps working:
+   * when present, `finish()` deletes the journal file the moment the run's terminal marker lands —
+   * a finished journal has discharged its recovery duty and the product persists nothing about a
+   * completed run. When absent the terminal file simply remains, which is safe (admission skips and
+   * sweeps terminal journals) just not clean.
    */
-  journal?: Pick<RunJournalStore, 'create' | 'append'>;
+  journal?: Pick<RunJournalStore, 'create' | 'append'> & {
+    removeFinished?: RunJournalStore['removeFinished'];
+  };
 }
 
 export interface AgentRunParams {
@@ -86,9 +92,10 @@ export interface AgentRunParams {
   task: string;
   runId: string;
   /**
-   * The conversation this run belongs to. Prior turns are loaded from it and this run's exchange is
-   * appended when it finishes, which is what makes "remember what I just asked" work. Omit for a
-   * one-off run with no conversational context.
+   * The conversation id the panel groups this run under. Wire-compat identity ONLY: the core neither
+   * loads prior turns from it nor appends this run's exchange to it. Every run starts from a clean
+   * context and persists no conversation — that is the product contract, not an omission. The id is
+   * still accepted (and validated upstream) so the panel's transcript grouping keeps working.
    */
   threadId?: string;
   llmConfig: AgentLlmConfig;
@@ -110,16 +117,28 @@ export function resolveConfig(partial: Partial<AgentConfig> | undefined): AgentC
       : boundedInteger(partial.tokenBudget, 0, 1_000, 10_000_000, 'tokenBudget');
   const mode = partial?.mode ?? 'agent';
   if (mode !== 'ask' && mode !== 'agent') throw new Error('mode must be ask or agent');
-  const autonomy = partial?.autonomy ?? 'auto';
-  if (autonomy !== 'auto' && autonomy !== 'confirm')
+  // Autonomy is ALWAYS 'auto'. The agent never pauses on a human approval, so a config value that
+  // used to re-enable pausing is deliberately accepted-and-ignored rather than rejected: panels and
+  // stored settings from before this decision still send 'confirm', and failing their runs over a
+  // field the product no longer honors would strand exactly the users the change is for. Malformed
+  // values still throw — silence is only for the two spellings that were ever legal.
+  if (
+    partial?.autonomy !== undefined &&
+    partial.autonomy !== 'auto' &&
+    partial.autonomy !== 'confirm'
+  ) {
     throw new Error('autonomy must be auto or confirm');
-  // Autonomy controls approval for ordinary mutations. Consequential/commit actions are still gated
-  // in every mode. Cross-domain navigation defaults to allow in `auto`; `confirm` gates it.
-  const crossDomainNavigation =
-    partial?.crossDomainNavigation ?? (autonomy === 'auto' ? 'allow' : 'confirm');
-  if (!['allow', 'confirm', 'deny'].includes(crossDomainNavigation)) {
+  }
+  const autonomy = 'auto';
+  // Same treatment for cross-domain navigation: 'confirm' was a pause, and pauses are gone, so it
+  // coerces to 'allow'. 'deny' is NOT a pause — it is a hard fence the caller asked for — and stays.
+  if (
+    partial?.crossDomainNavigation !== undefined &&
+    !['allow', 'confirm', 'deny'].includes(partial.crossDomainNavigation)
+  ) {
     throw new Error('crossDomainNavigation must be allow, confirm, or deny');
   }
+  const crossDomainNavigation = partial?.crossDomainNavigation === 'deny' ? 'deny' : 'allow';
   const allowedDomains = normalizeAllowedDomains(partial?.allowedDomains);
   const allowedUploadRoots = (partial?.allowedUploadRoots ?? []).map((root) => {
     if (typeof root !== 'string' || !isAbsolute(root))
@@ -149,7 +168,7 @@ export function resolveConfig(partial: Partial<AgentConfig> | undefined): AgentC
 }
 
 export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Promise<void> {
-  const { sessionId, profileId, task, runId, threadId, llmConfig, config } = params;
+  const { sessionId, profileId, task, runId, llmConfig, config } = params;
   const { driver, llm, memory, emit, signal, now } = deps;
   const usage: AgentUsage = { tokensIn: 0, tokensOut: 0 };
   const sendsEffort =
@@ -203,27 +222,31 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     });
     return actionId;
   };
+  /**
+   * SELF-approval. The agent never stops mid-task to ask a human whether it may act — that is the
+   * product decision, not a default: an unattended run that pauses on every commit either dies at the
+   * ten-minute input timeout or trains the user to click Approve reflexively, and both outcomes are
+   * worse than acting. The one legitimate stop that remains is the `ask` action for information the
+   * agent cannot know (credentials, a captcha, a task-defining choice) — that still goes through
+   * `waitForInput` in `handleAsk`.
+   *
+   * The approval EVENTS are deliberately kept: `approval.requested` + `approval.resolved approved`
+   * still land in the encrypted journal for every gesture the risk policy classifies as a commit, so
+   * the audit trail records that the harness recognised the boundary and crossed it autonomously —
+   * and an interrupted journal still reduces through the same phases recovery understands. What
+   * changed is only WHO answers, and how long that takes. The `log` line keeps the crossing visible
+   * in the transcript without blocking on anyone; `prompt` may quote page-authored text, and `log`
+   * already scrubs credential-like content before it leaves the process.
+   */
   const confirmJournaled = async (
     prompt: string,
-    action: AgentAction,
+    _action: AgentAction,
     actionId: string,
   ): Promise<boolean> => {
     await appendJournal({ type: 'approval.requested', actionId });
-    let approved = false;
-    try {
-      approved = await confirm(prompt, action, base, deps);
-    } catch (error) {
-      // Timeout/abort is rejection, never an unresolved approval that a terminal marker may silently
-      // erase. Callers that already have browser drift can now journal and verify their rollback.
-      await appendJournal({ type: 'approval.resolved', actionId, decision: 'rejected' });
-      throw error;
-    }
-    await appendJournal({
-      type: 'approval.resolved',
-      actionId,
-      decision: approved ? 'approved' : 'rejected',
-    });
-    return approved;
+    await appendJournal({ type: 'approval.resolved', actionId, decision: 'approved' });
+    log('info', `Proceeding autonomously: ${prompt}`);
+    return true;
   };
   const dispatchJournaled = async <T>(
     actionId: string,
@@ -419,19 +442,22 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         memoryDegraded('run', safeError(memoryError));
       }
     }
-    // Record the exchange in its thread REGARDLESS of outcome. A failed or stopped attempt is exactly
-    // what the next message ("try that again, but…") refers to; excluding it was why follow-ups landed
-    // with no idea what had just been attempted.
-    if (threadId) {
+    // NO thread turn is recorded — deliberately, not by omission. The exchange used to be appended
+    // here so a follow-up could refer to it; the product decision is now the opposite: nothing about
+    // a task survives it, and the next task starts from a clean context with zero bleed. The panel
+    // still shows the transcript it watched live; it just cannot replay it into a later run.
+    //
+    // The run's own journal is equally done. Its whole purpose was to make an INTERRUPTION
+    // recoverable, and the terminal marker just proved there is nothing left to recover — so delete
+    // the file rather than leaving encrypted residue that every future admission would decrypt,
+    // reduce, and skip. `removeFinished` re-proves the terminal phase under the store's write lock,
+    // so a bug here can never delete a journal that still matters. Failure to delete is a wart, not
+    // a hazard: admission sweeps terminal journals too, so the file goes at the next start.
+    if (deps.journal?.removeFinished && journalSnapshot) {
       try {
-        await memory.appendThreadTurn(threadId, {
-          user: safeTask.text,
-          assistant: safeResult || safeFinishError || '',
-          status,
-        });
-      } catch (threadError) {
-        log('warn', `Could not append the conversation turn: ${safeError(threadError)}`);
-        memoryDegraded('thread', safeError(threadError));
+        await deps.journal.removeFinished(runId);
+      } catch (cleanupError) {
+        log('warn', `Could not remove the finished run journal: ${safeError(cleanupError)}`);
       }
     }
     emit({
@@ -469,25 +495,19 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     memoryDegraded('run', safeError(error));
   }
 
-  // Prior turns of THIS conversation, as real messages. Scoped to the thread, so an unrelated task on
-  // the same profile can no longer bleed into this one.
-  let priorTurns: LlmMessage[] = [];
-  if (threadId) {
-    try {
-      priorTurns = capPriorTurns(threadToMessages(await memory.loadThread(threadId)));
-    } catch (error) {
-      priorTurns = []; // recall unavailable this turn — proceed with none
-      log('warn', `Could not load encrypted conversation history: ${safeError(error)}`);
-      memoryDegraded('thread', safeError(error));
-    }
-  }
+  // NO prior turns are loaded — for either mode. Every run is a fresh conversation on purpose: the
+  // panel kept one everlasting thread id, so "prior turns of this conversation" meant every unrelated
+  // task ever typed into the composer, prefixed with "[This attempt failed]" labels that kept the
+  // model chewing on the LAST task instead of this one. The context-overflow fallback below already
+  // proved runs work with no history; now that is simply the contract. What the model needs from the
+  // past, the user restates in the task — and only the user decides what carries over.
 
   // ASK mode: a single chat completion, no browser and no tools — the model answers from its own
   // knowledge in Markdown. The browser never opens (the lazy driver is never touched).
   if (config.mode === 'ask') {
     try {
       const system = buildAskPrompt();
-      const messages = normalizeMessages([...priorTurns, { role: 'user' as const, content: task }]);
+      const messages = normalizeMessages([{ role: 'user' as const, content: task }]);
       const tools: LlmTool[] = [];
       const desiredMaxTokens = sendsEffort ? 8000 : 2048;
       const maxTokens = budgetedMaxTokens({
@@ -625,26 +645,20 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       );
     }
 
-    // Skills are task-scoped and stable, so they stay in the cacheable system prefix. Site facts are
-    // loaded separately after each navigation and remain user-level untrusted data.
-    let memoryContext = '';
-    try {
-      memoryContext = await memory.loadContext(undefined, task);
-    } catch (error) {
-      // Recall is advisory. A rotated key, corrupt legacy record, or unavailable disk must not gain the
-      // authority to stop an otherwise safe browser run.
-      log('warn', `Could not load encrypted profile memory: ${safeError(error)}`);
-      memoryDegraded('run', safeError(error));
-    }
+    // NO persisted memory reaches the prompt. Cross-run facts and learned skills used to be loaded
+    // here (`memory.loadContext`) and re-loaded per host mid-run; both are gone with the durable
+    // memory feature itself — the product persists nothing between tasks, so there is nothing to
+    // recall AND no channel through which a past page's text can steer a future run. The vetted
+    // BUILT-IN skill pack still reaches the model: it is shipped code, not memory, and
+    // `buildSystemPrompt` now renders it from the constant directly.
     const system = buildSystemPrompt({
       task,
       config,
-      memoryContext,
       toolChoiceIsAdvisory: usesAutomaticToolChoice(llmConfig.provider, llmConfig.model),
     });
     let previous: RawPerception | null = null;
     let stepsSinceFullSnapshot = 0;
-    /** This run's assistant/tool exchange, appended to the thread's prior turns each step. */
+    /** This run's assistant/tool exchange — the WHOLE conversation the model sees, built per step. */
     const stepMessages: LlmMessage[] = [];
     /** The call id the NEXT observation answers, so the pairing providers require stays intact. */
     let lastToolCallId: string | undefined;
@@ -653,8 +667,6 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     const dataset: Array<Record<string, string>> = [];
     const datasetSeen = new Set<string>();
     let datasetColumns: string[] = [];
-    let siteMemoryHost = '';
-    let siteMemoryContext = '';
     let pendingImage: string | undefined;
     let lastFingerprint = '';
     let repeatCount = 0;
@@ -730,24 +742,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           `Current page blocked by run policy: ${currentPageDecision.reason}`,
         );
       }
-      const currentHost = hostOf(raw.url);
-      if (currentHost !== siteMemoryHost) {
-        siteMemoryHost = currentHost;
-        if (!currentHost) {
-          siteMemoryContext = '';
-        } else {
-          try {
-            siteMemoryContext = await memory.loadContext(currentHost, '');
-          } catch (error) {
-            siteMemoryContext = '';
-            log('warn', `Could not load encrypted site memory: ${safeError(error)}`);
-            memoryDegraded('step', safeError(error));
-          }
-        }
-      }
       // A summarised observation is only safe while a FULL one is still in the verbatim window.
       // Older tool results are pruned to their header line, so after enough consecutive unchanged
-      // steps — collect, remember, wait, a blocked action — every surviving result would say only
+      // steps — collect, wait, a blocked action — every surviving result would say only
       // "unchanged" and the model would be acting on element indices it can no longer see anywhere.
       // That is exactly how hallucinated indices and "no element [n]" loops start.
       const unchanged =
@@ -815,7 +812,6 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         ...(history.length ? { outcome: history[history.length - 1]! } : {}),
         ...(readEvidence.length ? { readState: readEvidence.join('\n\n') } : {}),
         ...(history.length ? { progress: runLedger(history) } : {}),
-        ...(siteMemoryContext ? { siteMemoryContext } : {}),
       });
       // Step 1 opens the turn as a user message; every later step is the RESULT of the tool call the
       // model just made. Feeding observations back as tool results is what gives the model a genuine
@@ -834,7 +830,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       // rather than the config: a transport that discards `effort` would otherwise reserve eight
       // times the output it can use and drain the run's token allowance for no reasoning at all.
       const desiredMaxTokens = sendsEffort ? 8000 : 1024;
-      const conversation = normalizeMessages([...priorTurns, ...pruneObservations(stepMessages)]);
+      // THIS RUN'S messages only. Nothing from any previous task is prepended — the conversation a
+      // model step sees is exactly what this run produced, pruned for size but never for provenance.
+      const conversation = normalizeMessages(pruneObservations(stepMessages));
       const imageForStep = pendingImage;
       const requestMessages = imageForStep
         ? attachImageToLastTurn(conversation, imageForStep)
@@ -907,7 +905,6 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           result = await llm.complete(buildRequest({ maxTokens: headroom }));
         } else {
           log('warn', 'Context limit reached; retrying this step with the conversation trimmed.');
-          priorTurns = [];
           result = await llm.complete(
             buildRequest({
               messages: normalizeMessages(pruneObservations(stepMessages).slice(-4)),
@@ -1160,31 +1157,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         continue;
       }
 
-      // FileMemoryStore rejects these before reading/writing its document. Mirror that deterministic
-      // validation before proposing/dispatching so a known non-applied validation failure cannot be
-      // mistaken for an ambiguous durable write in the recovery journal.
-      if (memoryActionContainsCredential(action)) {
-        const outcome = `blocked: credentials must not be saved through ${action.kind}`;
-        noteBlocked('credentials must not be saved to durable agent memory');
-        history.push(`${step}. ${outcome}`);
-        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (reason) =>
-          memoryDegraded('step', reason),
-        );
-        continue;
-      }
-      const durableMemoryDomain =
-        action.kind === 'remember' || action.kind === 'learn'
-          ? normalizeSkillHost(hostOf(raw.url))
-          : undefined;
-      if ((action.kind === 'remember' || action.kind === 'learn') && !durableMemoryDomain) {
-        const outcome = `blocked: ${action.kind} requires a current tenant/site domain, not a public suffix or malformed host`;
-        noteBlocked('durable memory requires a valid tenant/site scope');
-        history.push(`${step}. ${outcome}`);
-        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (reason) =>
-          memoryDegraded('step', reason),
-        );
-        continue;
-      }
+      // `remember`/`learn` were removed with durable memory itself: they no longer parse, the model
+      // is no longer offered them, and no credential-in-memory guard is needed for a write path that
+      // does not exist. A stale model that still emits one gets the ordinary invalid-action feedback.
 
       const commitIntent = actionCommitIntent(action, raw);
       const risk = actionRisk(action, raw);
@@ -1238,49 +1213,43 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         approvalGranted = true;
       }
 
-      // CONSEQUENTIAL actions gate in EVERY mode, `auto` included: uploads, purchases, sends,
-      // deletions, account creation, permission changes, data erasure. `auto` means the agent does not
-      // stop to check its work — it never meant it may spend money or delete an account unattended.
-      // Ordinary composition/navigation inside the browser gates only in `confirm`.
-      //
-      // This is only safe because the pause can now END. `waitForInput` has a timeout, and a
-      // panel-origin run with no panel attached fails immediately rather than waiting for an answer
-      // nobody can give — without those, a gate here would have wedged the profile permanently.
+      // CONSEQUENTIAL actions no longer pause on a human, in any mode — uploads, purchases, sends,
+      // deletions, account creation, permission changes, data erasure all proceed. This is the
+      // owner's decision: the agent is fully autonomous, and an approval modal that fires mid-task is
+      // exactly the interruption the product exists to remove. What SURVIVES the decision is
+      // everything around the old gate: the journal still classifies the gesture as a commit
+      // (`risk.consequential` feeds `journalEffect`, so recovery still treats an unverifiable click
+      // honestly), the self-approval below still writes the requested/approved pair into the audit
+      // trail, and the freshness checks that used to protect a human's stale "yes" now protect the
+      // harness's own: the page observed when the commit was classified must still be the page the
+      // commit lands on.
       let approvedTargetPatch: string | undefined;
-      // `risk.consequential` stays true for every classified gesture, because the JOURNAL must keep
-      // treating an unverifiable click as a possible commit. Who has to authorize it is a different
-      // question, and for the gestures whose only evidence of risk is unreadable page script it is
-      // the autonomy setting that answers it.
-      const gatesUnattended =
+      // `commitIntentGatesUnattended` keeps its policy meaning — which gestures cross the commit
+      // boundary — even though nobody is asked anymore: it now decides which actions get the
+      // journaled self-approval + pre-dispatch freshness re-check, not who answers.
+      const commitBoundary =
         commitIntent === undefined ? risk.consequential : commitIntentGatesUnattended(commitIntent);
-      const needsConfirm =
-        gatesUnattended ||
-        (config.autonomy === 'confirm' && (actionCapability(action.kind).mutating || risk.high));
-      if (needsConfirm && !navigationApproved) {
-        // The prompt must name the files and the destination. Redaction is right for the transcript,
-        // but it was also applied to the APPROVAL text, so the one human who could stop an exfiltration
-        // was shown "upload 1 local file(s) through [7]" — a blank cheque.
+      if (commitBoundary && !navigationApproved) {
+        // Name the files and the destination in the transcript line, exactly as the old approval
+        // prompt did for the human — the audit value of a specific sentence did not leave with the
+        // modal. (Redacting the transcript copy is still right; the paths here are basenames only.)
         const prompt =
           action.kind === 'upload'
-            ? `Approve uploading ${action.paths.map((p) => JSON.stringify(basename(p))).join(', ')} to ${hostOf(raw.url) || redactUrl(raw.url)}?`
-            : `Approve ${describeSafeAction(action, raw)}${risk.reason ? `? (${risk.reason})` : '?'}`;
-        // What the human is about to approve, in pixels, captured before they are asked. A canvas or
-        // cross-origin frame changes without touching DOM perception, so this is the only evidence
-        // that the thing under the coordinate is still the thing that was approved.
+            ? `uploading ${action.paths.map((p) => JSON.stringify(basename(p))).join(', ')} to ${hostOf(raw.url) || redactUrl(raw.url)}`
+            : `${describeSafeAction(action, raw)}${risk.reason ? ` (${risk.reason})` : ''}`;
+        // The commit target, in pixels, captured at classification time. A canvas or cross-origin
+        // frame changes without touching DOM perception, so this is the only evidence that the thing
+        // under the coordinate when the gesture dispatches is still the thing the model aimed at.
         approvedTargetPatch = await visualTargetPatch(driver, action);
-        const approved = await confirmJournaled(prompt, safeAction, journalActionId);
-        if (!approved) {
-          history.push(`${step}. user rejected ${describeSafeAction(action, raw)}`);
-          continue;
-        }
+        await confirmJournaled(prompt, safeAction, journalActionId);
         approvalGranted = true;
       }
 
-      // Approval is for this exact action against this exact observation, not a reusable "yes". A
-      // page can mutate, navigate, replace a button, change a total, or move a coordinate target while
-      // the human is reading the prompt. Re-observe immediately before dispatch and fail closed on any
-      // security-relevant drift. The normal next loop iteration gives the model the fresh page and it
-      // may propose a new action, which requires a new approval.
+      // A commit is authorized against this exact observation, not as a reusable "yes". The human
+      // pause is gone, but the window it guarded is not: a page can mutate, navigate, replace a
+      // button, or change a total during the model round trip and the classification work above.
+      // Re-observe immediately before dispatch and fail closed on any security-relevant drift — the
+      // next loop iteration hands the model the fresh page and it decides again against reality.
       if (approvalGranted) {
         const afterApproval = await perceive(driver);
         if (
@@ -1288,8 +1257,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           approvalContextFingerprint(action, afterApproval)
         ) {
           const outcome =
-            'blocked: the page or approved target changed while confirmation was pending; inspect the fresh page and request approval again';
-          noteBlocked('the page or approved target changed while confirmation was pending');
+            'blocked: the page or commit target changed before dispatch; inspect the fresh page and act again';
+          noteBlocked('the page or commit target changed before dispatch');
           history.push(`${step}. ${outcome}`);
           await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
             memoryDegraded('step', r),
@@ -1297,7 +1266,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           await appendJournal({
             type: 'action.cancelled',
             actionId: journalActionId,
-            summary: 'The approved target changed before dispatch',
+            summary: 'The commit target changed before dispatch',
           });
           continue;
         }
@@ -1306,8 +1275,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         if (action.kind === 'click_at' || action.kind === 'type_at') {
           if (!imageForStep || !(await visualTargetHeld(driver, action, approvedTargetPatch))) {
             const outcome =
-              'blocked: the visual page changed while confirmation was pending; capture a fresh screenshot and request approval again';
-            noteBlocked('the visual page changed while confirmation was pending');
+              'blocked: the visual page changed before dispatch; capture a fresh screenshot and act again';
+            noteBlocked('the visual page changed before dispatch');
             history.push(`${step}. ${outcome}`);
             await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
               memoryDegraded('step', r),
@@ -1315,7 +1284,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             await appendJournal({
               type: 'action.cancelled',
               actionId: journalActionId,
-              summary: 'The approved visual target changed before dispatch',
+              summary: 'The visual commit target changed before dispatch',
             });
             continue;
           }
@@ -1324,61 +1293,11 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
       // Risky but NOT consequential (for example, typing into an amount field). It proceeds, and the
       // model is told to check the result — awareness without a pause.
-      if (risk.high && risk.reason && !needsConfirm) {
+      if (risk.high && risk.reason && !commitBoundary) {
         // The detailed risk reason may include a page-authored field label. Keep it out of the trusted
         // nudge channel; the ordinary untrusted action outcome still tells the model what it touched.
         pendingCorrection =
           'You just took a high-risk composition action. Verify from the next snapshot that it did what the task asked — and do not repeat it.';
-      }
-
-      if (action.kind === 'remember' || action.kind === 'learn') {
-        // Durable memory changes future runs, so they pass through the same action-bound approval and
-        // post-confirmation freshness checks as browser commits. The scope remains harness-owned: the
-        // model can propose text, but never choose which host will receive it.
-        const domain = durableMemoryDomain;
-        if (!domain) {
-          history.push(`${step}. ${action.kind} skipped: no page domain`);
-          await appendJournal({
-            type: 'action.cancelled',
-            actionId: journalActionId,
-            summary: 'The durable-memory action had no valid host scope',
-          });
-          continue;
-        }
-        await dispatchJournaled(
-          journalActionId,
-          journalEffect,
-          async (beginEffect) => {
-            await beginEffect();
-            if (action.kind === 'remember') {
-              await memory.rememberFact({
-                domain,
-                key: action.factKey,
-                value: action.factValue,
-              });
-            } else {
-              await memory.learnSkill({
-                name: action.skillName,
-                trigger: action.skillTrigger,
-                steps: action.skillSteps,
-                origin: 'learned',
-                domain,
-                learnedAt: now(),
-              });
-            }
-            return 'durable memory updated';
-          },
-          (value) => value,
-        );
-        const outcome =
-          action.kind === 'remember'
-            ? `remembered "${action.factKey}" for ${domain}`
-            : `learned procedure "${action.skillName}" for ${domain}`;
-        history.push(`${step}. ${outcome}`);
-        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (reason) =>
-          memoryDegraded('step', reason),
-        );
-        continue;
       }
 
       // Two different questions, previously answered by one counter keyed on URL + action.
@@ -1703,24 +1622,19 @@ async function handleAsk(
         outcome: `refused sensitive handoff to ${atPoint.role} ${JSON.stringify(atPoint.name)} at the requested coordinate; it is not a secret-bearing field`,
       };
     }
-    // Last, because it is the only check that costs a human's attention: a page that already drifted
-    // is refused above rather than turned into a prompt nobody should answer.
-    //
-    // The first thing `type_at` does is CLICK the model's pixel. `actionRisk` classifies a
-    // coordinate gesture as consequential in every autonomy mode precisely because nobody — not the
-    // policy, not the human — can see what handler sits under it. Reaching that click through `ask`
-    // does not make it less of an activation: without this gate the model chose the coordinate, the
-    // human was shown only the question, and the click was dispatched with no approval bound to it.
-    // A canvas/frame can change without affecting DOM perception, so the target's own pixels are
-    // captured before the human is asked and required to still be there afterwards.
+    // The first thing `type_at` does is CLICK the model's pixel, and nobody — not the policy, not
+    // the harness — can see what handler sits under it. A separate human approval used to bind here;
+    // under full autonomy the human's ANSWER is the authorization: they just supplied the secret for
+    // exactly this handoff, and `requestApproval` (→ `confirmJournaled`) now records the coordinate
+    // activation in the journal and transcript without pausing on a second question. What still
+    // gates is physics, not permission: a canvas/frame can change without affecting DOM perception,
+    // so the target's pixels are sampled here and re-sampled just before dispatch — a moved target
+    // refuses the handoff rather than typing a secret into whatever replaced it.
     const approvedTargetPatch = await visualTargetPatch(deps.driver, directAction);
-    const approved = await requestApproval(
-      `Type the value you just supplied at visual coordinate (${action.targetX}, ${action.targetY}) on ${redactUrl(afterInput.url)}. Anything under that point will be clicked first.`,
+    await requestApproval(
+      `Type the value the human just supplied at visual coordinate (${action.targetX}, ${action.targetY}) on ${redactUrl(afterInput.url)}. Anything under that point is clicked first.`,
       directAction,
     );
-    if (!approved) {
-      return { ok: false, outcome: 'the sensitive coordinate handoff was rejected' };
-    }
     if (
       !approvedImage ||
       !(await visualTargetHeld(deps.driver, directAction, approvedTargetPatch))
@@ -1750,26 +1664,6 @@ async function handleAsk(
       : `${step}. human replied to ${JSON.stringify(clip(safeQuestion, 100))}: ${JSON.stringify(clip(safeAnswer, 120))}`,
   );
   return { ok: true, outcome: 'human input received' };
-}
-
-async function confirm(
-  prompt: string,
-  action: AgentAction,
-  base: { sessionId: string; profileId: string },
-  deps: AgentRunDeps,
-): Promise<boolean> {
-  const safeAction = redactAction(action);
-  const safePrompt = redactCredentialLikeText(prompt).text;
-  deps.emit({
-    type: 'run.needsInput',
-    ...base,
-    kind: 'confirm',
-    prompt: safePrompt,
-    action: safeAction,
-    ts: deps.now(),
-  });
-  const verdict = await deps.waitForInput(safePrompt, 'confirm', safeAction);
-  return /^(approve|approved|yes|ok)$/i.test(verdict.trim());
 }
 
 function canonicalNavigationUrl(rawUrl: string, baseUrl: string): string | undefined {
@@ -1825,22 +1719,6 @@ function firstLine(value: string): string {
 
 function clip(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
-}
-
-function memoryActionContainsCredential(action: AgentAction): boolean {
-  if (action.kind === 'remember') {
-    return (
-      /(password|passcode|otp|token|secret|api.?key|private.?key|seed|cvv|cvc)/i.test(
-        action.factKey,
-      ) || redactCredentialLikeText(`${action.factKey}: ${action.factValue}`).sensitive
-    );
-  }
-  if (action.kind === 'learn') {
-    return [action.skillName, action.skillTrigger, action.skillSteps].some(
-      (value) => redactCredentialLikeText(value).sensitive,
-    );
-  }
-  return false;
 }
 
 /**
@@ -2167,62 +2045,6 @@ function messageText(message: LlmMessage): string {
 }
 
 /**
- * Per-request budget for conversation history, in characters (~8.5k tokens).
- *
- * Separate from the STORE's own bound: a thread may legitimately hold `MAX_THREAD_CHARS` (120k) and
- * Ask mode benefits from all of it, but in an agent run that block rides on every one of up to 40
- * steps and is uncached on the managed path. Cap the request view; leave the durable record alone.
- */
-const MAX_PRIOR_TURN_CHARS = 30_000;
-
-/**
- * Keep the newest whole turns that fit the budget. Walking BACKWARDS matters: the most recent exchange
- * is what a follow-up ("try that again, but…") refers to. Whole messages only — a half-dropped turn
- * would strip the `[This attempt failed]` labelling that makes a retry request intelligible.
- */
-function capPriorTurns(messages: readonly LlmMessage[]): LlmMessage[] {
-  const kept: LlmMessage[] = [];
-  let budget = MAX_PRIOR_TURN_CHARS;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i]!;
-    const size = messageText(message).length;
-    if (kept.length > 0 && size > budget) break;
-    budget -= size;
-    kept.unshift(message);
-  }
-  return kept;
-}
-
-/** Stored thread turns → request messages. */
-function threadToMessages(stored: readonly ThreadMessage[]): LlmMessage[] {
-  const out: LlmMessage[] = [];
-  for (const message of stored) {
-    if (!message.content.trim()) continue;
-    if (message.role === 'compaction') {
-      out.push({
-        role: 'user',
-        content: `[Earlier context, summarized] ${message.content}`,
-      });
-      continue;
-    }
-    if (message.role === 'user') {
-      out.push({ role: 'user', content: message.content });
-      continue;
-    }
-    // Label an unsuccessful attempt rather than dropping it, so the model can tell a real answer from
-    // one that failed — and so "try that again" has something to refer to.
-    const prefix =
-      message.status === 'error'
-        ? '[This attempt failed] '
-        : message.status === 'stopped'
-          ? '[This attempt was stopped before finishing] '
-          : '';
-    out.push({ role: 'assistant', content: `${prefix}${message.content}` });
-  }
-  return out;
-}
-
-/**
  * Keep the run's own exchange bounded without breaking its structure.
  *
  * Page snapshots dominate an agent run's token cost, and every one of them stays relevant only for a
@@ -2289,18 +2111,17 @@ function hasResentBlocks(message: LlmMessage): message is LlmMessage & { content
   const content = message.content;
   return (
     typeof content === 'string' &&
-    (content.includes(EVIDENCE_PREAMBLE) ||
-      content.includes(SITE_MEMORY_PREAMBLE) ||
-      content.includes(PROGRESS_PREAMBLE))
+    (content.includes(EVIDENCE_PREAMBLE) || content.includes(PROGRESS_PREAMBLE))
   );
 }
 
 /**
- * Remove the evidence-ledger and site-memory blocks from a step prompt that is no longer the newest.
+ * Remove the evidence-ledger and progress blocks from a step prompt that is no longer the newest.
+ * (The per-site memory block that used to be stripped alongside them left with durable memory.)
  *
- * Both are rebuilt in full on EVERY step, so up to seven byte-identical copies of an 8,000-char ledger
- * plus a 4,000-char memory block could be live in one request — re-billed in full on the managed path,
- * which places no cache breakpoint on the message array.
+ * Both are rebuilt in full on EVERY step, so up to seven byte-identical copies of an 8,000-char
+ * ledger could be live in one request — re-billed in full on the managed path, which places no cache
+ * breakpoint on the message array.
  *
  * The cut is anchored on each block's preamble and ends at the FIRST closing fence after it. That
  * precision is the whole trick: the ledger shares `BEGIN/END_UNTRUSTED_WEB_CONTENT` with the page
@@ -2316,13 +2137,9 @@ function stripResentBlocks(content: string): string {
     return `${text.slice(0, start)}(earlier copy of this block omitted; the current one is below)\n${text.slice(end + endFence.length + 1)}`;
   };
   return cut(
-    cut(
-      cut(content, EVIDENCE_PREAMBLE, 'END_UNTRUSTED_WEB_CONTENT'),
-      PROGRESS_PREAMBLE,
-      'END_UNTRUSTED_WEB_CONTENT',
-    ),
-    SITE_MEMORY_PREAMBLE,
-    'END_UNTRUSTED_LOCAL_MEMORY',
+    cut(content, EVIDENCE_PREAMBLE, 'END_UNTRUSTED_WEB_CONTENT'),
+    PROGRESS_PREAMBLE,
+    'END_UNTRUSTED_WEB_CONTENT',
   );
 }
 

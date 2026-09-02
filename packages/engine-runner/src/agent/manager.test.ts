@@ -46,7 +46,7 @@ async function stopAndSettle(manager: AgentManager, profileId: string): Promise<
   }
 }
 
-test('manager snapshots retain the conversation id across panel reopen', async () => {
+test('manager snapshots retain the conversation id, and a finished run leaves no journal', async () => {
   const root = await mkdtemp(join(tmpdir(), 'lobee-manager-thread-'));
   const manager = new AgentManager({ resolveWs: async () => undefined, emit: () => {} });
   const profileId = `manager-thread-${Date.now()}`;
@@ -57,27 +57,32 @@ test('manager snapshots retain the conversation id across panel reopen', async (
     assert.equal(snapshot?.threadId, 'thread_reopen');
     assert.equal(snapshot?.task, 'answer briefly');
 
-    // Production always supplies the encrypted journal in a per-profile subdirectory and reuses the
-    // exact profile key. Wait for the fire-and-forget loop's first fsynced create.
+    // The run fails fast (its LLM endpoint is unreachable by construction) and reaches a terminal
+    // status; production reuses the profile key for the per-profile journal store, and the loop
+    // deletes the journal file the moment the terminal marker lands — completion must leave NOTHING.
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const status = manager.status(profileId).runs[0]?.status;
+      if (status && status !== 'running' && status !== 'awaiting_input') break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     const journal = new RunJournalStore(join(root, 'agent', 'journals'), {
       encryptionKey: memoryKey,
     });
-    let durable = await journal.load(started.sessionId);
-    for (let attempt = 0; !durable && attempt < 50; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      durable = await journal.load(started.sessionId);
-    }
-    assert.ok(durable);
+    assert.equal(await journal.load(started.sessionId), null, 'no journal may survive completion');
+    assert.deepEqual(await journal.listRunIds(), []);
   } finally {
     await stopAndSettle(manager, profileId);
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test('admission closes clean, pending, and read-dispatch journals without replay', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'lobee-manager-safe-recovery-'));
-  const key = randomBytes(32);
-  const store = new RunJournalStore(join(root, 'journals'), { encryptionKey: key });
+test('admission heals every interrupted journal — no phase throws, no residue remains', async () => {
+  // The four shapes that used to strand a profile behind "Agent recovery required …": a clean
+  // checkpoint, a pending proposal, an ambiguous write dispatch, and an unreconciled navigation.
+  // Each is now walked to a terminal state through the legal recovery transitions (never replayed)
+  // and its file deleted, so the next start finds an empty directory instead of a locked door.
+  const root = await mkdtemp(join(tmpdir(), 'lobee-manager-self-heal-'));
+  const store = new RunJournalStore(join(root, 'journals'), { encryptionKey: randomBytes(32) });
   try {
     await store.create({ runId: 'clean', task: 'task', mode: 'agent' });
     await store.create({ runId: 'pending', task: 'task', mode: 'agent' });
@@ -89,41 +94,6 @@ test('admission closes clean, pending, and read-dispatch journals without replay
       summary: 'Proposed type action',
       host: 'example.test',
     });
-    await store.create({ runId: 'read_dispatch', task: 'task', mode: 'agent' });
-    await append(store, 'read_dispatch', {
-      type: 'action.proposed',
-      actionId: 'a1',
-      actionKind: 'extract',
-      effect: 'read',
-      summary: 'Proposed extract action',
-      host: 'example.test',
-    });
-    await append(store, 'read_dispatch', { type: 'action.dispatching', actionId: 'a1' });
-
-    await admitUnfinishedRunJournals(store, 'profile-safe');
-
-    for (const runId of ['clean', 'pending', 'read_dispatch']) {
-      assert.equal((await store.load(runId))?.state.phase, 'stopped');
-    }
-    const read = await store.load('read_dispatch');
-    assert.ok(read);
-    assert.deepEqual(
-      read.journal.events.slice(-3).map((event) => event.type),
-      ['action.observed', 'recovery.resolved', 'run.stopped'],
-    );
-    assert.equal(
-      read.journal.events.some((event) => event.type === 'action.proposed' && 'args' in event),
-      false,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test('admission rejects ambiguous writes and leaves their journals unresolved', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'lobee-manager-write-recovery-'));
-  const store = new RunJournalStore(join(root, 'journals'), { encryptionKey: randomBytes(32) });
-  try {
     await store.create({ runId: 'write_dispatch', task: 'task', mode: 'agent' });
     await append(store, 'write_dispatch', {
       type: 'action.proposed',
@@ -134,47 +104,6 @@ test('admission rejects ambiguous writes and leaves their journals unresolved', 
       host: 'example.test',
     });
     await append(store, 'write_dispatch', { type: 'action.dispatching', actionId: 'a1' });
-
-    await assert.rejects(
-      admitUnfinishedRunJournals(store, 'profile-write'),
-      /recovery required.*write.*Verify the live browser.*will not replay/is,
-    );
-    const unresolved = await store.load('write_dispatch');
-    assert.equal(unresolved?.state.phase, 'dispatching');
-    assert.equal(
-      unresolved?.journal.events.some(
-        (event) =>
-          event.type === 'run.completed' ||
-          event.type === 'run.failed' ||
-          event.type === 'run.stopped',
-      ),
-      false,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test('admission rejects unfinished sensitive journals even before an action dispatch', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'lobee-manager-sensitive-recovery-'));
-  const store = new RunJournalStore(join(root, 'journals'), { encryptionKey: randomBytes(32) });
-  try {
-    await store.create({ runId: 'sensitive_handoff', task: 'task', mode: 'agent' });
-    await append(store, 'sensitive_handoff', { type: 'run.sensitive', reason: 'credential' });
-    await assert.rejects(
-      admitUnfinishedRunJournals(store, 'profile-sensitive'),
-      /recovery required.*credential.*will not replay/is,
-    );
-    assert.equal((await store.load('sensitive_handoff'))?.state.phase, 'running');
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test('admission never discards unfinished unexpected-navigation reconciliation', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'lobee-manager-drift-recovery-'));
-  const store = new RunJournalStore(join(root, 'journals'), { encryptionKey: randomBytes(32) });
-  try {
     await store.create({ runId: 'drift', task: 'task', mode: 'agent' });
     await append(store, 'drift', {
       type: 'action.proposed',
@@ -185,13 +114,67 @@ test('admission never discards unfinished unexpected-navigation reconciliation',
       host: 'outside.test',
     });
 
-    await assert.rejects(
-      admitUnfinishedRunJournals(store, 'profile-drift'),
-      /recovery required.*unexpected navigation.*will not replay/is,
-    );
-    const unresolved = await store.load('drift');
-    assert.equal(unresolved?.state.phase, 'proposed');
-    assert.equal(unresolved?.state.activeAction?.actionKind, 'navigation_reconcile');
+    const warnings: string[] = [];
+    await admitUnfinishedRunJournals(store, 'profile-heal', (message) => warnings.push(message));
+
+    assert.deepEqual(await store.listRunIds(), [], 'every journal file must be gone');
+    assert.deepEqual(await store.listUnfinished(), []);
+    // The discard is loud, not silent: each auto-closed run is named, and the ambiguous write warns
+    // the operator to verify the site manually — the honesty the old throw used to enforce.
+    assert.equal(warnings.filter((w) => /auto-closed interrupted run/.test(w)).length, 4);
+    assert.ok(warnings.some((w) => /may already have taken effect/.test(w)));
+    assert.ok(warnings.every((w) => !/replay/.test(w) || /without replay/.test(w)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an interrupted SENSITIVE journal is auto-healed on the next start, and the run proceeds', async () => {
+  // The exact user-facing failure this refactor kills: a run marked sensitive (credential handoff,
+  // upload path, screenshot) was interrupted, and every later `agent.start` threw "Agent recovery
+  // required … resolve or discard this encrypted journal" forever. Now the start itself heals it.
+  const root = await mkdtemp(join(tmpdir(), 'lobee-manager-sensitive-heal-'));
+  const manager = new AgentManager({ resolveWs: async () => undefined, emit: () => {} });
+  const profileId = `manager-heal-${Date.now()}`;
+  const memoryKey = randomBytes(32).toString('base64');
+  try {
+    const params = startParams(root, profileId, memoryKey);
+    const store = new RunJournalStore(join(params.memoryDir, 'journals'), {
+      encryptionKey: memoryKey,
+    });
+    await store.create({ runId: 'stranded_sensitive', task: 'task', mode: 'agent' });
+    await append(store, 'stranded_sensitive', { type: 'run.sensitive', reason: 'credential' });
+
+    // No throw: the new run is admitted. (It then fails fast on its unreachable LLM endpoint,
+    // which is irrelevant here — admission was the wall.)
+    const started = await manager.start(params);
+    assert.equal(started.profileId, profileId);
+
+    // The stranded journal was closed without replay and its file deleted.
+    assert.equal(await store.load('stranded_sensitive'), null);
+  } finally {
+    await stopAndSettle(manager, profileId);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a corrupt journal is quarantined aside instead of blocking every future start', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'lobee-manager-corrupt-heal-'));
+  const store = new RunJournalStore(join(root, 'journals'), { encryptionKey: randomBytes(32) });
+  try {
+    await store.create({ runId: 'healthy', task: 'task', mode: 'agent' });
+    // Plant bytes that fail authenticated decryption where a journal is expected.
+    await writeFile(join(root, 'journals', 'mangled.journal'), 'lobee-run-journal-v1:garbage');
+
+    const warnings: string[] = [];
+    await admitUnfinishedRunJournals(store, 'profile-corrupt', (message) => warnings.push(message));
+
+    assert.deepEqual(await store.listRunIds(), [], 'the healthy journal healed, the corrupt moved');
+    assert.ok(warnings.some((w) => /mangled\.journal\.corrupt/.test(w)));
+    const { readdir } = await import('node:fs/promises');
+    const names = await readdir(join(root, 'journals'));
+    assert.ok(names.includes('mangled.journal.corrupt'), 'the bytes survive for forensics');
+    assert.ok(!names.includes('mangled.journal'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

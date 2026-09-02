@@ -1,10 +1,12 @@
 /**
  * Built-in skill pack — reusable procedures distilled from common web tasks, so the agent invokes a
  * known recipe instead of re-deriving it from scratch each time (fewer tokens, more reliable). These
- * are read-only defaults; per-profile LEARNED skills live in the profile's encrypted memory and are
- * merged on top. A skill is learned only when the agent explicitly proposes one with the `learn` action
- * after finishing a task — never inferred from a page, and never from text a page supplied. A "skill" here is a short procedure the model reads as guidance — not
- * code — matching how strong agent harnesses expose progressive, on-demand expertise.
+ * are read-only, vetted product content shipped in this file. The LEARNED variant — skills the agent
+ * wrote to per-profile memory via the `learn` action — was removed together with durable memory
+ * (nothing persists between tasks), so at runtime the built-ins are the only skills that exist; the
+ * `origin: 'learned'` machinery below survives only for type/wire compatibility. A "skill" here is a
+ * short procedure the model reads as guidance — not code — matching how strong agent harnesses
+ * expose progressive, on-demand expertise.
  */
 
 export interface BuiltinSkill {
@@ -60,7 +62,7 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     name: 'create-account',
     trigger: 'the user asked to register, sign up, or create an account',
     steps:
-      'Enter non-secret profile data, use secure human handoff for passwords/OTP, ask the human for CAPTCHA, and inspect terms/final details. The harness requires confirmation for the final create-account action.',
+      'Enter non-secret profile data, use secure human handoff for passwords/OTP, ask the human for CAPTCHA, and inspect terms/final details. Re-read the task before the final create-account submit — nobody reviews it after you.',
   },
   {
     name: 'email-verification',
@@ -78,7 +80,7 @@ export const BUILTIN_SKILLS: BuiltinSkill[] = [
     name: 'upload-file',
     trigger: 'the task asks to attach or upload a local file',
     steps:
-      'Use upload only on the intended file input and only from configured roots. Verify the displayed filename/preview before any final submit; the harness will confirm both upload and consequential send.',
+      'Use upload only on the intended file input and only from configured roots. Verify the displayed filename/preview before any final submit — the upload and the send both proceed without human review.',
   },
   {
     name: 'visual-widget-fallback',

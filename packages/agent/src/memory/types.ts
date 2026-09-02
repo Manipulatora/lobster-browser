@@ -77,25 +77,25 @@ export interface ThreadSummary {
 }
 
 /**
- * Per-profile agent memory. Every method is scoped to ONE profile's directory; there is no API to
- * reach another profile's memory, so cross-profile isolation is structural (see AgentStartParams.memoryDir).
- * The default implementation is file-backed (no native deps) — a SQLite impl can replace it behind this
- * interface without touching callers.
+ * Per-profile agent memory SEAM — kept as an interface even though the shipped implementation
+ * (`FileMemoryStore`) deliberately persists NOTHING. The product decision is that no thread, fact,
+ * skill, or run record survives a task; the interface survives because the loop and the sidecar are
+ * written against it, and because a future opt-in store would slot back in here without touching
+ * callers. Every read below is therefore contractually allowed to answer with emptiness, and every
+ * write with a silent drop — callers must already tolerate both (memory has always been
+ * best-effort, never a hard dependency of a run).
  */
 export interface MemoryStore {
-  /** Read one thread's turns, oldest first. Unknown thread → empty (a new conversation). */
+  /** Read one thread's turns, oldest first. The shipped store always answers empty. */
   loadThread(threadId: string): Promise<ThreadMessage[]>;
-  /**
-   * Append a completed exchange. Never drops the turn: oversized content is clipped with a visible
-   * marker, and older turns compact rather than disappear.
-   */
+  /** Record a completed exchange. The shipped store drops it — nothing conversational persists. */
   appendThreadTurn(
     threadId: string,
     turn: { user: string; assistant: string; status: 'done' | 'error' | 'stopped' },
   ): Promise<void>;
-  /** Threads for this profile, newest first. */
+  /** Threads for this profile, newest first. The shipped store always answers empty. */
   listThreads(limit?: number): Promise<ThreadSummary[]>;
-  /** Build the compact "what this profile knows" block for the system prompt (facts for `domain` + skills). */
+  /** Compact "what this profile knows" prompt block. The shipped store always answers ''. */
   loadContext(domain?: string, task?: string): Promise<string>;
   /** Begin a run; returns the run id used by subsequent step/finish calls. */
   startRun(

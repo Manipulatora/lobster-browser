@@ -43,13 +43,14 @@ const page: RawPerception = {
 };
 
 test('navigation policy blocks local networks, unsafe schemes, and domain-fence escapes', () => {
-  // `confirm` autonomy keeps the cross-domain gate; hard denies apply in every mode.
+  // Requested 'confirm' autonomy is deliberately stripped (the agent never pauses on approval), so
+  // in-fence cross-domain moves ALLOW — while every hard deny holds in exactly the same places.
   const config = resolveConfig({ autonomy: 'confirm', allowedDomains: ['example.com'] });
   assert.equal(assessNavigation('http://127.0.0.1/admin', page.url, config).verdict, 'deny');
   assert.equal(assessNavigation('file:///etc/passwd', page.url, config).verdict, 'deny');
-  assert.equal(assessNavigation('https://example.com/path', page.url, config).verdict, 'confirm');
+  assert.equal(assessNavigation('https://example.com/path', page.url, config).verdict, 'allow');
   assert.equal(assessNavigation('https://evil-example.com/', page.url, config).verdict, 'deny');
-  assert.equal(assessNavigation('https://sub.example.com/', page.url, config).verdict, 'confirm');
+  assert.equal(assessNavigation('https://sub.example.com/', page.url, config).verdict, 'allow');
   assert.ok(isPrivateHostname('169.254.169.254'));
   assert.ok(isPrivateHostname('fd00::1'));
   for (const privateIpv6 of [
@@ -230,9 +231,12 @@ test('auto autonomy runs without approval pauses: cross-domain defaults to allow
   assert.equal(assessNavigation('https://sub.example.com/', page.url, auto).verdict, 'allow');
   assert.equal(assessNavigation('http://127.0.0.1/admin', page.url, auto).verdict, 'deny');
   assert.equal(assessNavigation('https://evil-example.com/', page.url, auto).verdict, 'deny');
-  // An explicit override still wins over the autonomy-derived default.
+  // A requested 'confirm' is a pause, and pauses are stripped: it coerces to 'allow'. The one
+  // override that still wins is 'deny' — a hard fence, not a pause.
   const strict = resolveConfig({ crossDomainNavigation: 'confirm' });
-  assert.equal(strict.crossDomainNavigation, 'confirm');
+  assert.equal(strict.crossDomainNavigation, 'allow');
+  const denied = resolveConfig({ crossDomainNavigation: 'deny' });
+  assert.equal(denied.crossDomainNavigation, 'deny');
 });
 
 test('high-impact controls require confirmation and secret action data is redacted', () => {

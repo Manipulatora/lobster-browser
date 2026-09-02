@@ -252,12 +252,15 @@ export class AgentBridge {
     }
     const threadId = body.threadId as string | undefined;
 
-    // The panel may deliberately choose either mode. Reject malformed values instead of silently
-    // falling back to `auto`: losing an explicitly requested confirmation policy is a safety bug.
+    // Autonomy is no longer the panel's to choose: the agent runs fully autonomous by product
+    // decision, and a stored 'confirm' from an older panel must neither fail the run (that strands
+    // the very user this is for) nor re-enable pausing (nobody is standing by to answer, so a pause
+    // is a ten-minute stall followed by a dead run). So the FIELD is still validated — garbage in
+    // the body stays a caller bug worth surfacing — but its VALUE is deliberately ignored.
     if (body.autonomy !== undefined && body.autonomy !== 'auto' && body.autonomy !== 'confirm') {
       return reply(400, { ok: false, error: 'autonomy must be auto or confirm' });
     }
-    const autonomy = (body.autonomy ?? 'confirm') as 'auto' | 'confirm';
+    const autonomy = 'auto' as const;
     // A domain fence bounds an unattended run. Reject a malformed list rather than silently ignoring
     // it — a caller that asked for a fence and did not get one is worse off than one that got an error.
     if (body.allowedDomains !== undefined && !Array.isArray(body.allowedDomains)) {
@@ -344,11 +347,12 @@ export class AgentBridge {
         mode,
         visionFallback: true,
         allowedUploadRoots: await uploadRoots(entry.memoryDir),
-        // Omission is fail-safe at this boundary: review-first autonomy and a bounded token budget.
-        // The panel must explicitly send `auto` or `null` to opt out of either guard. An empty domain
-        // list intentionally means unrestricted browsing. Every value is validated here because the
+        // Autonomy is fixed to `auto` above — the incoming value is validated but never honored.
+        // The remaining guards keep their fail-safe defaults: a bounded token budget unless the
+        // panel explicitly sends `null`, and a domain fence whenever one is supplied (an empty list
+        // intentionally means unrestricted browsing). Every value is validated here because the
         // panel is the least-trusted caller of the three (chrome-owned page, untrusted request data).
-        ...(autonomy ? { autonomy } : {}),
+        autonomy,
         ...(allowedDomains.length ? { allowedDomains } : {}),
         ...(tokenBudget !== undefined ? { tokenBudget } : {}),
       },
