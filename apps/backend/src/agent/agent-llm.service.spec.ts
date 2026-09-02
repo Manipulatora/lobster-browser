@@ -60,11 +60,26 @@ class FakeSpend {
   }
 }
 
+/**
+ * The synthetic ids {@link modelCatalog} serves. The roster is pinned to the seven product models,
+ * so these ids can only enter it through the `AGENT_ALLOWED_MODELS` escape hatch — which is exactly
+ * how {@link createService} admits them by default. That keeps every capability-classification test
+ * exercising the REAL filter logic (a synthetic id that fails the request contract must still be
+ * rejected even when explicitly allowed) instead of being silently filtered to nothing by the pin.
+ */
+const SYNTHETIC_CATALOG_IDS =
+  'openai/tool-model,openai/ask-model,openai/unbounded-model,' +
+  'anthropic/mandatory-thinking,google/image-only';
+
 function createService(
   values: Record<string, unknown> = {},
   spend: FakeSpend = new FakeSpend(),
 ): AgentLlmService {
-  const config = { get: (key: string): unknown => values[key] } as unknown as ConfigService;
+  const merged: Record<string, unknown> = {
+    AGENT_ALLOWED_MODELS: SYNTHETIC_CATALOG_IDS,
+    ...values,
+  };
+  const config = { get: (key: string): unknown => merged[key] } as unknown as ConfigService;
   return new AgentLlmService(config, spend as unknown as AgentSpendService);
 }
 
@@ -120,6 +135,120 @@ function modelCatalog(): { data: Array<Record<string, unknown>> } {
     ],
   };
 }
+
+/** The seven pinned product models, in the order the owner specified — the roster contract. */
+const PINNED_ROSTER = [
+  'openai/gpt-5.6-sol',
+  'openai/gpt-5.6-terra',
+  'openai/gpt-5.6-luna',
+  'anthropic/claude-fable-5',
+  'anthropic/claude-opus-5',
+  'anthropic/claude-opus-4.8',
+  'anthropic/claude-sonnet-5',
+];
+
+/** A live catalog that can serve every pinned model, minus any the test removes. */
+function pinnedCatalog(omit?: string): { data: Array<Record<string, unknown>> } {
+  return {
+    data: PINNED_ROSTER.filter((id) => id !== omit).map((id) => ({
+      id,
+      name: id,
+      context_length: 200_000,
+      supported_parameters: ['max_tokens', 'tools', 'tool_choice', 'reasoning'],
+      architecture: { output_modalities: ['text'] },
+      reasoning: { supported_efforts: ['low', 'medium', 'high'] },
+    })),
+  };
+}
+
+test('the roster is exactly the seven pinned models, in product order', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(pinnedCatalog()), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })) as typeof fetch;
+  try {
+    // The escape hatch is emptied on purpose: the seven must come from the pin alone.
+    const service = createService({
+      OPENROUTER_API_KEY: 'server-secret',
+      AGENT_ALLOWED_MODELS: '',
+    });
+    const result = await service.listModels();
+    assert.equal(result.stale, false);
+    assert.deepEqual(
+      result.models.map((model) => model.id),
+      PINNED_ROSTER,
+    );
+    for (const model of result.models) {
+      assert.equal(model.featured, true);
+      assert.equal(model.available, true);
+      assert.equal(model.agentCapable, true);
+    }
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a pinned model the catalog lacks is greyed out, not silently dropped', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify(pinnedCatalog('anthropic/claude-opus-5')), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })) as typeof fetch;
+  try {
+    const service = createService({
+      OPENROUTER_API_KEY: 'server-secret',
+      AGENT_ALLOWED_MODELS: '',
+    });
+    const result = await service.listModels();
+    // Still all seven, still in order — the roster is a product surface, not a mirror of OpenRouter.
+    assert.deepEqual(
+      result.models.map((model) => model.id),
+      PINNED_ROSTER,
+    );
+    const missing = result.models.find((model) => model.id === 'anthropic/claude-opus-5');
+    assert.equal(missing?.label, 'Claude Opus 5');
+    assert.equal(missing?.available, false);
+    assert.equal(missing?.agentCapable, false);
+    assert.equal(missing?.reasoning, false);
+    assert.deepEqual(missing?.efforts, []);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a greyed-out pinned model is refused before the upstream is contacted', async () => {
+  const original = globalThis.fetch;
+  let completionCalls = 0;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(pinnedCatalog('anthropic/claude-opus-5')), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    completionCalls += 1;
+    throw new Error('an unavailable model must never reach the provider');
+  }) as typeof fetch;
+  try {
+    const service = createService({
+      OPENROUTER_API_KEY: 'server-secret',
+      AGENT_ALLOWED_MODELS: '',
+    });
+    await assert.rejects(
+      service.chatCompletion(
+        { model: 'anthropic/claude-opus-5', messages: [{ role: 'user', content: 'hi' }] },
+        PRINCIPAL,
+      ),
+      BadRequestException,
+    );
+    assert.equal(completionCalls, 0);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
 
 test('model roster separates Ask compatibility from Agent tool capability', async () => {
   const original = globalThis.fetch;

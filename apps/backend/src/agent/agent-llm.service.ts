@@ -15,17 +15,18 @@ import type { AgentPrincipal } from './agent-auth.guard';
 import { insufficientCredit, modelUnpriced } from './agent-refusal';
 
 /**
- * Curated roster surfaced first in the Lobee picker. This is the SOURCE OF TRUTH for the model list —
- * the panel no longer owns it. Ids are OpenRouter model ids; live availability + reasoning support are
- * annotated from the catalog at request time.
+ * THE roster surfaced in the Lobee picker — exactly these ids, in exactly this order. This is the
+ * SOURCE OF TRUTH for the model list — the panel no longer owns it, and neither does OpenRouter's
+ * catalog: the catalog only annotates each entry with live availability and capabilities (a model
+ * missing from it is still listed, greyed out, rather than silently vanishing). Ids are OpenRouter
+ * model ids. To offer anything beyond these seven, list its exact id in `AGENT_ALLOWED_MODELS`.
  */
 const FEATURED: ReadonlyArray<{ id: string; label: string }> = [
-  { id: 'openai/gpt-5.4', label: 'GPT 5.4' },
-  { id: 'openai/gpt-5.5', label: 'GPT 5.5' },
-  { id: 'openai/gpt-5.6-luna', label: 'GPT 5.6 Luna' },
-  { id: 'openai/gpt-5.6-terra', label: 'GPT 5.6 Terra' },
   { id: 'openai/gpt-5.6-sol', label: 'GPT 5.6 Sol' },
+  { id: 'openai/gpt-5.6-terra', label: 'GPT 5.6 Terra' },
+  { id: 'openai/gpt-5.6-luna', label: 'GPT 5.6 Luna' },
   { id: 'anthropic/claude-fable-5', label: 'Claude Fable 5' },
+  { id: 'anthropic/claude-opus-5', label: 'Claude Opus 5' },
   { id: 'anthropic/claude-opus-4.8', label: 'Claude Opus 4.8' },
   { id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5' },
 ];
@@ -36,14 +37,6 @@ const MODEL_ID = /^[a-z0-9][a-z0-9._~-]*\/[a-z0-9][a-z0-9._:+~-]*$/i;
 type AgentEffort = 'low' | 'medium' | 'high';
 const VALID_EFFORTS: ReadonlySet<string> = new Set<AgentEffort>(['low', 'medium', 'high']);
 
-/**
- * The provider brands whose FULL live catalog we expose. The picker shows every OpenAI / Anthropic /
- * Google model from OpenRouter, and the chat gate allows exactly these same brands — so the roster and
- * what actually runs can never drift apart (that drift is what caused the earlier "managed 400"). To add
- * a model outside these brands, list its exact id in `AGENT_ALLOWED_MODELS`.
- */
-const ALLOWED_BRANDS: ReadonlySet<string> = new Set(['openai', 'anthropic', 'google']);
-const brandRank: Record<string, number> = { openai: 0, anthropic: 1, google: 2 };
 /** Exclude non-chat model ids (embeddings, audio, image, moderation) that would fail a chat call. */
 const NON_CHAT =
   /(embed|embedding|whisper|\btts\b|audio|dall-e|dalle|\bimage\b|moderation|rerank|guard)/i;
@@ -246,10 +239,11 @@ export class AgentLlmService implements OnModuleInit {
   }
 
   /**
-   * Lobee's model roster, synced from the live OpenRouter catalog and cached for about an hour. Text-chat
-   * models remain available to Ask mode while `agentCapable` identifies the smaller set that satisfies
-   * the loop's structured-tool contract. The key stays server-side. A sync failure serves only a
-   * previously verified stale cache; a cold failure returns an empty roster rather than inventing models.
+   * Lobee's model roster: the pinned {@link FEATURED} seven, annotated from the live OpenRouter catalog
+   * and cached for about an hour. Text-chat models remain available to Ask mode while `agentCapable`
+   * identifies the smaller set that satisfies the loop's structured-tool contract. The key stays
+   * server-side. A sync failure serves only a previously verified stale cache; a cold failure returns an
+   * empty roster rather than inventing models.
    */
   async listModels(): Promise<AgentModelsResult> {
     const key = this.config.get<string>('OPENROUTER_API_KEY')?.trim();
@@ -293,27 +287,38 @@ export class AgentLlmService implements OnModuleInit {
       };
     }
 
-    // Expose live text-chat entries that accept the proxy's mandatory `max_tokens` spend bound. Curated
-    // FEATURED ids get their nicer label + ordering; a catalog entry that cannot accept the forwarded
-    // request contract is omitted rather than offered as a model that will fail at completion time.
-    const featuredMeta = new Map(FEATURED.map((f, i) => [f.id, { label: f.label, order: i }]));
+    // THE ROSTER IS A PRODUCT SURFACE, NOT A MIRROR OF OPENROUTER. The previous build walked the
+    // live catalog filtered by brand, so the dropdown offered the ENTIRE OpenAI / Anthropic /
+    // Google catalogs and FEATURED was only decoration (a nicer label plus sort order) — and a
+    // curated id the catalog happened to lack silently vanished. Inverted: FEATURED is walked in
+    // its own order, and the catalog's only job is to say whether each entry is live and what it
+    // can do. A curated id the catalog is missing (or cannot serve under the forwarded request
+    // contract — the mandatory `max_tokens` spend bound, text output, not expired) is STILL
+    // emitted, with `available: false`, so the picker greys it out instead of the model
+    // disappearing without explanation; `assertModelAllowed` requires `available`, so a greyed
+    // entry can never actually run. `AGENT_ALLOWED_MODELS` remains the escape hatch: live ids it
+    // names append AFTER the seven.
     const explicitlyAllowed = this.configuredModels();
-    const models: AgentModelInfo[] = [];
-    for (const [id, entry] of live) {
-      const brand = id.split('/')[0] ?? '';
+    /** Can this live catalog entry accept the request contract the proxy forwards? */
+    const servable = (id: string, entry: OpenRouterModel): boolean => {
       const supported = new Set(entry.supported_parameters ?? []);
-      if (
-        id.length > 300 ||
-        !MODEL_ID.test(id) ||
-        (!ALLOWED_BRANDS.has(brand) && !explicitlyAllowed.has(id)) ||
-        NON_CHAT.test(id) ||
-        !supported.has('max_tokens') ||
-        isExpired(entry.expiration_date) ||
-        isNonTextOutput(entry.architecture?.output_modalities)
-      ) {
-        continue;
-      }
-      const feat = featuredMeta.get(id);
+      return (
+        id.length <= 300 &&
+        MODEL_ID.test(id) &&
+        !NON_CHAT.test(id) &&
+        supported.has('max_tokens') &&
+        !isExpired(entry.expiration_date) &&
+        !isNonTextOutput(entry.architecture?.output_modalities)
+      );
+    };
+    /** Annotate one servable catalog entry with the capabilities the panel branches on. */
+    const describe = (
+      id: string,
+      label: string,
+      featured: boolean,
+      entry: OpenRouterModel,
+    ): AgentModelInfo => {
+      const supported = new Set(entry.supported_parameters ?? []);
       const reasoning = Boolean(
         entry.reasoning || supported.has('reasoning') || supported.has('include_reasoning'),
       );
@@ -326,28 +331,45 @@ export class AgentLlmService implements OnModuleInit {
       );
       const agentCapable =
         supported.has('tools') && supported.has('tool_choice') && supported.has('max_tokens');
-      models.push({
+      return {
         id,
-        label: feat?.label ?? entry.name ?? id,
-        brand,
-        featured: Boolean(feat),
+        label,
+        brand: id.split('/')[0] ?? '',
+        featured,
         available: true,
         agentCapable,
         reasoning,
         efforts: reasoning ? efforts : [],
         ...(entry.context_length ? { contextLength: entry.context_length } : {}),
-      });
+      };
+    };
+    const models: AgentModelInfo[] = [];
+    for (const { id, label } of FEATURED) {
+      const entry = live.get(id);
+      models.push(
+        entry && servable(id, entry)
+          ? describe(id, label, true, entry)
+          : // Greyed out, not gone — the curated label still names it, nothing about it can run.
+            {
+              id,
+              label,
+              brand: id.split('/')[0] ?? '',
+              featured: true,
+              available: false,
+              agentCapable: false,
+              reasoning: false,
+              efforts: [],
+            },
+      );
     }
-    // Group by brand (OpenAI, Anthropic, Google); featured first within each, then alphabetical.
-    models.sort((a, b) => {
-      const ra = brandRank[a.brand] ?? 9;
-      const rb = brandRank[b.brand] ?? 9;
-      if (ra !== rb) return ra - rb;
-      const fa = featuredMeta.get(a.id)?.order ?? Infinity;
-      const fb = featuredMeta.get(b.id)?.order ?? Infinity;
-      if (fa !== fb) return fa - fb;
-      return a.label.localeCompare(b.label);
-    });
+    // Env-configured extras append after the seven, in catalog order. Unlike FEATURED these are an
+    // operator's own additions, so an id the catalog cannot serve is omitted rather than seeded.
+    const pinned = new Set(FEATURED.map((f) => f.id));
+    for (const [id, entry] of live) {
+      if (pinned.has(id) || !explicitlyAllowed.has(id) || !servable(id, entry)) continue;
+      models.push(describe(id, entry.name ?? id, false, entry));
+    }
+    // No sort: FEATURED order IS the product order, and extras keep the catalog's own.
     const payload: AgentModelsResult = {
       updatedAt: new Date().toISOString(),
       stale: false,
