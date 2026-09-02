@@ -4,7 +4,48 @@ export const ALL_EFFORTS: Effort[] = ['low', 'medium', 'high'];
 export const EFFORT_LABEL: Record<Effort, string> = { low: 'Low', medium: 'Medium', high: 'High' };
 
 // Offline fallback roster (used before the live sync lands or when the bridge is unreachable).
+// Pinned to the seven managed models, in roster order; the backend remains the source of truth.
 export const FALLBACK_MODELS: ModelInfo[] = [
+  {
+    id: 'openai/gpt-5.6-sol',
+    label: 'GPT 5.6 Sol',
+    brand: 'openai',
+    efforts: ALL_EFFORTS,
+    available: false,
+    agentCapable: false,
+  },
+  {
+    id: 'openai/gpt-5.6-terra',
+    label: 'GPT 5.6 Terra',
+    brand: 'openai',
+    efforts: ALL_EFFORTS,
+    available: false,
+    agentCapable: false,
+  },
+  {
+    id: 'openai/gpt-5.6-luna',
+    label: 'GPT 5.6 Luna',
+    brand: 'openai',
+    efforts: ALL_EFFORTS,
+    available: false,
+    agentCapable: false,
+  },
+  {
+    id: 'anthropic/claude-fable-5',
+    label: 'Claude Fable 5',
+    brand: 'anthropic',
+    efforts: ALL_EFFORTS,
+    available: false,
+    agentCapable: false,
+  },
+  {
+    id: 'anthropic/claude-opus-5',
+    label: 'Claude Opus 5',
+    brand: 'anthropic',
+    efforts: ALL_EFFORTS,
+    available: false,
+    agentCapable: false,
+  },
   {
     id: 'anthropic/claude-opus-4.8',
     label: 'Claude Opus 4.8',
@@ -17,14 +58,6 @@ export const FALLBACK_MODELS: ModelInfo[] = [
     id: 'anthropic/claude-sonnet-5',
     label: 'Claude Sonnet 5',
     brand: 'anthropic',
-    efforts: ALL_EFFORTS,
-    available: false,
-    agentCapable: false,
-  },
-  {
-    id: 'openai/gpt-5.5',
-    label: 'GPT 5.5',
-    brand: 'openai',
     efforts: ALL_EFFORTS,
     available: false,
     agentCapable: false,
@@ -49,12 +82,6 @@ export interface Persisted {
   allowedDomains: string[];
   /** `null` is the persisted representation of an intentionally unlimited run. */
   tokenBudget: number | null;
-  /**
-   * The conversation the composer is currently writing into. Persisted so closing and reopening the
-   * panel continues the SAME conversation rather than silently starting a new one — the sidecar
-   * resolves prior turns from this id, so losing it would look exactly like amnesia.
-   */
-  threadId: string;
 }
 const DEFAULTS: Persisted = {
   mode: 'agent',
@@ -65,7 +92,6 @@ const DEFAULTS: Persisted = {
   autonomy: 'confirm',
   allowedDomains: [],
   tokenBudget: 100_000,
-  threadId: '',
 };
 
 export type AllowedDomainsResult = { ok: true; domains: string[] } | { ok: false; error: string };
@@ -174,10 +200,6 @@ function normalizePersisted(raw: Partial<Persisted>): Persisted {
     // run. Replacing it with [] would silently turn a requested fence into unrestricted browsing.
     allowedDomains: parsedDomains.ok ? parsedDomains.domains : storedDomains,
     tokenBudget,
-    threadId:
-      typeof raw.threadId === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(raw.threadId)
-        ? raw.threadId
-        : '',
   };
 }
 

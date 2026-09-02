@@ -6,7 +6,6 @@ import { test } from 'node:test';
 const {
   applyEvent,
   mergeStoredMetadata,
-  recentThreads,
   snapshotToTurn,
   storedToTurn,
   toStoredTurn,
@@ -64,6 +63,41 @@ test('a streamed reply is never replayed through the typewriter', () => {
   // Nothing streamed, so the finished answer is the first time this text appears on screen.
   const atOnce = applyEvent(running(), { type: 'run.finished', status: 'done', result: 'Hello' });
   assert.equal(atOnce.animateAnswer, true);
+});
+
+test('steps carry the event timestamp and action kind for the rail dots', () => {
+  let turn = applyEvent(running(), {
+    type: 'step.thinking',
+    step: 0,
+    ts: '2026-08-27T10:00:00.000Z',
+  });
+  assert.equal(turn.steps.get(0).ts, '2026-08-27T10:00:00.000Z');
+  assert.equal(turn.steps.get(0).kind, undefined);
+
+  turn = applyEvent(turn, {
+    type: 'step.action',
+    step: 0,
+    ts: '2026-08-27T10:00:01.000Z',
+    action: { kind: 'navigate', url: 'https://example.com/plans' },
+  });
+  assert.equal(turn.steps.get(0).ts, '2026-08-27T10:00:01.000Z');
+  assert.equal(turn.steps.get(0).kind, 'navigate');
+  assert.equal(turn.steps.get(0).done, true);
+
+  turn = applyEvent(turn, {
+    type: 'step.observation',
+    step: 0,
+    ts: '2026-08-27T10:00:02.000Z',
+    title: 'Pricing',
+  });
+  assert.equal(turn.steps.get(0).ts, '2026-08-27T10:00:02.000Z');
+  assert.equal(turn.steps.get(0).kind, 'navigate', 'an observation never erases the action kind');
+  assert.equal(turn.steps.get(0).ctx, 'Pricing');
+
+  // Events without a timestamp (older sidecars) still reduce into a renderable step.
+  const bare = applyEvent(running(), { type: 'step.action', step: 1, action: { kind: 'click' } });
+  assert.equal(bare.steps.get(1).ts, undefined);
+  assert.equal(bare.steps.get(1).kind, 'click');
 });
 
 test('finishing clears a pending stop question and settles the thinking step', () => {
@@ -203,24 +237,4 @@ test('metadata that verifies nothing is kept as its own row rather than shifted 
   assert.equal(merged.length, 2);
   assert.equal(merged[1].id, 77);
   assert.equal(merged[1].needsSecureMigration, true);
-});
-
-test('every conversation the index can reach is listed, current one first', () => {
-  const list = recentThreads(
-    [
-      { id: 1, threadId: 'old', status: 'done', startedAt: '2026-01-01T00:00:00.000Z' },
-      { id: 2, threadId: 'newer', status: 'done', startedAt: '2026-02-01T00:00:00.000Z' },
-      { id: 3, threadId: 'newer', status: 'done', startedAt: '2026-02-02T00:00:00.000Z' },
-      { id: 4, status: 'done' },
-    ],
-    'current',
-  );
-  assert.deepEqual(
-    list.map((thread) => thread.id),
-    ['current', 'newer', 'old'],
-  );
-  assert.equal(list[1].turns, 2);
-  assert.equal(list[1].at, '2026-02-02T00:00:00.000Z');
-  // A brand new conversation has no rows yet and still has to be reachable in the list.
-  assert.equal(list[0].turns, 0);
 });

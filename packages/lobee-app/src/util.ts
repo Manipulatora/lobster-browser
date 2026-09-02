@@ -11,16 +11,6 @@ export const hostOf = (u: string): string => {
   }
 };
 
-/** Compact label for a conversation in the chat list: a time today, a date before that. */
-export function chatTimestamp(iso: string, now: number = Date.now()): string {
-  const at = Date.parse(iso);
-  if (!Number.isFinite(at)) return '';
-  const date = new Date(at);
-  return new Date(now).toDateString() === date.toDateString()
-    ? date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-    : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-}
-
 function describeBrowserConfig(a: AgentAction): string {
   switch (a.op) {
     case 'clear_cookies':

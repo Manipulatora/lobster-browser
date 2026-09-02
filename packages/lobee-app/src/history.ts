@@ -48,28 +48,6 @@ export interface HistoryMatchResult {
   unmatchedMetadataIndices: number[];
 }
 
-/** Select only the retained run owned by the conversation currently open in the panel. */
-export function findSnapshotForThread<T extends { threadId?: string }>(
-  snapshots: readonly T[] | null | undefined,
-  threadId: string,
-): T | undefined {
-  return snapshots?.find((snapshot) => snapshot.threadId === threadId);
-}
-
-/**
- * A live run is attached to the turn ids in the conversation currently rendered by the panel.
- * Switching underneath it would let its event handler patch an unrelated turn with the same local
- * numeric id, so conversation navigation stays locked until that run reaches a terminal event.
- */
-export function canSwitchThread(
-  busy: boolean,
-  navigationLocked: boolean,
-  nextThreadId: string,
-  currentThreadId: string,
-): boolean {
-  return !busy && !navigationLocked && Boolean(nextThreadId) && nextThreadId !== currentThreadId;
-}
-
 /** Convert a failed retained-run attachment into a truthful terminal event instead of a stuck UI. */
 export function resumeFailureEvent(attached: boolean): {
   type: 'run.finished';

@@ -15,6 +15,10 @@ import type { AgentEvent, AgentRunSnapshot } from './types.ts';
 export interface Step {
   label: string;
   ctx: string;
+  /** When the sidecar last touched this step (ISO timestamp), for the rail dot's hover detail. */
+  ts?: string;
+  /** The action kind behind the step (`navigate`, `click`, …); a thinking step carries none yet. */
+  kind?: string;
   thinking: boolean;
   done: boolean;
 }
@@ -93,6 +97,7 @@ export function applyEvent(turn: Turn, ev: AgentEvent): Turn {
         thinking: true,
         done: false,
         label: 'Thinking',
+        ...(ev.ts ? { ts: ev.ts } : {}),
       });
       return { ...turn, steps };
     }
@@ -101,9 +106,14 @@ export function applyEvent(turn: Turn, ev: AgentEvent): Turn {
         thinking: false,
         label: describeAction(ev.action),
         done: true,
+        ...(ev.ts ? { ts: ev.ts } : {}),
+        ...(ev.action?.kind ? { kind: ev.action.kind } : {}),
       });
     case 'step.observation':
-      return upsert(ev.step ?? 0, { ctx: ev.title || hostOf(String(ev.url ?? '')) });
+      return upsert(ev.step ?? 0, {
+        ctx: ev.title || hostOf(String(ev.url ?? '')),
+        ...(ev.ts ? { ts: ev.ts } : {}),
+      });
     case 'run.needsInput':
       return {
         ...turn,
@@ -378,38 +388,4 @@ export function mergeStoredMetadata(encrypted: Turn[], stored: Turn[]): Turn[] {
   // Fail closed: body-less or ambiguous metadata is kept as its own local row. It is never shifted
   // onto a neighboring encrypted turn merely because counts happen to line up.
   return [...merged, ...result.unmatchedMetadataIndices.map((index) => stored[index]!)];
-}
-
-export interface ThreadSummary {
-  id: string;
-  /** Newest activity in the conversation — what the list is ordered and labelled by. */
-  at: string;
-  turns: number;
-}
-
-/**
- * Every conversation the local index can still reach, newest first.
- *
- * "New chat" only mints a new id and never deletes the previous thread, but that is only true from
- * the user's side if something can open the old one again. This is that list; the current
- * conversation is always in it, even before it has a single stored turn.
- */
-export function recentThreads(rows: readonly StoredTurn[], currentId: string): ThreadSummary[] {
-  const byThread = new Map<string, ThreadSummary>();
-  for (const row of rows) {
-    if (!row.threadId) continue;
-    const summary = byThread.get(row.threadId) ?? { id: row.threadId, at: '', turns: 0 };
-    summary.turns += 1;
-    if ((row.startedAt ?? '') > summary.at) summary.at = row.startedAt ?? '';
-    byThread.set(row.threadId, summary);
-  }
-  if (currentId && !byThread.has(currentId)) {
-    byThread.set(currentId, { id: currentId, at: '', turns: 0 });
-  }
-  return [...byThread.values()].sort((left, right) => {
-    if (left.id === currentId) return -1;
-    if (right.id === currentId) return 1;
-    // ISO-8601 sorts chronologically as text; a row with no timestamp sorts last rather than first.
-    return left.at < right.at ? 1 : left.at > right.at ? -1 : 0;
-  });
 }

@@ -1,12 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import {
-  canSwitchThread,
-  findSnapshotForThread,
-  matchThreadHistory,
-  resumeFailureEvent,
-  threadExchanges,
-} from './history.ts';
+import { matchThreadHistory, resumeFailureEvent, threadExchanges } from './history.ts';
 
 test('encrypted thread messages reconstruct tasks, outcomes, timestamps, and stable ids', () => {
   assert.deepEqual(
@@ -71,28 +65,6 @@ test('a latest legacy body retires only after one exact encrypted match', () => 
   );
   assert.deepEqual(ambiguous.matches, []);
   assert.deepEqual(ambiguous.unmatchedMetadataIndices, [0]);
-});
-
-test('new-chat reopen ignores a retained snapshot from the previous thread', () => {
-  const snapshots = [
-    { sessionId: 'old-run', threadId: 'old-thread' },
-    { sessionId: 'current-run', threadId: 'current-thread' },
-  ];
-  assert.equal(findSnapshotForThread(snapshots, 'new-thread'), undefined);
-  assert.deepEqual(findSnapshotForThread(snapshots, 'current-thread'), snapshots[1]);
-  assert.equal(
-    findSnapshotForThread([{ sessionId: 'legacy-without-thread' }], 'current-thread'),
-    undefined,
-    'thread-less snapshots fail closed instead of leaking into the current chat',
-  );
-});
-
-test('conversation switching is locked while a run still owns the rendered turn ids', () => {
-  assert.equal(canSwitchThread(true, false, 'other-thread', 'current-thread'), false);
-  assert.equal(canSwitchThread(false, true, 'other-thread', 'current-thread'), false);
-  assert.equal(canSwitchThread(false, false, 'other-thread', 'current-thread'), true);
-  assert.equal(canSwitchThread(false, false, 'current-thread', 'current-thread'), false);
-  assert.equal(canSwitchThread(false, false, '', 'current-thread'), false);
 });
 
 test('a retained run that cannot reattach becomes a truthful terminal error', () => {

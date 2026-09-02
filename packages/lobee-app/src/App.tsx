@@ -7,15 +7,14 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react';
-import { ChevronDownIcon, MagnifyingGlassIcon, CheckIcon } from '@heroicons/react/24/outline';
+import { ChevronDownIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { brandIcon } from './icons';
-import { canSwitchThread, findSnapshotForThread, resumeFailureEvent } from './history';
+import { resumeFailureEvent } from './history';
 import { renderMarkdown, stableBlockBoundary } from './md';
 import {
   fetchEntitlement,
   fetchModels,
   fetchStatus,
-  fetchThread,
   getBridge,
   resumeTask,
   runTask,
@@ -32,19 +31,7 @@ import {
   parseAllowedDomains,
   store,
 } from './models';
-import { loadTranscript, saveTranscript, type StoredTurn } from './transcript';
-import {
-  applyEvent,
-  mergeStoredMetadata,
-  recentThreads,
-  snapshotToTurn,
-  storedToTurn,
-  toStoredTurn,
-  turnsFromThread,
-  type ThreadSummary,
-  type Turn,
-} from './turns';
-import { chatTimestamp } from './util';
+import { applyEvent, snapshotToTurn, type Step, type Turn } from './turns';
 import type { AgentEntitlement, AgentEvent, Effort, Mode, ModelInfo } from './types';
 
 // ---------------------------------------------------------------------------------------------------
@@ -198,6 +185,30 @@ function Status({ turn, hasThinking }: { turn: Turn; hasThinking: boolean }) {
   );
 }
 
+/**
+ * The run's activity as a quiet rail: one dot per step beside a thin vertical line, instead of a
+ * step-by-step text feed. What happened stays reachable — each dot carries its step's label and page
+ * context in its hover title — without the run narrating itself down the panel. The status word above
+ * the rail remains the live announcement, so nothing here needs a role.
+ */
+function StepRail({ steps }: { steps: Array<[number, Step]> }) {
+  return (
+    <div className="relative flex flex-col gap-[7px] py-1 pl-2.5">
+      <span
+        aria-hidden="true"
+        className="absolute bottom-[7px] left-[12.5px] top-[7px] w-px bg-line"
+      />
+      {steps.map(([n, s]) => (
+        <span
+          key={n}
+          title={s.ctx ? `${s.label || '…'} — ${s.ctx}` : s.label || '…'}
+          className={`lobee-dot ${s.thinking ? 'is-active' : s.done ? 'is-done' : ''}`}
+        />
+      ))}
+    </div>
+  );
+}
+
 function TurnView({
   turn,
   canRetry,
@@ -220,18 +231,7 @@ function TurnView({
       </div>
       <div className="flex flex-col gap-1 px-0.5">
         <Status turn={turn} hasThinking={hasThinking} />
-        {steps.length > 0 && (
-          <div className="flex flex-col gap-[3px] pl-2.5">
-            {steps.map(([n, s]) => (
-              <div key={n} className="flex items-baseline gap-1.5 text-[12.5px] text-ink-soft">
-                <span className={s.thinking ? 'lobee-shine' : 'text-ink'}>{s.label || '…'}</span>
-                {s.ctx && (
-                  <span className="min-w-0 truncate text-[11.5px] text-ink-soft">{s.ctx}</span>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+        {steps.length > 0 && <StepRail steps={steps} />}
       </div>
       {turn.await && <AwaitBox turn={turn} onReply={onReply} />}
       {turn.answer && (
@@ -325,36 +325,9 @@ function AwaitBox({
     const delivered = await onReply(turn, text);
     if (!delivered) setSubmitting(false);
   };
-  if (a.kind === 'confirm') {
-    return (
-      <div className="flex flex-col gap-2 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2.5">
-        <div className="text-[13px] font-medium">{a.prompt}</div>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            className="rounded-lg border border-violet-600 bg-violet-600 px-3.5 py-1.5 font-semibold text-white"
-            disabled={submitting}
-            onClick={() => void submit('approve')}
-          >
-            Approve
-          </button>
-          <button
-            type="button"
-            className="rounded-lg border border-line-strong bg-white px-3.5 py-1.5 font-semibold text-ink"
-            disabled={submitting}
-            onClick={() => void submit('reject')}
-          >
-            Reject
-          </button>
-        </div>
-        {turn.inputError && (
-          <div role="alert" className="text-[12px] text-red-600">
-            {turn.inputError}
-          </div>
-        )}
-      </div>
-    );
-  }
+  // The approve/reject branch is gone with the approval system itself: the agent core no longer
+  // emits `run.needsInput kind:'confirm'` — every action proceeds autonomously, so the only thing
+  // a run can still wait on is a genuine question (credentials, a missing fact) handled below.
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2.5">
       <div className="text-[13px] font-medium">{a.prompt}</div>
@@ -472,7 +445,7 @@ function Popover({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   // Opening a menu moves focus into it, which is the only way a keyboard user can reach the options
-  // at all. A popover that autofocuses its own search field has already claimed focus by this point.
+  // at all. With no autofocused child of its own, the first enabled option or control takes focus.
   useEffect(() => {
     const el = ref.current;
     if (!el || el.contains(document.activeElement)) return;
@@ -506,7 +479,6 @@ export function App() {
   const [mode, setMode] = useState<Mode>('agent');
   const [model, setModel] = useState('anthropic/claude-opus-4.8');
   const [effort, setEffort] = useState<Effort>('medium');
-  const [autonomy, setAutonomy] = useState<'auto' | 'confirm'>('confirm');
   const [allowedDomainsText, setAllowedDomainsText] = useState('');
   const [tokenBudget, setTokenBudget] = useState<number | null>(100_000);
   const [models, setModels] = useState<ModelInfo[]>(FALLBACK_MODELS);
@@ -523,37 +495,17 @@ export function App() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const [switchingThread, setSwitchingThread] = useState(false);
-  const switchingThreadRef = useRef(false);
   const [stopping, setStopping] = useState(false);
   /**
-   * How much of the conversation is settled.
-   *
-   * 'ready' is the only state that may write to local storage — a transient bridge failure must never
-   * be allowed to retire a retained plaintext body. 'unavailable' is nonetheless a settled state: the
-   * turn ids are final, so the composer stays usable and the run path can report the real reason
-   * instead of the panel presenting a permanently dead textarea.
+   * True while the mount check for a retained still-running run is in flight. The composer stays
+   * closed until it settles, so a task cannot be submitted over a run that is about to reattach.
    */
-  const [transcriptState, setTranscriptState] = useState<'loading' | 'ready' | 'unavailable'>(
-    'loading',
-  );
-  const transcriptReady = transcriptState === 'ready';
-  const [historyError, setHistoryError] = useState('');
-  const [historyRetry, setHistoryRetry] = useState(0);
+  const [resuming, setResuming] = useState(true);
+  /** Bumped to re-run the reattach check — after a reconnect. */
+  const [resumeRetry, setResumeRetry] = useState(0);
   /** Bumped to re-ask what the account may do — after a reconnect, and after any refused run. */
   const [entitlementRetry, setEntitlementRetry] = useState(0);
-  const [menu, setMenu] = useState<'chats' | 'mode' | 'model' | 'effort' | 'policy' | null>(null);
-  const [query, setQuery] = useState('');
-  /** Conversation the composer writes into; hydrated from storage, replaced by "New chat". */
-  const [threadId, setThreadId] = useState('');
-  /** Conversations the local index can still reach, rebuilt each time the chat list is opened. */
-  const [threads, setThreads] = useState<ThreadSummary[]>([]);
-  const [threadPreviews, setThreadPreviews] = useState<Record<string, string>>({});
-  // Both mount effects may read storage concurrently. Reusing one fallback prevents them from minting
-  // two conversation ids and making the first submitted turn impossible to hydrate later.
-  const initialThreadId = useRef(newThreadId());
-  /** Rows owned by other chats, retained so New chat never destroys an unverified legacy migration. */
-  const retainedOtherThreads = useRef<StoredTurn[]>([]);
+  const [menu, setMenu] = useState<'mode' | 'model' | 'effort' | 'policy' | null>(null);
   const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const closeMenu = useCallback((restoreFocus = true) => {
@@ -561,104 +513,23 @@ export function App() {
     if (restoreFocus) menuTriggerRef.current?.focus();
   }, []);
   const openMenu = useCallback(
-    (name: 'chats' | 'mode' | 'model' | 'effort' | 'policy', trigger: HTMLButtonElement) => {
+    (name: 'mode' | 'model' | 'effort' | 'policy', trigger: HTMLButtonElement) => {
       menuTriggerRef.current = trigger;
       setMenu((current) => (current === name ? null : name));
     },
     [],
   );
 
-  /** Hand the conversation currently on screen to the local index before leaving it. */
-  const retainCurrentRows = useCallback(async () => {
-    const currentRows = turns.map(toStoredTurn).filter((turn): turn is StoredTurn => turn !== null);
-    retainedOtherThreads.current = [...retainedOtherThreads.current, ...currentRows];
-    await saveTranscript(retainedOtherThreads.current);
-  }, [turns]);
-
   /**
-   * Begin a fresh conversation. The old thread stays on disk — this mints a new id rather than
-   * deleting anything, so "New chat" means "start clean", never "destroy what I had". Per-domain
-   * learned facts are profile-scoped and deliberately survive: they are knowledge, not conversation.
+   * Clear the finished conversation from view. Nothing is deleted anywhere else because nothing is
+   * kept anywhere else: turns live only in this panel's memory, and every submitted task already
+   * starts a fresh conversation. Per-domain learned facts are profile-scoped and deliberately
+   * survive: they are knowledge, not conversation.
    */
-  const startNewChat = useCallback(async () => {
-    if (busyRef.current || switchingThreadRef.current) return;
-    switchingThreadRef.current = true;
-    setSwitchingThread(true);
-    try {
-      const id = newThreadId();
-      await retainCurrentRows();
-      // The submit path observes switchingThreadRef synchronously. Rechecking the live run bit here
-      // also protects against a non-composer source attaching a run while storage was pending.
-      if (busyRef.current) return;
-      store.set({ threadId: id });
-      setThreadId(id);
-      setTurns([]);
-    } finally {
-      switchingThreadRef.current = false;
-      setSwitchingThread(false);
-    }
-  }, [retainCurrentRows]);
-
-  /** Reopen an earlier conversation, re-reading its bodies from encrypted memory. */
-  const openThread = useCallback(
-    async (id: string) => {
-      closeMenu();
-      if (!canSwitchThread(busyRef.current, switchingThreadRef.current, id, threadId)) return;
-      switchingThreadRef.current = true;
-      setSwitchingThread(true);
-      try {
-        // The reload re-reads the index from storage, so the rows on screen have to be in it first.
-        await retainCurrentRows();
-        if (busyRef.current) return;
-        store.set({ threadId: id });
-        setThreadId(id);
-        setTurns([]);
-        setHistoryRetry((value) => value + 1);
-      } finally {
-        switchingThreadRef.current = false;
-        setSwitchingThread(false);
-      }
-    },
-    [closeMenu, retainCurrentRows, threadId],
-  );
-
-  /**
-   * Label the conversations in the list with their opening message.
-   *
-   * Tasks are not kept locally once their encrypted counterpart is verified, so the only honest label
-   * comes from the thread store itself. A thread that cannot be read keeps its neutral placeholder
-   * rather than the list inventing a title for it.
-   */
-  const loadThreadPreviews = useCallback(
-    async (list: readonly ThreadSummary[], known: Record<string, string>) => {
-      for (const summary of list.slice(0, 8)) {
-        if (known[summary.id]) continue;
-        const loaded = await fetchThread(summary.id);
-        if (!loaded.ok) continue;
-        const first = loaded.messages.find((message) => message.role === 'user');
-        if (!first?.content) continue;
-        setThreadPreviews((current) => ({ ...current, [summary.id]: first.content.slice(0, 140) }));
-      }
-    },
-    [],
-  );
-
-  const openChats = useCallback(
-    async (trigger: HTMLButtonElement) => {
-      if (busyRef.current || switchingThreadRef.current) return;
-      if (menu === 'chats') {
-        closeMenu();
-        return;
-      }
-      const list = recentThreads(await loadTranscript(), threadId);
-      // Do not open stale navigation over a run that began while storage was being read.
-      if (busyRef.current || switchingThreadRef.current) return;
-      setThreads(list);
-      openMenu('chats', trigger);
-      void loadThreadPreviews(list, threadPreviews);
-    },
-    [closeMenu, loadThreadPreviews, menu, openMenu, threadId, threadPreviews],
-  );
+  const clearTurns = useCallback(() => {
+    if (busyRef.current) return;
+    setTurns([]);
+  }, []);
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
@@ -688,14 +559,8 @@ export function App() {
       setMode(p.mode === 'ask' ? 'ask' : 'agent');
       setModel(p.model);
       setEffort(ALL_EFFORTS.includes(p.effort) ? p.effort : 'medium');
-      setAutonomy(p.autonomy);
       setAllowedDomainsText(p.allowedDomains.join(', '));
       setTokenBudget(p.tokenBudget);
-      // First ever open (or storage cleared) starts a conversation rather than running thread-less,
-      // which would silently disable memory.
-      const resolvedThread = p.threadId || initialThreadId.current;
-      if (!p.threadId) store.set({ threadId: resolvedThread });
-      setThreadId(resolvedThread);
       const bridge = await getBridge();
       if (!alive) return;
       setBridgeReady(bridge !== null);
@@ -817,205 +682,40 @@ export function App() {
     if (ev.status === 'error') setEntitlementRetry((value) => value + 1);
   }, []);
 
-  // Restore capped terminal history, then reconcile the sidecar's retained latest snapshot. Running
-  // sessions are reattached to the replayable event stream so closing/reopening the panel is harmless.
+  // Reattach to a run the sidecar retained while the panel was closed or reloading. Conversations
+  // are deliberately not restored — every submit starts a fresh one and turns live only in this
+  // panel's memory — so the single thing worth recovering on mount is a run that is still going (or
+  // waiting on input). It reattaches to the replayable event stream, which is what keeps closing and
+  // reopening the panel harmless mid-run.
   useEffect(() => {
     let alive = true;
-    setTranscriptState('loading');
+    setResuming(true);
     void (async () => {
-      const [stored, snapshots, preferences] = await Promise.all([
-        loadTranscript(),
-        fetchStatus(),
-        store.get(),
-      ]);
+      const snapshots = await fetchStatus();
       if (!alive) return;
-      const resolvedThread = preferences.threadId || initialThreadId.current;
-      if (!preferences.threadId) store.set({ threadId: resolvedThread });
-      setThreadId(resolvedThread);
-
-      // Builds before the encrypted-history handoff omitted `threadId` from every local row even
-      // though their runs were already written to the current encrypted thread. Associate those rows
-      // with the persisted conversation once, then let the encrypted copy supply their bodies.
-      const resolvedRows = stored.map((row) =>
-        row.threadId ? row : { ...row, threadId: resolvedThread },
-      );
-      retainedOtherThreads.current = resolvedRows.filter((row) => row.threadId !== resolvedThread);
-      const indexed = resolvedRows
-        .map(storedToTurn)
-        .filter((turn) => turn.threadId === resolvedThread);
-      const loadedThread = await fetchThread(resolvedThread);
+      setResuming(false);
+      // A retry must never attach a run that is already delivering events into a rendered turn.
+      const snapshot = busyRef.current
+        ? undefined
+        : snapshots?.find((item) => item.status === 'running' || item.status === 'awaiting_input');
+      if (!snapshot) return;
+      const id = nextId.current++;
+      setTurns((prev) => [...prev, snapshotToTurn(snapshot, id, snapshot.threadId ?? '')]);
+      busyRef.current = true;
+      setBusy(true);
+      const attached = await resumeTask(snapshot.sessionId, {
+        onEvent: (event) => patchTurn(id, event),
+      });
       if (!alive) return;
-      if (!loadedThread.ok) {
-        // Keep legacy bodies exactly as loaded and, crucially, never reach 'ready' so the persistence
-        // effect cannot erase/migrate anything based on a transient bridge failure. The ids are final
-        // either way, so a new turn appended from here still gets one that cannot collide.
-        nextId.current = Math.max(0, ...indexed.map((turn) => turn.id)) + 1;
-        setTurns(indexed);
-        setHistoryError(loadedThread.error);
-        setTranscriptState('unavailable');
-        return;
-      }
-      setHistoryError('');
-
-      let hydrated = mergeStoredMetadata(
-        turnsFromThread(loadedThread.messages, resolvedThread),
-        indexed,
-      ).map((turn, index) => ({ ...turn, id: index + 1 }));
-
-      // A retained snapshot belongs to exactly one conversation. A terminal snapshot from a previous
-      // chat must not reappear after New chat, and a running old-thread run must never attach here.
-      const snapshot = findSnapshotForThread(snapshots, resolvedThread);
-      let live: { id: number; sessionId: string } | null = null;
-      if (snapshot) {
-        let existing = hydrated.findIndex((turn) => turn.sessionId === snapshot.sessionId);
-        // A terminal run is appended to encrypted memory before its finish event. On a fresh panel
-        // that turn has no local session metadata yet, so match the newest identical exchange instead
-        // of rendering a duplicate snapshot beside it.
-        if (existing < 0 && snapshot.status !== 'running' && snapshot.status !== 'awaiting_input') {
-          const status =
-            snapshot.status === 'done' ? 'done' : snapshot.status === 'error' ? 'error' : 'stopped';
-          const response =
-            status === 'done'
-              ? snapshot.result || ''
-              : snapshot.error || snapshot.result || 'The run ended without a result.';
-          const candidates = hydrated.flatMap((turn, index) =>
-            turn.threadId === resolvedThread &&
-            turn.task === snapshot.task &&
-            turn.status === status &&
-            (status === 'done' ? turn.answer : turn.failure) === response
-              ? [index]
-              : [],
-          );
-          if (candidates.length === 1) existing = candidates[0]!;
-        }
-        const id =
-          existing >= 0
-            ? hydrated[existing]!.id
-            : Math.max(0, ...hydrated.map((turn) => turn.id)) + 1;
-        const reconciled = snapshotToTurn(snapshot, id, snapshot.threadId!);
-        if (existing >= 0) {
-          const prior = hydrated[existing]!;
-          hydrated[existing] = {
-            ...reconciled,
-            threadId: prior.threadId || snapshot.threadId,
-            ...(prior.turnKey ? { turnKey: prior.turnKey } : {}),
-            answer: reconciled.answer || prior.answer,
-            failure: reconciled.failure || prior.failure,
-            steps: prior.steps.size ? prior.steps : reconciled.steps,
-            tokensIn: prior.tokensIn,
-            tokensOut: prior.tokensOut,
-            cachedTokensIn: prior.cachedTokensIn,
-          };
-        } else {
-          hydrated.push(reconciled);
-        }
-        if (snapshot.status === 'running' || snapshot.status === 'awaiting_input') {
-          live = { id, sessionId: snapshot.sessionId };
-        }
-      }
-      nextId.current = Math.max(0, ...hydrated.map((turn) => turn.id)) + 1;
-      setTurns(hydrated);
-      setTranscriptState('ready');
-      if (live) {
-        busyRef.current = true;
-        setBusy(true);
-        const currentLive = live;
-        void resumeTask(currentLive.sessionId, {
-          onEvent: (event) => patchTurn(currentLive.id, event),
-        }).then((attached) => {
-          if (!alive) return;
-          const failure = resumeFailureEvent(attached);
-          if (!failure) return;
-          setBridgeReady(false);
-          patchTurn(currentLive.id, failure);
-        });
-      }
+      const failure = resumeFailureEvent(attached);
+      if (!failure) return;
+      setBridgeReady(false);
+      patchTurn(id, failure);
     })();
     return () => {
       alive = false;
     };
-  }, [patchTurn, historyRetry]);
-
-  useEffect(() => {
-    if (!transcriptReady) return;
-    let cancelled = false;
-    const timer = setTimeout(() => {
-      void (async () => {
-        const loaded = await fetchThread(threadId);
-        if (cancelled) return;
-        if (!loaded.ok) {
-          // Do not discard the only copy of a newly-finished turn until its encrypted counterpart is
-          // verified. The existing migration format keeps a bounded, redacted fallback body; a later
-          // successful fetch clears it through exact/stable-id matching.
-          const fallback = turns
-            .map(toStoredTurn)
-            .filter((turn): turn is StoredTurn => turn !== null);
-          await saveTranscript([...retainedOtherThreads.current, ...fallback]);
-          if (cancelled) return;
-          setHistoryError(loaded.error);
-          // A history read can fail while the current run is still producing events. Keep the
-          // persistence effect armed until that run reaches a terminal state; otherwise its final
-          // fallback is never written. Once terminal, stop writing until Retry has re-established the
-          // encrypted source of truth.
-          if (!turns.some((turn) => turn.status === 'running')) setTranscriptState('unavailable');
-          return;
-        }
-        const local = turns.filter(
-          (turn) =>
-            turn.localRecord &&
-            (turn.status === 'done' || turn.status === 'error' || turn.status === 'stopped'),
-        );
-        const secured = mergeStoredMetadata(turnsFromThread(loaded.messages, threadId), local);
-        const terminal = secured
-          .map(toStoredTurn)
-          .filter((turn): turn is StoredTurn => turn !== null);
-        await saveTranscript([...retainedOtherThreads.current, ...terminal]);
-        if (cancelled) return;
-
-        setHistoryError('');
-        // Persisting the body-less metadata is only half of the migration. Reflect the exact matches
-        // in memory as well, or New chat can serialize the stale `needsSecureMigration` turn and
-        // reintroduce plaintext that was already verified in encrypted storage.
-        const verified = new Map<number, Turn>();
-        for (const candidate of secured) {
-          if (
-            candidate.localRecord &&
-            !candidate.needsSecureMigration &&
-            local.some((turn) => turn.id === candidate.id && turn.needsSecureMigration)
-          ) {
-            verified.set(candidate.id, candidate);
-          }
-        }
-        if (verified.size) {
-          setTurns((current) => {
-            let changed = false;
-            const next = current.map((turn) => {
-              const exact = verified.get(turn.id);
-              if (
-                !exact ||
-                !turn.needsSecureMigration ||
-                turn.threadId !== threadId ||
-                (turn.status !== 'done' && turn.status !== 'error' && turn.status !== 'stopped')
-              ) {
-                return turn;
-              }
-              changed = true;
-              return {
-                ...turn,
-                needsSecureMigration: false,
-                ...(exact.turnKey ? { turnKey: exact.turnKey } : {}),
-              };
-            });
-            return changed ? next : current;
-          });
-        }
-      })();
-    }, 200);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [transcriptReady, threadId, turns]);
+  }, [patchTurn, resumeRetry]);
 
   const onReply = useCallback(async (turn: Turn, text: string): Promise<boolean> => {
     try {
@@ -1067,13 +767,12 @@ export function App() {
   const locked = entitlement !== null && !entitlement.entitled;
 
   /** Whether a new message can be sent right now — the one condition Retry and the composer share. */
-  const canSubmit =
-    transcriptState !== 'loading' && composerReady && !busy && !switchingThread && !locked;
+  const canSubmit = !resuming && composerReady && !busy && !locked;
 
   const submit = useCallback(async () => {
     const el = inputRef.current;
     const task = (el?.value ?? '').trim();
-    if (!task || !canSubmit || busyRef.current || switchingThreadRef.current) return;
+    if (!task || !canSubmit || busyRef.current) return;
     if (!allowedDomains.ok) {
       setMenu('policy');
       return;
@@ -1083,11 +782,13 @@ export function App() {
       autogrow();
     }
     const id = nextId.current++;
+    // Every submitted task is its own conversation. Minting the id here — not at mount, not via a
+    // "New chat" gesture — is what guarantees no earlier task's exchange can bleed into this run.
+    const threadId = newThreadId();
     const turn: Turn = {
       id,
       threadId,
       localRecord: true,
-      // Cleared only after mergeStoredMetadata verifies the encrypted thread copy.
       needsSecureMigration: true,
       task,
       startedAt: new Date().toISOString(),
@@ -1116,7 +817,9 @@ export function App() {
         model,
         effort: efforts.length ? effort : undefined,
         threadId,
-        autonomy,
+        // Per-action review is retired from the panel; the agent runs uninterrupted. The core's
+        // unconditional consequential-action gates still apply regardless of this value.
+        autonomy: 'auto',
         allowedDomains: allowedDomains.domains,
         tokenBudget,
       },
@@ -1137,8 +840,6 @@ export function App() {
     model,
     effort,
     efforts,
-    threadId,
-    autonomy,
     allowedDomains,
     tokenBudget,
     autogrow,
@@ -1148,11 +849,11 @@ export function App() {
 
   /**
    * Run a past message again. It re-submits through the ordinary path rather than replaying anything,
-   * so the retry is a real new turn: it lands in the thread, gets its own steps, and can be stopped.
+   * so the retry is a real new turn: its own fresh conversation, its own steps, and it can be stopped.
    */
   const regenerate = useCallback(
     (turn: Turn) => {
-      if (!canSubmit || busyRef.current || switchingThreadRef.current) return;
+      if (!canSubmit || busyRef.current) return;
       fillComposer(turn.task);
       void submit();
     },
@@ -1201,7 +902,7 @@ export function App() {
     setBridgeReady(null);
     const bridge = await getBridge(true);
     setBridgeReady(bridge !== null);
-    setHistoryRetry((value) => value + 1);
+    setResumeRetry((value) => value + 1);
     setEntitlementRetry((value) => value + 1);
   }, []);
 
@@ -1210,66 +911,10 @@ export function App() {
 
   return (
     <div className="flex h-screen flex-col bg-white">
-      <header className="flex items-center justify-between gap-2 border-b border-line px-3.5 py-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <img src="./icons/lobee-48.png" alt="" className="h-4 w-4 shrink-0 rounded-sm" />
-          <span className="text-[0.8125rem] font-medium text-ink">Lobee</span>
-        </div>
+      {/* No in-app brand row: the browser's own side-panel title bar already shows the icon and
+          name, so repeating them here rendered the logo twice on every fresh panel. */}
+      <header className="flex items-center justify-end gap-2 border-b border-line px-3.5 py-2">
         <div className="flex shrink-0 items-center gap-0.5">
-          {/* Conversations. "New chat" only mints a new id, which is only true from the user's side
-              while something can still open the previous one. */}
-          <div className="relative">
-            <Trigger
-              open={menu === 'chats'}
-              controls="lobee-chats-menu"
-              disabled={busy || switchingThread}
-              onToggle={(trigger) => void openChats(trigger)}
-            >
-              <span>Chats</span>
-            </Trigger>
-            {menu === 'chats' && (
-              <Popover
-                id="lobee-chats-menu"
-                role="menu"
-                label="Conversations"
-                className={`${menuCls} right-0 top-[calc(100%+8px)] w-[248px]`}
-                triggerRef={menuTriggerRef}
-                onDismiss={() => closeMenu(false)}
-              >
-                {threads.length === 0 && (
-                  <div className="px-2 py-3 text-[12px] text-ink-soft">No conversations yet.</div>
-                )}
-                {threads.map((thread) => {
-                  const isCurrent = thread.id === threadId;
-                  return (
-                    <button
-                      key={thread.id}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={isCurrent}
-                      onClick={() => void openThread(thread.id)}
-                      className="flex w-full flex-col gap-px rounded-lg px-2.5 py-2 text-left hover:bg-violet-50"
-                    >
-                      <span
-                        className={`w-full truncate text-[12.5px] ${isCurrent ? 'font-semibold text-violet-700' : 'text-ink'}`}
-                      >
-                        {threadPreviews[thread.id] ||
-                          (isCurrent ? 'This conversation' : 'Untitled')}
-                      </span>
-                      <span className="text-[11px] text-ink-soft">
-                        {[
-                          isCurrent ? 'Current' : chatTimestamp(thread.at),
-                          thread.turns === 1 ? '1 message' : `${thread.turns} messages`,
-                        ]
-                          .filter(Boolean)
-                          .join(' · ')}
-                      </span>
-                    </button>
-                  );
-                })}
-              </Popover>
-            )}
-          </div>
           {busy ? (
             // The sidecar has always exposed POST /stop and the bridge has always had stopRun(); the
             // panel simply never called it, so a long agent run could not be cancelled from the UI.
@@ -1285,12 +930,12 @@ export function App() {
           ) : (
             <button
               type="button"
-              onClick={() => void startNewChat()}
-              disabled={turns.length === 0 || !transcriptReady || switchingThread}
-              title="Start a new conversation"
+              onClick={clearTurns}
+              disabled={turns.length === 0}
+              title="Clear the finished conversation from this panel"
               className="rounded-lg px-2 py-1 text-[0.75rem] text-ink-soft transition-colors hover:bg-violet-50 hover:text-violet-700 disabled:pointer-events-none disabled:opacity-40"
             >
-              New chat
+              Clear
             </button>
           )}
         </div>
@@ -1304,24 +949,13 @@ export function App() {
         }}
       >
         <div ref={contentRef} role="log" aria-live="off" className="flex flex-col gap-2.5">
-          {bridgeReady === false ? (
+          {bridgeReady === false && (
             <Notice
               headline="Not connected to this profile"
               detail={NO_BRIDGE_REASON}
               action="Try again"
               onAction={() => void reconnect()}
             />
-          ) : (
-            historyError && (
-              <Notice
-                headline="Earlier messages could not be loaded"
-                // The captured reason is the only thing that separates "the service isn't running"
-                // from "the token rotated" from "a 500", for the user and for support alike.
-                detail={`${asSentence(historyError)} Nothing was deleted — reconnecting brings them back.`}
-                action="Retry"
-                onAction={() => setHistoryRetry((value) => value + 1)}
-              />
-            )
           )}
           {visibleTurns.map((turn) => (
             <TurnView
@@ -1333,10 +967,9 @@ export function App() {
               onStop={() => void requestStop()}
             />
           ))}
-          {visibleTurns.length === 0 &&
-            transcriptState !== 'loading' &&
-            bridgeReady !== false &&
-            !locked && <EmptyState mode={mode} modelLabel={modelLabel} onPick={fillComposer} />}
+          {visibleTurns.length === 0 && !resuming && bridgeReady !== false && !locked && (
+            <EmptyState mode={mode} modelLabel={modelLabel} onPick={fillComposer} />
+          )}
         </div>
       </main>
 
@@ -1356,11 +989,11 @@ export function App() {
           <textarea
             ref={inputRef}
             aria-label="Message Lobee"
-            disabled={transcriptState === 'loading' || !composerReady}
+            disabled={resuming || !composerReady}
             rows={1}
             placeholder={
-              transcriptState === 'loading'
-                ? 'Loading conversation…'
+              resuming
+                ? 'Connecting…'
                 : composerReady
                   ? 'Message Lobee…'
                   : mode === 'agent'
@@ -1450,12 +1083,9 @@ export function App() {
                     models={models}
                     mode={mode}
                     selected={model}
-                    query={query}
-                    setQuery={setQuery}
                     onPick={(id) => {
                       setModel(id);
                       store.set({ model: id });
-                      setQuery('');
                       closeMenu();
                     }}
                   />
@@ -1463,7 +1093,8 @@ export function App() {
               )}
             </div>
 
-            {/* Run policy */}
+            {/* Run limits. There is deliberately no review/auto toggle any more: the agent runs
+                uninterrupted, and the core's unconditional consequential-action gates still ask. */}
             <div className="relative ml-auto min-w-0">
               <Trigger
                 open={menu === 'policy'}
@@ -1471,56 +1102,21 @@ export function App() {
                 haspopup="dialog"
                 onToggle={(trigger) => openMenu('policy', trigger)}
               >
-                <span>{autonomy === 'confirm' ? 'Review' : 'Auto'}</span>
+                <span>Limits</span>
               </Trigger>
               {menu === 'policy' && (
                 <Popover
                   id="lobee-policy-menu"
                   role="dialog"
-                  label="Run policy"
+                  label="Run limits"
                   className={`${menuCls} ${upward} right-0 w-[280px] p-3`}
                   triggerRef={menuTriggerRef}
                   onDismiss={() => closeMenu(false)}
                 >
                   <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-ink-soft">
-                    Run policy
+                    Run limits
                   </div>
-                  <div
-                    role="radiogroup"
-                    aria-label="Run policy"
-                    className="grid grid-cols-2 gap-1 rounded-lg bg-violet-50 p-1"
-                  >
-                    {(
-                      [
-                        ['confirm', 'Review changes'],
-                        ['auto', 'Run automatically'],
-                      ] as const
-                    ).map(([value, label]) => (
-                      <button
-                        key={value}
-                        type="button"
-                        role="radio"
-                        aria-checked={autonomy === value}
-                        className={`rounded-md px-2 py-1.5 text-[11.5px] font-semibold ${
-                          autonomy === value
-                            ? 'bg-white text-violet-700 shadow-sm'
-                            : 'text-ink-soft hover:text-ink'
-                        }`}
-                        onClick={() => {
-                          setAutonomy(value);
-                          store.set({ autonomy: value });
-                        }}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                  <p className="mt-1.5 text-[10.5px] leading-4 text-ink-soft">
-                    Review pauses before every browser change. Critical actions always ask in either
-                    mode.
-                  </p>
-
-                  <label className="mt-3 block text-[11.5px] font-semibold text-ink">
+                  <label className="block text-[11.5px] font-semibold text-ink">
                     Allowed domains
                     <input
                       type="text"
@@ -1620,48 +1216,28 @@ export function App() {
   );
 }
 
+// The roster is rendered exactly as the backend serves it — a short managed list needs no search bar.
 function ModelMenu({
   models,
   mode,
   selected,
-  query,
-  setQuery,
   onPick,
 }: {
   models: ModelInfo[];
   mode: Mode;
   selected: string;
-  query: string;
-  setQuery: (q: string) => void;
   onPick: (id: string) => void;
 }) {
-  const q = query.trim().toLowerCase();
-  const filtered = q
-    ? models.filter((m) => m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q))
-    : models;
   const brands: string[] = [];
-  for (const m of filtered) if (!brands.includes(m.brand)) brands.push(m.brand);
+  for (const m of models) if (!brands.includes(m.brand)) brands.push(m.brand);
   return (
     <>
-      <div className="sticky top-0 -m-1.5 mb-1 flex items-center gap-1.5 border-b border-line bg-white px-2 py-1.5">
-        <MagnifyingGlassIcon className="h-3.5 w-3.5 text-ink-soft" />
-        <input
-          autoFocus
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search models…"
-          className="w-full bg-transparent text-[13px] outline-none placeholder:text-ink-soft"
-        />
-      </div>
-      {filtered.length === 0 && (
-        <div className="px-2 py-3 text-[12px] text-ink-soft">No models match.</div>
-      )}
       {brands.map((brand) => (
         <div key={brand}>
           <div className="px-2 pb-1 pt-2 text-[10.5px] font-bold uppercase tracking-wider text-ink-soft">
             {brandTitle(brand)}
           </div>
-          {filtered
+          {models
             .filter((m) => m.brand === brand)
             .map((m) => {
               const sel = m.id === selected;
@@ -1704,14 +1280,6 @@ function ModelMenu({
       ))}
     </>
   );
-}
-
-/** Bridge messages are fragments ('bridge not configured for this profile'); make one read as prose. */
-function asSentence(text: string): string {
-  const trimmed = text.trim();
-  if (!trimmed) return '';
-  const opened = trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
-  return /[.!?]$/.test(opened) ? opened : `${opened}.`;
 }
 
 /** A standing condition the user can act on: what happened, why, and the one control that retries. */

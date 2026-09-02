@@ -120,6 +120,44 @@ body {
   }
 }
 
+/* Quiet run rail: one dot per agent step beside a thin vertical line. A settled step is a solid
+   mark, the active step breathes on the same rhythm as the status word, and the step's text lives
+   in the dot's hover title rather than narrating itself down the panel. */
+.lobee-dot {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--line-strong);
+}
+.lobee-dot.is-done {
+  background: var(--violet-600);
+}
+.lobee-dot.is-active {
+  background: var(--violet-600);
+  animation: lobee-breathe-dot 1.35s ease-in-out infinite;
+}
+@keyframes lobee-breathe-dot {
+  0%,
+  100% {
+    background: var(--ink-soft);
+    opacity: 0.7;
+  }
+  50% {
+    background: var(--violet-600);
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lobee-dot.is-active {
+    animation: none;
+    background: var(--violet-600);
+    opacity: 1;
+  }
+}
+
 /* Progressive answer cursor. The text reveal is time-bounded in React; the cursor disappears as
    soon as the exact final Markdown has been rendered. */
 .lobee-answer.is-typing .md > :last-child::after,
