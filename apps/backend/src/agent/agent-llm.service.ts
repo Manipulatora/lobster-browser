@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   ServiceUnavailableException,
+  type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -31,6 +32,16 @@ const FEATURED: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5' },
 ];
 const MODELS_CACHE_MS = 60 * 60 * 1000;
+/**
+ * How long a failed catalog sync is remembered before OpenRouter is asked again.
+ *
+ * Without it, a catalog that was down when the process started was re-fetched by EVERY request —
+ * each one waiting out the full sync timeout and then failing with a 400 the panel rendered as a
+ * model error, at whatever rate Lobee was stepping.
+ */
+const MODELS_SYNC_RETRY_MS = 60 * 1000;
+/** The background refresh runs this long before the cache would expire, so a request never syncs inline in steady state. */
+const MODELS_REFRESH_LEAD_MS = 5 * 60 * 1000;
 const DEFAULT_MODEL_SYNC_TIMEOUT_MS = 10_000;
 const DEFAULT_COMPLETION_TIMEOUT_MS = 55_000;
 const MODEL_ID = /^[a-z0-9][a-z0-9._~-]*\/[a-z0-9][a-z0-9._:+~-]*$/i;
@@ -98,6 +109,12 @@ interface PreparedCall {
    * when the provider never reports one. Four characters per token is the usual rule of thumb.
    */
   promptTokens: number;
+  /**
+   * Whether this call's charge has been dispatched. One call, one charge: the buffered path and
+   * both ends of the streaming path all settle through {@link AgentLlmService.settle}, and this is
+   * the latch that keeps a stream that reported usage and then flushed from paying twice.
+   */
+  settled: boolean;
 }
 
 /** The rule-of-thumb characters-per-token used wherever a real count is unavailable. */
@@ -209,9 +226,18 @@ function upstreamFaultBody(fault: UpstreamFault): Record<string, unknown> {
  * ledger and there is no second, softer record of what was spent.
  */
 @Injectable()
-export class AgentLlmService implements OnModuleInit {
+export class AgentLlmService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AgentLlmService.name);
   private modelsCache?: { at: number; payload: AgentModelsResult };
+  /** When the last catalog sync failed; undefined once one has succeeded since. */
+  private modelsSyncFailedAt?: number;
+  /** The catalog sync in flight, shared by every caller that arrives while it runs. */
+  private modelsSync?: Promise<void>;
+  private refreshTimer?: NodeJS.Timeout;
+  /** Set on shutdown, so a sync that finishes afterwards books no further refresh. */
+  private stopped = false;
+  /** Wall clock, overridable by tests that need to move it. */
+  private now = (): number => Date.now();
 
   constructor(
     private readonly config: ConfigService,
@@ -219,7 +245,8 @@ export class AgentLlmService implements OnModuleInit {
   ) {}
 
   /**
-   * Say at BOOT what a missing operator key costs, instead of at the first user request.
+   * Say at BOOT what a missing operator key costs, instead of at the first user request — and,
+   * when there is a key, start warming the roster.
    *
    * NOT a boot failure, deliberately. This key powers one module; refusing to start without it would
    * take sign-in, profile sync and billing down for a deployment that simply does not sell the
@@ -228,14 +255,45 @@ export class AgentLlmService implements OnModuleInit {
    * silently and let the operator discover the gap from a customer, which is what `.env.example`
    * not listing the variable at all made the normal outcome. `/health/agent` carries the same fact
    * for anything that reads rather than tails.
+   *
+   * THE WARM-UP IS NOT AWAITED EITHER, for the same reason: boot must not depend on OpenRouter
+   * answering. The first request used to pay for the catalog sync inline — up to the full sync
+   * timeout before its own model was even contacted — and a catalog that was slow at boot made
+   * every request pay it again. Now the sync starts here, in the background, and a timer keeps the
+   * cache from ever expiring under a request.
    */
   onModuleInit(): void {
-    if (this.config.get<string>('OPENROUTER_API_KEY')?.trim()) return;
-    this.logger.warn(
-      'OPENROUTER_API_KEY is not set — the managed Lobee agent is DISABLED on this backend: ' +
-        '/agent/llm/chat/completions answers 503 and /agent/llm/models serves an empty roster. ' +
-        'Nothing else is affected. See apps/backend/.env.example.',
-    );
+    if (!this.config.get<string>('OPENROUTER_API_KEY')?.trim()) {
+      this.logger.warn(
+        'OPENROUTER_API_KEY is not set — the managed Lobee agent is DISABLED on this backend: ' +
+          '/agent/llm/chat/completions answers 503 and /agent/llm/models serves an empty roster. ' +
+          'Nothing else is affected. See apps/backend/.env.example.',
+      );
+      return;
+    }
+    this.refreshRosterInBackground();
+  }
+
+  onModuleDestroy(): void {
+    this.stopped = true;
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
+  }
+
+  /**
+   * Sync the catalog, then book the next sync: early enough that the cache never expires under a
+   * request, or after the retry window when this one failed. `unref` so a pending refresh never
+   * holds the process open.
+   */
+  private refreshRosterInBackground(): void {
+    void this.syncRoster().then(() => {
+      if (this.stopped) return;
+      const delay =
+        this.modelsSyncFailedAt === undefined
+          ? MODELS_CACHE_MS - MODELS_REFRESH_LEAD_MS
+          : MODELS_SYNC_RETRY_MS;
+      this.refreshTimer = setTimeout(() => this.refreshRosterInBackground(), delay);
+      this.refreshTimer.unref?.();
+    });
   }
 
   /**
@@ -244,6 +302,13 @@ export class AgentLlmService implements OnModuleInit {
    * identifies the smaller set that satisfies the loop's structured-tool contract. The key stays
    * server-side. A sync failure serves only a previously verified stale cache; a cold failure returns an
    * empty roster rather than inventing models.
+   *
+   * NEVER MORE THAN ONE CATALOG FETCH AT A TIME, AND NONE FOR A MINUTE AFTER ONE FAILS. The cache
+   * is warmed at boot and refreshed by a timer, so in steady state this is a lookup. When the cache
+   * is cold or has expired, every caller that arrives during a sync shares THAT sync rather than
+   * starting its own; and a failed sync is remembered for {@link MODELS_SYNC_RETRY_MS}, during
+   * which the stale roster (or an empty one) is served at once instead of each request waiting out
+   * the sync timeout and hammering a catalog that is already struggling.
    */
   async listModels(): Promise<AgentModelsResult> {
     const key = this.config.get<string>('OPENROUTER_API_KEY')?.trim();
@@ -251,10 +316,44 @@ export class AgentLlmService implements OnModuleInit {
       this.logger.warn('OpenRouter model sync skipped: OPENROUTER_API_KEY is not configured');
       return { updatedAt: new Date().toISOString(), stale: true, models: [] };
     }
-    if (this.modelsCache && Date.now() - this.modelsCache.at < MODELS_CACHE_MS) {
-      return this.modelsCache.payload;
+    const cached = this.freshRoster();
+    if (cached) return cached;
+    const retryDue =
+      this.modelsSyncFailedAt === undefined ||
+      this.now() - this.modelsSyncFailedAt >= MODELS_SYNC_RETRY_MS;
+    if (retryDue) await this.syncRoster();
+    const synced = this.freshRoster();
+    if (synced) return synced;
+    // A real stale roster is safe; invented ids are not. On a cold failure expose no selectable model.
+    if (this.modelsCache) return { ...this.modelsCache.payload, stale: true };
+    return { updatedAt: new Date().toISOString(), stale: true, models: [] };
+  }
+
+  /** The cached roster, when it is younger than the cache window. */
+  private freshRoster(): AgentModelsResult | undefined {
+    if (!this.modelsCache) return undefined;
+    return this.now() - this.modelsCache.at < MODELS_CACHE_MS
+      ? this.modelsCache.payload
+      : undefined;
+  }
+
+  /** Coalesce: every caller during a sync awaits the same one. */
+  private syncRoster(): Promise<void> {
+    if (!this.modelsSync) {
+      this.modelsSync = this.loadRoster().finally(() => {
+        this.modelsSync = undefined;
+      });
     }
-    let live: Map<string, OpenRouterModel> | undefined;
+    return this.modelsSync;
+  }
+
+  /**
+   * One catalog fetch: on success the roster is rebuilt and cached, on failure the failure is
+   * remembered. Never throws — a broken catalog is a stale roster, not a broken request.
+   */
+  private async loadRoster(): Promise<void> {
+    const key = this.config.get<string>('OPENROUTER_API_KEY')?.trim();
+    if (!key) return;
     try {
       const timeoutMs = toBoundedPositiveInt(
         this.config.get('AGENT_MODEL_SYNC_TIMEOUT_MS'),
@@ -266,27 +365,29 @@ export class AgentLlmService implements OnModuleInit {
         { headers: { authorization: `Bearer ${key}` } },
         timeoutMs,
       );
-      if (res.ok) {
-        const body = (await res.json()) as { data?: OpenRouterModel[] };
-        if (!Array.isArray(body.data)) throw new Error('invalid_model_catalog');
-        live = new Map(body.data.map((m) => [m.id, m]));
-      } else {
-        this.logger.warn(`OpenRouter model sync failed status=${res.status}`);
-      }
+      if (!res.ok) throw new CatalogSyncError(`status=${res.status}`);
+      const body = (await res.json()) as { data?: OpenRouterModel[] };
+      if (!Array.isArray(body.data)) throw new CatalogSyncError('invalid_model_catalog');
+      // The build sits inside the try as well: this runs unattended at boot, where a malformed
+      // catalog entry has to become a remembered failure, not an unhandled rejection that takes
+      // the process down with it.
+      const payload = this.buildRoster(new Map(body.data.map((m) => [m.id, m])));
+      this.modelsCache = { at: this.now(), payload };
+      this.modelsSyncFailedAt = undefined;
     } catch (error) {
-      this.logger.warn(`OpenRouter model sync failed kind=${diagnosticKind(error)}`);
+      // Remembered, so the next minute of requests is answered from what we have instead of each
+      // one asking a catalog that just failed to answer.
+      this.modelsSyncFailedAt = this.now();
+      const detail =
+        error instanceof CatalogSyncError ? error.detail : `kind=${diagnosticKind(error)}`;
+      this.logger.warn(
+        `OpenRouter model sync failed ${detail}; next attempt in ${MODELS_SYNC_RETRY_MS / 1000}s`,
+      );
     }
+  }
 
-    if (!live) {
-      // A real stale roster is safe; invented ids are not. On a cold failure expose no selectable model.
-      if (this.modelsCache) return { ...this.modelsCache.payload, stale: true };
-      return {
-        updatedAt: new Date().toISOString(),
-        stale: true,
-        models: [],
-      };
-    }
-
+  /** The roster as the panel sees it, from one live catalog. Pure: the catalog in, the payload out. */
+  private buildRoster(live: Map<string, OpenRouterModel>): AgentModelsResult {
     // THE ROSTER IS A PRODUCT SURFACE, NOT A MIRROR OF OPENROUTER. The previous build walked the
     // live catalog filtered by brand, so the dropdown offered the ENTIRE OpenAI / Anthropic /
     // Google catalogs and FEATURED was only decoration (a nicer label plus sort order) — and a
@@ -370,13 +471,11 @@ export class AgentLlmService implements OnModuleInit {
       models.push(describe(id, entry.name ?? id, false, entry));
     }
     // No sort: FEATURED order IS the product order, and extras keep the catalog's own.
-    const payload: AgentModelsResult = {
+    return {
       updatedAt: new Date().toISOString(),
       stale: false,
       models,
     };
-    this.modelsCache = { at: Date.now(), payload };
-    return payload;
   }
 
   /**
@@ -449,7 +548,7 @@ export class AgentLlmService implements OnModuleInit {
         this.reportUpstreamFault(fault, prepared.model, res.status, code, requestIdOf(res));
         return { status: fault.status, stream: null, body: upstreamFaultBody(fault) };
       }
-      await this.settleFailure(prepared, principal, body.usage);
+      this.settleFailure(prepared, principal, body.usage);
       if (fault) {
         return { status: fault.status, stream: null, body: upstreamFaultBody(fault) };
       }
@@ -479,17 +578,13 @@ export class AgentLlmService implements OnModuleInit {
   ): TransformStream<Uint8Array, Uint8Array> {
     const decoder = new TextDecoder();
     let pending = '';
-    let settled = false;
     let observedChars = 0;
 
-    const settle = (usage?: OpenRouterUsage): void => {
-      if (settled) return;
-      settled = true;
-      void this.charge(prepared, principal, usage, {
+    const settle = (usage?: OpenRouterUsage): void =>
+      this.settle(prepared, principal, usage, {
         tokensIn: prepared.promptTokens,
         tokensOut: Math.ceil(observedChars / CHARS_PER_TOKEN),
       });
-    };
 
     return new TransformStream<Uint8Array, Uint8Array>({
       transform: (chunk, controller) => {
@@ -594,8 +689,13 @@ export class AgentLlmService implements OnModuleInit {
         ...raw,
         model,
         max_tokens: maxTokensOut,
-        // Defense-in-depth for older desktop bundles: Claude thinking rejects forced tool selection.
-        ...(requiresTools && model.startsWith('anthropic/') ? { tool_choice: 'auto' } : {}),
+        // `tool_choice` is forwarded exactly as sent. This used to be rewritten to 'auto' for every
+        // Anthropic model, a shim for old desktop bundles — which silently discarded the loop's
+        // forced `act` call, so Claude could answer a step in prose, and a step with no action is
+        // one the run cannot execute. The roster admits a model to Agent mode only when the catalog
+        // says it accepts `tool_choice`, and the CLIENT is the one place that decides what to send
+        // (`usesAutomaticToolChoice` in packages/agent); a choice the provider will not take is now
+        // its own visible 400 rather than a downgrade nobody can see.
         // Ask OpenRouter to return what it actually charged. That figure is authoritative — it
         // already reflects the provider it routed to and the discounts that applied — and the local
         // price table is only the fallback for a response that carries no cost. Placed AFTER the
@@ -609,6 +709,7 @@ export class AgentLlmService implements OnModuleInit {
       ),
       model,
       promptTokens,
+      settled: false,
     };
   }
 
@@ -654,7 +755,7 @@ export class AgentLlmService implements OnModuleInit {
     if (res.ok) {
       // A 2xx with no usage block still produced tokens someone paid for. Fall back to the prompt
       // estimate and the length of what came back rather than serving the call for free.
-      await this.charge(prepared, principal, body.usage, {
+      this.settle(prepared, principal, body.usage, {
         tokensIn: prepared.promptTokens,
         tokensOut: Math.ceil(
           (body.choices ?? []).reduce((sum, c) => sum + textLength(c.message?.content), 0) /
@@ -674,7 +775,7 @@ export class AgentLlmService implements OnModuleInit {
         this.reportUpstreamFault(fault, model, res.status, code, requestId);
         return { status: fault.status, body: upstreamFaultBody(fault) };
       }
-      await this.settleFailure(prepared, principal, body.usage);
+      this.settleFailure(prepared, principal, body.usage);
       if (fault) {
         return { status: fault.status, body: upstreamFaultBody(fault) };
       }
@@ -719,13 +820,40 @@ export class AgentLlmService implements OnModuleInit {
    * usage block is the only evidence of it. Metering nothing in either case, which is what happened
    * before, means every truncated generation was free to the customer and paid for by the operator.
    */
-  private async settleFailure(
+  private settleFailure(
     prepared: PreparedCall,
     principal: AgentPrincipal,
     usage: OpenRouterUsage | undefined,
-  ): Promise<void> {
+  ): void {
     if (!usage) return;
-    await this.charge(prepared, principal, usage, { tokensIn: 0, tokensOut: 0 });
+    this.settle(prepared, principal, usage, { tokensIn: 0, tokensOut: 0 });
+  }
+
+  /**
+   * Meter one call OFF THE CRITICAL PATH: exactly once, and only after the answer has left.
+   *
+   * The buffered path used to run reserve → upstream → debit inline, and the debit is the
+   * expensive half: two transactions on the wallet row plus the usage row, several round trips,
+   * before the sidecar saw the tool call it was waiting on — on every step of every run, with two
+   * runs on one team queueing on the same row. The customer has their tokens the moment OpenRouter
+   * answers; the ledger does not have to be written before they are told so. `setImmediate` runs
+   * the charge once the current turn has finished writing the response, and the accrual it goes
+   * through is the durable one (`AgentSpendService.charge`: accrue first, flush second), so a
+   * charge that fails is under-collected micros the next flush recovers, never a double.
+   *
+   * ONCE. The latch on the prepared call is what makes settlement idempotent per request across
+   * every path that can reach it — a 2xx, a non-2xx that still reported usage, a stream's usage
+   * frame and then its flush.
+   */
+  private settle(
+    prepared: PreparedCall,
+    principal: AgentPrincipal,
+    usage: OpenRouterUsage | undefined,
+    fallback: { tokensIn: number; tokensOut: number },
+  ): void {
+    if (prepared.settled) return;
+    prepared.settled = true;
+    setImmediate(() => void this.charge(prepared, principal, usage, fallback));
   }
 
   /**
@@ -790,6 +918,14 @@ export class AgentLlmService implements OnModuleInit {
       .map((entry) => entry.trim())
       .filter((entry) => entry.length <= 300 && MODEL_ID.test(entry));
     return new Set(configured);
+  }
+}
+
+/** A catalog answer that could not be used, carrying what the log line needs and nothing else. */
+class CatalogSyncError extends Error {
+  constructor(readonly detail: string) {
+    super('catalog_sync_failed');
+    this.name = 'CatalogSyncError';
   }
 }
 

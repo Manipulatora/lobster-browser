@@ -45,6 +45,24 @@ export interface AgentAffordability {
 }
 
 /**
+ * How long one wallet read answers the pre-flight check before the wallet is read again.
+ *
+ * Short enough that a deposit or another instance's charges are seen within seconds; long enough
+ * that a run stepping every second or two never pays for the read. See {@link AgentSpendService.canAfford}.
+ */
+export const AFFORDABILITY_WINDOW_MS = 5_000;
+
+/** Above this many cached wallets, expired ones are swept before a new one is added. */
+const WALLET_SNAPSHOT_CAP = 1_000;
+
+/** A team's wallet as last read, kept coherent by this process's own charges until it expires. */
+interface WalletSnapshot {
+  balanceCents: number;
+  pendingMicros: number;
+  readAt: number;
+}
+
+/**
  * Metering and charging for Lobee.
  *
  * THE SHAPE OF THE PROBLEM. One agent call is worth a fraction of a cent, and a wallet is
@@ -65,6 +83,10 @@ export class AgentSpendService {
 
   /** The margin over raw model cost. Resolved once at boot — it is a deployment decision. */
   readonly marginMultiplier: number;
+
+  private readonly wallets = new Map<string, WalletSnapshot>();
+  /** Wall clock, overridable by tests that need to move it. */
+  private now = (): number => Date.now();
 
   constructor(
     @Inject(BILLING_REPOSITORY) private readonly repo: BillingRepository,
@@ -96,18 +118,31 @@ export class AgentSpendService {
    * The standing accrual counts against the balance. It is spend already incurred and not yet
    * charged, so ignoring it would let a team that is exactly at zero keep starting calls that can
    * never be paid for.
+   *
+   * READ ONCE PER WINDOW, NOT ONCE PER STEP. This check sits in front of every Lobee step, and it
+   * used to cost two wallet reads (one of them an upsert) before the model was even contacted — a
+   * measurable slice of a step on a loaded Postgres, with two concurrent runs on one team
+   * serialising on the same wallet row for it. The wallet is now read into a {@link WalletSnapshot}
+   * and the check is answered from that for {@link AFFORDABILITY_WINDOW_MS}. The snapshot is not
+   * blind in the meantime: every charge this process makes moves it by exactly what the ledger
+   * moved ({@link followCharge}), so within the window it lags the database only by what OTHER
+   * writers did — a deposit landing, another instance's charges — and that lag is bounded by the
+   * window. What the window bounds is overspend: a team going from solvent to empty can start at
+   * most a window's worth of calls past the point a fresh read would have refused.
+   *
+   * A refusal is never served from the snapshot. It evicts it, so the very next attempt reads the
+   * wallet again and a top-up is honoured the moment it lands rather than up to a window later.
    */
   async canAfford(teamId: string, estimatedMicros: number): Promise<AgentAffordability> {
-    const [balanceCents, pendingMicros] = await Promise.all([
-      this.repo.getBalanceCents(teamId),
-      this.repo.getAgentAccruedMicros(teamId),
-    ]);
+    const wallet = await this.walletSnapshot(teamId);
     // Rounded UP: a reserve that rounds down reserves less than the call can cost, which is the
     // one direction the check exists to prevent.
     const requiredCents = Math.ceil(
-      (pendingMicros + Math.max(0, estimatedMicros)) / MICROS_PER_CENT,
+      (wallet.pendingMicros + Math.max(0, estimatedMicros)) / MICROS_PER_CENT,
     );
-    return { ok: balanceCents >= requiredCents, balanceCents, requiredCents };
+    const ok = wallet.balanceCents >= requiredCents;
+    if (!ok) this.wallets.delete(teamId);
+    return { ok, balanceCents: wallet.balanceCents, requiredCents };
   }
 
   /**
@@ -149,6 +184,7 @@ export class AgentSpendService {
     }
 
     const { chargedCents, pendingMicros, unpaidCents } = await this.flush(teamId, costMicros);
+    this.followCharge(teamId, chargedCents, pendingMicros);
 
     await this.repo.recordAgentUsage({
       teamId,
@@ -169,6 +205,41 @@ export class AgentSpendService {
   /** Newest-first usage rows, for explaining a charge to the team that disputes it. */
   async listUsage(teamId: string, limit = 50): Promise<AgentUsageRow[]> {
     return this.repo.listAgentUsage(teamId, limit);
+  }
+
+  /** The team's wallet as read within the current window, or read afresh. */
+  private async walletSnapshot(teamId: string): Promise<WalletSnapshot> {
+    const now = this.now();
+    const cached = this.wallets.get(teamId);
+    if (cached && now - cached.readAt < AFFORDABILITY_WINDOW_MS) return cached;
+    if (this.wallets.size >= WALLET_SNAPSHOT_CAP) this.evictExpired(now);
+    const [balanceCents, pendingMicros] = await Promise.all([
+      this.repo.getBalanceCents(teamId),
+      this.repo.getAgentAccruedMicros(teamId),
+    ]);
+    const fresh: WalletSnapshot = { balanceCents, pendingMicros, readAt: now };
+    this.wallets.set(teamId, fresh);
+    return fresh;
+  }
+
+  /**
+   * Keep the snapshot honest about what this process just did to the ledger.
+   *
+   * `flush` reports the cents it moved and the accrual it left behind, which is exactly the state
+   * the next pre-flight needs; applying it here makes a step's own spend visible to the following
+   * step without a round trip, so the window only has to cover what others did.
+   */
+  private followCharge(teamId: string, chargedCents: number, pendingMicros: number): void {
+    const wallet = this.wallets.get(teamId);
+    if (!wallet) return;
+    wallet.balanceCents -= chargedCents;
+    wallet.pendingMicros = pendingMicros;
+  }
+
+  private evictExpired(now: number): void {
+    for (const [teamId, wallet] of this.wallets) {
+      if (now - wallet.readAt >= AFFORDABILITY_WINDOW_MS) this.wallets.delete(teamId);
+    }
   }
 
   /**

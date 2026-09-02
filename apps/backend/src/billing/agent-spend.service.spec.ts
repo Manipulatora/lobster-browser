@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import type { ConfigService } from '@nestjs/config';
 
-import { AgentSpendService } from './agent-spend.service';
+import { AFFORDABILITY_WINDOW_MS, AgentSpendService } from './agent-spend.service';
 import { MICROS_PER_CENT } from './agent-pricing';
 import { InMemoryBillingRepository } from './in-memory-billing.repository';
 
@@ -218,4 +218,93 @@ test('an unpriceable model is knowable before the call is made', () => {
     service.estimateMicros({ model: 'nobody/invented-this', tokensIn: 1, maxTokensOut: 1 }),
     undefined,
   );
+});
+
+/** Counts the wallet reads the meter makes, so a test can prove the pre-flight stopped making them. */
+class CountingRepository extends InMemoryBillingRepository {
+  walletReads = 0;
+
+  override async getBalanceCents(teamId: string): Promise<number> {
+    this.walletReads += 1;
+    return super.getBalanceCents(teamId);
+  }
+
+  override async getAgentAccruedMicros(teamId: string): Promise<number> {
+    this.walletReads += 1;
+    return super.getAgentAccruedMicros(teamId);
+  }
+}
+
+function makeCountingService(): {
+  service: AgentSpendService;
+  repo: CountingRepository;
+  clock: { now: number };
+} {
+  const repo = new CountingRepository();
+  const config = { get: () => undefined } as unknown as ConfigService;
+  const service = new AgentSpendService(repo, config);
+  const clock = { now: 1_000_000 };
+  (service as unknown as { now: () => number }).now = () => clock.now;
+  return { service, repo, clock };
+}
+
+test('the pre-flight reads the wallet once per window, then follows the charges it makes itself', async () => {
+  const { service, repo, clock } = makeCountingService();
+  await fund(repo, 500);
+
+  const first = await service.canAfford(TEAM, 6_000);
+  assert.equal(first.ok, true);
+  assert.equal(first.requiredCents, 1);
+  assert.equal(repo.walletReads, 2, 'one balance read and one accrual read');
+
+  await service.canAfford(TEAM, 6_000);
+  await service.canAfford(TEAM, 6_000);
+  assert.equal(repo.walletReads, 2, 'the window answers the next checks');
+
+  // A charge moves the accrual; the snapshot sees it without a round trip.
+  const charged = await service.charge({ teamId: TEAM, userId: USER, ...TINY });
+  assert.equal(charged.pendingMicros, 4_500);
+  const after = await service.canAfford(TEAM, 6_000);
+  // 4,500 accrued + 6,000 estimated = 10,500 µ$ → two whole cents, from the followed snapshot.
+  assert.equal(after.requiredCents, 2);
+  assert.equal(after.balanceCents, 500);
+  assert.equal(repo.walletReads, 2);
+
+  // The window ends; the next check reads again.
+  clock.now += AFFORDABILITY_WINDOW_MS;
+  await service.canAfford(TEAM, 6_000);
+  assert.equal(repo.walletReads, 4);
+});
+
+test('a flushed cent is taken off the cached balance', async () => {
+  const { service, repo } = makeCountingService();
+  await fund(repo, 500);
+  await service.canAfford(TEAM, 1_000);
+
+  // Three 0.45-cent calls cross a whole cent on the third, which the flush takes from the wallet.
+  for (let i = 0; i < 3; i += 1) await service.charge({ teamId: TEAM, ...TINY });
+  const readsAfterCharges = repo.walletReads;
+
+  const check = await service.canAfford(TEAM, 1_000);
+  assert.equal(check.balanceCents, 499, 'the cent the flush took is gone from the snapshot');
+  // 3,500 µ$ carried + 1,000 estimated = 4,500 µ$ → one cent.
+  assert.equal(check.requiredCents, 1);
+  assert.equal(repo.walletReads, readsAfterCharges, 'without another read');
+  assert.equal(await repo.getBalanceCents(TEAM), 499, 'and the snapshot matches the ledger');
+});
+
+test('a refusal is never served from the snapshot, so a top-up is honoured at once', async () => {
+  const { service, repo } = makeCountingService();
+  await fund(repo, 1);
+
+  const refused = await service.canAfford(TEAM, 20_000);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.requiredCents, 2);
+  assert.equal(repo.walletReads, 2);
+
+  await fund(repo, 100);
+  const allowed = await service.canAfford(TEAM, 20_000);
+  assert.equal(allowed.ok, true, 'the deposit is seen on the very next check');
+  assert.equal(allowed.balanceCents, 101);
+  assert.equal(repo.walletReads, 4, 'a refusal evicts the snapshot rather than being cached');
 });
