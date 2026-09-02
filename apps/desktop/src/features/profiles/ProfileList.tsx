@@ -449,6 +449,16 @@ export function ProfileList({
                       {/* The account's view: another machine holds this profile's lease, so it —
                           and its proxy — are in use there right now. Running here shows on the
                           ring; running elsewhere is only knowable from the account. */}
+                      {/* First run on a new machine: the row is here before its data is, so the
+                          list is complete at once and each profile says where its data stands. */}
+                      {profile.syncState ? (
+                        <div
+                          className="sync-chip"
+                          title="This profile's data is arriving from your account"
+                        >
+                          {profile.syncState}
+                        </div>
+                      ) : null}
                       {profile.presence && !profile.presence.mine ? (
                         <div
                           className="presence-chip"

@@ -44,6 +44,12 @@ export interface Profile {
   syncVersion?: number;
   /** The machine running this profile right now, when another (or this) machine holds its lease. */
   presence?: ProfilePresence;
+  /**
+   * Launcher-only: the profile's data is not on this machine yet, or is arriving. A short human
+   * phrase ("Not downloaded yet", "Downloading…", "Restoring 12/40 files"). Absent once the
+   * profile's data is local. The server never sets it.
+   */
+  syncState?: string;
   createdAt: string;
   updatedAt: string;
 }

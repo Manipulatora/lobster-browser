@@ -51,6 +51,56 @@ use crate::snapshot::vault::SnapshotVault;
 use crate::AppState;
 use tauri::Manager as _;
 
+/// Where each local profile's data stands while it is arriving from the account — what the profile
+/// list shows beside the row ("Downloading…", "Restoring 12/40 files"). In memory only: a phase
+/// outlives nothing, and a restart that finds no data simply shows "Not downloaded yet" again.
+static SYNC_PHASES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::OnceLock::new();
+
+fn set_phase(profile_id: &str, phase: Option<&str>) {
+    let phases =
+        SYNC_PHASES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(mut map) = phases.lock() {
+        match phase {
+            Some(text) => {
+                map.insert(profile_id.to_string(), text.to_string());
+            }
+            None => {
+                map.remove(profile_id);
+            }
+        }
+    }
+}
+
+fn phase_of(profile_id: &str) -> Option<String> {
+    SYNC_PHASES.get()?.lock().ok()?.get(profile_id).cloned()
+}
+
+/// The phrase the list shows for a profile whose data is not (fully) here, or None when it is.
+///
+/// "Not downloaded yet" is derived, never stored: the row came from the account (it has a remote
+/// id), no server version was ever applied here (`remote_version == 0`), and there is no
+/// user-data-dir. A profile created on this machine and never pushed has no remote id; one that
+/// was pushed has a version — neither reads as missing.
+pub(crate) fn sync_state_of(
+    state: &AppState,
+    profile_id: &str,
+    link: Option<&crate::profile_store::SyncLink>,
+) -> Option<String> {
+    if let Some(phase) = phase_of(profile_id) {
+        return Some(phase);
+    }
+    let link = link?;
+    if link.remote_id.is_some()
+        && link.remote_version == 0
+        && !state.profiles_dir.join(profile_id).exists()
+    {
+        return Some("Not downloaded yet".to_string());
+    }
+    None
+}
+
 /// A stalled request must not wedge a capture, but a 25 MiB upload over a poor link is legitimately
 /// slow, so this is generous rather than snappy.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
@@ -954,6 +1004,19 @@ pub async fn reconcile(state: &AppState) -> Result<SyncSummary> {
                             .map(|_| ())
                     })
                 };
+                // A row that came from the account before its data did (row-first sign-in) has
+                // no user-data-dir yet: this pull IS its data, so restore it as well as record it.
+                let applied = match applied {
+                    Ok(()) if !state.profiles_dir.join(&local.id).exists() => {
+                        match open_vault(state) {
+                            Ok(vault) => {
+                                restore_pulled(state, &vault, &local.id, &local.id, &outcome)
+                            }
+                            Err(err) => Err(err),
+                        }
+                    }
+                    other => other,
+                };
                 match applied {
                     Ok(()) => {
                         summary.pulled += 1;
@@ -1092,25 +1155,12 @@ fn apply_portable_row(
 /// the server row is what makes a profile created on the website — which has never pushed a
 /// snapshot — arrive here as a usable profile rather than not at all.
 async fn materialise(state: &AppState, remote: &RemoteProfile) -> Result<String> {
-    let (key, _) = content_key(state, &remote.id)?;
-    let vault = open_vault(state)?;
-
-    // Pulled into a scratch id first: the ledger is keyed by profile id, and a row created before the
-    // download is a row left behind when the download fails.
-    let downloaded = pull(&vault, &remote.id, &remote.id, &key).await;
-    let (row, pulled) = match downloaded {
-        Ok(outcome) => (outcome.row.clone(), Some(outcome)),
-        Err(err) => {
-            tracing::info!(
-                remote_id = %remote.id,
-                error = %format!("{err:#}"),
-                "no snapshot for this account profile; creating the row only"
-            );
-            (None, None)
-        }
-    };
-
-    let row = row.unwrap_or_else(|| crate::profile_portable::PortableRow {
+    // THE ROW FIRST, THE DATA SECOND. A second machine used to download and restore every profile
+    // before a single one appeared, and a download that failed deleted the row it had created — so a
+    // slow line or one bad snapshot looked like "no profiles" for as long as it kept failing. Now
+    // the list is complete as soon as the account has been asked, each row says where its data
+    // stands, and the data arrives behind it (or at launch, see `ensure_materialised`).
+    let row = crate::profile_portable::PortableRow {
         source_profile_id: remote.id.clone(),
         name: remote.name.clone(),
         engine: remote.engine.clone().unwrap_or_else(|| "lobium".into()),
@@ -1126,8 +1176,7 @@ async fn materialise(state: &AppState, remote: &RemoteProfile) -> Result<String>
         folder: remote.folder.clone(),
         notes: None,
         password_hash: None,
-    });
-
+    };
     let created = {
         let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
         let existing =
@@ -1140,59 +1189,128 @@ async fn materialise(state: &AppState, remote: &RemoteProfile) -> Result<String>
         created
     };
 
-    let result = finish_materialise(state, &vault, &created.id, remote, pulled.as_ref());
-    match result {
+    // A profile the account knows but no machine ever synced has no snapshot: the row IS the
+    // profile, and there is nothing to download.
+    if remote.sync_version == Some(0) {
+        return Ok(created.name);
+    }
+
+    match fetch_into(state, &created, &remote.id).await {
         Ok(()) => Ok(created.name),
         Err(err) => {
-            if let Ok(conn) = state.db.lock() {
-                let _ = crate::profile_store::delete(&conn, &created.id);
-                let _ = crate::profile_store::purge(&conn, &created.id);
-            }
-            let _ = crate::remove_profile_data_dir(&state.profiles_dir, &created.id);
+            // The row stays: the list shows it as not downloaded, the next tick retries, and Run
+            // fetches it on demand. Deleting it was how a failed download became a missing profile.
+            tracing::warn!(
+                profile_id = %created.id,
+                remote_id = %remote.id,
+                error = %format!("{err:#}"),
+                "the profile's data did not arrive; the row is kept and the download will be retried"
+            );
             Err(err)
         }
     }
 }
 
-/// Move the downloaded snapshot onto the new local id and restore it.
-///
-/// The restore is unconditional here and only here: the user-data-dir was created by this function a
-/// moment ago, so there is no session in it to lose.
-fn finish_materialise(
+/// Download the account's snapshot for `profile` (keyed by `remote_id`) and put it in place:
+/// the sealed fields onto the row, the artifacts into the user-data-dir, the watermark last.
+/// The list shows each phase while it runs.
+async fn fetch_into(
+    state: &AppState,
+    profile: &crate::profile_store::Profile,
+    remote_id: &str,
+) -> Result<()> {
+    set_phase(&profile.id, Some("Downloading…"));
+    let result = async {
+        let (key, _) = content_key(state, remote_id)?;
+        let vault = open_vault(state)?;
+        // Pulled under the REMOTE id as a scratch entry: the ledger is keyed by profile id, and the
+        // restore below adopts it under the local one.
+        let pulled = pull(&vault, remote_id, remote_id, &key).await?;
+        if let Some(row) = pulled.row.as_ref() {
+            let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
+            apply_portable_row(&conn, &state.cipher, profile, row)?;
+        }
+        restore_pulled(state, &vault, &profile.id, remote_id, &pulled)
+    }
+    .await;
+    set_phase(&profile.id, None);
+    result
+}
+
+/// Make sure a profile's data is on this machine before it is used — the on-demand half of the
+/// row-first sign-in. A profile whose data is already here returns at once with `false`.
+pub async fn ensure_materialised(state: &AppState, profile_id: &str) -> Result<bool> {
+    let (profile, link) = {
+        let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
+        let profile = crate::profile_store::get(&conn, &state.cipher, profile_id)
+            .map_err(|e| anyhow!("{e}"))?
+            .ok_or_else(|| anyhow!("profile {profile_id} not found"))?;
+        let link =
+            crate::profile_store::sync_link(&conn, profile_id).map_err(|e| anyhow!("{e}"))?;
+        (profile, link)
+    };
+    let Some(remote_id) = link.as_ref().and_then(|l| l.remote_id.clone()) else {
+        return Ok(false);
+    };
+    if link.is_some_and(|l| l.remote_version > 0) || state.profiles_dir.join(profile_id).exists() {
+        return Ok(false);
+    }
+    if !signed_in() {
+        bail!("this profile's data has not been downloaded yet — sign in to fetch it");
+    }
+    ensure_account_key(state).await?;
+    fetch_into(state, &profile, &remote_id)
+        .await
+        .context("downloading the profile's data from your account")?;
+    Ok(true)
+}
+
+/// Put a pulled snapshot in place: adopt its artifacts under the local profile id, restore them into
+/// the user-data-dir, and only then advance the watermark — so a restore that fails is retried.
+fn restore_pulled(
     state: &AppState,
     vault: &SnapshotVault,
     profile_id: &str,
-    remote: &RemoteProfile,
-    pulled: Option<&PullOutcome>,
+    source_id: &str,
+    pulled: &PullOutcome,
 ) -> Result<()> {
-    let Some(pulled) = pulled else {
-        return Ok(());
-    };
-    let manifest = vault.manifest(&remote.id, pulled.snapshot_version)?;
-    let mut artifacts = Vec::with_capacity(manifest.artifacts.len());
-    for record in &manifest.artifacts {
+    let manifest = vault.manifest(source_id, pulled.snapshot_version)?;
+    let total = manifest.artifacts.len();
+    let mut artifacts = Vec::with_capacity(total);
+    for (index, record) in manifest.artifacts.iter().enumerate() {
+        set_phase(
+            profile_id,
+            Some(&format!("Restoring {}/{} files", index + 1, total)),
+        );
         artifacts.push((
             record.id.clone(),
             vault.get_artifact(
-                &remote.id,
+                source_id,
                 record.captured_in_version,
                 &record.id,
                 &record.sealed_digest,
             )?,
         ));
     }
-    let adopted = vault.adopt(profile_id, &manifest, artifacts)?;
-    // The scratch entry has served its purpose; leaving it would make the ledger carry a version
-    // under an id no profile row names.
-    let _ = vault.discard(&remote.id, pulled.snapshot_version);
+    // A pull made under the local id (the reconcile path) is already in the ledger where the
+    // restore reads it; a scratch pull under the remote id (sign-in) is adopted under the local id
+    // first, and the scratch entry dropped so the ledger never carries a version no row names.
+    let version = if source_id == profile_id {
+        pulled.snapshot_version
+    } else {
+        let adopted = vault.adopt(profile_id, &manifest, artifacts)?;
+        let _ = vault.discard(source_id, pulled.snapshot_version);
+        adopted.version
+    };
 
+    set_phase(profile_id, Some("Restoring…"));
     let udd = state.profiles_dir.join(profile_id);
     let target = {
         let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
         crate::snapshot::commands::identity_of_row(&conn, &state.cipher, profile_id)
             .map_err(|e| anyhow!("{e}"))?
     };
-    let report = crate::snapshot::restore(vault, &udd, profile_id, adopted.version, &target, false)
+    let report = crate::snapshot::restore(vault, &udd, profile_id, version, &target, false)
         .context("restoring the downloaded profile")?;
     if !report.ok {
         bail!(
@@ -1464,6 +1582,19 @@ pub(crate) fn measure_encodings(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_sync_phase_is_shown_while_set_and_gone_when_cleared() {
+        super::set_phase("p-phase", Some("Downloading…"));
+        assert_eq!(super::phase_of("p-phase").as_deref(), Some("Downloading…"));
+        super::set_phase("p-phase", Some("Restoring 3/9 files"));
+        assert_eq!(
+            super::phase_of("p-phase").as_deref(),
+            Some("Restoring 3/9 files")
+        );
+        super::set_phase("p-phase", None);
+        assert_eq!(super::phase_of("p-phase"), None);
+    }
+
     #[test]
     fn the_version_probe_pulls_only_when_the_account_moved_on() {
         assert!(

@@ -142,7 +142,11 @@ probe (`GET /profiles` carries `syncVersion` from the blob store's `head`; the l
 clean profile every 60 s); presence end to end (`presence.rs`: stable device id + hostname label,
 lease acquire on launch / refresh every 60 s / release on stop, a 20 s poll of the new bulk
 `GET /leases`, merged into `list_profiles` as `presence`; the profile list shows "Running on
-<machine>"). *Still open:* device identity + label; lease acquire/refresh/release
+<machine>"). *Second slice (same day):* row-first sign-in — `materialise` creates the row from
+the account's metadata before any download, keeps it when the data fails, and the list shows each
+row's state ("Not downloaded yet", "Downloading…", "Restoring 12/40 files"); a profile's data is
+fetched on demand at Run (`ensure_materialised`) and by the next reconcile tick, which now also
+restores a pulled snapshot into a missing user-data-dir. *Still open:* device identity + label; lease acquire/refresh/release
 around launch; `GET /profiles/leases`; lease on the Profile row; "running on <machine>" and
 proxy "used by"; sync version probe + `blobVersion` on the row + conditional pull; download
 progress in the list; restore deferred to launch; blob retention + quota.

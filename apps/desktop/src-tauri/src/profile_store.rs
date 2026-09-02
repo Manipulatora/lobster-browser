@@ -156,6 +156,10 @@ pub struct Profile {
     /// Never stored: merged into the list from the account's lease view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence: Option<crate::presence::ProfilePresence>,
+    /// Launcher-only: the profile's data is not on this machine yet, or is arriving (a short
+    /// phrase for the list). Never stored; derived when listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_state: Option<String>,
     /// Columns whose stored value could not be decrypted or parsed on this machine.
     ///
     /// DEGRADED, NOT FATAL. A single unreadable cell used to fail the whole row mapping, which fails
@@ -404,6 +408,7 @@ fn row_to_profile(cipher: &SecretCipher, row: &Row) -> rusqlite::Result<Profile>
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         presence: None,
+        sync_state: None,
         unreadable_secrets,
     })
 }

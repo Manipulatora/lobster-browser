@@ -802,10 +802,10 @@ async fn list_profiles(state: State<'_, AppState>) -> Result<Vec<Profile>, Strin
     // never synced has no account id and therefore no presence — this machine is the only one that
     // could be running it.
     for profile in &mut profiles {
-        if let Ok(Some(link)) = profile_store::sync_link(&conn, &profile.id) {
-            if let Some(remote_id) = link.remote_id {
-                profile.presence = state.presence.presence_for(&remote_id);
-            }
+        let link = profile_store::sync_link(&conn, &profile.id).ok().flatten();
+        profile.sync_state = profile_sync::sync_state_of(&state, &profile.id, link.as_ref());
+        if let Some(remote_id) = link.and_then(|l| l.remote_id) {
+            profile.presence = state.presence.presence_for(&remote_id);
         }
     }
     Ok(profiles)
@@ -1132,6 +1132,11 @@ async fn launch_profile(
         .sidecar
         .as_ref()
         .ok_or("engine-runner sidecar is not available (failed to start)")?;
+    // A profile that arrived from the account before its data did is fetched now, with the list
+    // showing the phases; the browser opens on the restored data, never on an empty directory.
+    profile_sync::ensure_materialised(&state, &id)
+        .await
+        .map_err(|e| e.to_string())?;
     // The desktop Launch button opens the browser headful; a headless toggle is future UI (DSK-13).
     let started = local_api::start_profile_via_sidecar(
         &state.db,

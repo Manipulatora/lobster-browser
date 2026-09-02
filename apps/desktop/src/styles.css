@@ -769,6 +769,40 @@ select.lb-select:disabled {
   border: 1px solid var(--color-warning-line, #f0d59a);
   white-space: nowrap;
 }
+.sync-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--color-info-ink, #1f4b8f);
+  background: var(--color-info-soft, #e8f0fd);
+  border: 1px solid var(--color-info-line, #b9cff3);
+  white-space: nowrap;
+}
+.sync-chip::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: sync-chip-spin 0.9s linear infinite;
+}
+@keyframes sync-chip-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sync-chip::before {
+    animation: none;
+    border-top-color: currentColor;
+  }
+}
 .presence-chip::before {
   content: '';
   width: 6px;
