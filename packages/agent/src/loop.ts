@@ -17,13 +17,14 @@ import {
 import type { BrowserDriver } from './driver.js';
 import { MAX_SCREENSHOT_BASE64_CHARS } from './driver.js';
 import { executeAction } from './executor.js';
-import type { EffectDelivery, Sleep } from './executor.js';
+import type { Sleep } from './executor.js';
 import type { LlmClient } from './llm/index.js';
 import { usesAutomaticToolChoice } from './llm/index.js';
 import type { LlmMessage, LlmTool } from './llm/types.js';
 import { normalizeMessages } from './llm/types.js';
 import { budgetedMaxTokens, contextOverflowHeadroom, tokenBudgetExceeded } from './loop/decide.js';
-import { handleAsk, rollbackNavigation } from './loop/execute.js';
+import { handleAsk, restoreNavigationJournaled } from './loop/execute.js';
+import type { DispatchContext } from './loop/execute.js';
 import {
   actionIdentity,
   approvalContextFingerprint,
@@ -42,19 +43,17 @@ import {
   renderDataset,
   runLedger,
 } from './loop/observe.js';
-import type {
-  AppendRunJournalEventV1,
-  JournalActionEffect,
-  RunJournalSnapshot,
-} from './journal/index.js';
 import type { RunJournalStore } from './journal/index.js';
 import {
   addUsage,
   appendSafe,
+  askJournalEffect,
+  createRunJournal,
   createRunLog,
   createStepTimer,
   hostOf,
   instrumentDriver,
+  journalEffectOf,
   journalHostOf,
   safe,
   safeError,
@@ -235,214 +234,34 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     );
   const safeTask = redactCredentialLikeText(task);
   let memoryStarted = false;
-  let journalSnapshot: RunJournalSnapshot | undefined;
-  let journalActionSequence = 0;
 
   // The journal is a safety dependency, unlike recall memory. Create it before emitting lifecycle
   // events, consulting the model, opening a URL, or touching durable profile state. A production
   // storage failure therefore rejects the run before it can do work.
-  if (deps.journal) {
-    journalSnapshot = await deps.journal.create({
-      runId,
-      // Tasks can contain credentials or private business data. Recovery needs lifecycle/effect
-      // state, not a second copy of the prompt, so persist a deliberately content-free label.
-      task: 'Agent task',
-      mode: config.mode ?? 'agent',
-    });
-  }
-
-  const appendJournal = async (event: AppendRunJournalEventV1): Promise<void> => {
-    const journal = deps.journal;
-    const snapshot = journalSnapshot;
-    if (!journal || !snapshot) return;
-    journalSnapshot = await timed('journal', () =>
-      journal.append(runId, event, snapshot.journal.revision),
-    );
-  };
-  const markJournalSensitive = async (
-    reason: 'credential' | 'upload_path' | 'provider_configuration' | 'image_payload' | 'unknown',
-  ): Promise<void> => {
-    if (!journalSnapshot || journalSnapshot.journal.sensitive) return;
-    await appendJournal({ type: 'run.sensitive', reason });
-  };
-  const proposeJournalAction = async (
-    kind: AgentAction['kind'] | 'navigation_reconcile',
-    effect: JournalActionEffect,
-    host?: string,
-  ): Promise<string> => {
-    const actionId = `action-${++journalActionSequence}`;
-    await appendJournal({
-      type: 'action.proposed',
-      actionId,
-      actionKind: kind,
-      effect,
-      // Never derive this from the live arguments or page label. That would turn an encrypted safety
-      // checkpoint into a second store of selectors, values, paths, URLs, or attacker text.
-      summary: `Proposed ${kind.replaceAll('_', ' ')} action`,
-      ...(host ? { host } : {}),
-    });
-    return actionId;
-  };
-  /**
-   * SELF-approval. The agent never stops mid-task to ask a human whether it may act — that is the
-   * product decision, not a default: an unattended run that pauses on every commit either dies at the
-   * ten-minute input timeout or trains the user to click Approve reflexively, and both outcomes are
-   * worse than acting. The one legitimate stop that remains is the `ask` action for information the
-   * agent cannot know (credentials, a captcha, a task-defining choice) — that still goes through
-   * `waitForInput` in `handleAsk`.
-   *
-   * The approval EVENTS are deliberately kept: `approval.requested` + `approval.resolved approved`
-   * still land in the encrypted journal for every gesture the risk policy classifies as a commit, so
-   * the audit trail records that the harness recognised the boundary and crossed it autonomously —
-   * and an interrupted journal still reduces through the same phases recovery understands. What
-   * changed is only WHO answers, and how long that takes. The `log` line keeps the crossing visible
-   * in the transcript without blocking on anyone; `prompt` may quote page-authored text, and `log`
-   * already scrubs credential-like content before it leaves the process.
-   */
-  const confirmJournaled = async (
-    prompt: string,
-    _action: AgentAction,
-    actionId: string,
-  ): Promise<boolean> => {
-    await appendJournal({ type: 'approval.requested', actionId });
-    await appendJournal({ type: 'approval.resolved', actionId, decision: 'approved' });
-    log('info', `Proceeding autonomously: ${prompt}`);
-    return true;
-  };
-  const dispatchJournaled = async <T>(
-    actionId: string,
-    effect: JournalActionEffect,
-    operation: (beginEffect: () => Promise<void>) => Promise<T>,
-    outcomeOf: (value: T) => string,
-    verifyAfterEffect?: (value: T) => Promise<void>,
-    deliveryOf?: (value: T) => EffectDelivery | undefined,
-  ): Promise<T> => {
-    if (!journalSnapshot) return operation(async () => {});
-    let effectBegan = false;
-    const beginEffect = async (): Promise<void> => {
-      if (effectBegan) return;
-      // RunJournalStore fsyncs this append before returning. Nothing with effects crosses the driver /
-      // memory boundary unless that durability barrier succeeds. The executor invokes this only after
-      // deterministic target, policy, path and capability validation has passed.
-      await appendJournal({ type: 'action.dispatching', actionId });
-      effectBegan = true;
-    };
-    // Reads do not need preflight/effect separation and are safe to close during startup recovery.
-    if (effect === 'read') await beginEffect();
-    let value: T;
-    try {
-      value = await operation(beginEffect);
-    } catch (error) {
-      if (!effectBegan) {
-        await appendJournal({
-          type: 'action.cancelled',
-          actionId,
-          summary: 'The action failed before dispatch',
-        });
-      }
-      throw error;
-    }
-    const outcome = outcomeOf(value);
-    const reportedFailure = /^(?:error|blocked|refused|missing|stale|could not)\b/i.test(outcome);
-    if (!effectBegan) {
-      // A structured missing dispatch marker proves the executor returned during deterministic
-      // preflight. It is safe to retry from a fresh observation and must not poison the profile as an
-      // ambiguous write merely because the human-readable outcome starts with "blocked" or "error".
-      await appendJournal({
-        type: 'action.cancelled',
-        actionId,
-        summary: reportedFailure
-          ? 'The action was rejected before dispatch'
-          : 'The action completed without a browser-side effect',
-      });
-      return value;
-    }
-    if (reportedFailure && effect !== 'read') {
-      // Driver methods can fail after an input event was delivered (for example, wait-for-settle after
-      // a click). A returned error therefore does not prove a write was absent. But it does not prove
-      // one HAPPENED either, and treating every driver rejection as possibly-written meant one CDP
-      // hiccup on an ordinary click recorded an unverifiable effect and refused every later run on the
-      // profile. The executor reports how far the action actually got, so only the case that is truly
-      // in doubt — a rejection while an input was in flight — is preserved as an ambiguity.
-      const delivery = deliveryOf?.(value);
-      if (delivery === 'none') {
-        await appendJournal({
-          type: 'action.cancelled',
-          actionId,
-          summary: 'The action failed before any input reached the page',
-        });
-        return value;
-      }
-      if (delivery === 'delivered') {
-        // Every input landed; only the settling or reading that follows failed. The effect is a fact,
-        // not a maybe, and the next observation is what tells the model where it ended up — so this is
-        // an ordinary failed step, not a profile-wide block. Post-effect verification is deliberately
-        // skipped: the driver has already said it cannot read this page, and re-asking could only
-        // downgrade a known state back into a lockout.
-        await appendJournal({
-          type: 'action.observed',
-          actionId,
-          outcome: 'succeeded',
-          summary: 'The input was delivered; the page state after it could not be read',
-        });
-        return value;
-      }
-      await appendJournal({
-        type: 'action.observed',
-        actionId,
-        outcome: 'unknown',
-        summary: 'The action effect could not be verified',
-      });
-      throw new Error(
-        'action outcome is ambiguous; manual recovery is required before another run',
-      );
-    }
-    if (!reportedFailure && effect !== 'read' && verifyAfterEffect) {
-      try {
-        await verifyAfterEffect(value);
-      } catch {
-        await appendJournal({
-          type: 'action.observed',
-          actionId,
-          outcome: 'unknown',
-          summary: 'The browser effect was delivered but fresh state could not be verified',
-        });
-        throw new Error(
-          'action delivery completed but post-action browser state is ambiguous; manual recovery is required before another run',
-        );
-      }
-    }
-    await appendJournal({
-      type: 'action.observed',
-      actionId,
-      outcome: reportedFailure ? 'failed' : 'succeeded',
-      summary: reportedFailure
-        ? 'The action was observed to fail'
-        : verifyAfterEffect
-          ? 'The driver completed and fresh browser state was observed'
-          : 'The action effect was acknowledged by its durable subsystem',
-    });
-    return value;
-  };
-  const restoreNavigationJournaled = async (
-    priorUrl: string,
-    currentUrl: string,
-    actionId: string,
-  ): Promise<void> => {
-    await dispatchJournaled(
-      actionId,
-      'write',
-      async (beginEffect) => {
-        await beginEffect();
-        await rollbackNavigation(driver, priorUrl);
-        return 'navigation restored and verified';
-      },
-      (value) => value,
-    );
-    log(
-      'info',
-      `Restored the prior page after refusing unexpected navigation from ${redactUrl(currentUrl)}.`,
-    );
+  const journal = createRunJournal({
+    journal: deps.journal,
+    runId,
+    snapshot: deps.journal
+      ? await deps.journal.create({
+          runId,
+          // Tasks can contain credentials or private business data. Recovery needs lifecycle/effect
+          // state, not a second copy of the prompt, so persist a deliberately content-free label.
+          task: 'Agent task',
+          mode: config.mode ?? 'agent',
+        })
+      : undefined,
+    timed,
+    log,
+  });
+  /** The run-scoped services the dispatch helpers act through. */
+  const ctx: DispatchContext = {
+    driver,
+    config,
+    signal,
+    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+    journal,
+    timer,
+    log,
   };
 
   const finish = async (
@@ -456,7 +275,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     // echoing a token it saw must not turn `run.finished` into a credential exfiltration event.
     const safeResult = redactCredentialLikeText(result).text;
     const safeFinishError = error === undefined ? undefined : redactCredentialLikeText(error).text;
-    await appendJournal({
+    await journal.append({
       type: status === 'done' ? 'run.completed' : status === 'error' ? 'run.failed' : 'run.stopped',
       // Result text may contain extracted/private page data. The encrypted journal only needs a
       // terminal lifecycle marker; the encrypted conversation memory owns user-visible content.
@@ -487,7 +306,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     // reduce, and skip. `removeFinished` re-proves the terminal phase under the store's write lock,
     // so a bug here can never delete a journal that still matters. Failure to delete is a wart, not
     // a hazard: admission sweeps terminal journals too, so the file goes at the next start.
-    if (deps.journal?.removeFinished && journalSnapshot) {
+    if (deps.journal?.removeFinished && journal.snapshot) {
       try {
         await deps.journal.removeFinished(runId);
       } catch (cleanupError) {
@@ -618,14 +437,10 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         if (decision.verdict === 'deny') {
           return await finish('error', '', `Start URL blocked: ${decision.reason}`);
         }
-        const actionId = await proposeJournalAction(
-          'navigate',
-          'write',
-          journalHostOf(destination),
-        );
+        const actionId = await journal.propose('navigate', 'write', journalHostOf(destination));
         if (decision.verdict === 'confirm') {
           const safeDestination = redactUrl(destination);
-          const approved = await confirmJournaled(
+          const approved = await journal.confirm(
             `Approve opening ${safeDestination}? (${decision.reason})`,
             { kind: 'navigate', url: safeDestination },
             actionId,
@@ -634,7 +449,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         }
         const liveCurrent = await safe(() => driver.currentUrl(), '');
         if (liveCurrent !== current) {
-          await appendJournal({
+          await journal.append({
             type: 'action.cancelled',
             actionId,
             summary: 'The source page changed before navigation',
@@ -646,7 +461,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         // through code, not during a run. Reassess anyway so this line stays the dispatch boundary.
         const finalDecision = assessNavigation(destination, liveCurrent, config);
         if (finalDecision.verdict === 'deny') {
-          await appendJournal({
+          await journal.append({
             type: 'action.cancelled',
             actionId,
             summary: 'Navigation was cancelled by policy',
@@ -663,7 +478,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           'Start URL blocked because the current page kept changing during confirmation.',
         );
       }
-      await dispatchJournaled(
+      await journal.dispatch(
         startNavigationActionId!,
         'write',
         async (beginEffect) => {
@@ -832,7 +647,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       ) {
         // A screenshot can contain credentials, messages, customer data, or cross-origin pixels the
         // DOM snapshot cannot classify. Mark the run non-resumable before capture/provider handoff.
-        await markJournalSensitive('image_payload');
+        await journal.markSensitive('image_payload');
         const captured = await driver.screenshot().catch(() => undefined);
         if (captured && captured.length <= MAX_SCREENSHOT_BASE64_CHARS) pendingImage = captured;
       }
@@ -1187,15 +1002,10 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       }
 
       if (action.kind === 'ask') {
-        if (action.sensitive) await markJournalSensitive('credential');
-        const askEffect: JournalActionEffect =
-          action.sensitive &&
-          (action.targetId !== undefined ||
-            (action.targetX !== undefined && action.targetY !== undefined))
-            ? 'consequential'
-            : 'read';
-        const actionId = await proposeJournalAction(action.kind, askEffect, journalHostOf(raw.url));
-        const handled = await dispatchJournaled(
+        if (action.sensitive) await journal.markSensitive('credential');
+        const askEffect = askJournalEffect(action);
+        const actionId = await journal.propose(action.kind, askEffect, journalHostOf(raw.url));
+        const handled = await journal.dispatch(
           actionId,
           askEffect,
           (beginEffect) =>
@@ -1211,7 +1021,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
               memory,
               now,
               beginEffect,
-              (prompt, pending) => confirmJournaled(prompt, pending, actionId),
+              (prompt, pending) => journal.confirm(prompt, pending, actionId),
               (text) => pendingUserMessages.push(text),
             ),
           (value) => value.outcome,
@@ -1229,7 +1039,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         history.push(`${step}. blocked: visual fallback is disabled for this run`);
         continue;
       }
-      if (action.kind === 'screenshot') await markJournalSensitive('image_payload');
+      if (action.kind === 'screenshot') await journal.markSensitive('image_payload');
 
       // A privileged browser-internal page that is NOT a vetted settings surface is off limits
       // entirely — the agent leaves rather than acting. The navigation policy already refuses to open
@@ -1309,21 +1119,16 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
       // Upload paths and visual payloads must never be eligible for automatic restart. This marker is
       // fsynced before approval or execution and contains no path/image data.
-      if (action.kind === 'upload') await markJournalSensitive('upload_path');
-      const journalEffect: JournalActionEffect = risk.consequential
-        ? 'consequential'
-        : actionCapability(action.kind).mutating &&
-            !(action.kind === 'tab' && action.operation === 'list')
-          ? 'write'
-          : 'read';
-      const journalActionId = await proposeJournalAction(
+      if (action.kind === 'upload') await journal.markSensitive('upload_path');
+      const journalEffect = journalEffectOf(action, risk);
+      const journalActionId = await journal.propose(
         action.kind,
         journalEffect,
         journalHostOf(raw.url),
       );
 
       if (navigationDecision?.verdict === 'confirm') {
-        navigationApproved = await confirmJournaled(
+        navigationApproved = await journal.confirm(
           `Approve ${describeSafeAction(action, raw)}? (${navigationDecision.reason}${risk.consequential && risk.reason ? `; ${risk.reason}` : ''})`,
           safeAction,
           journalActionId,
@@ -1363,7 +1168,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         // frame changes without touching DOM perception, so this is the only evidence that the thing
         // under the coordinate when the gesture dispatches is still the thing the model aimed at.
         approvedTargetPatch = await visualTargetPatch(driver, action);
-        await confirmJournaled(prompt, safeAction, journalActionId);
+        await journal.confirm(prompt, safeAction, journalActionId);
         approvalGranted = true;
       }
 
@@ -1383,7 +1188,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           noteBlocked('the page or commit target changed before dispatch');
           history.push(`${step}. ${outcome}`);
           await recordStep(step, raw.url, safeAction, outcome);
-          await appendJournal({
+          await journal.append({
             type: 'action.cancelled',
             actionId: journalActionId,
             summary: 'The commit target changed before dispatch',
@@ -1399,7 +1204,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             noteBlocked('the visual page changed before dispatch');
             history.push(`${step}. ${outcome}`);
             await recordStep(step, raw.url, safeAction, outcome);
-            await appendJournal({
+            await journal.append({
               type: 'action.cancelled',
               actionId: journalActionId,
               summary: 'The visual commit target changed before dispatch',
@@ -1445,7 +1250,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
       let verifiedPerception: RawPerception | undefined;
       const outcome = await timedExecute(() =>
-        dispatchJournaled(
+        journal.dispatch(
           journalActionId,
           journalEffect,
           (beginEffect) =>
@@ -1547,12 +1352,12 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             ? { verdict: 'allow' as const, reason: 'vetted browser settings navigation' }
             : assessNavigationDrift(afterUrl, liveUrlBeforeAction, config);
           if (drift.verdict === 'deny') {
-            const reconcileActionId = await proposeJournalAction(
+            const reconcileActionId = await journal.propose(
               'navigation_reconcile',
               'write',
               journalHostOf(afterUrl),
             );
-            await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, reconcileActionId);
+            await restoreNavigationJournaled(ctx, liveUrlBeforeAction, afterUrl, reconcileActionId);
             return await finish(
               'error',
               '',
@@ -1564,24 +1369,24 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             target !== undefined &&
             sameNavigationAuthority(target, afterUrl, liveUrlBeforeAction);
           if (drift.verdict === 'confirm' && !priorApprovalCoversDrift) {
-            const stayActionId = await proposeJournalAction(
+            const stayActionId = await journal.propose(
               'navigation_reconcile',
               'write',
               journalHostOf(afterUrl),
             );
             let approved = false;
             try {
-              approved = await confirmJournaled(
+              approved = await journal.confirm(
                 `The page opened ${redactUrl(afterUrl)}. Approve staying there? (${drift.reason})`,
                 { kind: 'navigate', url: redactUrl(afterUrl) },
                 stayActionId,
               );
             } catch (error) {
-              await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, stayActionId);
+              await restoreNavigationJournaled(ctx, liveUrlBeforeAction, afterUrl, stayActionId);
               throw error;
             }
             if (!approved) {
-              await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, stayActionId);
+              await restoreNavigationJournaled(ctx, liveUrlBeforeAction, afterUrl, stayActionId);
               history.push(`${step}. user rejected unexpected navigation; went back`);
             } else {
               // A stay approval is scoped to the destination authority the human saw. Redirecting to a
@@ -1597,7 +1402,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
                 !sameNavigationAuthority(afterUrl, afterConfirmation, liveUrlBeforeAction) ||
                 finalDecision.verdict === 'deny'
               ) {
-                await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, stayActionId);
+                await restoreNavigationJournaled(ctx, liveUrlBeforeAction, afterUrl, stayActionId);
                 const reason =
                   finalDecision.verdict === 'deny'
                     ? finalDecision.reason
@@ -1607,7 +1412,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
                   `${step}. unexpected navigation approval expired: ${reason}; went back`,
                 );
               } else {
-                await appendJournal({
+                await journal.append({
                   type: 'action.cancelled',
                   actionId: stayActionId,
                   summary: 'The user approved the observed destination',
@@ -1630,8 +1435,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     return await finish('stopped', `Reached the ${config.maxSteps}-step budget without finishing.`);
   } catch (error) {
     if (
-      journalSnapshot?.state.phase === 'dispatching' ||
-      journalSnapshot?.state.phase === 'recovery_required'
+      journal.snapshot?.state.phase === 'dispatching' ||
+      journal.snapshot?.state.phase === 'recovery_required'
     ) {
       // A dispatch crossed the durable boundary but has no provably clean outcome. Do not append a
       // terminal marker over it. The manager may still report a live error event, while admission of

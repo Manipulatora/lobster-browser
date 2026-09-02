@@ -3,9 +3,10 @@
  * the human-input handoff (including the direct secure typing path a sensitive answer takes), and
  * the rollback that undoes a navigation the policy refused after the fact.
  */
-import type { AgentAction } from '@lobster/shared-types';
+import type { AgentAction, AgentConfig } from '@lobster/shared-types';
 import type { BrowserDriver } from '../driver.js';
 import { executeAction } from '../executor.js';
+import type { Sleep } from '../executor.js';
 import type { AgentRunDeps } from '../loop.js';
 import type { MemoryStore } from '../memory/index.js';
 import { perceive } from '../perception/perceive.js';
@@ -15,6 +16,7 @@ import type { PerceivedElement, RawPerception } from '../types.js';
 import { approvalContextFingerprint } from './gate.js';
 import { clip } from './observe.js';
 import { appendSafe } from './record.js';
+import type { RunJournal, RunLog, StepTimer } from './record.js';
 import { visualTargetHeld, visualTargetPatch } from './verify.js';
 
 export async function handleAsk(
@@ -188,7 +190,7 @@ function elementAtPoint(raw: RawPerception, x: number, y: number): PerceivedElem
   );
 }
 
-export async function rollbackNavigation(driver: BrowserDriver, priorUrl: string): Promise<void> {
+async function rollbackNavigation(driver: BrowserDriver, priorUrl: string): Promise<void> {
   try {
     await driver.goBack();
     await driver.waitForSettle(3000);
@@ -212,4 +214,38 @@ export async function rollbackNavigation(driver: BrowserDriver, priorUrl: string
   if (urlIdentity(await driver.currentUrl()) !== urlIdentity(priorUrl)) {
     throw new Error('could not verify restoration of the prior page');
   }
+}
+
+/** The run-scoped services the dispatch helpers act through. */
+export interface DispatchContext {
+  driver: BrowserDriver;
+  config: AgentConfig;
+  signal: AbortSignal;
+  sleep?: Sleep;
+  journal: RunJournal;
+  timer: StepTimer;
+  log: RunLog['log'];
+}
+
+/** Undo a navigation the policy refused after the fact, journaled as a write of its own. */
+export async function restoreNavigationJournaled(
+  ctx: DispatchContext,
+  priorUrl: string,
+  currentUrl: string,
+  actionId: string,
+): Promise<void> {
+  await ctx.journal.dispatch(
+    actionId,
+    'write',
+    async (beginEffect) => {
+      await beginEffect();
+      await rollbackNavigation(ctx.driver, priorUrl);
+      return 'navigation restored and verified';
+    },
+    (value) => value,
+  );
+  ctx.log(
+    'info',
+    `Restored the prior page after refusing unexpected navigation from ${redactUrl(currentUrl)}.`,
+  );
 }

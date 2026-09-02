@@ -4,10 +4,20 @@
  * here is logged and survived, never raised into the step.
  */
 import type { AgentAction, AgentEvent, AgentUsage } from '@lobster/shared-types';
+import { actionCapability } from '../actions.js';
 import type { BrowserDriver } from '../driver.js';
+import type { EffectDelivery } from '../executor.js';
+import type {
+  AppendRunJournalEventV1,
+  JournalActionEffect,
+  RunJournalSnapshot,
+  RunJournalStore,
+} from '../journal/index.js';
 import type { MemoryStore } from '../memory/index.js';
 import { EXTRACT_SCRIPT } from '../perception/extract-script.js';
+import type { ActionRisk } from '../policy.js';
 import { redactCredentialLikeText } from '../sensitive-text.js';
+import { isReportedFailure } from './verify.js';
 
 /** The phases a step's time is attributed to, in the order the debug line reports them. */
 const TIMING_PHASES = ['perceive', 'llm', 'execute', 'settle', 'journal'] as const;
@@ -252,4 +262,252 @@ export function createStepTimer(input: {
     stepTiming ??= newStepTiming(step, clock());
   };
   return { timed, timedExecute, begin, flush };
+}
+
+/**
+ * The run's encrypted safety journal, spoken to in the loop's own terms: propose an action, mark the
+ * run sensitive, self-approve a commit, and dispatch under the durable barrier. Every method is a
+ * no-op for a run without a journal (focused tests, embedders), so the loop never branches on it.
+ */
+export interface RunJournal {
+  /** The latest authenticated snapshot; undefined for a run without a journal. */
+  readonly snapshot: RunJournalSnapshot | undefined;
+  append: (event: AppendRunJournalEventV1) => Promise<void>;
+  markSensitive: (
+    reason: 'credential' | 'upload_path' | 'provider_configuration' | 'image_payload' | 'unknown',
+  ) => Promise<void>;
+  propose: (
+    kind: AgentAction['kind'] | 'navigation_reconcile',
+    effect: JournalActionEffect,
+    host?: string,
+  ) => Promise<string>;
+  confirm: (prompt: string, action: AgentAction, actionId: string) => Promise<boolean>;
+  dispatch: <T>(
+    actionId: string,
+    effect: JournalActionEffect,
+    operation: (beginEffect: () => Promise<void>) => Promise<T>,
+    outcomeOf: (value: T) => string,
+    verifyAfterEffect?: (value: T) => Promise<void>,
+    deliveryOf?: (value: T) => EffectDelivery | undefined,
+  ) => Promise<T>;
+}
+
+export function createRunJournal(input: {
+  journal: Pick<RunJournalStore, 'append'> | undefined;
+  runId: string;
+  /** What `create` returned, or undefined when the run has no journal. */
+  snapshot: RunJournalSnapshot | undefined;
+  timed: StepTimer['timed'];
+  log: RunLog['log'];
+}): RunJournal {
+  const { journal, runId, timed, log } = input;
+  let journalSnapshot = input.snapshot;
+  let journalActionSequence = 0;
+
+  const appendJournal = async (event: AppendRunJournalEventV1): Promise<void> => {
+    const snapshot = journalSnapshot;
+    if (!journal || !snapshot) return;
+    journalSnapshot = await timed('journal', () =>
+      journal.append(runId, event, snapshot.journal.revision),
+    );
+  };
+  const markJournalSensitive = async (
+    reason: 'credential' | 'upload_path' | 'provider_configuration' | 'image_payload' | 'unknown',
+  ): Promise<void> => {
+    if (!journalSnapshot || journalSnapshot.journal.sensitive) return;
+    await appendJournal({ type: 'run.sensitive', reason });
+  };
+  const proposeJournalAction = async (
+    kind: AgentAction['kind'] | 'navigation_reconcile',
+    effect: JournalActionEffect,
+    host?: string,
+  ): Promise<string> => {
+    const actionId = `action-${++journalActionSequence}`;
+    await appendJournal({
+      type: 'action.proposed',
+      actionId,
+      actionKind: kind,
+      effect,
+      // Never derive this from the live arguments or page label. That would turn an encrypted safety
+      // checkpoint into a second store of selectors, values, paths, URLs, or attacker text.
+      summary: `Proposed ${kind.replaceAll('_', ' ')} action`,
+      ...(host ? { host } : {}),
+    });
+    return actionId;
+  };
+  /**
+   * SELF-approval. The agent never stops mid-task to ask a human whether it may act — that is the
+   * product decision, not a default: an unattended run that pauses on every commit either dies at the
+   * ten-minute input timeout or trains the user to click Approve reflexively, and both outcomes are
+   * worse than acting. The one legitimate stop that remains is the `ask` action for information the
+   * agent cannot know (credentials, a captcha, a task-defining choice) — that still goes through
+   * `waitForInput` in `handleAsk`.
+   *
+   * The approval EVENTS are deliberately kept: `approval.requested` + `approval.resolved approved`
+   * still land in the encrypted journal for every gesture the risk policy classifies as a commit, so
+   * the audit trail records that the harness recognised the boundary and crossed it autonomously —
+   * and an interrupted journal still reduces through the same phases recovery understands. What
+   * changed is only WHO answers, and how long that takes. The `log` line keeps the crossing visible
+   * in the transcript without blocking on anyone; `prompt` may quote page-authored text, and `log`
+   * already scrubs credential-like content before it leaves the process.
+   */
+  const confirmJournaled = async (
+    prompt: string,
+    _action: AgentAction,
+    actionId: string,
+  ): Promise<boolean> => {
+    await appendJournal({ type: 'approval.requested', actionId });
+    await appendJournal({ type: 'approval.resolved', actionId, decision: 'approved' });
+    log('info', `Proceeding autonomously: ${prompt}`);
+    return true;
+  };
+  const dispatchJournaled = async <T>(
+    actionId: string,
+    effect: JournalActionEffect,
+    operation: (beginEffect: () => Promise<void>) => Promise<T>,
+    outcomeOf: (value: T) => string,
+    verifyAfterEffect?: (value: T) => Promise<void>,
+    deliveryOf?: (value: T) => EffectDelivery | undefined,
+  ): Promise<T> => {
+    if (!journalSnapshot) return operation(async () => {});
+    let effectBegan = false;
+    const beginEffect = async (): Promise<void> => {
+      if (effectBegan) return;
+      // RunJournalStore fsyncs this append before returning. Nothing with effects crosses the driver /
+      // memory boundary unless that durability barrier succeeds. The executor invokes this only after
+      // deterministic target, policy, path and capability validation has passed.
+      await appendJournal({ type: 'action.dispatching', actionId });
+      effectBegan = true;
+    };
+    // Reads do not need preflight/effect separation and are safe to close during startup recovery.
+    if (effect === 'read') await beginEffect();
+    let value: T;
+    try {
+      value = await operation(beginEffect);
+    } catch (error) {
+      if (!effectBegan) {
+        await appendJournal({
+          type: 'action.cancelled',
+          actionId,
+          summary: 'The action failed before dispatch',
+        });
+      }
+      throw error;
+    }
+    const outcome = outcomeOf(value);
+    const reportedFailure = isReportedFailure(outcome);
+    if (!effectBegan) {
+      // A structured missing dispatch marker proves the executor returned during deterministic
+      // preflight. It is safe to retry from a fresh observation and must not poison the profile as an
+      // ambiguous write merely because the human-readable outcome starts with "blocked" or "error".
+      await appendJournal({
+        type: 'action.cancelled',
+        actionId,
+        summary: reportedFailure
+          ? 'The action was rejected before dispatch'
+          : 'The action completed without a browser-side effect',
+      });
+      return value;
+    }
+    if (reportedFailure && effect !== 'read') {
+      // Driver methods can fail after an input event was delivered (for example, wait-for-settle after
+      // a click). A returned error therefore does not prove a write was absent. But it does not prove
+      // one HAPPENED either, and treating every driver rejection as possibly-written meant one CDP
+      // hiccup on an ordinary click recorded an unverifiable effect and refused every later run on the
+      // profile. The executor reports how far the action actually got, so only the case that is truly
+      // in doubt — a rejection while an input was in flight — is preserved as an ambiguity.
+      const delivery = deliveryOf?.(value);
+      if (delivery === 'none') {
+        await appendJournal({
+          type: 'action.cancelled',
+          actionId,
+          summary: 'The action failed before any input reached the page',
+        });
+        return value;
+      }
+      if (delivery === 'delivered') {
+        // Every input landed; only the settling or reading that follows failed. The effect is a fact,
+        // not a maybe, and the next observation is what tells the model where it ended up — so this is
+        // an ordinary failed step, not a profile-wide block. Post-effect verification is deliberately
+        // skipped: the driver has already said it cannot read this page, and re-asking could only
+        // downgrade a known state back into a lockout.
+        await appendJournal({
+          type: 'action.observed',
+          actionId,
+          outcome: 'succeeded',
+          summary: 'The input was delivered; the page state after it could not be read',
+        });
+        return value;
+      }
+      await appendJournal({
+        type: 'action.observed',
+        actionId,
+        outcome: 'unknown',
+        summary: 'The action effect could not be verified',
+      });
+      throw new Error(
+        'action outcome is ambiguous; manual recovery is required before another run',
+      );
+    }
+    if (!reportedFailure && effect !== 'read' && verifyAfterEffect) {
+      try {
+        await verifyAfterEffect(value);
+      } catch {
+        await appendJournal({
+          type: 'action.observed',
+          actionId,
+          outcome: 'unknown',
+          summary: 'The browser effect was delivered but fresh state could not be verified',
+        });
+        throw new Error(
+          'action delivery completed but post-action browser state is ambiguous; manual recovery is required before another run',
+        );
+      }
+    }
+    await appendJournal({
+      type: 'action.observed',
+      actionId,
+      outcome: reportedFailure ? 'failed' : 'succeeded',
+      summary: reportedFailure
+        ? 'The action was observed to fail'
+        : verifyAfterEffect
+          ? 'The driver completed and fresh browser state was observed'
+          : 'The action effect was acknowledged by its durable subsystem',
+    });
+    return value;
+  };
+  return {
+    get snapshot() {
+      return journalSnapshot;
+    },
+    append: appendJournal,
+    markSensitive: markJournalSensitive,
+    propose: proposeJournalAction,
+    confirm: confirmJournaled,
+    dispatch: dispatchJournaled,
+  };
+}
+
+/**
+ * How the journal classifies what an action can do — which is what recovery must assume happened if
+ * the run dies mid-dispatch: a commit the risk policy flagged, a plain browser write, or a read.
+ */
+export function journalEffectOf(action: AgentAction, risk: ActionRisk): JournalActionEffect {
+  return risk.consequential
+    ? 'consequential'
+    : actionCapability(action.kind).mutating &&
+        !(action.kind === 'tab' && action.operation === 'list')
+      ? 'write'
+      : 'read';
+}
+
+/** An `ask` only has an effect when a sensitive answer is typed straight into a target on the page. */
+export function askJournalEffect(
+  action: Extract<AgentAction, { kind: 'ask' }>,
+): JournalActionEffect {
+  return action.sensitive &&
+    (action.targetId !== undefined ||
+      (action.targetX !== undefined && action.targetY !== undefined))
+    ? 'consequential'
+    : 'read';
 }

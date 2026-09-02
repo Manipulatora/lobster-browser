@@ -132,3 +132,11 @@ export async function visualTargetHeld(
   }
   return false;
 }
+
+/**
+ * Does an executor outcome line say the action did not do what was asked? These prefixes are the
+ * executor's own refusal and failure vocabulary; any other outcome reads as success.
+ */
+export function isReportedFailure(outcome: string): boolean {
+  return /^(?:error|blocked|refused|missing|stale|could not)\b/i.test(outcome);
+}
