@@ -1,6 +1,10 @@
 import { readdir, rename } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { EncryptedJournalFile, JournalStorageError } from './encrypted-file.js';
+import {
+  EncryptedJournalFile,
+  JournalStorageError,
+  type JournalFileSystem,
+} from './encrypted-file.js';
 import { isTerminalPhase, reduceRunJournal, type RunJournalState } from './reducer.js';
 import {
   MAX_JOURNAL_BYTES,
@@ -18,6 +22,78 @@ import { scrubJournalText } from './scrub.js';
 // The desktop core may construct more than one store facade for a profile. Serialize by canonical
 // directory + run id across every facade in this process so optimistic revisions cannot race locally.
 const RUN_WRITE_QUEUES = new Map<string, Promise<void>>();
+
+/**
+ * How long an accepted non-barrier event may wait in memory before it is written on its own. Short
+ * enough that the durable record is never more than a blink behind the live run; long enough that
+ * the burst a step produces (proposed → approval.requested → approval.resolved → dispatching) shares
+ * one physical write.
+ */
+const DEFAULT_FLUSH_DELAY_MS = 250;
+/**
+ * A background flush that keeps failing stops retrying after this many attempts and leaves the
+ * failure for the next append to surface. Retrying forever against a broken disk would create and
+ * unlink a temp file every few hundred milliseconds for as long as the sidecar lives.
+ */
+const MAX_FLUSH_ATTEMPTS = 5;
+/** `setTimeout` fires anything above this immediately, which would turn "later" into "now". */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+/**
+ * Events `append` has accepted for one journal but has not yet written.
+ *
+ * WHY THIS EXISTS. Every append used to be its own read → decrypt → re-encrypt → fsync → rename
+ * cycle. A mutating step appends four to six events, so the loop paid four to six fsynced rewrites
+ * of the whole file per step — plausibly tens of milliseconds each under Windows real-time scanning
+ * — for a record whose only load-bearing durability point is the dispatch marker. Everything else
+ * is bookkeeping that recovery reads AFTER a crash and that no browser effect waits on. So the
+ * bookkeeping is accepted in memory (validated, sequenced, reduced exactly as before) and reaches
+ * the disk with the next durability barrier or on a short timer, whichever is first.
+ *
+ * WHY THE MAP IS PROCESS-GLOBAL. The sidecar builds a fresh store facade per run and another per
+ * bridge request, all over one directory with one key. A buffer private to a facade would let a
+ * second facade read a revision the first has already moved past, then append on top of that stale
+ * view and clobber the buffered events — the exact lost update the optimistic revision exists to
+ * prevent. Keyed by directory + key fingerprint + run, every same-key facade shares one buffer; a
+ * wrong-key facade has no entry and fails at the authenticated read as it always did.
+ *
+ * WHAT A CRASH LOSES. Only events accepted after the last barrier. The barrier write carries every
+ * event before it, in order, so the durable file is always a prefix of the accepted history that
+ * ends on a state recovery understands.
+ */
+interface PendingWrites {
+  runId: string;
+  /** The accepted journal in full; the durable file holds a prefix of it. */
+  journal: RunJournalV1;
+  /** The revision the durable file held when this process last verified or wrote it. */
+  durableRevision: number;
+  timer: NodeJS.Timeout | undefined;
+  /** Failed background flushes so far; the next append surfaces the failure by writing itself. */
+  attempts: number;
+}
+
+const PENDING_WRITES = new Map<string, PendingWrites>();
+
+/**
+ * The events that must be on disk before `append` resolves.
+ *
+ * `action.dispatching` is THE barrier: the loop writes it immediately before handing an action to the
+ * driver, and recovery's whole reasoning ("a side effect may have occurred") rests on it being durable
+ * before the effect can exist. Terminal markers are barriers because their reader is a LATER process:
+ * the loop deletes the file right after writing one, and the admission sweep that catches a crash in
+ * between must find the marker, not an unfinished journal it then has to "resolve".
+ */
+function isDurabilityBarrier(type: RunJournalEventV1['type']): boolean {
+  switch (type) {
+    case 'action.dispatching':
+    case 'run.completed':
+    case 'run.failed':
+    case 'run.stopped':
+      return true;
+    default:
+      return false;
+  }
+}
 
 export interface CreateRunJournalInput {
   runId: string;
@@ -55,11 +131,17 @@ export class RunJournalNotFoundError extends Error {
 /**
  * Encrypted per-profile journal store. Each run has one serialized writer, and every append uses an
  * optimistic revision so concurrent producers cannot silently overwrite one another.
+ *
+ * Appends are accepted immediately and written in batches: a durability barrier (`action.dispatching`
+ * or a terminal marker) is fsynced before its promise resolves and carries every event accepted
+ * before it; anything else is buffered and written with the next barrier or within `flushDelayMs`.
+ * Every read path writes the buffer first, so no reader ever sees a revision the disk lacks.
  */
 export class RunJournalStore {
   private readonly root: string;
   private readonly files: EncryptedJournalFile;
   private readonly maxEvents: number;
+  private readonly flushDelayMs: number;
   private readonly clock: () => string;
 
   constructor(
@@ -69,16 +151,22 @@ export class RunJournalStore {
       maxEvents?: number;
       maxBytes?: number;
       clock?: () => string;
+      /** How long a non-barrier event may stay buffered before it is written on its own. */
+      flushDelayMs?: number;
+      /** Test seam: count the physical writes and fsyncs the store actually performs. */
+      fs?: JournalFileSystem;
     },
   ) {
     this.root = resolve(journalDir);
     this.maxEvents = normalizeEventCap(opts.maxEvents);
+    this.flushDelayMs = normalizeFlushDelay(opts.flushDelayMs);
     this.clock = opts.clock ?? (() => new Date().toISOString());
     this.files = new EncryptedJournalFile(this.root, {
       encryptionKey: opts.encryptionKey,
       ...(opts.maxBytes === undefined
         ? {}
         : { maxPlaintextBytes: Math.min(MAX_JOURNAL_BYTES, opts.maxBytes) }),
+      ...(opts.fs === undefined ? {} : { fs: opts.fs }),
     });
   }
 
@@ -94,9 +182,12 @@ export class RunJournalStore {
         throw new JournalRevisionConflictError(
           input.runId,
           0,
-          (await this.loadRequired(input.runId)).journal.revision,
+          (await this.loadRequiredLocked(input.runId)).journal.revision,
         );
       }
+      // A buffer can only outlive its file if something outside this store deleted the journal. The
+      // new journal starts from its own first revision, not on top of a ghost's.
+      this.dropPending(input.runId);
       const task = scrubJournalText(requireString(input.task, 'task'));
       const model =
         input.model === undefined
@@ -121,14 +212,14 @@ export class RunJournalStore {
         events: [start],
       });
       const state = reduceRunJournal(journal);
-      await this.write(path, journal);
+      await this.files.write(path, JSON.stringify(journal));
       return cloneSnapshot({ journal, state });
     });
   }
 
   async load(runId: string): Promise<RunJournalSnapshot | null> {
     assertJournalRunId(runId);
-    return this.loadInternal(runId);
+    return this.serialize(runId, () => this.loadLocked(runId));
   }
 
   async append(
@@ -141,30 +232,65 @@ export class RunJournalStore {
       throw new JournalValidationError('expected revision must be a positive integer');
     }
     return this.serialize(runId, async () => {
-      const current = await this.loadRequired(runId);
-      if (current.journal.revision !== expectedRevision) {
-        throw new JournalRevisionConflictError(runId, expectedRevision, current.journal.revision);
+      const pending = PENDING_WRITES.get(this.pendingKey(runId));
+      const current = pending?.journal ?? (await this.loadRequiredFromDisk(runId)).journal;
+      if (current.revision !== expectedRevision) {
+        throw new JournalRevisionConflictError(runId, expectedRevision, current.revision);
       }
-      if (current.journal.events.length >= this.maxEvents) {
+      if (current.events.length >= this.maxEvents) {
         throw new JournalStorageError(`event cap exceeded (${this.maxEvents})`);
       }
       const { event, sensitive } = sanitizeAppendEvent(
         eventInput,
-        current.journal.revision + 1,
+        current.revision + 1,
         this.clock,
-        current.journal.updatedAt,
+        current.updatedAt,
       );
       const candidate = parseRunJournalV1({
-        ...current.journal,
+        ...current,
         updatedAt: event.at,
         revision: event.seq,
-        sensitive: current.journal.sensitive || sensitive || event.type === 'run.sensitive',
-        events: [...current.journal.events, event],
+        sensitive: current.sensitive || sensitive || event.type === 'run.sensitive',
+        events: [...current.events, event],
       });
       const state = reduceRunJournal(candidate);
-      await this.write(this.pathFor(runId), candidate);
+      const serialized = JSON.stringify(candidate);
+      // Enforced at acceptance, exactly as when every append was a write: the event that crosses
+      // the cap is the one refused, not an unrelated flush seconds later.
+      this.files.assertPlaintextWithinCap(serialized);
+      if (isDurabilityBarrier(event.type) || (pending !== undefined && pending.attempts > 0)) {
+        // A barrier writes through. So does any append after a background flush failed: a disk that
+        // cannot take the buffer must be reported to the loop now, before the next effect, not
+        // hidden behind a resolved promise. A failure here leaves the buffer as it was — the events
+        // it holds were accepted; this one was not.
+        await this.persist(runId, serialized, pending?.durableRevision);
+        this.dropPending(runId);
+      } else if (pending) {
+        pending.journal = candidate;
+      } else {
+        this.startBuffer(runId, candidate, current.revision);
+      }
       return cloneSnapshot({ journal: candidate, state });
     });
+  }
+
+  /**
+   * Write every buffered event now — for one run, or for all runs this store's directory and key
+   * hold. Barriers make this unnecessary in the ordinary flow; an embedder that is about to exit
+   * without a terminal marker calls it so the last observations are not left to a timer that will
+   * never fire.
+   */
+  async flush(runId?: string): Promise<void> {
+    if (runId !== undefined) {
+      assertJournalRunId(runId);
+      await this.flushRun(runId);
+      return;
+    }
+    const owned = `${this.root}\0${this.files.keyFingerprint}\0`;
+    const runIds = [...PENDING_WRITES.entries()]
+      .filter(([key]) => key.startsWith(owned))
+      .map(([, entry]) => entry.runId);
+    for (const id of runIds) await this.flushRun(id);
   }
 
   /** List exact journal ids. Interrupted temp files and unrelated directory entries are ignored. */
@@ -193,7 +319,7 @@ export class RunJournalStore {
   async listUnfinished(): Promise<RunJournalSnapshot[]> {
     const snapshots: RunJournalSnapshot[] = [];
     for (const runId of await this.listRunIds()) {
-      const snapshot = await this.loadRequired(runId);
+      const snapshot = await this.serialize(runId, () => this.loadRequiredLocked(runId));
       if (!isTerminalPhase(snapshot.state.phase)) snapshots.push(snapshot);
     }
     return snapshots;
@@ -229,7 +355,7 @@ export class RunJournalStore {
       await this.serialize(runId, async () => {
         let snapshot: RunJournalSnapshot;
         try {
-          snapshot = await this.loadRequired(runId);
+          snapshot = await this.loadRequiredLocked(runId);
         } catch {
           retainedUnreadable.push(runId);
           return;
@@ -264,7 +390,7 @@ export class RunJournalStore {
     return this.serialize(runId, async () => {
       let snapshot: RunJournalSnapshot | null;
       try {
-        snapshot = await this.loadInternal(runId);
+        snapshot = await this.loadLocked(runId);
       } catch {
         // Unreadable is not provably terminal; retain fail-closed exactly like pruneFinished.
         return false;
@@ -284,29 +410,53 @@ export class RunJournalStore {
    * earlier failure: between the caller's read and this call the file could have been repaired or
    * replaced, and renaming a journal that now reads fine would silently discard real recovery state.
    * A readable journal is therefore refused (`false`), whatever the caller saw before.
+   *
+   * Readability is a property of the durable file alone. Buffered events are not consulted, and a
+   * buffer the disk cannot currently take is a write problem, not what "unreadable" means — so a
+   * healthy file is never quarantined for it.
    */
   async quarantineUnreadable(runId: string): Promise<boolean> {
     assertJournalRunId(runId);
     return this.serialize(runId, async () => {
       try {
-        await this.loadInternal(runId);
+        await this.loadFromDisk(runId);
         return false; // readable — never quarantine a journal that still parses and authenticates
       } catch {
         // fall through: provably unreadable right now, under the write lock
       }
       const path = this.pathFor(runId); // validated + containment-asserted
       await rename(path, `${path}.corrupt`);
+      this.dropPending(runId); // whatever was buffered extended bytes that no longer exist here
       return true;
     });
   }
 
-  private async loadRequired(runId: string): Promise<RunJournalSnapshot> {
-    const loaded = await this.loadInternal(runId);
+  /** Write the buffer, then read the file: the caller sees exactly what the disk holds. */
+  private async loadLocked(runId: string): Promise<RunJournalSnapshot | null> {
+    try {
+      await this.flushLocked(runId);
+    } catch (error) {
+      // A buffer the durable file proved stale has already been discarded, and the file it lost to
+      // is the truth this read should return. Anything else means the disk cannot currently take
+      // the buffered revision — and describing a journal that cannot be made durable would be a lie.
+      if (!(error instanceof JournalRevisionConflictError)) throw error;
+    }
+    return this.loadFromDisk(runId);
+  }
+
+  private async loadRequiredLocked(runId: string): Promise<RunJournalSnapshot> {
+    const loaded = await this.loadLocked(runId);
     if (!loaded) throw new RunJournalNotFoundError(runId);
     return loaded;
   }
 
-  private async loadInternal(runId: string): Promise<RunJournalSnapshot | null> {
+  private async loadRequiredFromDisk(runId: string): Promise<RunJournalSnapshot> {
+    const loaded = await this.loadFromDisk(runId);
+    if (!loaded) throw new RunJournalNotFoundError(runId);
+    return loaded;
+  }
+
+  private async loadFromDisk(runId: string): Promise<RunJournalSnapshot | null> {
     const plaintext = await this.files.read(this.pathFor(runId));
     if (plaintext === null) return null;
     let decoded: unknown;
@@ -324,13 +474,97 @@ export class RunJournalStore {
     return cloneSnapshot({ journal, state });
   }
 
-  private pathFor(runId: string): string {
-    return this.files.resolveFile(`${runId}.journal`);
+  /**
+   * One physical write of the complete journal.
+   *
+   * When the caller has been working from the buffer, the durable file is re-read first and must
+   * still hold the revision this process last wrote: a writer this process knows nothing about —
+   * another sidecar on the same profile, a restore from backup — is then a revision conflict, never
+   * an overwrite with a stale copy from memory. The buffer is dropped in that case because it is
+   * provably built on a file that no longer exists in that form. A caller that has just read the
+   * disk inside the same critical section passes `undefined` and skips the redundant read.
+   */
+  private async persist(
+    runId: string,
+    serialized: string,
+    durableRevision: number | undefined,
+  ): Promise<void> {
+    if (durableRevision !== undefined) {
+      let onDisk: RunJournalSnapshot;
+      try {
+        onDisk = await this.loadRequiredFromDisk(runId);
+      } catch (error) {
+        if (error instanceof RunJournalNotFoundError) this.dropPending(runId);
+        throw error;
+      }
+      if (onDisk.journal.revision !== durableRevision) {
+        this.dropPending(runId);
+        throw new JournalRevisionConflictError(runId, durableRevision, onDisk.journal.revision);
+      }
+    }
+    await this.files.write(this.pathFor(runId), serialized);
   }
 
-  private async write(path: string, journal: RunJournalV1): Promise<void> {
-    const serialized = JSON.stringify(journal);
-    await this.files.write(path, serialized);
+  private startBuffer(runId: string, journal: RunJournalV1, durableRevision: number): void {
+    const entry: PendingWrites = { runId, journal, durableRevision, timer: undefined, attempts: 0 };
+    PENDING_WRITES.set(this.pendingKey(runId), entry);
+    this.scheduleFlush(entry, this.flushDelayMs);
+  }
+
+  private scheduleFlush(entry: PendingWrites, delayMs: number): void {
+    entry.timer = setTimeout(
+      () => {
+        entry.timer = undefined;
+        // A rejected timer callback would be an unhandled rejection that takes the sidecar down. The
+        // failure is recorded on the entry instead and surfaced by the next append or read.
+        void this.flushRun(entry.runId).catch(() => {});
+      },
+      Math.min(MAX_TIMER_MS, delayMs),
+    );
+    // Never keep an exiting process alive for a flush: by construction it holds nothing a barrier
+    // covered, and a process that is exiting has no next effect to protect.
+    entry.timer.unref();
+  }
+
+  private flushRun(runId: string): Promise<void> {
+    return this.serialize(runId, () => this.flushLocked(runId));
+  }
+
+  /** Write the buffered events, if any. The caller holds the run's queue. */
+  private async flushLocked(runId: string): Promise<void> {
+    const entry = PENDING_WRITES.get(this.pendingKey(runId));
+    if (!entry) return;
+    try {
+      await this.persist(runId, JSON.stringify(entry.journal), entry.durableRevision);
+    } catch (error) {
+      // The journal was deleted underneath the buffer: there is nowhere for these events to go, and
+      // the reader that follows will report the absence, which is the durable truth.
+      if (error instanceof RunJournalNotFoundError) return;
+      // `persist` already discarded a buffer the file proved stale; the conflict is the caller's.
+      if (error instanceof JournalRevisionConflictError) throw error;
+      entry.attempts += 1;
+      if (entry.attempts < MAX_FLUSH_ATTEMPTS && entry.timer === undefined) {
+        this.scheduleFlush(entry, this.flushDelayMs * (entry.attempts + 1));
+      }
+      throw error;
+    }
+    this.dropPending(runId);
+  }
+
+  private dropPending(runId: string): void {
+    const key = this.pendingKey(runId);
+    const entry = PENDING_WRITES.get(key);
+    if (!entry) return;
+    if (entry.timer !== undefined) clearTimeout(entry.timer);
+    PENDING_WRITES.delete(key);
+  }
+
+  private pendingKey(runId: string): string {
+    return `${this.root}\0${this.files.keyFingerprint}\0${runId}`;
+  }
+
+  private pathFor(runId: string): string {
+    return this.files.resolveFile(`${runId}.journal`);
   }
 
   private async serialize<T>(runId: string, operation: () => Promise<T>): Promise<T> {
@@ -528,4 +762,12 @@ function normalizeEventCap(value: number | undefined): number {
     throw new JournalStorageError('event cap must be a positive integer');
   }
   return Math.min(MAX_JOURNAL_EVENTS, value);
+}
+
+function normalizeFlushDelay(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_FLUSH_DELAY_MS;
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_TIMER_MS) {
+    throw new JournalStorageError('flush delay must be a positive integer of milliseconds');
+  }
+  return value;
 }

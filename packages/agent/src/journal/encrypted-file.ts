@@ -1,12 +1,23 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
+import * as nodeFs from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { MAX_JOURNAL_BYTES } from './schema.js';
 
 const ENVELOPE_PREFIX = 'lobee-run-journal-v1:';
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
+
+/**
+ * The filesystem calls this primitive makes. Injectable so a test can count the physical costs of
+ * durability — temp-file creation, every fsync, the rename that publishes a revision — which is the
+ * only honest way to prove that batching in the store removed them rather than merely moved them.
+ * Production never passes one; the default is the real module.
+ */
+export type JournalFileSystem = Pick<
+  typeof nodeFs,
+  'open' | 'rename' | 'unlink' | 'mkdir' | 'chmod' | 'lstat'
+>;
 
 /**
  * Whether this platform can fsync a directory to persist its entries.
@@ -42,10 +53,10 @@ const HAS_O_NOFOLLOW = O_NOFOLLOW !== 0;
  * Node exposes no way to close the window on Windows. Callers that CREATE a file still use
  * `O_CREAT | O_EXCL`, which is atomic and needs no such check.
  */
-async function assertNotSymlink(path: string): Promise<void> {
+async function assertNotSymlink(fs: JournalFileSystem, path: string): Promise<void> {
   if (HAS_O_NOFOLLOW) return;
   try {
-    if ((await lstat(path)).isSymbolicLink()) {
+    if ((await fs.lstat(path)).isSymbolicLink()) {
       throw new JournalStorageError(`${basename(path)} is a symbolic link`);
     }
   } catch (error) {
@@ -66,14 +77,28 @@ export class EncryptedJournalFile {
   private readonly root: string;
   private readonly key: Buffer;
   private readonly maxPlaintextBytes: number;
+  private readonly fs: JournalFileSystem;
+  /**
+   * Identifies the key without revealing it, so in-memory state derived from plaintext (the store's
+   * write buffer) can be shared between facades holding the same key and never reach one that holds
+   * a different key — a wrong-key facade must keep failing at the authenticated read, exactly as it
+   * does against the file.
+   */
+  readonly keyFingerprint: string;
 
   constructor(
     root: string,
-    opts: { encryptionKey: string | Uint8Array; maxPlaintextBytes?: number },
+    opts: {
+      encryptionKey: string | Uint8Array;
+      maxPlaintextBytes?: number;
+      fs?: JournalFileSystem;
+    },
   ) {
     this.root = resolve(root);
     this.key = decodeKey(opts.encryptionKey);
+    this.keyFingerprint = createHash('sha256').update(this.key).digest('hex');
     this.maxPlaintextBytes = normalizeByteCap(opts.maxPlaintextBytes);
+    this.fs = opts.fs ?? nodeFs;
   }
 
   resolveFile(filename: string): string {
@@ -90,8 +115,8 @@ export class EncryptedJournalFile {
     if (!(await this.verifyRoot())) return false;
     let handle;
     try {
-      await assertNotSymlink(path);
-      handle = await open(path, constants.O_RDONLY | O_NOFOLLOW);
+      await assertNotSymlink(this.fs, path);
+      handle = await this.fs.open(path, constants.O_RDONLY | O_NOFOLLOW);
       return true;
     } catch (error) {
       if (isMissing(error)) return false;
@@ -107,8 +132,8 @@ export class EncryptedJournalFile {
     if (!(await this.verifyRoot())) return null;
     let handle;
     try {
-      await assertNotSymlink(path);
-      handle = await open(path, constants.O_RDONLY | O_NOFOLLOW);
+      await assertNotSymlink(this.fs, path);
+      handle = await this.fs.open(path, constants.O_RDONLY | O_NOFOLLOW);
       const stat = await handle.stat();
       if (!stat.isFile()) throw new JournalStorageError(`${basename(path)} is not a regular file`);
       const maxEnvelopeBytes =
@@ -129,11 +154,20 @@ export class EncryptedJournalFile {
     }
   }
 
-  async write(path: string, plaintext: string): Promise<void> {
-    this.assertContained(path);
+  /**
+   * The size cap, exposed so the store can refuse an oversized event at the moment it is ACCEPTED.
+   * Batched appends reach `write` seconds after the caller was told they succeeded; a cap enforced
+   * only here would fail an unrelated later flush instead of the event that crossed it.
+   */
+  assertPlaintextWithinCap(plaintext: string): void {
     if (Buffer.byteLength(plaintext, 'utf8') > this.maxPlaintextBytes) {
       throw new JournalStorageError(`journal exceeds the ${this.maxPlaintextBytes}-byte cap`);
     }
+  }
+
+  async write(path: string, plaintext: string): Promise<void> {
+    this.assertContained(path);
+    this.assertPlaintextWithinCap(plaintext);
     await this.ensureRoot();
     const encrypted = this.encrypt(plaintext, path);
     const temp = resolve(
@@ -143,7 +177,11 @@ export class EncryptedJournalFile {
     this.assertContained(temp);
     let handle;
     try {
-      handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+      handle = await this.fs.open(
+        temp,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+        0o600,
+      );
       await handle.writeFile(encrypted, 'utf8');
       // Set the final inode mode before it becomes visible at `path`. A chmod after rename can fail
       // after the new revision has already replaced the old one, making the caller believe an append
@@ -152,11 +190,11 @@ export class EncryptedJournalFile {
       await handle.sync();
       await handle.close();
       handle = undefined;
-      await rename(temp, path);
+      await this.fs.rename(temp, path);
       await this.fsyncDirectory();
     } catch (error) {
       await handle?.close().catch(() => {});
-      await unlink(temp).catch(() => {});
+      await this.fs.unlink(temp).catch(() => {});
       if (error instanceof JournalStorageError) throw error;
       throw storageFailure(error, basename(path));
     }
@@ -166,7 +204,7 @@ export class EncryptedJournalFile {
     this.assertContained(path);
     if (!(await this.verifyRoot())) return;
     try {
-      await unlink(path);
+      await this.fs.unlink(path);
       await this.fsyncDirectory();
     } catch (error) {
       if (isMissing(error)) return;
@@ -176,11 +214,11 @@ export class EncryptedJournalFile {
 
   private async ensureRoot(): Promise<void> {
     const existed = await this.verifyRoot();
-    await mkdir(this.root, { recursive: true, mode: 0o700 });
+    await this.fs.mkdir(this.root, { recursive: true, mode: 0o700 });
     if (!(await this.verifyRoot())) {
       throw new JournalStorageError('journal directory disappeared during creation');
     }
-    await chmod(this.root, 0o700);
+    await this.fs.chmod(this.root, 0o700);
     if (!existed) {
       // Syncing the new directory persists its contents, but not necessarily the directory entry that
       // links it from its parent. Persist that entry before any caller can rely on a journal created in
@@ -195,7 +233,7 @@ export class EncryptedJournalFile {
    */
   async verifyRoot(): Promise<boolean> {
     try {
-      const stat = await lstat(this.root);
+      const stat = await this.fs.lstat(this.root);
       if (stat.isSymbolicLink())
         throw new JournalStorageError('journal directory must not be a symlink');
       if (!stat.isDirectory()) throw new JournalStorageError('journal root is not a directory');
@@ -213,7 +251,7 @@ export class EncryptedJournalFile {
     if (!DIRECTORY_SYNC_SUPPORTED) return;
     let handle;
     try {
-      handle = await open(path, constants.O_RDONLY);
+      handle = await this.fs.open(path, constants.O_RDONLY);
       await handle.sync();
     } catch (error) {
       // A dispatch marker is not a durability barrier if its rename can disappear after a filesystem
