@@ -1,4 +1,3 @@
-import { Buffer } from 'node:buffer';
 import { homedir } from 'node:os';
 import { basename, isAbsolute } from 'node:path';
 import type {
@@ -17,18 +16,60 @@ import {
 } from './browser-config-guard.js';
 import type { BrowserDriver } from './driver.js';
 import { MAX_SCREENSHOT_BASE64_CHARS } from './driver.js';
-import { executeAction } from './executor.js';
-import type { EffectDelivery, Sleep } from './executor.js';
-import type { LlmClient } from './llm/index.js';
+import type { Sleep } from './executor.js';
+import type { LlmClient, LlmResult } from './llm/index.js';
 import { usesAutomaticToolChoice } from './llm/index.js';
 import type { LlmMessage, LlmTool } from './llm/types.js';
 import { normalizeMessages } from './llm/types.js';
-import type {
-  AppendRunJournalEventV1,
-  JournalActionEffect,
-  RunJournalSnapshot,
-} from './journal/index.js';
+import {
+  budgetedMaxTokens,
+  createStepRequestBuilder,
+  recoverFromContextOverflow,
+  tokenBudgetExceeded,
+} from './loop/decide.js';
+import {
+  adoptedPopupNote,
+  dispatchAction,
+  handleAsk,
+  openStartUrl,
+  restoreNavigationJournaled,
+} from './loop/execute.js';
+import type { DispatchContext } from './loop/execute.js';
+import {
+  approvalContextFingerprint,
+  createRepeatDetector,
+  isSettingsUiAction,
+  sameNavigationAuthority,
+  scopeWipeAllToNamedSite,
+  settingsActionIntent,
+} from './loop/gate.js';
+import {
+  appendExtractedEvidence,
+  attachImageToLastTurn,
+  budgetNudge,
+  createDataset,
+  createObservationRenderer,
+  firstLine,
+  observationFingerprint,
+  pruneObservations,
+  runLedger,
+} from './loop/observe.js';
 import type { RunJournalStore } from './journal/index.js';
+import {
+  addUsage,
+  appendSafe,
+  askJournalEffect,
+  createRunJournal,
+  createRunLog,
+  createStepTimer,
+  hostOf,
+  instrumentDriver,
+  journalEffectOf,
+  journalHostOf,
+  safe,
+  safeError,
+} from './loop/record.js';
+import { verifyBrowserStateObserved, visualTargetHeld, visualTargetPatch } from './loop/verify.js';
 import type { MemoryStore } from './memory/index.js';
 import {
   actionCommitIntent,
@@ -41,7 +82,6 @@ import {
   targetUrlForAction,
 } from './policy.js';
 import type { PolicyDecision } from './policy.js';
-import { EXTRACT_SCRIPT } from './perception/extract-script.js';
 import { perceive } from './perception/perceive.js';
 import {
   describeSituationChange,
@@ -49,29 +89,26 @@ import {
   situationTransitions,
 } from './perception/situation.js';
 import type { SituationSignal } from './perception/situation.js';
-import { renderObservation, sameElements } from './perception/serialize.js';
 import {
   buildAskPrompt,
   buildStepPrompt,
   buildSystemPrompt,
-  EVIDENCE_PREAMBLE,
-  PROGRESS_PREAMBLE,
-  VERBATIM_OBSERVATIONS,
   buildVolatileTail,
   userMessageBlock,
 } from './prompt.js';
 import type { WorkingMemory } from './prompt.js';
 import {
   describeSafeAction,
-  isSensitiveElement,
   redactAction,
   redactRawActionInput,
   redactUrl,
   urlIdentity,
 } from './security.js';
 import { redactCredentialLikeText } from './sensitive-text.js';
-import type { PerceivedElement, RawPerception } from './types.js';
-import { siteNamedIn } from './site-families.js';
+import type { RawPerception } from './types.js';
+
+// Kept on the loop's public surface after the split; it lives with the request budgeting now.
+export { contextOverflowHeadroom } from './loop/decide.js';
 
 export interface AgentRunDeps {
   driver: BrowserDriver;
@@ -117,13 +154,6 @@ export interface AgentRunParams {
   llmConfig: AgentLlmConfig;
   config: AgentConfig;
 }
-
-/**
- * A response smaller than this is not a useful budget for either a chat answer or a structured agent
- * action. Stopping before the request is safer than asking a provider for a handful of tokens, paying
- * for the full prompt, and receiving a truncated/non-executable result.
- */
-const MIN_USEFUL_OUTPUT_TOKENS = 256;
 
 export function resolveConfig(partial: Partial<AgentConfig> | undefined): AgentConfig {
   const maxSteps = boundedInteger(partial?.maxSteps, 40, 1, 200, 'maxSteps');
@@ -183,84 +213,6 @@ export function resolveConfig(partial: Partial<AgentConfig> | undefined): AgentC
   };
 }
 
-/**
- * A wipe-all is site-scoped BY CONSTRUCTION. "Remove all cookies of outlook.com" reads, to a model,
- * as "all cookies" — and clear_all_cookies signs the user out of every site in an anti-detect
- * profile, irreversibly. Whether that is what the user meant is not a judgment call the model gets to
- * make: if the request names a site, the action becomes that site's clear_session; only a request
- * that names no site at all ("clear all cookies", "log me out everywhere") keeps the wipe-all.
- */
-function scopeWipeAllToNamedSite(action: AgentAction, task: string): AgentAction {
-  if (action.kind !== 'browser_config' || action.op !== 'clear_all_cookies') return action;
-  const site = siteNamedIn(task);
-  if (!site) return action;
-  return {
-    kind: 'browser_config',
-    op: 'clear_session',
-    site,
-    note: `scoped to ${site}: the request named that site, so its session is cleared and every other site's is kept`,
-    ...(action.plan ? { plan: action.plan } : {}),
-  };
-}
-
-/** The phases a step's time is attributed to, in the order the debug line reports them. */
-const TIMING_PHASES = ['perceive', 'llm', 'execute', 'settle', 'journal'] as const;
-type TimedPhase = (typeof TIMING_PHASES)[number];
-
-interface StepTiming {
-  step: number;
-  startedAt: number;
-  phases: Record<TimedPhase | 'total', number>;
-}
-
-function newStepTiming(step: number, startedAt: number): StepTiming {
-  return {
-    step,
-    startedAt,
-    phases: { perceive: 0, llm: 0, execute: 0, settle: 0, journal: 0, total: 0 },
-  };
-}
-
-/**
- * The driver with its two slow primitives on the stopwatch: the DOM walk (`evaluate` of the extract
- * script, i.e. every `perceive`) and `waitForSettle`. Timing them HERE attributes the cost wherever
- * it is paid — the top-of-step read, the pre-dispatch freshness read, the post-action verification,
- * the executor's own settle waits — without threading a clock through each caller.
- *
- * A Proxy rather than a wrapper class: every other member is forwarded BOUND TO THE REAL DRIVER, so a
- * driver that keeps private fields or compares `this` never meets a foreign receiver, and optional
- * members (`ready`, `screenshot`, `takeAdoptedPopup`) stay absent when the driver lacks them — the
- * loop decides behaviour by their presence.
- */
-function instrumentDriver(
-  driver: BrowserDriver,
-  timed: <T>(phase: 'perceive' | 'settle', operation: () => Promise<T>) => Promise<T>,
-): BrowserDriver {
-  return new Proxy(driver, {
-    get(target, property) {
-      const value = Reflect.get(target, property) as unknown;
-      if (typeof value !== 'function') return value;
-      const method = value as (...args: unknown[]) => unknown;
-      if (property === 'evaluate') {
-        return (expression: string): unknown =>
-          expression === EXTRACT_SCRIPT
-            ? timed('perceive', () => method.call(target, expression) as Promise<unknown>)
-            : method.call(target, expression);
-      }
-      if (property === 'waitForSettle') {
-        return (...args: unknown[]): Promise<void> =>
-          timed('settle', () => method.call(target, ...args) as Promise<void>);
-      }
-      return method.bind(target);
-    },
-  });
-}
-
-/** The action minus the model's memo: a fresh `plan` on the same gesture must not read as a new gesture. */
-function actionIdentity(action: AgentAction): string {
-  return JSON.stringify({ ...action, plan: undefined });
-}
-
 export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Promise<void> {
   const { sessionId, profileId, task, runId, llmConfig, config } = params;
   const { llm, memory, emit, signal, now } = deps;
@@ -270,315 +222,64 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     (llm.sendsEffort?.(llmConfig.stepModel || llmConfig.model, llmConfig.effort) ?? false);
   const history: string[] = [];
   const base = { sessionId, profileId };
-  /**
-   * Milliseconds on the clock the events are stamped with, so a step's phase durations and its
-   * events' `ts` are measured the same way — and a test that injects `now` controls both.
-   */
-  const clock = (): number => {
-    const ms = Date.parse(now());
-    return Number.isNaN(ms) ? Date.now() : ms;
-  };
-  /** Phase accumulators for the step in progress; reported by `flushStepTiming`. */
-  let stepTiming: StepTiming | undefined;
-  const timed = async <T>(phase: TimedPhase, operation: () => Promise<T>): Promise<T> => {
-    const startedAt = clock();
-    try {
-      return await operation();
-    } finally {
-      if (stepTiming) stepTiming.phases[phase] += Math.max(0, clock() - startedAt);
-    }
-  };
-  /**
-   * The dispatch window NET of the primitives measured inside it, so `execute` is the driver's own
-   * work — cursor paths, key cadence, the executor's checks — and not a second copy of the settle,
-   * journal and verification-read time that `dispatchJournaled` also spends.
-   */
-  const timedExecute = async <T>(operation: () => Promise<T>): Promise<T> => {
-    const startedAt = clock();
-    const inner = (): number =>
-      stepTiming
-        ? stepTiming.phases.perceive + stepTiming.phases.settle + stepTiming.phases.journal
-        : 0;
-    const innerBefore = inner();
-    try {
-      return await operation();
-    } finally {
-      if (stepTiming) {
-        stepTiming.phases.execute += Math.max(0, clock() - startedAt - (inner() - innerBefore));
-      }
-    }
-  };
+  const { log, memoryDegraded } = createRunLog({ emit, base, now });
+  const timer = createStepTimer({ now, emit, base, log });
+  const { timed } = timer;
   const driver = instrumentDriver(deps.driver, timed);
+  /** The per-step memory record, best-effort: a failure lands on the memory channel, never in the step. */
+  const recordStep = (
+    step: number,
+    url: string,
+    action: AgentAction,
+    outcome: string,
+  ): Promise<void> =>
+    appendSafe(memory, runId, step, url, action, outcome, now, log, (reason) =>
+      memoryDegraded('step', reason),
+    );
   const safeTask = redactCredentialLikeText(task);
   let memoryStarted = false;
-  let journalSnapshot: RunJournalSnapshot | undefined;
-  let journalActionSequence = 0;
 
   // The journal is a safety dependency, unlike recall memory. Create it before emitting lifecycle
   // events, consulting the model, opening a URL, or touching durable profile state. A production
   // storage failure therefore rejects the run before it can do work.
-  if (deps.journal) {
-    journalSnapshot = await deps.journal.create({
-      runId,
-      // Tasks can contain credentials or private business data. Recovery needs lifecycle/effect
-      // state, not a second copy of the prompt, so persist a deliberately content-free label.
-      task: 'Agent task',
-      mode: config.mode ?? 'agent',
-    });
-  }
-
-  const appendJournal = async (event: AppendRunJournalEventV1): Promise<void> => {
-    const journal = deps.journal;
-    const snapshot = journalSnapshot;
-    if (!journal || !snapshot) return;
-    journalSnapshot = await timed('journal', () =>
-      journal.append(runId, event, snapshot.journal.revision),
-    );
-  };
-  const markJournalSensitive = async (
-    reason: 'credential' | 'upload_path' | 'provider_configuration' | 'image_payload' | 'unknown',
-  ): Promise<void> => {
-    if (!journalSnapshot || journalSnapshot.journal.sensitive) return;
-    await appendJournal({ type: 'run.sensitive', reason });
-  };
-  const proposeJournalAction = async (
-    kind: AgentAction['kind'] | 'navigation_reconcile',
-    effect: JournalActionEffect,
-    host?: string,
-  ): Promise<string> => {
-    const actionId = `action-${++journalActionSequence}`;
-    await appendJournal({
-      type: 'action.proposed',
-      actionId,
-      actionKind: kind,
-      effect,
-      // Never derive this from the live arguments or page label. That would turn an encrypted safety
-      // checkpoint into a second store of selectors, values, paths, URLs, or attacker text.
-      summary: `Proposed ${kind.replaceAll('_', ' ')} action`,
-      ...(host ? { host } : {}),
-    });
-    return actionId;
-  };
-  /**
-   * SELF-approval. The agent never stops mid-task to ask a human whether it may act — that is the
-   * product decision, not a default: an unattended run that pauses on every commit either dies at the
-   * ten-minute input timeout or trains the user to click Approve reflexively, and both outcomes are
-   * worse than acting. The one legitimate stop that remains is the `ask` action for information the
-   * agent cannot know (credentials, a captcha, a task-defining choice) — that still goes through
-   * `waitForInput` in `handleAsk`.
-   *
-   * The approval EVENTS are deliberately kept: `approval.requested` + `approval.resolved approved`
-   * still land in the encrypted journal for every gesture the risk policy classifies as a commit, so
-   * the audit trail records that the harness recognised the boundary and crossed it autonomously —
-   * and an interrupted journal still reduces through the same phases recovery understands. What
-   * changed is only WHO answers, and how long that takes. The `log` line keeps the crossing visible
-   * in the transcript without blocking on anyone; `prompt` may quote page-authored text, and `log`
-   * already scrubs credential-like content before it leaves the process.
-   */
-  const confirmJournaled = async (
-    prompt: string,
-    _action: AgentAction,
-    actionId: string,
-  ): Promise<boolean> => {
-    await appendJournal({ type: 'approval.requested', actionId });
-    await appendJournal({ type: 'approval.resolved', actionId, decision: 'approved' });
-    log('info', `Proceeding autonomously: ${prompt}`);
-    return true;
-  };
-  const dispatchJournaled = async <T>(
-    actionId: string,
-    effect: JournalActionEffect,
-    operation: (beginEffect: () => Promise<void>) => Promise<T>,
-    outcomeOf: (value: T) => string,
-    verifyAfterEffect?: (value: T) => Promise<void>,
-    deliveryOf?: (value: T) => EffectDelivery | undefined,
-  ): Promise<T> => {
-    if (!journalSnapshot) return operation(async () => {});
-    let effectBegan = false;
-    const beginEffect = async (): Promise<void> => {
-      if (effectBegan) return;
-      // RunJournalStore fsyncs this append before returning. Nothing with effects crosses the driver /
-      // memory boundary unless that durability barrier succeeds. The executor invokes this only after
-      // deterministic target, policy, path and capability validation has passed.
-      await appendJournal({ type: 'action.dispatching', actionId });
-      effectBegan = true;
-    };
-    // Reads do not need preflight/effect separation and are safe to close during startup recovery.
-    if (effect === 'read') await beginEffect();
-    let value: T;
-    try {
-      value = await operation(beginEffect);
-    } catch (error) {
-      if (!effectBegan) {
-        await appendJournal({
-          type: 'action.cancelled',
-          actionId,
-          summary: 'The action failed before dispatch',
-        });
-      }
-      throw error;
-    }
-    const outcome = outcomeOf(value);
-    const reportedFailure = /^(?:error|blocked|refused|missing|stale|could not)\b/i.test(outcome);
-    if (!effectBegan) {
-      // A structured missing dispatch marker proves the executor returned during deterministic
-      // preflight. It is safe to retry from a fresh observation and must not poison the profile as an
-      // ambiguous write merely because the human-readable outcome starts with "blocked" or "error".
-      await appendJournal({
-        type: 'action.cancelled',
-        actionId,
-        summary: reportedFailure
-          ? 'The action was rejected before dispatch'
-          : 'The action completed without a browser-side effect',
-      });
-      return value;
-    }
-    if (reportedFailure && effect !== 'read') {
-      // Driver methods can fail after an input event was delivered (for example, wait-for-settle after
-      // a click). A returned error therefore does not prove a write was absent. But it does not prove
-      // one HAPPENED either, and treating every driver rejection as possibly-written meant one CDP
-      // hiccup on an ordinary click recorded an unverifiable effect and refused every later run on the
-      // profile. The executor reports how far the action actually got, so only the case that is truly
-      // in doubt — a rejection while an input was in flight — is preserved as an ambiguity.
-      const delivery = deliveryOf?.(value);
-      if (delivery === 'none') {
-        await appendJournal({
-          type: 'action.cancelled',
-          actionId,
-          summary: 'The action failed before any input reached the page',
-        });
-        return value;
-      }
-      if (delivery === 'delivered') {
-        // Every input landed; only the settling or reading that follows failed. The effect is a fact,
-        // not a maybe, and the next observation is what tells the model where it ended up — so this is
-        // an ordinary failed step, not a profile-wide block. Post-effect verification is deliberately
-        // skipped: the driver has already said it cannot read this page, and re-asking could only
-        // downgrade a known state back into a lockout.
-        await appendJournal({
-          type: 'action.observed',
-          actionId,
-          outcome: 'succeeded',
-          summary: 'The input was delivered; the page state after it could not be read',
-        });
-        return value;
-      }
-      await appendJournal({
-        type: 'action.observed',
-        actionId,
-        outcome: 'unknown',
-        summary: 'The action effect could not be verified',
-      });
-      throw new Error(
-        'action outcome is ambiguous; manual recovery is required before another run',
-      );
-    }
-    if (!reportedFailure && effect !== 'read' && verifyAfterEffect) {
-      try {
-        await verifyAfterEffect(value);
-      } catch {
-        await appendJournal({
-          type: 'action.observed',
-          actionId,
-          outcome: 'unknown',
-          summary: 'The browser effect was delivered but fresh state could not be verified',
-        });
-        throw new Error(
-          'action delivery completed but post-action browser state is ambiguous; manual recovery is required before another run',
-        );
-      }
-    }
-    await appendJournal({
-      type: 'action.observed',
-      actionId,
-      outcome: reportedFailure ? 'failed' : 'succeeded',
-      summary: reportedFailure
-        ? 'The action was observed to fail'
-        : verifyAfterEffect
-          ? 'The driver completed and fresh browser state was observed'
-          : 'The action effect was acknowledged by its durable subsystem',
-    });
-    return value;
-  };
-  const restoreNavigationJournaled = async (
-    priorUrl: string,
-    currentUrl: string,
-    actionId: string,
-  ): Promise<void> => {
-    await dispatchJournaled(
-      actionId,
-      'write',
-      async (beginEffect) => {
-        await beginEffect();
-        await rollbackNavigation(driver, priorUrl);
-        return 'navigation restored and verified';
-      },
-      (value) => value,
-    );
-    log(
-      'info',
-      `Restored the prior page after refusing unexpected navigation from ${redactUrl(currentUrl)}.`,
-    );
+  const journal = createRunJournal({
+    journal: deps.journal,
+    runId,
+    snapshot: deps.journal
+      ? await deps.journal.create({
+          runId,
+          // Tasks can contain credentials or private business data. Recovery needs lifecycle/effect
+          // state, not a second copy of the prompt, so persist a deliberately content-free label.
+          task: 'Agent task',
+          mode: config.mode ?? 'agent',
+        })
+      : undefined,
+    timed,
+    log,
+  });
+  /** The run-scoped services the dispatch helpers act through. */
+  const ctx: DispatchContext = {
+    driver,
+    config,
+    signal,
+    ...(deps.sleep ? { sleep: deps.sleep } : {}),
+    journal,
+    timer,
+    log,
   };
 
-  const log = (level: 'debug' | 'info' | 'warn' | 'error', message: string): void =>
-    emit({
-      type: 'log',
-      ...base,
-      level,
-      message: redactCredentialLikeText(message).text,
-      ts: now(),
-    });
-  /**
-   * Report a memory degradation on its own typed channel as well as the log. Memory failing is
-   * survivable but must never be INVISIBLE: a profile that has silently stopped remembering anything
-   * looked exactly like one that was working.
-   */
-  const memoryDegraded = (scope: 'run' | 'thread' | 'step', reason: string): void => {
-    emit({
-      type: 'memory.degraded',
-      ...base,
-      scope,
-      reason: redactCredentialLikeText(reason).text,
-      ts: now(),
-    });
-  };
-  const addUsage = (value: AgentUsage): void => {
-    usage.tokensIn += value.tokensIn;
-    usage.tokensOut += value.tokensOut;
-    if (value.cachedTokensIn)
-      usage.cachedTokensIn = (usage.cachedTokensIn ?? 0) + value.cachedTokensIn;
-    if (value.costUsd) usage.costUsd = (usage.costUsd ?? 0) + value.costUsd;
-  };
-  /**
-   * Report where the finished step's time went. Called at the step BOUNDARY — the top of the next
-   * iteration, and from `finish` — rather than at each of the step's dozen exits, so every path
-   * through a step (executed, blocked, asked, retried) reports exactly once. A step is over when the
-   * next one begins or the run ends, and that is when its number is final.
-   */
-  const flushStepTiming = (): void => {
-    if (!stepTiming) return;
-    const { step, startedAt, phases } = stepTiming;
-    stepTiming = undefined;
-    phases.total = Math.max(0, clock() - startedAt);
-    emit({ type: 'step.timing', ...base, step, phases: { ...phases }, ts: now() });
-    log(
-      'debug',
-      `Step ${step} timing: ${TIMING_PHASES.map((phase) => `${phase} ${phases[phase]}ms`).join(', ')} (total ${phases.total}ms).`,
-    );
-  };
   const finish = async (
     status: 'done' | 'error' | 'stopped',
     result: string,
     error?: string,
   ): Promise<void> => {
     // The step that ended the run is over too; its timing goes out before the terminal event.
-    flushStepTiming();
+    timer.flush();
     // Terminal text is model-/page-derived and crosses the UI plus thread-memory boundaries. A model
     // echoing a token it saw must not turn `run.finished` into a credential exfiltration event.
     const safeResult = redactCredentialLikeText(result).text;
     const safeFinishError = error === undefined ? undefined : redactCredentialLikeText(error).text;
-    await appendJournal({
+    await journal.append({
       type: status === 'done' ? 'run.completed' : status === 'error' ? 'run.failed' : 'run.stopped',
       // Result text may contain extracted/private page data. The encrypted journal only needs a
       // terminal lifecycle marker; the encrypted conversation memory owns user-visible content.
@@ -609,7 +310,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     // reduce, and skip. `removeFinished` re-proves the terminal phase under the store's write lock,
     // so a bug here can never delete a journal that still matters. Failure to delete is a wart, not
     // a hazard: admission sweeps terminal journals too, so the file goes at the next start.
-    if (deps.journal?.removeFinished && journalSnapshot) {
+    if (deps.journal?.removeFinished && journal.snapshot) {
       try {
         await deps.journal.removeFinished(runId);
       } catch (cleanupError) {
@@ -694,7 +395,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         ...(llmConfig.effort ? { effort: llmConfig.effort } : {}),
         signal,
       });
-      addUsage(result.usage);
+      addUsage(usage, result.usage);
       emit({ type: 'usage', ...base, usage: { ...result.usage }, ts: now() });
       if (tokenBudgetExceeded(config.tokenBudget, usage)) {
         return await finish(
@@ -716,89 +417,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
   try {
     if (config.startUrl) {
-      let current = await safe(() => driver.currentUrl(), '');
-      const destination = canonicalNavigationUrl(config.startUrl, current);
-      if (!destination) {
-        return await finish('error', '', 'Start URL blocked: the destination is not a valid URL');
-      }
-
-      // Bind a possibly-relative start URL to the page that was actually observed, then re-check both
-      // source and absolute destination immediately before dispatch. A page may self-navigate while a
-      // human reads the prompt; the original relative string must never be re-based onto that new page.
-      let readyToNavigate = false;
-      let startNavigationActionId: string | undefined;
-      for (let attempt = 0; attempt < 3 && !readyToNavigate; attempt += 1) {
-        const currentDecision = assessCurrentPage(current, config);
-        if (currentDecision.verdict === 'deny') {
-          return await finish(
-            'error',
-            '',
-            `Start URL blocked because the current page changed: ${currentDecision.reason}`,
-          );
-        }
-        const decision = assessNavigation(destination, current, config);
-        if (decision.verdict === 'deny') {
-          return await finish('error', '', `Start URL blocked: ${decision.reason}`);
-        }
-        const actionId = await proposeJournalAction(
-          'navigate',
-          'write',
-          journalHostOf(destination),
-        );
-        if (decision.verdict === 'confirm') {
-          const safeDestination = redactUrl(destination);
-          const approved = await confirmJournaled(
-            `Approve opening ${safeDestination}? (${decision.reason})`,
-            { kind: 'navigate', url: safeDestination },
-            actionId,
-          );
-          if (!approved) return await finish('stopped', 'The start navigation was rejected.');
-        }
-        const liveCurrent = await safe(() => driver.currentUrl(), '');
-        if (liveCurrent !== current) {
-          await appendJournal({
-            type: 'action.cancelled',
-            actionId,
-            summary: 'The source page changed before navigation',
-          });
-          current = liveCurrent;
-          continue;
-        }
-        // The canonical destination is immutable, but policy may have changed with configuration only
-        // through code, not during a run. Reassess anyway so this line stays the dispatch boundary.
-        const finalDecision = assessNavigation(destination, liveCurrent, config);
-        if (finalDecision.verdict === 'deny') {
-          await appendJournal({
-            type: 'action.cancelled',
-            actionId,
-            summary: 'Navigation was cancelled by policy',
-          });
-          return await finish('error', '', `Start URL blocked: ${finalDecision.reason}`);
-        }
-        readyToNavigate = true;
-        startNavigationActionId = actionId;
-      }
-      if (!readyToNavigate) {
-        return await finish(
-          'error',
-          '',
-          'Start URL blocked because the current page kept changing during confirmation.',
-        );
-      }
-      await dispatchJournaled(
-        startNavigationActionId!,
-        'write',
-        async (beginEffect) => {
-          await beginEffect();
-          await driver.navigate(destination);
-          await driver.waitForSettle();
-          return 'navigation finished';
-        },
-        (outcome) => outcome,
-        async () => {
-          await verifyBrowserStateObserved(driver);
-        },
-      );
+      const end = await openStartUrl(ctx, config.startUrl);
+      if (end) return await finish(end.status, end.result, end.error);
     }
 
     // NO persisted memory reaches the prompt. Cross-run facts and learned skills used to be loaded
@@ -812,8 +432,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       config,
       toolChoiceIsAdvisory: usesAutomaticToolChoice(llmConfig.provider, llmConfig.model),
     });
-    let previous: RawPerception | null = null;
-    let stepsSinceFullSnapshot = 0;
+    const observationRenderer = createObservationRenderer();
     /** This run's assistant/tool exchange — the WHOLE conversation the model sees, built per step. */
     const stepMessages: LlmMessage[] = [];
     // Trusted user turns (steering, answers) waiting to enter the conversation after this step's
@@ -826,22 +445,15 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     /** The call id the NEXT observation answers, so the pairing providers require stays intact. */
     let lastToolCallId: string | undefined;
     let readEvidence: string[] = [];
-    /** Rows the run has collected, in order, deduplicated by their full content. */
-    const dataset: Array<Record<string, string>> = [];
-    const datasetSeen = new Set<string>();
-    let datasetColumns: string[] = [];
+    const dataset = createDataset();
     let pendingImage: string | undefined;
-    let lastFingerprint = '';
-    let repeatCount = 0;
-    /** Same action AND an unchanged page: the genuine no-progress signal. */
-    let lastStateFingerprint = '';
-    let stuckCount = 0;
+    const repeats = createRepeatDetector();
     let recovery = false;
     let invalidActions = 0;
     /** True while a token-truncated response is being retried, so the retry cannot itself loop. */
     let truncatedRetry = false;
     /** A context-overflow recovery is attempted at most once per run. */
-    let oversizeRetried = false;
+    const overflow = { retried: false };
     /**
      * A correction for the NEXT step, delivered through the ordinary nudge channel rather than as its
      * own message. A standalone user message would sit next to the step prompt (also a user message
@@ -893,8 +505,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     for (let step = 1; step <= config.maxSteps; step += 1) {
       // A step retried after a truncated reply (`step -= 1` below) keeps accumulating into its own
       // record: the retry is part of what that step cost.
-      if (stepTiming && stepTiming.step !== step) flushStepTiming();
-      stepTiming ??= newStepTiming(step, clock());
+      timer.begin(step);
       if (signal.aborted) return await finish('stopped', 'Stopped by user.');
       for (const text of deps.takeSteering?.() ?? []) {
         const safe = redactCredentialLikeText(text).text.trim();
@@ -921,20 +532,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           `Current page blocked by run policy: ${currentPageDecision.reason}`,
         );
       }
-      // A summarised observation is only safe while a FULL one is still in the verbatim window.
-      // Older tool results are pruned to their header line, so after enough consecutive unchanged
-      // steps — collect, wait, a blocked action — every surviving result would say only
-      // "unchanged" and the model would be acting on element indices it can no longer see anywhere.
-      // That is exactly how hallucinated indices and "no element [n]" loops start.
-      const unchanged =
-        previous !== null &&
-        sameElements(previous, raw) &&
-        stepsSinceFullSnapshot < VERBATIM_OBSERVATIONS - 1;
-      const rendered = unchanged
-        ? `url: ${raw.url} | ${JSON.stringify(raw.title)}\n(interactive elements unchanged from the previous step)`
-        : renderObservation(raw);
-      stepsSinceFullSnapshot = unchanged ? stepsSinceFullSnapshot + 1 : 0;
-      previous = raw;
+      const rendered = observationRenderer.render(raw);
       emit({
         type: 'step.observation',
         ...base,
@@ -955,7 +553,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       ) {
         // A screenshot can contain credentials, messages, customer data, or cross-origin pixels the
         // DOM snapshot cannot classify. Mark the run non-resumable before capture/provider handoff.
-        await markJournalSensitive('image_payload');
+        await journal.markSensitive('image_payload');
         const captured = await driver.screenshot().catch(() => undefined);
         if (captured && captured.length <= MAX_SCREENSHOT_BASE64_CHARS) pendingImage = captured;
       }
@@ -969,18 +567,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         nudges.push(
           'RECOVERY: the last behavior repeated. Re-read the page and choose a materially different action.',
         );
-      // Escalate rather than repeat. The same "wrap up" line from 75% to 100% carried no new
-      // information after the first time, so the last quarter of a run read identically whether five
-      // steps remained or one.
-      if (step >= Math.ceil(config.maxSteps * 0.95)) {
-        nudges.push(
-          `BUDGET: step ${step} of ${config.maxSteps} — this is your LAST chance to answer. Call \`done\` NOW with whatever you have, and say plainly what is missing.`,
-        );
-      } else if (step >= Math.ceil(config.maxSteps * 0.75)) {
-        nudges.push(
-          `BUDGET: step ${step} of ${config.maxSteps}. Wrap up — consolidate what you already have and call \`done\`; do not start new exploration.`,
-        );
-      }
+      const budget = budgetNudge(step, config.maxSteps);
+      if (budget) nudges.push(budget);
       // Situation transitions. The snapshot's `page signals` line says what is on the page now; what
       // the model needs told is that it CHANGED — a login wall that was not there a step ago, a
       // CAPTCHA that has gone — compared against the page the previous iteration acted on. The
@@ -1087,84 +675,37 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
 
       emit({ type: 'step.thinking', ...base, step, ts: now() });
       pendingImage = undefined;
-      let progressChars = 0;
-      let progressEmittedAt = 0;
-      const buildRequest = (
-        overrides: { maxTokens?: number; messages?: LlmMessage[] } = {},
-      ): Parameters<typeof llm.complete>[0] => ({
-        model: step === 1 || recovery ? llmConfig.model : (llmConfig.stepModel ?? llmConfig.model),
+      const buildRequest = createStepRequestBuilder({
+        llmConfig,
+        step,
+        recovery,
         system,
-        messages: overrides.messages ?? requestMessages,
+        messages: requestMessages,
         tools,
-        forceTool: ACT_TOOL.name,
-        maxTokens: overrides.maxTokens ?? requestMaxTokens,
-        cachePrefix: true,
-        sessionId: runId,
-        attribution: { profileId, sessionId: runId },
-        // A routine step on the step model runs at the step model's effort: the whole point of a
-        // cheaper model for navigation is latency, and asking it to think hard gives that back.
-        ...((
-          step === 1 || recovery || !llmConfig.stepModel
-            ? llmConfig.effort
-            : (llmConfig.stepEffort ?? llmConfig.effort)
-        )
-          ? {
-              effort:
-                step === 1 || recovery || !llmConfig.stepModel
-                  ? llmConfig.effort
-                  : (llmConfig.stepEffort ?? llmConfig.effort),
-            }
-          : {}),
-        // A silent retry is indistinguishable from a hang: three BYOK attempts plus backoff is minutes
-        // of a panel showing only "thinking", which invites killing a run that was recovering fine.
-        onRetry: ({ attempt, attempts, delayMs, reason }) =>
-          log(
-            'warn',
-            `The model provider did not respond (${reason}). Retrying in ${Math.round(delayMs / 1000)}s — attempt ${attempt} of ${attempts}.`,
-          ),
-        // Asking for progress is what makes the step STREAM (see the adapter): the model's thinking
-        // becomes activity for the idle watchdog instead of time against a wall clock, and the
-        // panel can say the model is still working. Throttled: one event a second and a half.
-        onProgress: ({ kind, chars }) => {
-          progressChars += chars;
-          const at = Date.now();
-          if (at - progressEmittedAt < 1500) return;
-          progressEmittedAt = at;
-          emit({ type: 'step.progress', ...base, step, kind, chars: progressChars, ts: now() });
-        },
+        maxTokens: requestMaxTokens,
+        runId,
+        profileId,
         signal,
+        log,
+        onProgress: (kind, chars) =>
+          emit({ type: 'step.progress', ...base, step, kind, chars, ts: now() }),
       });
-      // A context-window 400 used to end the run outright: it is not in `retryableStatus`, so it
-      // propagated straight to the catch that calls `finish('error')`. Recover in the cheapest order —
-      // ask for fewer OUTPUT tokens first (the whole conversation survives), and only then start
-      // dropping history. `normalizeMessages` already repairs an arbitrarily head-dropped list, so the
-      // dangerous part of the second tier is already built.
-      let result: Awaited<ReturnType<typeof llm.complete>>;
+      let result: LlmResult;
       try {
         result = await timed('llm', () => llm.complete(buildRequest()));
       } catch (error) {
-        const headroom = contextOverflowHeadroom(error);
-        if (headroom === null || oversizeRetried) throw error;
-        oversizeRetried = true;
-        // Only take the cheap path when it actually CHANGES the request. A headroom at or above the
-        // current cap would re-send an identical body and burn a call to get the same 400.
-        if (headroom >= 512 && headroom < requestMaxTokens) {
-          log('warn', `Context limit reached; retrying this step with a smaller output budget.`);
-          result = await timed('llm', () => llm.complete(buildRequest({ maxTokens: headroom })));
-        } else {
-          log('warn', 'Context limit reached; retrying this step with the conversation trimmed.');
-          result = await timed('llm', () =>
-            llm.complete(
-              buildRequest({
-                messages: normalizeMessages(pruneObservations(stepMessages).slice(-4)),
-                maxTokens: Math.min(requestMaxTokens, 1024),
-              }),
-            ),
-          );
-        }
+        result = await recoverFromContextOverflow(error, {
+          llm,
+          buildRequest,
+          timed,
+          requestMaxTokens,
+          stepMessages,
+          overflow,
+          log,
+        });
       }
       recovery = false;
-      addUsage(result.usage);
+      addUsage(usage, result.usage);
       emit({ type: 'usage', ...base, usage: { ...result.usage }, ts: now() });
       // Provider usage is authoritative. Estimation is necessarily conservative-but-imperfect across
       // tokenizers and image accounting, so quarantine the returned tool call if the provider says the
@@ -1279,9 +820,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         const outcome = `blocked: ${reason}`;
         noteBlocked(reason);
         history.push(`${step}. ${outcome}`);
-        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-          memoryDegraded('step', r),
-        );
+        await recordStep(step, raw.url, safeAction, outcome);
         continue;
       }
 
@@ -1307,22 +846,15 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           'credential-like text must use the direct secure human-input channel, not model-authored typing',
         );
         history.push(`${step}. ${outcome}`);
-        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (reason) =>
-          memoryDegraded('step', reason),
-        );
+        await recordStep(step, raw.url, safeAction, outcome);
         continue;
       }
 
       if (action.kind === 'ask') {
-        if (action.sensitive) await markJournalSensitive('credential');
-        const askEffect: JournalActionEffect =
-          action.sensitive &&
-          (action.targetId !== undefined ||
-            (action.targetX !== undefined && action.targetY !== undefined))
-            ? 'consequential'
-            : 'read';
-        const actionId = await proposeJournalAction(action.kind, askEffect, journalHostOf(raw.url));
-        const handled = await dispatchJournaled(
+        if (action.sensitive) await journal.markSensitive('credential');
+        const askEffect = askJournalEffect(action);
+        const actionId = await journal.propose(action.kind, askEffect, journalHostOf(raw.url));
+        const handled = await journal.dispatch(
           actionId,
           askEffect,
           (beginEffect) =>
@@ -1338,7 +870,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
               memory,
               now,
               beginEffect,
-              (prompt, pending) => confirmJournaled(prompt, pending, actionId),
+              (prompt, pending) => journal.confirm(prompt, pending, actionId),
               (text) => pendingUserMessages.push(text),
             ),
           (value) => value.outcome,
@@ -1356,7 +888,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         history.push(`${step}. blocked: visual fallback is disabled for this run`);
         continue;
       }
-      if (action.kind === 'screenshot') await markJournalSensitive('image_payload');
+      if (action.kind === 'screenshot') await journal.markSensitive('image_payload');
 
       // A privileged browser-internal page that is NOT a vetted settings surface is off limits
       // entirely — the agent leaves rather than acting. The navigation policy already refuses to open
@@ -1373,9 +905,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           'blocked: this is a privileged browser page outside the vetted settings surface. Leave it (switch tabs, go back, or navigate to a normal site) before continuing.';
         noteBlocked('this is a privileged browser page outside the vetted settings surface');
         history.push(`${step}. ${outcome}`);
-        await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-          memoryDegraded('step', r),
-        );
+        await recordStep(step, raw.url, safeAction, outcome);
         recovery = true;
         continue;
       }
@@ -1396,9 +926,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
               : (settingsAssessment.reason ?? 'blocked: browser setting is not permitted');
           noteBlocked(outcome.replace(/^blocked: /, ''));
           history.push(`${step}. ${outcome}`);
-          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-            memoryDegraded('step', r),
-          );
+          await recordStep(step, raw.url, safeAction, outcome);
           continue;
         }
       }
@@ -1433,30 +961,23 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           const outcome = `blocked: ${decision.reason}`;
           noteBlocked(decision.reason);
           history.push(`${step}. ${outcome}`);
-          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-            memoryDegraded('step', r),
-          );
+          await recordStep(step, raw.url, safeAction, outcome);
           continue;
         }
       }
 
       // Upload paths and visual payloads must never be eligible for automatic restart. This marker is
       // fsynced before approval or execution and contains no path/image data.
-      if (action.kind === 'upload') await markJournalSensitive('upload_path');
-      const journalEffect: JournalActionEffect = risk.consequential
-        ? 'consequential'
-        : actionCapability(action.kind).mutating &&
-            !(action.kind === 'tab' && action.operation === 'list')
-          ? 'write'
-          : 'read';
-      const journalActionId = await proposeJournalAction(
+      if (action.kind === 'upload') await journal.markSensitive('upload_path');
+      const journalEffect = journalEffectOf(action, risk);
+      const journalActionId = await journal.propose(
         action.kind,
         journalEffect,
         journalHostOf(raw.url),
       );
 
       if (navigationDecision?.verdict === 'confirm') {
-        navigationApproved = await confirmJournaled(
+        navigationApproved = await journal.confirm(
           `Approve ${describeSafeAction(action, raw)}? (${navigationDecision.reason}${risk.consequential && risk.reason ? `; ${risk.reason}` : ''})`,
           safeAction,
           journalActionId,
@@ -1496,7 +1017,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         // frame changes without touching DOM perception, so this is the only evidence that the thing
         // under the coordinate when the gesture dispatches is still the thing the model aimed at.
         approvedTargetPatch = await visualTargetPatch(driver, action);
-        await confirmJournaled(prompt, safeAction, journalActionId);
+        await journal.confirm(prompt, safeAction, journalActionId);
         approvalGranted = true;
       }
 
@@ -1515,10 +1036,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             'blocked: the page or commit target changed before dispatch; inspect the fresh page and act again';
           noteBlocked('the page or commit target changed before dispatch');
           history.push(`${step}. ${outcome}`);
-          await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-            memoryDegraded('step', r),
-          );
-          await appendJournal({
+          await recordStep(step, raw.url, safeAction, outcome);
+          await journal.append({
             type: 'action.cancelled',
             actionId: journalActionId,
             summary: 'The commit target changed before dispatch',
@@ -1533,10 +1052,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
               'blocked: the visual page changed before dispatch; capture a fresh screenshot and act again';
             noteBlocked('the visual page changed before dispatch');
             history.push(`${step}. ${outcome}`);
-            await appendSafe(memory, runId, step, raw.url, safeAction, outcome, now, log, (r) =>
-              memoryDegraded('step', r),
-            );
-            await appendJournal({
+            await recordStep(step, raw.url, safeAction, outcome);
+            await journal.append({
               type: 'action.cancelled',
               actionId: journalActionId,
               summary: 'The visual commit target changed before dispatch',
@@ -1555,22 +1072,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
           'You just took a high-risk composition action. Verify from the next snapshot that it did what the task asked — and do not repeat it.';
       }
 
-      // Two different questions, previously answered by one counter keyed on URL + action.
-      //
-      // "Stuck" is the same action against a page that did not move at all — the real no-progress
-      // signal, and cheap to stop early. "Repeating" is the same action while the page KEEPS
-      // CHANGING, which is what reading an infinite list, polling for late-arriving content, or
-      // paging through an SPA that never changes its URL all look like. Killing the second case at
-      // the fifth attempt made an explicitly supported scenario impossible: five scrolls down a feed
-      // ended the run as a loop even though every scroll had appended new rows. It still cannot go on
-      // forever — a page with a ticking clock would otherwise never look stuck — so it keeps a much
-      // looser bound of its own, under the run's step and token ceilings.
-      const actionFingerprint = `${raw.url}|${actionIdentity(safeAction)}`;
-      const stateFingerprint = `${observationFingerprint(raw)}|${actionIdentity(safeAction)}`;
-      stuckCount = stateFingerprint === lastStateFingerprint ? stuckCount + 1 : 1;
-      repeatCount = actionFingerprint === lastFingerprint ? repeatCount + 1 : 1;
-      lastStateFingerprint = stateFingerprint;
-      lastFingerprint = actionFingerprint;
+      // Stuck and repeating are two different questions (see `createRepeatDetector`): only the
+      // first is a genuine no-progress signal, so it ends the run much sooner.
+      const { stuckCount, repeatCount } = repeats.note(raw, safeAction);
       if (stuckCount >= 5 || repeatCount >= 12) {
         return await finish(
           'error',
@@ -1580,37 +1084,17 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
       }
       if (stuckCount >= 3 || repeatCount >= 8) recovery = true;
 
-      let verifiedPerception: RawPerception | undefined;
-      const outcome = await timedExecute(() =>
-        dispatchJournaled(
-          journalActionId,
-          journalEffect,
-          (beginEffect) =>
-            executeAction(action, raw, driver, {
-              ...(deps.sleep ? { sleep: deps.sleep } : {}),
-              config,
-              signal,
-              navigationApproved,
-              beforeEffect: beginEffect,
-            }),
-          (value) => value.outcome,
-          journalEffect === 'read'
-            ? undefined
-            : async () => {
-                verifiedPerception = await verifyBrowserStateObserved(
-                  driver,
-                  movesBrowserOnly(action),
-                );
-              },
-          (value) => value.delivery,
-        ),
-      );
+      const { outcome, verifiedPerception } = await dispatchAction(ctx, {
+        action,
+        raw,
+        actionId: journalActionId,
+        effect: journalEffect,
+        navigationApproved,
+      });
       // An action that actually ran clears the consecutive streak (but not the total): the agent found
       // something it is allowed to do, so it is no longer stuck against the same wall.
       consecutiveBlocks = 0;
-      await appendSafe(memory, runId, step, raw.url, safeAction, outcome.outcome, now, log, (r) =>
-        memoryDegraded('step', r),
-      );
+      await recordStep(step, raw.url, safeAction, outcome.outcome);
 
       if (outcome.terminal) {
         // A collected dataset is the ACTUAL result of a scrape. Appending it verbatim means a
@@ -1618,21 +1102,14 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         // from memory — which is where transcription errors and dropped pages came from.
         const summary = outcome.terminal.summary || outcome.outcome;
         return outcome.terminal.success
-          ? await finish(
-              'done',
-              dataset.length ? `${summary}\n\n${renderDataset(dataset, datasetColumns)}` : summary,
-            )
+          ? await finish('done', dataset.size ? `${summary}\n\n${dataset.render()}` : summary)
           : await finish('error', '', summary);
       }
-      // A popup the page opened has silently become the working target; say so in the same breath as
-      // the action's outcome, so the model knows which page it is now on.
-      const adopted = driver.takeAdoptedPopup?.();
+      const popupNote = adoptedPopupNote(driver);
       // The per-step report the panel shows beside the rail dot. Same line the model receives as the
       // step's result, so what the user reads and what the model reasons from cannot diverge.
       emit({ type: 'step.outcome', ...base, step, text: outcome.outcome, ts: now() });
-      history.push(
-        `${step}. ${outcome.outcome}${adopted ? ` — the page opened a new tab (${redactUrl(adopted)}); you are now on it` : ''}`,
-      );
+      history.push(`${step}. ${outcome.outcome}${popupNote}`);
       // Keep a bounded evidence ledger across pagination. Unlike one-shot read state, page-one values
       // remain available after clicking Next, while a hard total cap prevents runaway prompt growth.
       if (outcome.extracted) {
@@ -1646,24 +1123,9 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
         );
       }
       if (outcome.collected) {
-        if (outcome.collected.columns?.length) datasetColumns = outcome.collected.columns;
-        let added = 0;
-        for (const row of outcome.collected.rows) {
-          if (dataset.length >= 5_000) break;
-          // Dedupe on the whole row: re-visiting page 1 after paginating back is normal, and silently
-          // doubling every row is worse than dropping a genuine duplicate.
-          const key = JSON.stringify(row);
-          if (datasetSeen.has(key)) continue;
-          datasetSeen.add(key);
-          dataset.push(row);
-          added += 1;
-          for (const column of Object.keys(row)) {
-            if (!datasetColumns.includes(column)) datasetColumns.push(column);
-          }
-        }
-        const skipped = outcome.collected.rows.length - added;
+        const { added, skipped } = dataset.merge(outcome.collected);
         history[history.length - 1] =
-          `${step}. collected ${added} new row(s)${skipped > 0 ? `, ${skipped} duplicate(s) ignored` : ''} — ${dataset.length} total so far`;
+          `${step}. collected ${added} new row(s)${skipped > 0 ? `, ${skipped} duplicate(s) ignored` : ''} — ${dataset.size} total so far`;
       }
       // Only a read that produced something closes this view. An extract can legitimately fail — the
       // page was still loading, or its text renders in a cross-origin frame — and marking the view
@@ -1686,12 +1148,12 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             ? { verdict: 'allow' as const, reason: 'vetted browser settings navigation' }
             : assessNavigationDrift(afterUrl, liveUrlBeforeAction, config);
           if (drift.verdict === 'deny') {
-            const reconcileActionId = await proposeJournalAction(
+            const reconcileActionId = await journal.propose(
               'navigation_reconcile',
               'write',
               journalHostOf(afterUrl),
             );
-            await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, reconcileActionId);
+            await restoreNavigationJournaled(ctx, liveUrlBeforeAction, afterUrl, reconcileActionId);
             return await finish(
               'error',
               '',
@@ -1703,24 +1165,24 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
             target !== undefined &&
             sameNavigationAuthority(target, afterUrl, liveUrlBeforeAction);
           if (drift.verdict === 'confirm' && !priorApprovalCoversDrift) {
-            const stayActionId = await proposeJournalAction(
+            const stayActionId = await journal.propose(
               'navigation_reconcile',
               'write',
               journalHostOf(afterUrl),
             );
             let approved = false;
             try {
-              approved = await confirmJournaled(
+              approved = await journal.confirm(
                 `The page opened ${redactUrl(afterUrl)}. Approve staying there? (${drift.reason})`,
                 { kind: 'navigate', url: redactUrl(afterUrl) },
                 stayActionId,
               );
             } catch (error) {
-              await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, stayActionId);
+              await restoreNavigationJournaled(ctx, liveUrlBeforeAction, afterUrl, stayActionId);
               throw error;
             }
             if (!approved) {
-              await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, stayActionId);
+              await restoreNavigationJournaled(ctx, liveUrlBeforeAction, afterUrl, stayActionId);
               history.push(`${step}. user rejected unexpected navigation; went back`);
             } else {
               // A stay approval is scoped to the destination authority the human saw. Redirecting to a
@@ -1736,7 +1198,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
                 !sameNavigationAuthority(afterUrl, afterConfirmation, liveUrlBeforeAction) ||
                 finalDecision.verdict === 'deny'
               ) {
-                await restoreNavigationJournaled(liveUrlBeforeAction, afterUrl, stayActionId);
+                await restoreNavigationJournaled(ctx, liveUrlBeforeAction, afterUrl, stayActionId);
                 const reason =
                   finalDecision.verdict === 'deny'
                     ? finalDecision.reason
@@ -1746,7 +1208,7 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
                   `${step}. unexpected navigation approval expired: ${reason}; went back`,
                 );
               } else {
-                await appendJournal({
+                await journal.append({
                   type: 'action.cancelled',
                   actionId: stayActionId,
                   summary: 'The user approved the observed destination',
@@ -1769,8 +1231,8 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     return await finish('stopped', `Reached the ${config.maxSteps}-step budget without finishing.`);
   } catch (error) {
     if (
-      journalSnapshot?.state.phase === 'dispatching' ||
-      journalSnapshot?.state.phase === 'recovery_required'
+      journal.snapshot?.state.phase === 'dispatching' ||
+      journal.snapshot?.state.phase === 'recovery_required'
     ) {
       // A dispatch crossed the durable boundary but has no provably clean outcome. Do not append a
       // terminal marker over it. The manager may still report a live error event, while admission of
@@ -1779,191 +1241,6 @@ export async function runAgent(params: AgentRunParams, deps: AgentRunDeps): Prom
     }
     if (signal.aborted) return await finish('stopped', 'Stopped by user.');
     return await finish('error', '', safeError(error));
-  }
-}
-
-async function handleAsk(
-  action: Extract<AgentAction, { kind: 'ask' }>,
-  raw: RawPerception,
-  approvedImage: string | undefined,
-  step: number,
-  runId: string,
-  history: string[],
-  base: { sessionId: string; profileId: string },
-  deps: AgentRunDeps,
-  memory: MemoryStore,
-  now: () => string,
-  beforeEffect: () => Promise<void>,
-  requestApproval: (prompt: string, action: AgentAction) => Promise<boolean>,
-  onReply: (text: string) => void,
-): Promise<{ ok: boolean; outcome: string }> {
-  const safeQuestion = redactCredentialLikeText(action.question).text;
-  deps.emit({
-    type: 'run.needsInput',
-    ...base,
-    kind: 'ask',
-    prompt: safeQuestion,
-    ...(action.sensitive !== undefined ? { sensitive: action.sensitive } : {}),
-    ts: now(),
-  });
-  const answer = await deps.waitForInput(safeQuestion, 'ask', redactAction(action));
-  if (action.sensitive && action.targetId !== undefined) {
-    // Supplying the sensitive reply is the human's authorization for this exact handoff. Bind it to
-    // the same page/target just like a confirm verdict; otherwise a login field can be replaced while
-    // the human is retrieving an OTP and receive a secret intended for the old observation.
-    const directAction: AgentAction = {
-      kind: 'type',
-      id: action.targetId,
-      text: answer,
-      clear: true,
-    };
-    const afterInput = await perceive(deps.driver);
-    if (
-      approvalContextFingerprint(directAction, raw) !==
-      approvalContextFingerprint(directAction, afterInput)
-    ) {
-      return {
-        ok: false,
-        outcome:
-          'blocked: the sensitive target changed while human input was pending; inspect the fresh page and ask again',
-      };
-    }
-    const element = afterInput.elements.find((item) => item.index === action.targetId);
-    if (!element)
-      return { ok: false, outcome: `sensitive target [${action.targetId}] is no longer available` };
-    if (!isSensitiveElement(element)) {
-      return {
-        ok: false,
-        outcome: `refused sensitive handoff to non-sensitive field [${action.targetId}]`,
-      };
-    }
-    const direct = await executeAction(directAction, afterInput, deps.driver, {
-      ...(deps.sleep ? { sleep: deps.sleep } : {}),
-      signal: deps.signal,
-      beforeEffect,
-    });
-    const safeAction: AgentAction = {
-      kind: 'type',
-      id: action.targetId,
-      text: '[REDACTED]',
-      clear: true,
-    };
-    await appendSafe(memory, runId, step, raw.url, safeAction, direct.outcome, now, () => {});
-    history.push(`${step}. human securely supplied sensitive input to [${action.targetId}]`);
-    return { ok: true, outcome: direct.outcome };
-  }
-  if (action.sensitive && action.targetX !== undefined && action.targetY !== undefined) {
-    const directAction: AgentAction = {
-      kind: 'type_at',
-      x: action.targetX,
-      y: action.targetY,
-      text: answer,
-      clear: true,
-    };
-    const afterInput = await perceive(deps.driver);
-    if (
-      approvalContextFingerprint(directAction, raw) !==
-      approvalContextFingerprint(directAction, afterInput)
-    ) {
-      return {
-        ok: false,
-        outcome:
-          'blocked: the page changed while sensitive coordinate input was pending; capture a fresh screenshot and ask again',
-      };
-    }
-    // The coordinate channel exists for surfaces DOM perception cannot see — a canvas widget, a
-    // cross-origin payment frame — so an unperceived point is expected and the human approval above
-    // is what authorizes it. A point perception CAN see is different: if it resolves to an ordinary
-    // control, the secret would be typed somewhere page script can read it, and the `targetId`
-    // branch would have refused the very same handoff.
-    const atPoint = elementAtPoint(afterInput, action.targetX, action.targetY);
-    if (atPoint && !isSensitiveElement(atPoint)) {
-      return {
-        ok: false,
-        outcome: `refused sensitive handoff to ${atPoint.role} ${JSON.stringify(atPoint.name)} at the requested coordinate; it is not a secret-bearing field`,
-      };
-    }
-    // The first thing `type_at` does is CLICK the model's pixel, and nobody — not the policy, not
-    // the harness — can see what handler sits under it. A separate human approval used to bind here;
-    // under full autonomy the human's ANSWER is the authorization: they just supplied the secret for
-    // exactly this handoff, and `requestApproval` (→ `confirmJournaled`) now records the coordinate
-    // activation in the journal and transcript without pausing on a second question. What still
-    // gates is physics, not permission: a canvas/frame can change without affecting DOM perception,
-    // so the target's pixels are sampled here and re-sampled just before dispatch — a moved target
-    // refuses the handoff rather than typing a secret into whatever replaced it.
-    const approvedTargetPatch = await visualTargetPatch(deps.driver, directAction);
-    await requestApproval(
-      `Type the value the human just supplied at visual coordinate (${action.targetX}, ${action.targetY}) on ${redactUrl(afterInput.url)}. Anything under that point is clicked first.`,
-      directAction,
-    );
-    if (
-      !approvedImage ||
-      !(await visualTargetHeld(deps.driver, directAction, approvedTargetPatch))
-    ) {
-      return {
-        ok: false,
-        outcome:
-          'blocked: the visual page changed while sensitive coordinate input was pending; capture a fresh screenshot and ask again',
-      };
-    }
-    const direct = await executeAction(directAction, afterInput, deps.driver, {
-      ...(deps.sleep ? { sleep: deps.sleep } : {}),
-      signal: deps.signal,
-      beforeEffect,
-    });
-    const safeAction = redactAction(directAction, raw);
-    await appendSafe(memory, runId, step, raw.url, safeAction, direct.outcome, now, () => {});
-    history.push(
-      `${step}. human securely supplied sensitive input at the requested visual coordinate`,
-    );
-    return { ok: true, outcome: direct.outcome };
-  }
-  const safeAnswer = redactCredentialLikeText(answer).text;
-  history.push(
-    action.sensitive
-      ? `${step}. human completed the sensitive handoff (reply withheld)`
-      : `${step}. human replied to ${JSON.stringify(clip(safeQuestion, 100))}: ${JSON.stringify(clip(safeAnswer, 120))}`,
-  );
-  // The answer itself reaches the model in full, as a trusted user turn — not as a 120-character
-  // clip inside a fence the model is told never to obey, which is how a reply used to arrive.
-  if (!action.sensitive && safeAnswer.trim()) {
-    onReply(
-      `In answer to your question ${JSON.stringify(clip(safeQuestion, 200))}: ${safeAnswer.trim()}`,
-    );
-  }
-  return { ok: true, outcome: 'human input received' };
-}
-
-function canonicalNavigationUrl(rawUrl: string, baseUrl: string): string | undefined {
-  try {
-    return new URL(rawUrl, baseUrl || undefined).toString();
-  } catch {
-    return undefined;
-  }
-}
-
-async function appendSafe(
-  memory: MemoryStore,
-  runId: string,
-  step: number,
-  url: string,
-  action: AgentAction,
-  outcome: string,
-  now: () => string,
-  log: (level: 'warn', message: string) => void,
-  onDegraded?: (reason: string) => void,
-): Promise<void> {
-  try {
-    await memory.appendStep(runId, {
-      index: step,
-      url,
-      action: JSON.stringify(action),
-      outcome,
-      ts: now(),
-    });
-  } catch (error) {
-    log('warn', `Could not persist encrypted agent step: ${safeError(error)}`);
-    onDegraded?.(safeError(error));
   }
 }
 
@@ -1979,622 +1256,4 @@ function boundedInteger(
     throw new Error(`${name} must be an integer between ${min} and ${max}`);
   }
   return value;
-}
-
-function firstLine(value: string): string {
-  return value.split('\n', 1)[0] ?? '';
-}
-
-function clip(value: string, max: number): string {
-  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
-}
-
-/**
- * Per-extract and whole-ledger budgets, in characters.
- *
- * The entry budget MUST NOT be smaller than what `extract` can produce (its own cap is 12,000), or a
- * single page is silently beheaded: the outcome line still reports "extracted 3933 characters" while
- * the model receives 3,000 of them. That is exactly how a 400-row index lost the row it was asked
- * for — the extractor found it at character ~3,700 and the ledger cut it off, so the agent scrolled
- * and re-extracted the same page repeatedly, each time being told it had succeeded.
- *
- * Affording this got much cheaper: since the ledger is now stripped from every tool message except
- * the newest, a bigger budget rides once per request rather than up to seven times.
- */
-const MAX_EXTRACT_ENTRY_CHARS = 12_000;
-const MAX_EXTRACT_LEDGER_CHARS = 16_000;
-
-function appendExtractedEvidence(
-  existing: string[],
-  step: number,
-  url: string,
-  description: string,
-  text: string,
-): string[] {
-  // Clip LOUDLY. A bare ellipsis reads as a formatting flourish; a count reads as missing evidence and
-  // is something the model can act on (narrow the read, or use `collect` page by page).
-  const body =
-    text.length > MAX_EXTRACT_ENTRY_CHARS
-      ? `${text.slice(0, MAX_EXTRACT_ENTRY_CHARS)}\n[…${text.length - MAX_EXTRACT_ENTRY_CHARS} more characters of this page were cut from the record. If what you need is missing, read a narrower part of the page or use \`collect\` as you go.]`
-      : text;
-  const entry = `Extract ${step} — ${clip(description, 160)} — ${redactUrl(url)}\n${body}`;
-  const next = [...existing, entry];
-  let dropped = 0;
-  while (next.length > 1 && next.join('\n\n').length > MAX_EXTRACT_LEDGER_CHARS) {
-    next.shift();
-    dropped += 1;
-  }
-  // Say what was lost. Dropping the earliest pages silently let a paginated read report a total that
-  // quietly excluded page one; a visible notice lets the model re-read or switch to `collect`.
-  if (dropped > 0) {
-    next.unshift(
-      `[${dropped} earlier extract(s) dropped to stay within the context budget — if you still need that data, re-read those pages or use \`collect\` so the harness keeps rows for you]`,
-    );
-  }
-  if (next[0] && next[0].length > MAX_EXTRACT_LEDGER_CHARS) {
-    next[0] = clip(next[0], MAX_EXTRACT_LEDGER_CHARS);
-  }
-  return next;
-}
-
-/**
- * Render the collected rows as a Markdown table, which the panel now renders properly and which the
- * user can copy straight into a spreadsheet. Falls back to listing rows when there are too many
- * columns for a table to stay readable.
- */
-function renderDataset(
-  rows: ReadonlyArray<Record<string, string>>,
-  columns: readonly string[],
-): string {
-  const cols = columns.length ? columns : [...new Set(rows.flatMap((row) => Object.keys(row)))];
-  const header = `Collected ${rows.length} row(s):`;
-  if (cols.length === 0) return header;
-  const escape = (value: string): string => value.replace(/\|/g, '\\|').replace(/\n/g, ' ');
-  const lines = [
-    `| ${cols.join(' | ')} |`,
-    `| ${cols.map(() => '---').join(' | ')} |`,
-    ...rows.map((row) => `| ${cols.map((c) => escape(row[c] ?? '')).join(' | ')} |`),
-  ];
-  return `${header}\n\n${lines.join('\n')}`;
-}
-
-function hostOf(url: string): string {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return '';
-  }
-}
-
-function journalHostOf(url: string): string | undefined {
-  const host = hostOf(url).replace(/\.$/, '');
-  // IPv6 literals contain colons and are intentionally omitted: the schema's optional host field is
-  // a DNS/IPv4 correlation hint, never an authority parser or an execution target.
-  return /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/.test(host) ? host : undefined;
-}
-
-/** True when two destinations identify the same protocol/host/port authority. */
-function sameNavigationAuthority(first: string, second: string, baseUrl: string): boolean {
-  try {
-    return (
-      new URL(first, baseUrl || undefined).origin === new URL(second, baseUrl || undefined).origin
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isSettingsUiAction(action: AgentAction): boolean {
-  return (
-    action.kind === 'click' ||
-    action.kind === 'click_at' ||
-    action.kind === 'hover' ||
-    action.kind === 'type' ||
-    action.kind === 'type_at' ||
-    action.kind === 'select' ||
-    action.kind === 'key' ||
-    action.kind === 'drag'
-  );
-}
-
-function settingsActionIntent(action: AgentAction, raw: RawPerception): Array<string | undefined> {
-  const values: Array<string | undefined> = ['note' in action ? action.note : undefined];
-  const elementName = (index: number | undefined): string | undefined =>
-    index === undefined ? undefined : raw.elements.find((element) => element.index === index)?.name;
-  switch (action.kind) {
-    case 'click':
-    case 'hover':
-      values.push(elementName(action.id));
-      break;
-    case 'select':
-      // The chosen option is the whole intent of a select: the control may be named "Language" or
-      // "Time zone" innocuously enough, but it is the value that changes the persona.
-      values.push(elementName(action.id), ...action.values);
-      break;
-    case 'type':
-      values.push(elementName(action.id), action.text);
-      break;
-    case 'type_at':
-      values.push(action.text);
-      break;
-    case 'key':
-      // Space and Enter activate whatever currently holds focus, so the key alone says nothing
-      // about what is being toggled. Screen the focused control's own name too.
-      values.push(action.key, raw.elements.find((element) => element.focused)?.name);
-      break;
-    case 'drag':
-      values.push(elementName(action.fromId), elementName(action.toId));
-      break;
-    default:
-      break;
-  }
-  return values;
-}
-
-/**
- * The perceived control containing a visual coordinate, if perception can see one there.
- *
- * Perception measures each element's centre plus its width and height, so containment is decidable
- * without going back to the page — which matters here, because this is asked immediately before a
- * secret is typed and a fresh round trip would only widen the window it is guarding. An unperceived
- * point is a real answer, not a failure: canvas widgets and cross-origin frames are exactly why the
- * coordinate channel exists.
- */
-function elementAtPoint(raw: RawPerception, x: number, y: number): PerceivedElement | undefined {
-  return raw.elements.find(
-    (element) =>
-      x >= element.x - element.w / 2 &&
-      x <= element.x + element.w / 2 &&
-      y >= element.y - element.h / 2 &&
-      y <= element.y + element.h / 2,
-  );
-}
-
-function observationFingerprint(raw: RawPerception): string {
-  return JSON.stringify([
-    raw.urlIdentity ?? urlIdentity(raw.url),
-    raw.scrollY,
-    raw.text ?? '',
-    raw.elements.map((element) => [
-      element.role,
-      element.name,
-      element.value ?? '',
-      element.state ?? '',
-    ]),
-  ]);
-}
-
-/**
- * Ephemeral binding for a confirmation prompt. This deliberately includes more than the normal
- * observation-deduplication fingerprint: target coordinates, form semantics, focus, hrefs, visible
- * page text, and viewport geometry all affect what an approved click/key/coordinate gesture will do.
- * Coordinate actions additionally require byte-identical fresh screenshot data immediately before
- * dispatch, covering canvas and cross-origin content that DOM perception cannot see. The value is
- * compared in memory only; action text (which may be secret) is never persisted or logged.
- */
-function approvalContextFingerprint(action: AgentAction, raw: RawPerception): string {
-  return JSON.stringify([
-    action,
-    raw.urlIdentity ?? urlIdentity(raw.url),
-    raw.title,
-    raw.scrollY,
-    raw.viewportW ?? 0,
-    raw.viewportH,
-    raw.text ?? '',
-    raw.signals ?? [],
-    raw.elements.map((element) => [
-      element.index,
-      element.tag,
-      element.role,
-      element.name,
-      element.type ?? '',
-      element.submitsForm ?? false,
-      element.focused ?? false,
-      element.editable ?? false,
-      element.value ?? '',
-      element.filled ?? false,
-      element.href ?? '',
-      element.state ?? '',
-      element.context ?? '',
-      element.x,
-      element.y,
-      element.w,
-      element.h,
-    ]),
-  ]);
-}
-
-/**
- * Headroom left for OUTPUT tokens when a provider rejects a request for exceeding its context window,
- * or `null` when the error is something else entirely.
- *
- * Anthropic states the arithmetic verbatim — "input length and `max_tokens` exceed context limit:
- * 190000 + 8000 > 200000" — and OpenRouter forwards the message, so the cheapest fix is usually just
- * asking for fewer output tokens. `0` means "recognised as an overflow but the numbers were not
- * stated", which tells the caller to fall back to trimming the conversation.
- */
-export function contextOverflowHeadroom(error: unknown): number | null {
-  const message = error instanceof Error ? error.message : String(error);
-  if (!/context (window|limit|length)|too long|max_tokens/i.test(message)) return null;
-  const m = /(\d[\d,]*)\s*\+\s*(\d[\d,]*)\s*>\s*(\d[\d,]*)/.exec(message);
-  if (!m) return 0;
-  const n = (v: string): number => Number(v.replace(/,/g, ''));
-  // Leave a margin: the reported input length is for the request that FAILED, and the retry's own
-  // prompt is not byte-identical.
-  const headroom = n(m[3]!) - n(m[1]!) - 1_000;
-  return headroom > 0 ? headroom : 0;
-}
-
-interface BudgetedRequest {
-  desiredMaxTokens: number;
-  tokenBudget: number | undefined;
-  usage: AgentUsage;
-  system: string;
-  messages: readonly LlmMessage[];
-  tools: readonly LlmTool[];
-}
-
-/**
- * Cap the request's output by the allowance left after its CURRENT input. Provider usage remains
- * authoritative after the response and is checked before any returned action is dispatched.
- */
-function budgetedMaxTokens(request: BudgetedRequest): number {
-  if (request.tokenBudget === undefined) return request.desiredMaxTokens;
-  const remaining = request.tokenBudget - budgetedTokens(request.usage);
-  const outputRoom = remaining - requestInputReserve(request);
-  if (outputRoom < MIN_USEFUL_OUTPUT_TOKENS) return 0;
-  return Math.min(request.desiredMaxTokens, Math.floor(outputRoom));
-}
-
-function requestInputReserve(
-  request: Pick<BudgetedRequest, 'system' | 'messages' | 'tools'>,
-): number {
-  const FIXED_REQUEST_OVERHEAD = 256;
-  const MESSAGE_OVERHEAD = 24;
-  const TOOL_OVERHEAD = 32;
-  let reserve = FIXED_REQUEST_OVERHEAD + estimatedTokens(request.system);
-  reserve += estimatedTokens(JSON.stringify(request.tools)) + request.tools.length * TOOL_OVERHEAD;
-  for (const message of request.messages) {
-    reserve += MESSAGE_OVERHEAD + estimatedTokens(messageText(message));
-    if (message.role === 'user') {
-      for (const image of message.images ?? []) {
-        // Native image inputs are billed by pixels rather than base64 text. The compressed byte count
-        // is a useful signal but can dwarf actual vision usage, so bound it at a deliberately generous
-        // per-image reserve rather than making every normal screenshot exceed the run budget.
-        reserve += 64 + Math.min(8_192, Math.max(1_024, Math.ceil(image.data.length / 4)));
-      }
-    }
-  }
-  return reserve;
-}
-
-/**
- * Tokens a string is worth, for reserving room BEFORE the provider has counted it.
- *
- * Reserving UTF-8 bytes was tokenizer-independent but not a token estimate at all: English prose is
- * about one byte per character and roughly four characters per token, so the reserve came out ~4×
- * the real input and the budget appeared spent long before it was. Dividing keeps the property that
- * mattered — no tokenizer, and still an over-estimate — while staying in the right order of
- * magnitude. The divisor is deliberately below the ~4 bytes/token English average so the reserve
- * errs high, and multi-byte scripts (which pack more bytes into a token) land near 1 token/char.
- */
-function estimatedTokens(value: string): number {
-  return Math.ceil(Buffer.byteLength(value, 'utf8') / 3);
-}
-
-/** A cached prefix read is billed at roughly a tenth of a fresh one. */
-const CACHE_READ_BUDGET_WEIGHT = 0.1;
-
-/**
- * What this run has spent against its budget.
- *
- * The budget exists to bound COST. Counting cache reads at full price meant prompt caching — the one
- * mechanism that makes a long run affordable — accelerated the shutdown instead: every step re-reads
- * the whole prefix, so the total grew by an entire prompt per step and a forty-step run halted around
- * step ten. `tokensIn` stays the honest context measure everything else reports; only this
- * arithmetic is weighted.
- */
-function budgetedTokens(value: AgentUsage): number {
-  const cached = Math.min(value.cachedTokensIn ?? 0, value.tokensIn);
-  const fresh = value.tokensIn - cached;
-  return fresh + Math.ceil(cached * CACHE_READ_BUDGET_WEIGHT) + value.tokensOut;
-}
-
-function tokenBudgetExceeded(tokenBudget: number | undefined, usage: AgentUsage): boolean {
-  return tokenBudget !== undefined && budgetedTokens(usage) > tokenBudget;
-}
-
-/** All text in a message, for budgeting. */
-function messageText(message: LlmMessage): string {
-  if (message.role === 'assistant') {
-    return (message.content ?? '') + JSON.stringify(message.toolCalls ?? []);
-  }
-  return message.content;
-}
-
-/**
- * Keep the run's own exchange bounded without breaking its structure.
- *
- * Page snapshots dominate an agent run's token cost, and every one of them stays relevant only for a
- * step or two. Older TOOL RESULTS are therefore reduced to their HEADER LINE — step number, URL and the
- * outcome of the action that produced them (see `buildStepPrompt`) — while every assistant turn, the
- * record of what the agent actually DID, is preserved in full. The shape of the conversation is never
- * altered, so the call/result pairing providers require survives.
- */
-function pruneObservations(messages: readonly LlmMessage[]): LlmMessage[] {
-  const toolIndices = messages.flatMap((m, i) => (m.role === 'tool' ? [i] : []));
-  // Prune in batches: shrinking exactly one more tool result every step rewrites one message per
-  // request, and a rewritten message is a cache miss for itself and everything after it. Moving the
-  // cut every PRUNE_BATCH steps keeps the prefix stable in between, at the price of up to
-  // PRUNE_BATCH - 1 extra verbatim snapshots.
-  const prunable = Math.max(0, toolIndices.length - VERBATIM_OBSERVATIONS);
-  const pruned = prunable - (prunable % PRUNE_BATCH);
-  const cutoff = pruned > 0 ? toolIndices[pruned]! : -1;
-  // The newest message that carries the re-sent blocks keeps them; every older copy is stale by
-  // definition, since both blocks are rebuilt in full on every step.
-  const newestWithBlocks = messages.reduce(
-    (found, message, index) => (hasResentBlocks(message) ? index : found),
-    -1,
-  );
-
-  return messages.map((message, index) => {
-    if (message.role === 'tool' && cutoff >= 0 && index < cutoff) {
-      const headerLine = message.content.split('\n', 1)[0] ?? '';
-      return {
-        ...message,
-        content: `${headerLine.slice(0, 300)}\n(older page snapshot omitted to save context)`,
-      };
-    }
-    if (index !== newestWithBlocks && hasResentBlocks(message)) {
-      return { ...message, content: stripResentBlocks(message.content) };
-    }
-    return message;
-  });
-}
-
-/** How many aged tool results are pruned at once (see `pruneObservations`). */
-const PRUNE_BATCH = 3;
-
-/** Steps kept verbatim at each end of the ledger before the middle is elided. */
-const LEDGER_HEAD = 3;
-const LEDGER_TAIL = 8;
-
-/**
- * The run's own history, bounded, as one re-sent block.
- *
- * `history` accumulated a line per step for the whole run and only its LAST entry was ever read, so
- * the model's only cross-step structure was six verbatim observations and a row of header lines.
- * That is enough to react and not enough to carry a plan: on a multi-phase task the model re-derives
- * what it was doing every few steps, or quietly stops doing it. Keeping both ends and eliding the
- * middle bounds the cost — the recent steps say where it is, the first ones say what it set out to
- * do — and turns the ledger from dead memory growth into the run's working state.
- */
-function runLedger(history: readonly string[]): string {
-  const clip = (line: string): string => (line.length > 200 ? `${line.slice(0, 199)}…` : line);
-  if (history.length <= LEDGER_HEAD + LEDGER_TAIL) return history.map(clip).join('\n');
-  const omitted = history.length - LEDGER_HEAD - LEDGER_TAIL;
-  return [
-    ...history.slice(0, LEDGER_HEAD).map(clip),
-    `… ${omitted} earlier step(s) omitted …`,
-    ...history.slice(-LEDGER_TAIL).map(clip),
-  ].join('\n');
-}
-
-function hasResentBlocks(message: LlmMessage): message is LlmMessage & { content: string } {
-  if (message.role === 'assistant') return false;
-  const content = message.content;
-  return (
-    typeof content === 'string' &&
-    (content.includes(EVIDENCE_PREAMBLE) || content.includes(PROGRESS_PREAMBLE))
-  );
-}
-
-/**
- * Remove the evidence-ledger and progress blocks from a step prompt that is no longer the newest.
- * (The per-site memory block that used to be stripped alongside them left with durable memory.)
- *
- * Both are rebuilt in full on EVERY step, so up to seven byte-identical copies of an 8,000-char
- * ledger could be live in one request — re-billed in full on the managed path, which places no cache
- * breakpoint on the message array.
- *
- * The cut is anchored on each block's preamble and ends at the FIRST closing fence after it. That
- * precision is the whole trick: the ledger shares `BEGIN/END_UNTRUSTED_WEB_CONTENT` with the page
- * snapshot, so a greedy match would delete the observation the step exists to deliver. Whatever is
- * removed is always a COMPLETE fenced unit — never content stripped of its "untrusted data" framing.
- */
-function stripResentBlocks(content: string): string {
-  const cut = (text: string, preamble: string, endFence: string): string => {
-    const start = text.indexOf(preamble);
-    if (start === -1) return text;
-    const end = text.indexOf(endFence, start);
-    if (end === -1) return text; // malformed: leave it whole rather than truncate mid-fence
-    return `${text.slice(0, start)}(earlier copy of this block omitted; the current one is below)\n${text.slice(end + endFence.length + 1)}`;
-  };
-  return cut(
-    cut(content, EVIDENCE_PREAMBLE, 'END_UNTRUSTED_WEB_CONTENT'),
-    PROGRESS_PREAMBLE,
-    'END_UNTRUSTED_WEB_CONTENT',
-  );
-}
-
-/**
- * Attach a screenshot to the newest turn. Vision arrives as an extra content part on the message the
- * model is about to answer; a tool result cannot carry an image on every provider, so in that case a
- * trailing user turn carries it instead.
- */
-function attachImageToLastTurn(messages: readonly LlmMessage[], image: string): LlmMessage[] {
-  const out = [...messages];
-  const last = out.at(-1);
-  if (last?.role === 'user') {
-    out[out.length - 1] = { ...last, images: [{ mediaType: 'image/png', data: image }] };
-    return out;
-  }
-  out.push({
-    role: 'user',
-    content: 'Visual observation of the current page:',
-    images: [{ mediaType: 'image/png', data: image }],
-  });
-  return out;
-}
-
-function safeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
-  try {
-    return await fn();
-  } catch {
-    return fallback;
-  }
-}
-
-/**
- * How many times a still-moving page is re-observed before its state is called ambiguous.
- *
- * The two reads this compares — perception's URL and the follow-up `currentUrl()` — are separate
- * round trips, so anything that rewrites the location between them looks like drift: a deferred
- * redirect, an SPA route change, or an analytics/consent script calling `history.replaceState` to
- * strip a `?utm_source=`. None of those means an effect was lost, but a single-shot comparison
- * reported them as "delivery completed, post-state ambiguous" — which is not merely a failed run.
- * It leaves the journal `recovery_required`, and admission then refuses EVERY later run on that
- * profile, permanently, over a query string. Re-observing distinguishes the two: a page that has
- * settled agrees with itself, and a page still turning over after this many attempts genuinely
- * cannot testify about what just happened.
- */
-const POST_ACTION_SETTLE_ATTEMPTS = 3;
-
-/**
- * Does this action's effect stop at "which document the browser is showing"?
- *
- * The distinction decides what an unreadable page after the action MEANS. A click, a keystroke, an
- * upload or a durable memory write can commit something the browser cannot take back, so being
- * unable to re-read the page genuinely leaves it unknown whether that happened, and the run must
- * block rather than guess. Moving the browser is not like that: it commits nothing outside the
- * browser and repeating it is idempotent, so an unreadable destination is a fact ABOUT THE PAGE, to
- * be reported to the model, not an unresolved external effect.
- *
- * Treating them alike had a disproportionate cost. A page that calls `alert()` blocks its renderer,
- * so nothing on it can be read — and navigating to one therefore ended the run as an ambiguous
- * write, left the journal `recovery_required`, and refused admission for every later run on that
- * profile. One ordinary `alert()` on one site permanently disabled the agent for that profile, with
- * no supported way to clear it.
- */
-function movesBrowserOnly(action: AgentAction): boolean {
-  return action.kind === 'navigate' || action.kind === 'back' || action.kind === 'tab';
-}
-
-/**
- * Confirm the page can testify about what just happened — and hand back the observation it used, so
- * the next step reads the page it already read instead of extracting the whole DOM again.
- */
-async function verifyBrowserStateObserved(
-  driver: BrowserDriver,
-  browserMoveOnly = false,
-): Promise<RawPerception | undefined> {
-  for (let attempt = 1; ; attempt += 1) {
-    const observed = await perceive(driver);
-    if (observed.signals?.includes('page-unreadable') && !browserMoveOnly) {
-      throw new Error('the post-action page could not be read');
-    }
-    if (observed.signals?.includes('page-unreadable')) {
-      // The move itself is not in doubt, and the next step's own observation carries the reason the
-      // page cannot be read — a blocking dialog, a hostile CSP — so the model can hand off or leave.
-      return undefined;
-    }
-    if (driver.ready && !driver.ready()) {
-      throw new Error('the browser detached before post-action verification');
-    }
-    const liveUrl = await driver.currentUrl();
-    if (urlIdentity(liveUrl) === (observed.urlIdentity ?? urlIdentity(observed.url))) {
-      return observed;
-    }
-    if (attempt >= POST_ACTION_SETTLE_ATTEMPTS) {
-      throw new Error('the page changed during post-action verification');
-    }
-    // Let the navigation finish rather than sampling it again immediately; a failure to settle is
-    // itself part of the evidence that the state is not observable.
-    await driver.waitForSettle(3000).catch(() => {});
-  }
-}
-
-/**
- * Side of the square of pixels around a coordinate gesture that must survive an approval unchanged.
- *
- * The check used to demand two byte-identical FULL-PAGE screenshots taken either side of a human
- * reading a modal. Any caret blink, spinner, lazy image, video frame, or CSS transition anywhere on
- * the page changed those bytes, so the documented escape hatch for canvas widgets, captchas and
- * cross-origin payment frames could essentially never run: the agent burned a screenshot, an
- * approval and a block, then reported failure. Bounding the comparison to the neighbourhood of the
- * click keeps the property that actually matters — the thing under the cursor is still the thing
- * that was approved — and stops unrelated motion from vetoing it.
- */
-const VISUAL_TARGET_PATCH_PX = 160;
-
-/** How many times a patch is re-sampled before the target counts as changed. */
-const VISUAL_TARGET_SAMPLES = 3;
-
-function visualTargetPatch(
-  driver: BrowserDriver,
-  action: AgentAction,
-): Promise<string | undefined> {
-  if ((action.kind !== 'click_at' && action.kind !== 'type_at') || !driver.screenshot) {
-    return Promise.resolve(undefined);
-  }
-  const half = Math.round(VISUAL_TARGET_PATCH_PX / 2);
-  return driver
-    .screenshot({
-      x: Math.max(0, Math.round(action.x) - half),
-      y: Math.max(0, Math.round(action.y) - half),
-      width: VISUAL_TARGET_PATCH_PX,
-      height: VISUAL_TARGET_PATCH_PX,
-    })
-    .catch(() => undefined);
-}
-
-/**
- * Is the approved coordinate's neighbourhood still the one that was approved?
- *
- * Re-sampled a few times because a patch can legitimately differ for one frame — a caret in a field
- * the gesture is about to focus, a hover transition finishing — without the target having moved. A
- * missing capture is a refusal, not a pass: an unverifiable coordinate gesture is exactly the case
- * this gate exists for.
- */
-async function visualTargetHeld(
-  driver: BrowserDriver,
-  action: AgentAction,
-  approved: string | undefined,
-): Promise<boolean> {
-  if (!approved) return false;
-  for (let sample = 0; sample < VISUAL_TARGET_SAMPLES; sample += 1) {
-    const fresh = await visualTargetPatch(driver, action);
-    if (fresh && fresh === approved) return true;
-  }
-  return false;
-}
-
-async function rollbackNavigation(driver: BrowserDriver, priorUrl: string): Promise<void> {
-  try {
-    await driver.goBack();
-    await driver.waitForSettle(3000);
-    if (urlIdentity(await driver.currentUrl()) === urlIdentity(priorUrl)) return;
-  } catch {
-    // A popup/new tab has no back entry; close the active extra tab instead.
-  }
-  try {
-    const tabs = await driver.listTabs();
-    const active = tabs.find((tab) => tab.active);
-    if (active && tabs.length > 1) {
-      await driver.closeTab(active.index);
-      await driver.waitForSettle(3000);
-      if (urlIdentity(await driver.currentUrl()) === urlIdentity(priorUrl)) return;
-    }
-  } catch {
-    // Last resort below.
-  }
-  await driver.navigate(priorUrl);
-  await driver.waitForSettle(3000);
-  if (urlIdentity(await driver.currentUrl()) !== urlIdentity(priorUrl)) {
-    throw new Error('could not verify restoration of the prior page');
-  }
 }
