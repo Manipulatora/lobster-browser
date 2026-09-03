@@ -1,7 +1,7 @@
-diff --git a/chrome/browser/resources/new_tab_page/app.css b/chrome/browser/resources/new_tab_page/app.css
-index d9d32b0e8eb63..7b87644979b99 100644
---- a/chrome/browser/resources/new_tab_page/app.css
-+++ b/chrome/browser/resources/new_tab_page/app.css
+Index: src/chrome/browser/resources/new_tab_page/app.css
+===================================================================
+--- src.orig/chrome/browser/resources/new_tab_page/app.css
++++ src/chrome/browser/resources/new_tab_page/app.css
 @@ -198,6 +198,29 @@ cr-most-visited {
    z-index: 2;
  }
@@ -32,11 +32,11 @@ index d9d32b0e8eb63..7b87644979b99 100644
  #modules:not([hidden]) {
    /* We use animation instead of transition to allow a fade-in out of
       display: none. */
-diff --git a/chrome/browser/resources/new_tab_page/app.html b/chrome/browser/resources/new_tab_page/app.html
-index b6dab963bf644..fbb64f26ed104 100644
---- a/chrome/browser/resources/new_tab_page/app.html
-+++ b/chrome/browser/resources/new_tab_page/app.html
-@@ -98,6 +98,10 @@ import {SubmitButtonIconType} from '//resources/cr_components/composebox/compose
+Index: src/chrome/browser/resources/new_tab_page/app.html
+===================================================================
+--- src.orig/chrome/browser/resources/new_tab_page/app.html
++++ src/chrome/browser/resources/new_tab_page/app.html
+@@ -99,6 +99,10 @@ import {SubmitButtonIconType} from '//re
        </ntp-lens-upload-dialog>
      ` : ''}
    </div>
@@ -45,12 +45,12 @@ index b6dab963bf644..fbb64f26ed104 100644
 +    <img src="icons/lobster_ad.png" alt="Lobster Browser for multiple profile management" draggable="false">
 +  </div>
    ${this.lazyRender_ && this.ntpNextFeaturesEnabled_
-   && this.isActionChipsVisible_ ? html`
+   && this.isActionChipsVisible_ && this.composeboxEnabled ? html`
      <ntp-action-chips
-diff --git a/chrome/browser/resources/new_tab_page/icons/BUILD.gn b/chrome/browser/resources/new_tab_page/icons/BUILD.gn
-index d3958628cf58b..c4b15e40190af 100644
---- a/chrome/browser/resources/new_tab_page/icons/BUILD.gn
-+++ b/chrome/browser/resources/new_tab_page/icons/BUILD.gn
+Index: src/chrome/browser/resources/new_tab_page/icons/BUILD.gn
+===================================================================
+--- src.orig/chrome/browser/resources/new_tab_page/icons/BUILD.gn
++++ src/chrome/browser/resources/new_tab_page/icons/BUILD.gn
 @@ -12,6 +12,10 @@ generate_grd("build_grdp") {
    grd_prefix = "new_tab_page"
    out_grd = "$target_gen_dir/resources.grdp"
@@ -59,13 +59,13 @@ index d3958628cf58b..c4b15e40190af 100644
 +    "lobium_master.png",
 +    "lobster_wordmark.png",
 +    "lobster_wordmark_horizontal.png",
+     "attach_file.svg",
      "chevron.svg",
      "copy.svg",
-     "drag_drop_illustration.svg",
-diff --git a/chrome/browser/resources/new_tab_page/logo.css b/chrome/browser/resources/new_tab_page/logo.css
-index 7153f6db34add..ece252aa688ea 100644
---- a/chrome/browser/resources/new_tab_page/logo.css
-+++ b/chrome/browser/resources/new_tab_page/logo.css
+Index: src/chrome/browser/resources/new_tab_page/logo.css
+===================================================================
+--- src.orig/chrome/browser/resources/new_tab_page/logo.css
++++ src/chrome/browser/resources/new_tab_page/logo.css
 @@ -31,27 +31,31 @@
  }
  
@@ -74,11 +74,6 @@ index 7153f6db34add..ece252aa688ea 100644
    forced-color-adjust: none;
 -  height: 92px;
 -  width: 272px;
--}
--
--:host([use-google-logo26_]) #logo {
--  height: 82px;
--  width: 270px;
 +  height: auto;
 +  width: auto;
 +  display: flex;
@@ -87,6 +82,11 @@ index 7153f6db34add..ece252aa688ea 100644
 +  margin: 0 auto;
  }
  
+-:host([use-google-logo26_]) #logo {
+-  height: 82px;
+-  width: 270px;
+-}
+-
 -:host([single-colored]) #logo {
 -  -webkit-mask-image: url(./icons/google_logo.svg);
 -  -webkit-mask-repeat: no-repeat;
@@ -113,10 +113,10 @@ index 7153f6db34add..ece252aa688ea 100644
  }
  
  #imageDoodle {
-diff --git a/chrome/browser/resources/new_tab_page/logo.html b/chrome/browser/resources/new_tab_page/logo.html
-index efb32fff8f9d5..bfa86b9375977 100644
---- a/chrome/browser/resources/new_tab_page/logo.html
-+++ b/chrome/browser/resources/new_tab_page/logo.html
+Index: src/chrome/browser/resources/new_tab_page/logo.html
+===================================================================
+--- src.orig/chrome/browser/resources/new_tab_page/logo.html
++++ src/chrome/browser/resources/new_tab_page/logo.html
 @@ -1,5 +1,7 @@
  ${this.showLogo_ ? html`
 -  <div id="logo"></div>
@@ -126,11 +126,11 @@ index efb32fff8f9d5..bfa86b9375977 100644
  ` : ''}
  ${this.showDoodle_ ? html`
    <div id="doodle" title="${this.doodle_!.description}">
-diff --git a/chrome/browser/resources/new_tab_page/logo.ts b/chrome/browser/resources/new_tab_page/logo.ts
-index 17c796eea4864..7b2b6bf1b7f95 100644
---- a/chrome/browser/resources/new_tab_page/logo.ts
-+++ b/chrome/browser/resources/new_tab_page/logo.ts
-@@ -175,7 +175,10 @@ export class LogoElement extends CrLitElement {
+Index: src/chrome/browser/resources/new_tab_page/logo.ts
+===================================================================
+--- src.orig/chrome/browser/resources/new_tab_page/logo.ts
++++ src/chrome/browser/resources/new_tab_page/logo.ts
+@@ -175,7 +175,10 @@ export class LogoElement extends CrLitEl
    }
  
    private computeShowDoodle_(): boolean {
@@ -142,11 +142,11 @@ index 17c796eea4864..7b2b6bf1b7f95 100644
    }
  
    /**
-diff --git a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
-index 20936d6cca48e..886b2ef2e6b5d 100644
---- a/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
-+++ b/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
-@@ -698,17 +698,10 @@ void NewTabPageHandler::GetMostVisitedSettings(
+Index: src/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+===================================================================
+--- src.orig/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
++++ src/chrome/browser/ui/webui/new_tab_page/new_tab_page_handler.cc
+@@ -698,17 +698,10 @@ void NewTabPageHandler::GetMostVisitedSe
  }
  
  void NewTabPageHandler::GetDoodle(GetDoodleCallback callback) {
