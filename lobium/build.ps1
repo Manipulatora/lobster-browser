@@ -243,7 +243,12 @@ Missing the V8 builtins PGO profile at $v8Pgo. Fetch it:
 Ok ("V8 PGO {0:N0} MB builtins profile" -f ((Get-Item $v8Pgo).Length / 1MB))
 
 $drive = Get-PSDrive -Name (Split-Path -Qualifier $SrcDir).TrimEnd(':')
-if ($drive.Free / 1GB -lt 150) { Die ("Only {0:N0} GB free on {1}: - an official build needs ~150 GB." -f ($drive.Free / 1GB), $drive.Name) }
+# Measured on the build box (2026-09-03): the finished out\Lobium for 152.0.7977.42 with this
+# gn-args set is 15 GB, and the largest transient the build needs on top of it is a few GB of
+# object files. 150 GB was the figure for a symbolised official build; with a 67 GB pack already
+# on the volume it refused a machine that had 117 GB free, which is plenty. 100 GB keeps a margin
+# for the .git growth a tag fetch brings.
+if ($drive.Free / 1GB -lt 100) { Die ("Only {0:N0} GB free on {1}: - the build needs ~100 GB free (out\Lobium is ~15 GB, plus transients)." -f ($drive.Free / 1GB), $drive.Name) }
 Ok ("disk   {0:N0} GB free on {1}:" -f ($drive.Free / 1GB), $drive.Name)
 
 $cores = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
