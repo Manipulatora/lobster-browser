@@ -5,8 +5,8 @@
   "platforms": {
     "linux-x64": {
       "version": "152.0.7977.75",
-      "url": "https://lobrowser.com/download/engine/lobium-linux-x64-152.0.7977.42-b2.tar.gz",
-      "sha256": "d267977fde5bd901f0aaa0e632ba6b2e4a856a91728bb2ce7f5ffb962acd32dc"
+      "url": "https://lobrowser.com/download/engine/lobium-linux-x64-152.0.7977.75-b1.tar.gz",
+      "sha256": "105095fd5253c4cdb63161f4e3a5af600b51fafa5ca82e5a1b517f1ce2227411"
     },
     "win-x64": {
       "version": "152.0.7977.42",
