@@ -155,6 +155,23 @@ body {
   color: var(--violet-600);
   white-space: pre-wrap;
 }
+/* A page condition that changed between steps (a login wall, a captcha): the harness's own note,
+   not a step — a hollow mark in the muted ink, so it is neither a thing Lobee did nor a thing the
+   user said. */
+.lobee-dot.is-signal {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--ink-soft);
+}
+.lobee-step-text.is-signal {
+  color: var(--ink-soft);
+  white-space: pre-wrap;
+}
+/* How long a slow step took, after its line. Muted and tabular so it reads as a measurement. */
+.lobee-step-time {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .lobee-dot {
   position: relative;
   display: inline-block;

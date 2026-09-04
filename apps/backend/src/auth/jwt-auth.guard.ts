@@ -8,7 +8,7 @@ import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import type { User } from '@lobster/shared-types';
 
-import { AuthService, type JwtPayload } from './auth.service';
+import { AuthService, type JwtPayload, type SessionAudience } from './auth.service';
 import { IS_PUBLIC_KEY } from './public.decorator';
 
 /**
@@ -20,12 +20,18 @@ export interface AuthenticatedRequest {
   headers: { authorization?: string };
   /** Populated by JwtAuthGuard once the bearer token is verified. */
   user?: User;
+  /**
+   * Which kind of session presented the token, so an endpoint that mints a replacement (a password
+   * change) can mint it for the same audience. Populated by JwtAuthGuard alongside `user`.
+   */
+  audience?: SessionAudience;
 }
 
 /**
  * Protects routes with a Bearer JWT: extracts the token from the `Authorization` header,
- * verifies its signature/expiry, confirms the user still exists, and attaches the public
- * user (id included) to `request.user` for downstream handlers.
+ * verifies its signature/expiry, confirms the user still exists AND that the token has not been
+ * revoked since it was minted (see `AuthService.authenticate`), and attaches the public user (id
+ * included) to `request.user` for downstream handlers.
  *
  * An `agent`-audience token is refused here. It is signed with the same secret, so without this
  * check the narrow, short-lived credential the desktop hands to a sidecar would also open the
@@ -71,7 +77,8 @@ export class JwtAuthGuard implements CanActivate {
       throw new UnauthorizedException('agent tokens are not valid on this endpoint');
     }
 
-    request.user = await this.auth.validateUser(payload.sub);
+    request.user = await this.auth.authenticate(payload);
+    request.audience = payload.aud === 'desktop' ? 'desktop' : 'web';
     return true;
   }
 

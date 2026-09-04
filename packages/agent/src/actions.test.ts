@@ -153,3 +153,32 @@ test('key parsing canonicalizes to the one vocabulary the driver can press', () 
     assert.equal(parsed.ok, false, `${JSON.stringify(key)} must not parse as a pressable key`);
   }
 });
+
+test('a plan rides on any action, clamped rather than dropped, and is absent when empty', () => {
+  // `plan` is the model's memo to the harness, attached in one place for every kind: a kind that
+  // forgot to carry it would silently drop the model's notes, and the only symptom would be a model
+  // that keeps re-deriving what it had already worked out.
+  const long = 'p'.repeat(9000);
+  const clicked = parseAction({ kind: 'click', id: 1, plan: long });
+  assert.ok(clicked.ok && clicked.action.kind === 'click');
+  assert.equal(clicked.action.plan?.length, 400, 'clamped to the schema limit');
+  assert.ok(clicked.action.plan?.endsWith('…'), 'a clamp says it clamped');
+  assert.equal(ACT_TOOL.inputSchema.properties.plan.maxLength, 400);
+
+  // Kinds without a `note` carry it too, trimmed.
+  const asked = parseAction({
+    kind: 'ask',
+    question: 'Which colour?',
+    plan: '  after the answer, open the first result  ',
+  });
+  assert.ok(asked.ok && asked.action.kind === 'ask');
+  assert.equal(asked.action.plan, 'after the answer, open the first result');
+
+  for (const plan of ['', '   ', 42, null, ['x']]) {
+    const parsed = parseAction({ kind: 'back', plan });
+    assert.ok(
+      parsed.ok && !('plan' in parsed.action),
+      `${JSON.stringify(plan)} must neither reject the action nor attach a plan`,
+    );
+  }
+});

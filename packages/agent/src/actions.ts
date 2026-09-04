@@ -198,6 +198,13 @@ export function normalizeActionKey(raw: string): string | undefined {
   return /^[A-Za-z0-9]$/.test(value) ? value : undefined;
 }
 
+/**
+ * Longest `plan` an action may carry. The plan is re-sent to the model on every step, so its size is
+ * paid per step for the rest of the run; four hundred characters is a paragraph of intentions, which
+ * is what the field is for, and a model that wants to keep more should `collect` or `extract` it.
+ */
+export const MAX_PLAN_CHARS = 400;
+
 export const ACT_TOOL = {
   name: 'act',
   description:
@@ -309,6 +316,12 @@ export const ACT_TOOL = {
       success: { type: 'boolean' },
       summary: { type: 'string', maxLength: 4_000 },
       note: { type: 'string', maxLength: 160 },
+      plan: {
+        type: 'string',
+        maxLength: MAX_PLAN_CHARS,
+        description:
+          'Your running plan and notes for later steps; replaces the previous one. The harness re-sends your latest plan every step, so restate whatever still matters.',
+      },
     },
     required: ['kind'],
   },
@@ -362,6 +375,7 @@ export function buildActionReference(opts: {
     "  · A settings op opens a vetted page in a SEPARATE BACKGROUND tab — the user's tab is untouched. Perceive it, operate the one control you came for, then CLOSE that tab.",
     "  · You can NEVER change fingerprint or proxy/network settings (user-agent, languages, timezone, screen, canvas/WebGL, WebRTC, proxy, DNS, fonts) — hard-blocked to protect the profile's identity; don't attempt them.",
     '- ask {question,sensitive?,targetId?}; done {success,summary}',
+    '- Any action may also carry `plan` (up to 400 characters): your running plan and notes for later steps — what you have learned, what remains, what to avoid. Each plan REPLACES the previous one and is re-sent to you every step, so it outlives the page snapshots that get pruned.',
   );
   // Two worked examples, in the action reference (part of the cached system prefix) and never in the
   // per-step prompt. They target the two rules most often broken in practice: `collect` losing its
@@ -439,7 +453,22 @@ const strings = (value: unknown, max = 20): string[] | undefined =>
     ? value
     : undefined;
 
+/**
+ * Parse the model's tool input into an action, or say precisely why it is not one.
+ *
+ * `plan` is attached here, in ONE place, rather than spread into every kind's case below: it is the
+ * model's memo to the harness, not a parameter of any action, and a case that forgot to carry it
+ * would drop the model's notes silently — the only symptom would be a model that keeps re-deriving
+ * what it had already worked out. Clamped, never rejected, for the same reason `note` is.
+ */
 export function parseAction(raw: RawActionInput): ParseActionResult {
+  const parsed = parseActionFields(raw);
+  if (!parsed.ok) return parsed;
+  const plan = clamp(raw.plan, MAX_PLAN_CHARS)?.trim();
+  return plan ? ok({ ...parsed.action, plan }) : parsed;
+}
+
+function parseActionFields(raw: RawActionInput): ParseActionResult {
   const kind = str(raw.kind, 40);
   if (!kind) return bad('missing "kind"');
 

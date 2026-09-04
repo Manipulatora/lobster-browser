@@ -2,21 +2,34 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { ForbiddenException } from '@nestjs/common';
+import type { ConfigService } from '@nestjs/config';
 
-import { TeamsService } from './teams.service';
+import {
+  DEFAULT_TEAMS_PER_ACCOUNT_LIMIT,
+  TeamsService,
+  resolveTeamsPerAccountLimit,
+} from './teams.service';
 import { InMemoryTeamsRepository } from './in-memory-teams.repository';
 import { InMemoryUsersRepository } from '../auth/in-memory-users.repository';
 
+/** A cap high enough to be out of the way in fixtures that are about something else. */
+const UNCAPPED = 100;
+
 /**
  * Unit tests for TeamsService against the in-memory repos — no Nest app boot and no database.
- * Focused on the last-admin safety guard in {@link TeamsService.setRole}.
+ * Focused on the last-admin safety guard in {@link TeamsService.setRole} and the ownership cap in
+ * {@link TeamsService.createTeam}.
  */
-function makeService(): { service: TeamsService; teams: InMemoryTeamsRepository } {
+function makeService(env: Record<string, string> = {}): {
+  service: TeamsService;
+  teams: InMemoryTeamsRepository;
+} {
   const teams = new InMemoryTeamsRepository();
   const users = new InMemoryUsersRepository((ownerUserId, name) =>
     teams.prepareTeamWithOwner(ownerUserId, name),
   );
-  return { service: new TeamsService(teams, users), teams };
+  const config = { get: (key: string) => env[key] } as unknown as ConfigService;
+  return { service: new TeamsService(teams, users, config), teams };
 }
 
 test('createTeam returns only after the owner admin membership is visible', async () => {
@@ -27,10 +40,69 @@ test('createTeam returns only after the owner admin membership is visible', asyn
   assert.equal((await teams.getMembership(team.id, 'owner-1'))?.role, 'admin');
 });
 
+test('createTeam refuses once the account owns the configured number of teams', async () => {
+  const { service, teams } = makeService({ TEAMS_PER_ACCOUNT_LIMIT: '2' });
+  // The personal team registration creates is one of the two.
+  teams.prepareTeamWithOwner('owner-1', 'Personal').commit();
+  await service.createTeam('owner-1', 'Second');
+
+  await assert.rejects(
+    () => service.createTeam('owner-1', 'Third'),
+    (err: unknown) => {
+      assert.ok(err instanceof ForbiddenException);
+      assert.match(err.message, /team limit \(2\) reached for this account/);
+      return true;
+    },
+  );
+  assert.equal(
+    (await teams.findTeamsForUser('owner-1')).length,
+    2,
+    'the refused create wrote nothing',
+  );
+});
+
+test('teams the account was invited into do not count against its cap', async () => {
+  const { service, teams } = makeService({ TEAMS_PER_ACCOUNT_LIMIT: '2' });
+  teams.prepareTeamWithOwner('owner-1', 'Personal').commit();
+  const theirs = await teams.createTeam('someone-else', 'Theirs', UNCAPPED);
+  await teams.addMember(theirs.id, 'owner-1', 'member');
+
+  // owner-1 now belongs to two teams but owns one, so a second owned team still fits.
+  await service.createTeam('owner-1', 'Second');
+  assert.equal((await teams.findTeamsForUser('owner-1')).length, 3);
+});
+
+test('two creates racing for the last team slot produce one team and one 403', async () => {
+  const { service, teams } = makeService({ TEAMS_PER_ACCOUNT_LIMIT: '2' });
+  teams.prepareTeamWithOwner('owner-1', 'Personal').commit();
+
+  const results = await Promise.allSettled([
+    service.createTeam('owner-1', 'Racer A'),
+    service.createTeam('owner-1', 'Racer B'),
+  ]);
+
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal(
+    results.filter(
+      (result) => result.status === 'rejected' && result.reason instanceof ForbiddenException,
+    ).length,
+    1,
+  );
+  assert.equal((await teams.findTeamsForUser('owner-1')).length, 2);
+});
+
+test('TEAMS_PER_ACCOUNT_LIMIT: unset and garbage mean the default, never unlimited; the floor is one', () => {
+  assert.equal(resolveTeamsPerAccountLimit(undefined), DEFAULT_TEAMS_PER_ACCOUNT_LIMIT);
+  assert.equal(resolveTeamsPerAccountLimit(''), DEFAULT_TEAMS_PER_ACCOUNT_LIMIT);
+  assert.equal(resolveTeamsPerAccountLimit('lots'), DEFAULT_TEAMS_PER_ACCOUNT_LIMIT);
+  assert.equal(resolveTeamsPerAccountLimit('0'), 1, 'the personal team always exists and counts');
+  assert.equal(resolveTeamsPerAccountLimit('7.9'), 7);
+});
+
 test('setRole refuses to demote the last admin of a team', async () => {
   const { service, teams } = makeService();
   const adminId = 'admin-1';
-  const team = await teams.createTeam(adminId, 'Solo Team');
+  const team = await teams.createTeam(adminId, 'Solo Team', UNCAPPED);
 
   await assert.rejects(
     () => service.setRole(team.id, adminId, adminId, 'member'),
@@ -46,7 +118,7 @@ test('setRole CAN demote an admin when another admin remains', async () => {
   const { service, teams } = makeService();
   const adminA = 'admin-a';
   const adminB = 'admin-b';
-  const team = await teams.createTeam(adminA, 'Team');
+  const team = await teams.createTeam(adminA, 'Team', UNCAPPED);
   await teams.addMember(team.id, adminB, 'admin');
 
   // adminA (still an admin) demotes adminB — the team keeps at least one admin, so this is allowed.
@@ -67,7 +139,7 @@ async function twoAdminTeam(): Promise<{
   const { service, teams } = makeService();
   const adminA = 'admin-a';
   const adminB = 'admin-b';
-  const team = await teams.createTeam(adminA, 'Concurrent Team');
+  const team = await teams.createTeam(adminA, 'Concurrent Team', UNCAPPED);
   await teams.addMember(team.id, adminB, 'admin');
   return { service, teams, teamId: team.id, adminA, adminB };
 }

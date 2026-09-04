@@ -10,6 +10,7 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { MailModule } from '../mail/mail.module';
 import { AuthModule } from '../auth/auth.module';
 import { TeamsModule } from './teams.module';
+import { DEFAULT_TEAMS_PER_ACCOUNT_LIMIT } from './teams.service';
 import { createMailCapture, signUpOverHttp, type MailCapture } from '../testing/e2e-auth';
 import { MailService } from '../mail/mail.service';
 
@@ -143,6 +144,41 @@ test('create team -> invite -> role change -> admin-only + membership enforcemen
 test('unauthenticated create is 401', async () => {
   const res = await request(app.getHttpServer()).post('/teams').send({ name: 'nope' });
   assert.equal(res.status, 401);
+});
+
+test('an account may own at most the configured number of teams, its personal team included', async () => {
+  const token = await registerToken('team-cap@gmail.com');
+  const inviterToken = await registerToken('team-cap-inviter@gmail.com');
+  const auth = (t: string) => ({ Authorization: `Bearer ${t}` });
+
+  // The personal team is one; the rest of the cap is available over the API…
+  for (let i = 1; i < DEFAULT_TEAMS_PER_ACCOUNT_LIMIT; i += 1) {
+    const res = await request(app.getHttpServer())
+      .post('/teams')
+      .set(auth(token))
+      .send({ name: `Owned ${i}` });
+    assert.ok([200, 201].includes(res.status), `create ${i} status ${res.status}`);
+  }
+  // …and the one past it is refused. Before the cap this loop ran for as long as curl did.
+  const overflow = await request(app.getHttpServer())
+    .post('/teams')
+    .set(auth(token))
+    .send({ name: 'One too many' });
+  assert.equal(overflow.status, 403);
+
+  // An invitation is not something the invitee created, so it neither counts nor is refused.
+  const theirs = await request(app.getHttpServer())
+    .post('/teams')
+    .set(auth(inviterToken))
+    .send({ name: 'Theirs' });
+  const invite = await request(app.getHttpServer())
+    .post(`/teams/${theirs.body.data.id}/members`)
+    .set(auth(inviterToken))
+    .send({ email: 'team-cap@gmail.com', role: 'member' });
+  assert.ok([200, 201].includes(invite.status), `invite status ${invite.status}`);
+
+  const list = await request(app.getHttpServer()).get('/teams').set(auth(token));
+  assert.equal(list.body.data.length, DEFAULT_TEAMS_PER_ACCOUNT_LIMIT + 1);
 });
 
 test('BE-7: admin can remove a member; member can leave after promotion', async () => {

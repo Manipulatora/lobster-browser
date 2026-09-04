@@ -8,11 +8,12 @@ import {
 } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 
-import type {
-  AgentChargeRequest,
-  AgentChargeResult,
+import {
   AgentSpendService,
+  type AgentChargeRequest,
+  type AgentChargeResult,
 } from '../billing/agent-spend.service';
+import { InMemoryBillingRepository } from '../billing/in-memory-billing.repository';
 import type { AgentPrincipal } from './agent-auth.guard';
 import { AgentLlmService } from './agent-llm.service';
 import { AgentRefusalException } from './agent-refusal';
@@ -31,6 +32,8 @@ class FakeSpend {
   affordable = true;
   balanceCents = 500;
   requiredCents = 2;
+  /** When set, a charge is recorded the moment it is asked for but does not complete until this resolves. */
+  gate?: Promise<void>;
 
   estimateMicros(args: { tokensIn: number; maxTokensOut: number }): number | undefined {
     return this.priced ? args.tokensIn * 2 + args.maxTokensOut : undefined;
@@ -46,6 +49,7 @@ class FakeSpend {
 
   async charge(request: AgentChargeRequest): Promise<AgentChargeResult> {
     this.charges.push(request);
+    if (this.gate) await this.gate;
     return {
       priced: true,
       costMicros: 100,
@@ -73,7 +77,7 @@ const SYNTHETIC_CATALOG_IDS =
 
 function createService(
   values: Record<string, unknown> = {},
-  spend: FakeSpend = new FakeSpend(),
+  spend: FakeSpend | AgentSpendService = new FakeSpend(),
 ): AgentLlmService {
   const merged: Record<string, unknown> = {
     AGENT_ALLOWED_MODELS: SYNTHETIC_CATALOG_IDS,
@@ -94,6 +98,14 @@ async function drain(stream: ReadableStream<Uint8Array>): Promise<string> {
     received.push(decoder.decode(value));
   }
   return received.join('');
+}
+
+/**
+ * Let a deferred settlement run. A charge is dispatched with `setImmediate` after the answer has
+ * been handed back, so a test that wants to see it lands has to yield one turn of the loop first.
+ */
+async function settled(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 function modelCatalog(): { data: Array<Record<string, unknown>> } {
@@ -304,7 +316,7 @@ test('model roster does not invent selectable fallback models without a configur
   }
 });
 
-test('managed completion gates incompatible models and normalizes Claude tool choice', async () => {
+test('managed completion gates incompatible models and forwards tool_choice verbatim', async () => {
   const original = globalThis.fetch;
   let calls = 0;
   let completionBody: Record<string, unknown> = {};
@@ -357,7 +369,11 @@ test('managed completion gates incompatible models and normalizes Claude tool ch
       PRINCIPAL,
     );
     assert.equal(claudeResult.status, 200);
-    assert.equal(completionBody.tool_choice, 'auto');
+    // Forwarded as sent. The proxy used to rewrite this to 'auto' for every Anthropic model, which
+    // discarded the loop's forced `act` call and let Claude answer a step in prose. The client is
+    // the one place that decides what a model is sent, and the roster already refuses a model that
+    // cannot take `tool_choice` at all.
+    assert.deepEqual(completionBody.tool_choice, { type: 'function', function: { name: 'act' } });
     assert.equal(calls, 2);
 
     const askResult = await service.chatCompletion(
@@ -501,6 +517,8 @@ test('a streamed completion pipes SSE through untouched and still meters usage',
     // Bytes reach the client exactly as they arrived — the proxy must not reshape frames.
     assert.equal(await drain(stream!), frames.join(''));
 
+    await settled();
+    // The usage frame settled the call; the flush that followed must not settle it again.
     assert.equal(spend.charges.length, 1);
     const [charge] = spend.charges;
     // Input, cached input and output are carried SEPARATELY: they are billed at three different
@@ -549,6 +567,7 @@ test('a streamed answer whose usage chunk never arrives is still charged for', a
     );
     await drain(stream!);
 
+    await settled();
     assert.equal(spend.charges.length, 1, 'an unmeasured stream must not be served for free');
     const [charge] = spend.charges;
     // 32 delta characters at four characters per token, counted once each — a rolling re-scan
@@ -591,6 +610,7 @@ test('a client that walks away mid-stream is charged for what was generated', as
     await reader.read();
     await reader.cancel();
 
+    await settled();
     assert.equal(spend.charges.length, 1, 'a closed panel is not a refund');
     assert.equal(spend.charges[0].tokensOut, 1);
   } finally {
@@ -621,6 +641,7 @@ test('a non-2xx upstream that reports usage is charged for the generation it bil
       PRINCIPAL,
     );
     assert.equal(result.status, 502);
+    await settled();
     assert.equal(spend.charges.length, 1);
     assert.equal(spend.charges[0].tokensOut, 120);
     assert.equal(spend.charges[0].providerCostUsd, 0.0031);
@@ -646,6 +667,7 @@ test('a failure that generated nothing is charged for nothing', async () => {
       PRINCIPAL,
     );
     assert.equal(result.status, 429);
+    await settled();
     assert.deepEqual(spend.charges, []);
   } finally {
     globalThis.fetch = original;
@@ -838,6 +860,7 @@ test('a rejected OPERATOR key is not the caller’s agent token going stale', as
     // The provider's own sentence is not forwarded: OpenRouter quotes the operator's key URL in it.
     assert.doesNotMatch(JSON.stringify(body), /No auth credentials found/);
     // Nothing generated, nothing charged.
+    await settled();
     assert.deepEqual(spend.charges, []);
     // And the operator hears about it, loudly — nobody else can end this outage.
     assert.match(logs.error.join('\n'), /OPERATOR_FAULT reason=operator_key_rejected/);
@@ -871,6 +894,7 @@ test('an exhausted OPERATOR balance is an outage, not the customer’s empty wal
     assert.doesNotMatch(serialised, /insufficient_credit\b/);
     assert.doesNotMatch(serialised, /top up/i);
     assert.match(serialised, /"reason":"operator_out_of_funds"/);
+    await settled();
     assert.deepEqual(spend.charges, []);
     assert.match(logs.error.join('\n'), /OPERATOR_FAULT reason=operator_out_of_funds/);
   } finally {
@@ -1013,7 +1037,288 @@ test('a generation the OPERATOR’s key ran out under is not billed to the custo
     // The usual rule meters a part-generated answer the provider billed us for. Here it is waived on
     // purpose: the user is being told "nothing was charged", and that has to be true, not nearly
     // true. It is the operator's ceiling that stopped this, and the operator eats the fraction.
+    await settled();
     assert.deepEqual(spend.charges, []);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('the roster is warmed at boot, so a request never waits on the catalog', async () => {
+  const original = globalThis.fetch;
+  let catalogFetches = 0;
+  let releaseCatalog: () => void = () => {};
+  const catalogReady = new Promise<void>((resolve) => {
+    releaseCatalog = resolve;
+  });
+  globalThis.fetch = (async (input) => {
+    if (!String(input).includes('/models')) throw new Error('only the catalog is expected here');
+    catalogFetches += 1;
+    await catalogReady;
+    return new Response(JSON.stringify(pinnedCatalog()), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const service = createService({ OPENROUTER_API_KEY: 'server-key', AGENT_ALLOWED_MODELS: '' });
+    // Boot: the sync starts here and is NOT awaited — a slow catalog must not hold the process.
+    service.onModuleInit();
+    assert.equal(catalogFetches, 1);
+    // A request arriving while the boot sync is in flight joins it instead of starting its own.
+    const pending = service.listModels();
+    releaseCatalog();
+    const roster = await pending;
+    assert.equal(roster.stale, false);
+    assert.deepEqual(
+      roster.models.map((model) => model.id),
+      PINNED_ROSTER,
+    );
+    assert.equal(catalogFetches, 1);
+    // From here on the roster is a lookup.
+    await service.listModels();
+    assert.equal(catalogFetches, 1);
+    service.onModuleDestroy();
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a burst of cold requests shares one catalog fetch', async () => {
+  const original = globalThis.fetch;
+  let catalogFetches = 0;
+  globalThis.fetch = (async () => {
+    catalogFetches += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return new Response(JSON.stringify(pinnedCatalog()), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const service = createService({ OPENROUTER_API_KEY: 'server-key', AGENT_ALLOWED_MODELS: '' });
+    const rosters = await Promise.all([
+      service.listModels(),
+      service.listModels(),
+      service.listModels(),
+    ]);
+    assert.equal(catalogFetches, 1, 'three cold callers, one sync');
+    for (const roster of rosters) assert.equal(roster.stale, false);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a failed catalog sync is remembered for a minute instead of retried by every request', async () => {
+  const original = globalThis.fetch;
+  let catalogFetches = 0;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      catalogFetches += 1;
+      throw new Error('catalog down');
+    }
+    throw new Error('no completion should be attempted');
+  }) as typeof fetch;
+  try {
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' });
+    captureLogs(service);
+    const first = await service.listModels();
+    assert.equal(first.stale, true);
+    assert.deepEqual(first.models, []);
+    assert.equal(catalogFetches, 1);
+
+    // The next minute of requests is answered from the failure, not from OpenRouter — and a
+    // completion in that minute is refused at once rather than after another sync timeout.
+    await service.listModels();
+    await assert.rejects(
+      service.chatCompletion({ model: 'openai/tool-model', messages: [] }, PRINCIPAL),
+      BadRequestException,
+    );
+    assert.equal(catalogFetches, 1, 'a burst after a failure must not hammer the catalog');
+
+    // When the window has passed, exactly one more attempt is made.
+    (service as unknown as { now: () => number }).now = () => Date.now() + 61_000;
+    await service.listModels();
+    assert.equal(catalogFetches, 2);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a catalog that is down at boot neither fails boot nor is re-asked by the first requests', async () => {
+  const original = globalThis.fetch;
+  let catalogFetches = 0;
+  globalThis.fetch = (async () => {
+    catalogFetches += 1;
+    throw new Error('catalog down');
+  }) as typeof fetch;
+  try {
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' });
+    captureLogs(service);
+    service.onModuleInit();
+    const roster = await service.listModels();
+    assert.deepEqual(roster.models, []);
+    assert.equal(catalogFetches, 1, 'the request joined the boot attempt and did not add its own');
+    service.onModuleDestroy();
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a roster that was good keeps serving, stale, while the catalog is down', async () => {
+  const original = globalThis.fetch;
+  let catalogFetches = 0;
+  globalThis.fetch = (async () => {
+    catalogFetches += 1;
+    if (catalogFetches === 1) {
+      return new Response(JSON.stringify(pinnedCatalog()), { status: 200 });
+    }
+    throw new Error('catalog down');
+  }) as typeof fetch;
+  try {
+    const service = createService({ OPENROUTER_API_KEY: 'server-key', AGENT_ALLOWED_MODELS: '' });
+    captureLogs(service);
+    assert.equal((await service.listModels()).stale, false);
+
+    // Two hours on: the cache has expired and the catalog is down.
+    let clock = Date.now() + 2 * 60 * 60 * 1000;
+    (service as unknown as { now: () => number }).now = () => clock;
+    const stale = await service.listModels();
+    assert.equal(stale.stale, true);
+    assert.deepEqual(
+      stale.models.map((model) => model.id),
+      PINNED_ROSTER,
+      'the last verified roster is still served — a dead catalog is not a dead proxy',
+    );
+    assert.equal(catalogFetches, 2);
+    // Not re-asked within the retry window …
+    await service.listModels();
+    assert.equal(catalogFetches, 2);
+    // … and asked once more after it.
+    clock += 61_000;
+    await service.listModels();
+    assert.equal(catalogFetches, 3);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a buffered step answers as soon as the provider does; the debit settles afterwards', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(modelCatalog()), { status: 200 });
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: 'answer' } }],
+        usage: {
+          prompt_tokens: 21,
+          completion_tokens: 6,
+          cost: 0.00042,
+          prompt_tokens_details: { cached_tokens: 5 },
+        },
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+
+  try {
+    const spend = new FakeSpend();
+    let release: () => void = () => {};
+    // The ledger is slow. The answer must not be.
+    spend.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const service = createService({ OPENROUTER_API_KEY: 'server-key' }, spend);
+    const result = await service.chatCompletion(
+      { model: 'openai/ask-model', messages: [{ role: 'user', content: 'hi' }] },
+      PRINCIPAL,
+    );
+    assert.equal(result.status, 200);
+    assert.equal(spend.charges.length, 0, 'the answer is back before the ledger has been touched');
+
+    await settled();
+    assert.equal(spend.charges.length, 1, 'and the charge follows, exactly once');
+    const [charge] = spend.charges;
+    // Exact: the provider's own figures, each carried separately, and its own cost.
+    assert.equal(charge.tokensIn, 21);
+    assert.equal(charge.tokensOut, 6);
+    assert.equal(charge.cachedIn, 5);
+    assert.equal(charge.providerCostUsd, 0.00042);
+    assert.equal(charge.teamId, 'team-1');
+    release();
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('steps on one team read the wallet once per window, not once per step', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes('/models')) {
+      return new Response(JSON.stringify(pinnedCatalog()), { status: 200 });
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: 'ok' } }],
+        usage: { prompt_tokens: 50, completion_tokens: 10 },
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+
+  try {
+    // The real meter over the in-memory ledger, with its wallet reads counted.
+    const repo = new InMemoryBillingRepository();
+    let walletReads = 0;
+    for (const method of ['getBalanceCents', 'getAgentAccruedMicros'] as const) {
+      const real = repo[method].bind(repo);
+      repo[method] = async (teamId: string): Promise<number> => {
+        walletReads += 1;
+        return real(teamId);
+      };
+    }
+    await repo.move({ teamId: 'team-1', kind: 'deposit', amountCents: 500, description: 'test' });
+    const spend = new AgentSpendService(repo, {
+      get: () => undefined,
+    } as unknown as ConfigService);
+    const service = createService(
+      { OPENROUTER_API_KEY: 'server-key', AGENT_ALLOWED_MODELS: '' },
+      spend,
+    );
+
+    for (let step = 0; step < 3; step += 1) {
+      const result = await service.chatCompletion(
+        { model: 'anthropic/claude-sonnet-5', messages: [{ role: 'user', content: 'go' }] },
+        PRINCIPAL,
+      );
+      assert.equal(result.status, 200);
+      await settled();
+    }
+    assert.equal(walletReads, 2, 'one balance read and one accrual read for the whole run');
+    assert.equal((await spend.listUsage('team-1')).length, 3, 'every step was still metered');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a malformed catalog is a remembered failure at boot, not a crash', async () => {
+  const original = globalThis.fetch;
+  let catalogFetches = 0;
+  globalThis.fetch = (async () => {
+    catalogFetches += 1;
+    // `supported_parameters` is not a list: building the roster from it throws. That used to be
+    // one request's 500; run unattended at boot it would be an unhandled rejection.
+    return new Response(
+      JSON.stringify({ data: [{ id: 'anthropic/claude-sonnet-5', supported_parameters: 5 }] }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  try {
+    const service = createService({ OPENROUTER_API_KEY: 'server-key', AGENT_ALLOWED_MODELS: '' });
+    const logs = captureLogs(service);
+    service.onModuleInit();
+    const roster = await service.listModels();
+    assert.equal(roster.stale, true);
+    assert.deepEqual(roster.models, []);
+    assert.equal(catalogFetches, 1);
+    assert.match(logs.warn.join('\n'), /model sync failed kind=TypeError/);
+    service.onModuleDestroy();
   } finally {
     globalThis.fetch = original;
   }

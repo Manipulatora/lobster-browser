@@ -89,6 +89,57 @@ export class MailService {
     );
   }
 
+  /**
+   * The password-reset code. The same shape and the same short life as the sign-up code — it is the
+   * same secret defending against the same guesser — with the one thing a reset reader needs to
+   * know that a sign-up reader does not: nothing changes until the code is used.
+   */
+  async sendPasswordReset(to: string, code: string, expiresMinutes: number): Promise<boolean> {
+    return this.send(
+      to,
+      `${code} is your Lobster Browser password reset code`,
+      `Your password reset code is ${code}.\n\nEnter it on the reset screen together with your new password. Nothing changes until you do; when you do, every device signed in with the old password is signed out.\n\nThis code expires in ${expiresMinutes} minutes. If you did not ask to reset your password, you can ignore this email.`,
+      layout(
+        'Reset your password',
+        `<p style="margin:0 0 18px">Your password reset code is
+           <strong style="font-weight:600;color:#171320">${escapeHtml(code)}</strong>.</p>
+         <p style="margin:0 0 18px">Enter it on the reset screen together with your new password.
+           Nothing changes until you do; when you do, every device signed in with the old password
+           is signed out.</p>
+         <p style="margin:0;font-size:13px;color:#8b8598">This code expires in ${expiresMinutes} minutes.
+           If you did not ask to reset your password, you can ignore this email.</p>`,
+      ),
+    );
+  }
+
+  /**
+   * Sent to the mailbox owner when a sign-up arrives for an address that already has one in flight.
+   *
+   * The only party entitled to know that is the owner of the inbox, so it goes to them and not back
+   * to the caller. It is written for two readers: the person who submitted the form twice, and the
+   * person who never submitted it at all and is now holding a code someone else caused to be sent —
+   * the second reader is the one this mail exists for. NOTHING from the sign-up form appears in it:
+   * the name on the pending row may have been typed by a stranger.
+   */
+  async sendRegistrationAlreadyPending(to: string, expiresMinutes: number): Promise<boolean> {
+    return this.send(
+      to,
+      'A Lobster Browser sign-up for this address is already in progress',
+      `Someone started creating a Lobster Browser account with this email address a few minutes ago, and that sign-up is still waiting for its verification code.\n\nIf that was you, use the code from the earlier email — this request changed nothing.\n\nIf it was not you, ignore both emails. No account is created without the code, and the pending sign-up expires in ${expiresMinutes} minutes; after that you can start your own.`,
+      layout(
+        'A sign-up is already in progress',
+        `<p style="margin:0 0 18px">Someone started creating a Lobster Browser account with this
+           email address a few minutes ago, and that sign-up is still waiting for its verification
+           code.</p>
+         <p style="margin:0 0 18px">If that was you, use the code from the earlier email — this
+           request changed nothing.</p>
+         <p style="margin:0;font-size:13px;color:#8b8598">If it was not you, ignore both emails. No
+           account is created without the code, and the pending sign-up expires in ${expiresMinutes}
+           minutes; after that you can start your own.</p>`,
+      ),
+    );
+  }
+
   /** Receipt for a settled deposit. Sent only after the Credit is actually recorded. */
   async sendDepositReceipt(
     to: string,

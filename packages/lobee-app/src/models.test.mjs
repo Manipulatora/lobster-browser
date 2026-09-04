@@ -25,11 +25,13 @@ globalThis.window = {
 };
 globalThis.chrome = globalThis.window.chrome;
 
-const { FALLBACK_MODELS, newThreadId, parseAllowedDomains, store } = await import('./models.ts');
+const { FALLBACK_MODELS, newThreadId, parseAllowedDomains, store, wireMode } =
+  await import('./models.ts');
 
 test('new panels use a review-first bounded policy', async () => {
   bin = {};
   const settings = await store.get();
+  assert.equal(settings.mode, 'auto', 'nobody picks Ask or Agent before typing');
   assert.equal(settings.autonomy, 'confirm');
   assert.deepEqual(settings.allowedDomains, []);
   assert.equal(settings.tokenBudget, 100_000);
@@ -43,7 +45,7 @@ test('run-policy settings survive panel storage and invalid values fail back to 
     tokenBudget: 50_000,
   });
   assert.deepEqual(await store.get(), {
-    mode: 'agent',
+    mode: 'auto',
     model: 'anthropic/claude-opus-4.8',
     effort: 'medium',
     autonomy: 'auto',
@@ -142,4 +144,25 @@ test('allowed-domain input is normalized, deduplicated, and bounded', () => {
     Array.from({ length: 51 }, (_, index) => `d${index}.test`).join(','),
   );
   assert.equal(tooMany.ok, false, 'an oversized fence is rejected, never silently truncated');
+});
+
+test('Ask and Agent persist as explicit overrides; anything else is the per-message default', async () => {
+  bin = {};
+  store.set({ mode: 'agent' });
+  assert.equal((await store.get()).mode, 'agent');
+  store.set({ mode: 'ask' });
+  assert.equal((await store.get()).mode, 'ask');
+  // A stored value from a panel with different modes must not strand the user in one of them.
+  bin.mode = 'review';
+  assert.equal((await store.get()).mode, 'auto');
+  bin.mode = 42;
+  assert.equal((await store.get()).mode, 'auto');
+});
+
+test('auto is a panel choice, not a run kind: the sidecar hears agent', () => {
+  // The bridge answers any mode but ask/agent with a 400 before a run exists, so sending 'auto'
+  // through would fail every message a fresh install types.
+  assert.equal(wireMode('auto'), 'agent');
+  assert.equal(wireMode('agent'), 'agent');
+  assert.equal(wireMode('ask'), 'ask');
 });

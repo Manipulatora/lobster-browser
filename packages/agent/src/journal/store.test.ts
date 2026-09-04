@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { constants, type Mode, type PathLike } from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import { copyFile, lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { EncryptedJournalFile } from './encrypted-file.js';
-import { JournalTransitionError } from './reducer.js';
-import { parseRunJournalV1 } from './schema.js';
+import { EncryptedJournalFile, type JournalFileSystem } from './encrypted-file.js';
+import { projectRunRecovery } from './recovery.js';
+import { JournalTransitionError, reduceRunJournal } from './reducer.js';
+import { parseRunJournalV1, type RunJournalV1 } from './schema.js';
 import { JournalRevisionConflictError, RunJournalStore, type RunJournalSnapshot } from './store.js';
 
 const key = (): string => randomBytes(32).toString('base64');
@@ -50,7 +53,13 @@ async function assertOwnerOnly(
 
 async function withStore(
   fn: (ctx: { dir: string; encryptionKey: string; store: RunJournalStore }) => Promise<void>,
-  options: { maxEvents?: number; maxBytes?: number; clock?: () => string } = {},
+  options: {
+    maxEvents?: number;
+    maxBytes?: number;
+    clock?: () => string;
+    flushDelayMs?: number;
+    fs?: JournalFileSystem;
+  } = {},
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), 'lobee-run-journal-'));
   const encryptionKey = key();
@@ -73,6 +82,51 @@ async function append(
 ): Promise<RunJournalSnapshot> {
   return store.append(snapshot.journal.runId, event, snapshot.journal.revision);
 }
+
+/**
+ * The real filesystem with its physical costs recorded in order: the temp file a durable write
+ * creates, every fsync, and the rename that publishes a revision. Order matters as much as count —
+ * it is how a test proves a barrier's fsync and rename happened BEFORE its promise resolved, not
+ * merely at some point.
+ */
+function countingFs(): { fs: JournalFileSystem; ops: string[]; count: (op: string) => number } {
+  const ops: string[] = [];
+  const fs: JournalFileSystem = {
+    ...fsp,
+    async open(path: PathLike, flags?: string | number, mode?: Mode) {
+      const handle = await fsp.open(path, flags, mode);
+      if (typeof flags === 'number' && (flags & constants.O_CREAT) !== 0) ops.push('create');
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        ops.push('sync');
+        await sync();
+      };
+      return handle;
+    },
+    async rename(from: PathLike, to: PathLike) {
+      ops.push('rename');
+      await fsp.rename(from, to);
+    },
+  };
+  return { fs, ops, count: (op) => ops.filter((entry) => entry === op).length };
+}
+
+/** What a process that starts AFTER a crash would read: the durable file, nothing from memory. */
+async function onDisk(dir: string, encryptionKey: string, runId: string): Promise<RunJournalV1> {
+  const files = new EncryptedJournalFile(dir, { encryptionKey });
+  const plaintext = await files.read(files.resolveFile(`${runId}.journal`));
+  assert.ok(plaintext !== null, `${runId}.journal is missing`);
+  return parseRunJournalV1(JSON.parse(plaintext));
+}
+
+/** One durable write on this platform: temp create, file fsync, rename, then the directory fsync. */
+const DURABLE_WRITE_OPS =
+  process.platform === 'win32'
+    ? ['create', 'sync', 'rename']
+    : ['create', 'sync', 'rename', 'sync'];
+
+/** A flush delay no test waits for: "the timer has not fired yet" is the state under test. */
+const NEVER_MS = 60_000;
 
 test('journal is AES-GCM encrypted, path-bound, and written with private permissions', async () => {
   await withStore(async ({ dir, encryptionKey, store }) => {
@@ -518,6 +572,24 @@ test('event and byte caps reject the write without corrupting the last durable r
         /byte cap|exceeds/,
       );
       await assert.rejects(stat(join(dir, 'oversized.journal')), /ENOENT/);
+
+      // A buffered append is capped when it is ACCEPTED, so the event that crosses the cap is the
+      // one refused — not an unrelated flush seconds later, long after its caller moved on.
+      let snapshot = await store.create({ runId: 'buffered', task: 'x', mode: 'agent' });
+      const proposal = (summary: string): Parameters<RunJournalStore['append']>[1] => ({
+        type: 'action.proposed',
+        actionId: 'a1',
+        actionKind: 'navigate',
+        effect: 'read',
+        summary,
+      });
+      await assert.rejects(
+        append(store, snapshot, proposal('y'.repeat(1_000))),
+        /byte cap|exceeds/,
+      );
+      snapshot = await append(store, snapshot, proposal('y'));
+      assert.equal(snapshot.journal.revision, 2);
+      assert.equal((await store.load('buffered'))?.journal.revision, 2);
     },
     { maxBytes: 1_024 },
   );
@@ -624,4 +696,217 @@ test('quarantineUnreadable moves only a journal that is unreadable RIGHT NOW, un
     );
     assert.deepEqual(await store.listRunIds(), ['healthy']);
   });
+});
+
+test('non-barrier appends are batched; only the dispatch barrier pays for durability, before it resolves', async () => {
+  const { fs, ops, count } = countingFs();
+  await withStore(
+    async ({ dir, encryptionKey, store }) => {
+      let snapshot = await store.create({ runId: 'batched', task: 'x', mode: 'agent' });
+      assert.deepEqual(ops, DURABLE_WRITE_OPS, 'creation is one durable write');
+
+      // Three events that precede no browser effect: accepted, sequenced, reduced — and not written.
+      snapshot = await append(store, snapshot, {
+        type: 'action.proposed',
+        actionId: 'a1',
+        actionKind: 'click',
+        effect: 'consequential',
+        summary: 'Submit the order',
+        host: 'shop.example',
+      });
+      snapshot = await append(store, snapshot, { type: 'approval.requested', actionId: 'a1' });
+      snapshot = await append(store, snapshot, {
+        type: 'approval.resolved',
+        actionId: 'a1',
+        decision: 'approved',
+      });
+      assert.equal(snapshot.journal.revision, 4);
+      assert.equal(snapshot.state.phase, 'approved');
+      assert.equal(count('rename'), 1, 'no physical write for a non-barrier event');
+      assert.equal((await onDisk(dir, encryptionKey, 'batched')).revision, 1);
+
+      // The barrier: one durable write that carries everything before it, finished — temp file
+      // fsynced, renamed into place, directory fsynced — before the promise resolves.
+      const before = ops.length;
+      snapshot = await append(store, snapshot, { type: 'action.dispatching', actionId: 'a1' });
+      assert.deepEqual(ops.slice(before), DURABLE_WRITE_OPS);
+      assert.equal(count('rename'), 2, 'four appends cost one physical write, not four');
+      const durable = await onDisk(dir, encryptionKey, 'batched');
+      assert.equal(durable.revision, 5);
+      assert.deepEqual(durable.events, snapshot.journal.events);
+
+      // A crash between batched events: what follows the barrier is still in memory, but nothing
+      // the barrier covered is lost, and the durable prefix ends on a state recovery understands.
+      snapshot = await append(store, snapshot, {
+        type: 'action.observed',
+        actionId: 'a1',
+        outcome: 'succeeded',
+        summary: 'Order submitted',
+      });
+      snapshot = await append(store, snapshot, {
+        type: 'action.proposed',
+        actionId: 'a2',
+        actionKind: 'extract_text',
+        effect: 'read',
+        summary: 'Read the confirmation',
+      });
+      assert.equal(snapshot.journal.revision, 7);
+      assert.equal(count('rename'), 2);
+      const crashed = await onDisk(dir, encryptionKey, 'batched');
+      assert.equal(crashed.revision, 5);
+      assert.deepEqual(crashed.events, snapshot.journal.events.slice(0, 5));
+      const recovered = reduceRunJournal(crashed);
+      assert.equal(recovered.phase, 'dispatching');
+      assert.deepEqual(projectRunRecovery(recovered), {
+        kind: 'recovery_required',
+        reason: 'side_effect_may_have_occurred',
+        actionId: 'a1',
+      });
+
+      // An explicit flush lands the remainder in one more write, and a terminal marker is a barrier
+      // of its own: the process that deletes or sweeps the file must find it on disk.
+      await store.flush('batched');
+      assert.equal(count('rename'), 3);
+      assert.deepEqual(
+        (await onDisk(dir, encryptionKey, 'batched')).events,
+        snapshot.journal.events,
+      );
+      snapshot = await append(store, snapshot, {
+        type: 'action.cancelled',
+        actionId: 'a2',
+        summary: 'Not needed',
+      });
+      snapshot = await append(store, snapshot, { type: 'run.completed', summary: 'done' });
+      assert.equal(count('rename'), 4, 'the cancellation rode along with the terminal barrier');
+      assert.equal((await onDisk(dir, encryptionKey, 'batched')).revision, 9);
+      assert.equal(await store.removeFinished('batched'), true);
+    },
+    { flushDelayMs: NEVER_MS, fs },
+  );
+});
+
+test('buffered events reach the disk on the flush timer even when no barrier follows', async () => {
+  const { fs, count } = countingFs();
+  await withStore(
+    async ({ dir, encryptionKey, store }) => {
+      const snapshot = await store.create({ runId: 'timed', task: 'x', mode: 'agent' });
+      await append(store, snapshot, {
+        type: 'action.proposed',
+        actionId: 'a1',
+        actionKind: 'navigate',
+        effect: 'read',
+        summary: 'Open the page',
+      });
+      assert.equal(count('rename'), 1);
+      const deadline = Date.now() + 5_000;
+      while (count('rename') < 2 && Date.now() < deadline) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+      }
+      assert.equal(count('rename'), 2, 'the timer wrote the buffer without a barrier');
+      await store.flush('timed'); // wait for the timer's write to release the run before reading
+      assert.equal((await onDisk(dir, encryptionKey, 'timed')).revision, 2);
+    },
+    { flushDelayMs: 10, fs },
+  );
+});
+
+test('every reader sees the buffer durably, facades with the key share it, a wrong key never does', async () => {
+  const { fs, count } = countingFs();
+  await withStore(
+    async ({ dir, encryptionKey, store }) => {
+      let snapshot = await store.create({ runId: 'shared', task: 'x', mode: 'agent' });
+      snapshot = await append(store, snapshot, {
+        type: 'action.proposed',
+        actionId: 'a1',
+        actionKind: 'click',
+        effect: 'write',
+        summary: 'Press the button',
+      });
+      assert.equal(count('rename'), 1);
+
+      // A second facade over the same directory and key — the sidecar builds one per bridge request
+      // — reads through the shared buffer: the read writes it first, so the revision it reports is
+      // one the disk actually holds.
+      const twin = new RunJournalStore(dir, {
+        encryptionKey,
+        clock: () => NOW,
+        flushDelayMs: NEVER_MS,
+        fs,
+      });
+      const seen = await twin.load('shared');
+      assert.equal(seen?.journal.revision, 2);
+      assert.equal(count('rename'), 2, 'a read makes the buffer durable before answering');
+      assert.equal((await onDisk(dir, encryptionKey, 'shared')).revision, 2);
+
+      // The buffer is one per (directory, key, run): the twin appends into it, the original
+      // continues from what the twin accepted, and neither write reached the disk.
+      const viaTwin = await twin.append(
+        'shared',
+        { type: 'approval.requested', actionId: 'a1' },
+        2,
+      );
+      const viaOriginal = await append(store, viaTwin, {
+        type: 'approval.resolved',
+        actionId: 'a1',
+        decision: 'approved',
+      });
+      assert.equal(viaOriginal.journal.revision, 4);
+      assert.equal(count('rename'), 2);
+
+      // A facade holding a different key has no buffer to read and fails at the authenticated
+      // file exactly as before batching — the plaintext in memory is bound to the key, not the path.
+      const stranger = new RunJournalStore(dir, { encryptionKey: key(), flushDelayMs: NEVER_MS });
+      await assert.rejects(stranger.load('shared'), /authentication failed/);
+    },
+    { flushDelayMs: NEVER_MS, fs },
+  );
+});
+
+test('a durable file changed behind the buffer is a revision conflict, never a silent overwrite', async () => {
+  await withStore(
+    async ({ dir, encryptionKey, store }) => {
+      const snapshot = await store.create({ runId: 'guarded', task: 'x', mode: 'agent' });
+      const buffered = await append(store, snapshot, {
+        type: 'action.proposed',
+        actionId: 'a1',
+        actionKind: 'click',
+        effect: 'write',
+        summary: 'Press the button',
+      });
+      assert.equal(buffered.journal.revision, 2);
+
+      // Another process closes the run underneath this one (the file is at revision 1 on disk).
+      const files = new EncryptedJournalFile(dir, { encryptionKey });
+      const path = files.resolveFile('guarded.journal');
+      const current = await onDisk(dir, encryptionKey, 'guarded');
+      await files.write(
+        path,
+        JSON.stringify({
+          ...current,
+          updatedAt: NOW,
+          revision: 2,
+          events: [
+            ...current.events,
+            { type: 'run.stopped', seq: 2, at: NOW, summary: 'Closed by another process' },
+          ],
+        }),
+      );
+
+      // The barrier re-reads the file before writing and refuses to overwrite what it did not
+      // expect; the other process's terminal marker survives, and the stale buffer is discarded so
+      // the store describes the file again, not its memory.
+      await assert.rejects(
+        append(store, buffered, { type: 'action.dispatching', actionId: 'a1' }),
+        JournalRevisionConflictError,
+      );
+      assert.equal(
+        (await onDisk(dir, encryptionKey, 'guarded')).events.at(-1)?.type,
+        'run.stopped',
+      );
+      const reloaded = await store.load('guarded');
+      assert.equal(reloaded?.journal.revision, 2);
+      assert.equal(reloaded?.state.phase, 'stopped');
+    },
+    { flushDelayMs: NEVER_MS },
+  );
 });

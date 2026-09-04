@@ -13,20 +13,26 @@ import type { User } from '@lobster/shared-types';
 
 import type { LoginDto } from './dto/login.dto';
 import type { RegisterDto } from './dto/register.dto';
-import { USERS_REPOSITORY, type StoredUser, type UsersRepository } from './users.repository';
+import {
+  USERS_REPOSITORY,
+  type PendingRegistrationInput,
+  type StoredUser,
+  type UsersRepository,
+} from './users.repository';
 import { resolveJwtSecret } from './jwt-secret';
 import { MailService } from '../mail/mail.service';
 
 /** bcrypt work factor. 10 is the common default: strong enough, ~tens of ms per hash. */
 const BCRYPT_COST = 10;
 
-/** How long a verification link stays usable. Long enough for a mail delay, short enough that a
- *  leaked inbox weeks later is not a live credential. */
 /**
- * Fifteen minutes. Much shorter than the 24 hours a link could afford: a six-digit code is a
- * 1-in-a-million guess, so the window it stays guessable in is the control that matters.
+ * How long a mailed code stays usable. Fifteen minutes — much shorter than the 24 hours a link
+ * could afford: a six-digit code is a 1-in-a-million guess, so the window it stays guessable in is
+ * the control that matters. Shared by every code this service mails (sign-up, re-verification,
+ * password reset), because it is the same secret shape defending against the same guesser.
  */
 const VERIFICATION_TTL_MS = 15 * 60 * 1000;
+const VERIFICATION_TTL_MINUTES = VERIFICATION_TTL_MS / 60000;
 
 /** A uniformly random 6-digit code, zero-padded so every code is the same length. */
 function sixDigitCode(): string {
@@ -40,6 +46,11 @@ function sixDigitCode(): string {
  */
 function hashVerificationCode(code: string): string {
   return createHash('sha256').update(code.replace(/\s+/g, '')).digest('hex');
+}
+
+/** Whole minutes, rounded up and never zero — a person reads "expires in 3 minutes", not "in 170 s". */
+function minutesUntil(when: Date, now: Date): number {
+  return Math.max(1, Math.ceil((when.getTime() - now.getTime()) / 60000));
 }
 
 /**
@@ -104,8 +115,10 @@ const TOKEN_TTL = '7d';
  * running and an app they resent.
  *
  * The exposure this accepts is bounded by where the token is: the OS credential store, readable
- * only by this user account, cleared on sign-out and on any 401. If a token has to be revoked
- * sooner than this, that needs server-side revocation, which no TTL substitutes for.
+ * only by this user account, cleared on sign-out and on any 401. A token that has to die sooner
+ * than this is what {@link AuthService.logoutAll} is for: every session token carries the
+ * account's session version, and a bump refuses all of them — see {@link AuthService.authenticate}.
+ * No TTL substitutes for that, which is why the year is affordable at all.
  */
 const DESKTOP_TOKEN_TTL = '365d';
 
@@ -116,6 +129,10 @@ const DESKTOP_TOKEN_TTL = '365d';
  * authorises spend against the operator's model key on behalf of one team, and it travels to a
  * sidecar process rather than living in the OS keychain. Renewing it costs one call the desktop
  * already holds a session for, so there is no user-visible price for keeping the window short.
+ *
+ * It is also why agent tokens carry no session version: the window is short enough that ending
+ * them early buys nothing worth a users-table read on every metered step, and the guard that
+ * accepts them opens no account endpoint.
  */
 export const AGENT_TOKEN_TTL_SECONDS = 30 * 60;
 
@@ -127,6 +144,9 @@ export const AGENT_TOKEN_TTL_SECONDS = 30 * 60;
  * short-lived, narrow credential handed to a sidecar would open every account endpoint.
  */
 export type TokenAudience = 'web' | 'desktop' | 'agent';
+
+/** The audiences that ARE sessions: the two kinds of token that open the account API. */
+export type SessionAudience = Exclude<TokenAudience, 'agent'>;
 
 /** What the auth endpoints hand back to a client: the public user + a bearer token. */
 export interface AuthResult {
@@ -143,6 +163,12 @@ export interface JwtPayload {
   aud?: TokenAudience;
   /** The team an `agent` token spends for. Never present on a session token. */
   teamId?: string;
+  /**
+   * The session version the token was minted under (`StoredUser.sessionVersion`). Absent on tokens
+   * issued before revocation existed; those count as version 0, so the first bump revokes them like
+   * any other rather than leaving a class of tokens that can never be signed out.
+   */
+  sv?: number;
 }
 
 /** An agent token plus what the caller needs to renew it before it expires. */
@@ -151,6 +177,9 @@ export interface AgentTokenResult {
   teamId: string;
   expiresInSeconds: number;
 }
+
+/** What a session token is minted from: the user, at the session version that is current NOW. */
+type SessionIdentity = Pick<StoredUser, 'id' | 'email' | 'sessionVersion'>;
 
 /**
  * Auth business logic: register/login with hashed passwords and signed JWTs.
@@ -194,21 +223,49 @@ export class AuthService {
       throw new ConflictException('email already registered');
     }
 
-    const passwordHash = await bcrypt.hash(dto.password, BCRYPT_COST);
+    const now = new Date();
     const code = sixDigitCode();
-
-    await this.users.upsertPendingRegistration({
+    const pending: PendingRegistrationInput = {
       email,
-      passwordHash,
+      passwordHash: await bcrypt.hash(dto.password, BCRYPT_COST),
       fullName: dto.fullName.trim(),
       company: dto.company?.trim() || undefined,
       codeHash: hashVerificationCode(code),
-      expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS),
-    });
+      expiresAt: new Date(now.getTime() + VERIFICATION_TTL_MS),
+    };
+    const acknowledgement: PendingRegistrationResult = {
+      pending: true,
+      email,
+      expiresInMinutes: VERIFICATION_TTL_MINUTES,
+    };
 
-    await this.mail.sendVerification(email, code, VERIFICATION_TTL_MS / 60000);
+    if (await this.users.claimPendingRegistration(pending, now)) {
+      await this.mail.sendVerification(email, code, VERIFICATION_TTL_MINUTES);
+      return acknowledgement;
+    }
 
-    return { pending: true, email, expiresInMinutes: VERIFICATION_TTL_MS / 60000 };
+    // A live sign-up already holds the address. WHAT MUST NOT HAPPEN is what used to: replacing
+    // its credentials with this caller's. The mailbox owner enters whichever code reaches them, so
+    // whoever wrote the row last chose the password of the account the owner then proved — a
+    // takeover for the price of one POST inside a fifteen-minute window.
+    const current = await this.users.findPendingRegistration(email);
+    if (current && (await bcrypt.compare(dto.password, current.passwordHash))) {
+      // The same person, back again — a closed tab, a mail that never came, a corrected name.
+      // Knowing the pending password is proof enough of that, so this is a re-send carrying the
+      // form's newer details rather than a fifteen-minute wait.
+      await this.users.upsertPendingRegistration(pending);
+      await this.mail.sendVerification(email, code, VERIFICATION_TTL_MINUTES);
+      return acknowledgement;
+    }
+
+    // Different credentials: the row stands untouched, and the acknowledgement is the same one a
+    // fresh sign-up gets — a refusal here would say which addresses are mid-registration. The one
+    // party entitled to know is the mailbox owner, who is told by mail instead, so that a sign-up
+    // they did not start is something they notice rather than something they complete.
+    if (current) {
+      await this.mail.sendRegistrationAlreadyPending(email, minutesUntil(current.expiresAt, now));
+    }
+    return acknowledgement;
   }
 
   /**
@@ -245,8 +302,12 @@ export class AuthService {
    */
   async resendRegistrationCode(emailInput: string): Promise<void> {
     const email = this.normalizeEmail(emailInput);
+    const now = new Date();
     const pending = await this.users.findPendingRegistration(email);
-    if (!pending) return;
+    // An expired sign-up is over, not dormant. Re-sending would revive whatever credentials it
+    // held, for whoever asks — and the address is already free to be claimed afresh by whoever
+    // actually wants it.
+    if (!pending || pending.expiresAt.getTime() <= now.getTime()) return;
 
     const code = sixDigitCode();
     await this.users.upsertPendingRegistration({
@@ -255,9 +316,9 @@ export class AuthService {
       fullName: pending.fullName,
       company: pending.company,
       codeHash: hashVerificationCode(code),
-      expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS),
+      expiresAt: new Date(now.getTime() + VERIFICATION_TTL_MS),
     });
-    await this.mail.sendVerification(email, code, VERIFICATION_TTL_MS / 60000);
+    await this.mail.sendVerification(email, code, VERIFICATION_TTL_MINUTES);
   }
 
   async login(dto: LoginDto): Promise<AuthResult> {
@@ -286,11 +347,26 @@ export class AuthService {
     return { user: this.toPublicUser(user), token: this.signToken(user) };
   }
 
-  /** Resolve the current user for the guard; throws if the id no longer maps to a user. */
-  async validateUser(userId: string): Promise<User> {
-    const user = await this.users.findById(userId);
+  /**
+   * Resolve the user behind a verified token, and refuse it if it predates the last revocation.
+   *
+   * THE VERSION CHECK IS WHAT MAKES SIGN-OUT REAL. A JWT is valid until it expires — a year, for
+   * the launcher — and no TTL substitutes for being able to end a session before then. Every token
+   * carries the version it was minted under; sign-out-everywhere, a password change and a password
+   * reset each bump the account's version, and from that instant every older token fails here. One
+   * read, on the row the guard already needs to confirm the user still exists.
+   *
+   * Equality, not "at least": a token claiming a version the account has not reached cannot have
+   * been minted by this server for the account as it stands, and there is no reading of it that
+   * should open anything.
+   */
+  async authenticate(payload: JwtPayload): Promise<User> {
+    const user = await this.users.findById(payload.sub);
     if (!user) {
       throw new UnauthorizedException('user no longer exists');
+    }
+    if ((payload.sv ?? 0) !== user.sessionVersion) {
+      throw new UnauthorizedException('session revoked; sign in again');
     }
     return this.toPublicUser(user);
   }
@@ -301,15 +377,36 @@ export class AuthService {
   }
 
   /**
-   * Issue a bearer token for an already-authenticated identity.
+   * Mint a session for an identity established out of band — the desktop loopback handoff, where
+   * the website authenticated the user and the launcher holds only a redeemed code.
    *
-   * Public so the desktop loopback handoff can mint a token after redeeming an authorisation code
-   * — at that point the user has been authenticated by the website, but there is no `StoredUser`
-   * in hand and no password to re-verify. It performs NO authentication of its own: callers must
-   * have established the identity first.
+   * Reads the account so the token carries the version that is current NOW. Minting from a copy
+   * read earlier would produce either a token that is dead on arrival or, worse, one that outlives
+   * a revocation issued in between. It performs NO authentication of its own: callers must have
+   * established the identity first.
    */
-  issueTokenFor(userId: string, email: string, audience: 'web' | 'desktop' = 'web'): string {
-    const payload: JwtPayload = { sub: userId, email, aud: audience };
+  async issueSessionFor(userId: string, audience: SessionAudience): Promise<AuthResult> {
+    const user = await this.users.findById(userId);
+    if (!user) {
+      throw new UnauthorizedException('user no longer exists');
+    }
+    return { user: this.toPublicUser(user), token: this.issueTokenFor(user, audience) };
+  }
+
+  /**
+   * Sign a session token for a user already in hand.
+   *
+   * The identity must carry the user's CURRENT session version — the one just read or just
+   * written — because that number is what the guard will compare against for the life of the
+   * token. Callers holding only an id use {@link issueSessionFor}, which reads it.
+   */
+  issueTokenFor(user: SessionIdentity, audience: SessionAudience = 'web'): string {
+    const payload: JwtPayload = {
+      sub: user.id,
+      email: user.email,
+      aud: audience,
+      sv: user.sessionVersion,
+    };
     return this.jwt.sign(payload, {
       secret: this.jwtSecret,
       expiresIn: audience === 'desktop' ? DESKTOP_TOKEN_TTL : TOKEN_TTL,
@@ -341,8 +438,125 @@ export class AuthService {
     };
   }
 
+  // --- Ending sessions -------------------------------------------------------
+  //
+  // Three doors, one mechanism: each bumps the account's session version, and `authenticate`
+  // refuses every token minted under the old one. Sign-out-everywhere is the bump alone; the two
+  // password paths get it as part of the same write that sets the new hash, so there is no instant
+  // at which the old password is gone but a token minted under it still works.
+
+  /**
+   * Sign out everywhere: every token this account holds — web, desktop, this one included — stops
+   * working at once. The only remedy for a token that has left the machine it was issued to, and
+   * the reason `DESKTOP_TOKEN_TTL` can afford to be a year.
+   */
+  async logoutAll(userId: string): Promise<void> {
+    const user = await this.users.revokeSessions(userId);
+    if (!user) {
+      throw new UnauthorizedException('user no longer exists');
+    }
+  }
+
+  /**
+   * Change the password of a signed-in user who can still prove the current one.
+   *
+   * PROVING THE CURRENT PASSWORD is what keeps a stolen token from becoming a stolen account: a
+   * token alone can read; only the password can change the password. A wrong guess counts against
+   * the same backoff as a wrong sign-in — it is the same secret being guessed, through another
+   * door — and is answered as a bad request rather than a 401, because the web client treats a 401
+   * as "signed out" and a typo here must not end the session.
+   *
+   * Every other session dies with the old password; the caller gets a replacement token for the
+   * screen they are on, minted for the same audience they arrived with.
+   */
+  async changePassword(args: {
+    userId: string;
+    currentPassword: string;
+    newPassword: string;
+    audience: SessionAudience;
+  }): Promise<AuthResult> {
+    const now = new Date();
+    const user = await this.users.findById(args.userId);
+    if (!user) {
+      throw new UnauthorizedException('user no longer exists');
+    }
+
+    const matches = await bcrypt.compare(args.currentPassword, user.passwordHash);
+    if (user.lockedUntil && new Date(user.lockedUntil) > now) {
+      throw new BadRequestException('current password is incorrect');
+    }
+    if (!matches) {
+      await this.users.registerFailedLogin(user.id, now);
+      throw new BadRequestException('current password is incorrect');
+    }
+
+    const updated = await this.users.changePassword(
+      user.id,
+      await bcrypt.hash(args.newPassword, BCRYPT_COST),
+    );
+    if (!updated) {
+      throw new UnauthorizedException('user no longer exists');
+    }
+    return { user: this.toPublicUser(updated), token: this.issueTokenFor(updated, args.audience) };
+  }
+
+  /**
+   * Start a password reset: mail a code to the address, if an account has it.
+   *
+   * ANSWERS THE SAME WAY FOR EVERY ADDRESS. Whether an account exists is not the caller's to learn
+   * here, so nothing about the outcome depends on it — including the response time. The mail is
+   * not awaited: an SMTP round-trip taken only for real accounts would say in milliseconds what
+   * the body refuses to say in words. MailService never throws, and a send that fails is
+   * recoverable by asking again; nothing here depends on it.
+   */
+  async requestPasswordReset(emailInput: string): Promise<void> {
+    const email = this.normalizeEmail(emailInput);
+    const user = await this.users.findByEmail(email);
+    if (!user) return;
+
+    const code = sixDigitCode();
+    await this.users.createPasswordReset(
+      user.id,
+      hashVerificationCode(code),
+      new Date(Date.now() + VERIFICATION_TTL_MS),
+    );
+    // Detached on purpose (see above). MailService answers false rather than throwing, but a
+    // detached promise that ever did reject would take the whole process down, so the net stays.
+    void this.mail.sendPasswordReset(email, code, VERIFICATION_TTL_MINUTES).catch(() => undefined);
+  }
+
+  /**
+   * Finish a reset: the code proves the mailbox, and the mailbox is the account.
+   *
+   * Public by necessity — the person has, by definition, no session and no password — so the code
+   * carries the whole burden, bounded by the attempt counter on the reset row. Sets the password,
+   * ends every existing session (a reset is the answer to "someone else may have my password",
+   * and their sessions have to go with it) and returns a fresh one, exactly as completing a
+   * sign-up does: mailbox control is what both flows rest on.
+   *
+   * The new hash is computed BEFORE the account is looked up, so an unknown address costs the same
+   * bcrypt work as a known one, and every failure is the one sentence `completeRegistration` uses.
+   */
+  async resetPassword(emailInput: string, code: string, newPassword: string): Promise<AuthResult> {
+    const email = this.normalizeEmail(emailInput);
+    const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
+    const user = await this.users.findByEmail(email);
+    const updated =
+      user &&
+      (await this.users.resetPasswordWithCode(
+        user.id,
+        hashVerificationCode(code),
+        passwordHash,
+        new Date(),
+      ));
+    if (!updated) {
+      throw new BadRequestException('that code is incorrect or has expired');
+    }
+    return { user: this.toPublicUser(updated), token: this.issueTokenFor(updated) };
+  }
+
   private signToken(user: StoredUser): string {
-    return this.issueTokenFor(user.id, user.email);
+    return this.issueTokenFor(user);
   }
 
   /** Canonical email form: trimmed + lowercased. The single normalization point for auth. */
@@ -350,10 +564,20 @@ export class AuthService {
     return email.trim().toLowerCase();
   }
 
-  /** Drop the password hash so it never crosses the wire. */
+  /**
+   * The wire `User`, and nothing else. An explicit projection rather than a spread-minus-hash: the
+   * stored record also carries the backoff state and the session version, and a spread would send
+   * whatever the next server-only field turns out to be too.
+   */
   private toPublicUser(user: StoredUser): User {
-    const { passwordHash: _passwordHash, ...publicUser } = user;
-    return publicUser;
+    return {
+      id: user.id,
+      email: user.email,
+      displayName: user.displayName,
+      company: user.company,
+      createdAt: user.createdAt,
+      emailVerifiedAt: user.emailVerifiedAt,
+    };
   }
 
   // --- Verifying an EXISTING account's address --------------------------------
@@ -376,7 +600,7 @@ export class AuthService {
       hashVerificationCode(code),
       new Date(Date.now() + VERIFICATION_TTL_MS),
     );
-    await this.mail.sendVerification(email, code, VERIFICATION_TTL_MS / 60000);
+    await this.mail.sendVerification(email, code, VERIFICATION_TTL_MINUTES);
   }
 
   /**

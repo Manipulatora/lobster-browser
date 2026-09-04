@@ -13,6 +13,8 @@ export interface AgentEvent {
     | 'step.observation'
     | 'step.outcome'
     | 'step.progress'
+    | 'step.signal'
+    | 'step.timing'
     | 'run.steered'
     | 'run.needsInput'
     | 'run.finished'
@@ -29,14 +31,29 @@ export interface AgentEvent {
   title?: string;
   /** Streamed fragment of the assistant reply (`answer.delta`). */
   text?: string;
-  /** step.progress: what is streaming and how much so far. */
+  /**
+   * step.progress: what is streaming (`reasoning` | `text` | `tool`); run.needsInput: what is asked
+   * (`ask` | `confirm`). One loosely typed field for both, because the event stream is data the panel
+   * reads defensively, not a schema it enforces — and one interface cannot declare a name twice.
+   */
   kind?: string;
   chars?: number;
   /** Provider-reported token counts (`usage`). */
   usage?: { tokensIn?: number; tokensOut?: number; cachedTokensIn?: number; costUsd?: number };
   prompt?: string;
-  kind?: 'ask' | 'confirm';
   sensitive?: boolean;
+  /**
+   * step.signal: a page condition the harness tracks between steps — `login`, `captcha`, `otp`,
+   * `dialog`, `cross-origin-frame`, … — and whether it `appeared` (true) or cleared (false) at
+   * `step`. The reducer names each one for the rail and humanises any it has never seen.
+   */
+  signal?: string;
+  appeared?: boolean;
+  /**
+   * step.timing: how long each phase of `step` took, in milliseconds, keyed by phase name. Only the
+   * total is shown, and only when it is long enough to explain a wait.
+   */
+  phases?: unknown;
   status?: 'done' | 'error' | 'stopped';
   /** Which memory operation degraded (`memory.degraded`). */
   scope?: 'run' | 'thread' | 'step';
@@ -89,7 +106,12 @@ export interface AgentEntitlement {
   message?: string;
 }
 
-export type Mode = 'ask' | 'agent';
+/**
+ * How a message is handled. `auto` — the default — sends every message through the agent loop and
+ * lets the model decide per message whether it is chat (answered on its first step, browser closed)
+ * or a web task. `ask` and `agent` are the explicit overrides: chat only, or always the loop.
+ */
+export type Mode = 'auto' | 'ask' | 'agent';
 export type Effort = 'low' | 'medium' | 'high';
 
 export interface ModelInfo {

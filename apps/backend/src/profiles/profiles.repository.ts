@@ -84,11 +84,16 @@ export type RemoveProfileAsAdminResult =
  */
 export interface ProfilesRepository {
   /**
-   * Create an entire same-team batch under the team's current profile allowance.
+   * Create an entire same-team batch under the BILLING ACCOUNT's current profile allowance.
+   *
+   * The account is the team's owner, and the allowance is shared by every team that owner has —
+   * see `account-profile-limit.ts` for why it stopped being per team. The count is therefore of
+   * live profiles across all of the owner's teams, and the entitlement is the best one among their
+   * teams' subscriptions.
    *
    * This is the ONLY creation primitive: implementations must make entitlement lookup, live-row
-   * count, limit check, and every insert one atomic operation. Concurrent calls for the same team
-   * must serialize, and any insert failure must roll the whole batch back.
+   * count, limit check, and every insert one atomic operation. Concurrent calls for the same
+   * account must serialize, and any insert failure must roll the whole batch back.
    */
   createManyWithinLimit(inputs: readonly CreateProfileRecord[]): Promise<Profile[]>;
   findById(teamId: string, id: string): Promise<Profile | null>;
@@ -107,8 +112,9 @@ export interface ProfilesRepository {
     actorUserId: string,
   ): Promise<RemoveProfileAsAdminResult>;
   /**
-   * The profile limit the team's Subscription currently entitles it to, or null when no
-   * subscription exists. The atomic creation primitive applies the default free-tier entitlement.
+   * The profile limit the team's billing account is currently entitled to — the figure
+   * {@link createManyWithinLimit} enforces — or null when no team the owner owns has a
+   * subscription. The atomic creation primitive applies the default free-tier entitlement then.
    *
    * ENTITLED, not purchased: a package whose period has ended, or whose last renewal failed, is
    * worth the free allowance however large a limit is stored on the row.

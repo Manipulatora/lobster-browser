@@ -26,13 +26,15 @@ import {
   ALL_EFFORTS,
   EFFORT_LABEL,
   FALLBACK_MODELS,
+  MODE_LABEL,
   brandTitle,
   mapRoster,
   newThreadId,
   parseAllowedDomains,
   store,
+  wireMode,
 } from './models';
-import { applyEvent, snapshotToTurn, type Step, type Turn } from './turns';
+import { applyEvent, snapshotToTurn, stepDuration, stepText, type Step, type Turn } from './turns';
 import type { AgentEntitlement, AgentEvent, Effort, Mode, ModelInfo } from './types';
 
 // ---------------------------------------------------------------------------------------------------
@@ -190,7 +192,9 @@ function Status({ turn, hasThinking }: { turn: Turn; hasThinking: boolean }) {
  * The run's activity as a quiet rail: one dot per step beside a thin vertical line, instead of a
  * step-by-step text feed. What happened stays reachable — each dot carries its step's label and page
  * context in its hover title — without the run narrating itself down the panel. The status word above
- * the rail remains the live announcement, so nothing here needs a role.
+ * the rail remains the live announcement, so nothing here needs a role. Between the steps sit the
+ * things that happened to the run rather than in it: a page condition the harness noticed (a login
+ * wall, a captcha) and the user's own mid-run message, each in its own quiet mark.
  */
 function StepRail({ steps }: { steps: Array<[number, Step]> }) {
   return (
@@ -210,7 +214,15 @@ function StepRail({ steps }: { steps: Array<[number, Step]> }) {
             </div>
           );
         }
-        const text = s.outcome || s.label || (s.thinking ? 'Thinking…' : '…');
+        if (s.kind === 'signal') {
+          return (
+            <div key={n} className="lobee-step-row is-signal" title="What the page did">
+              <span className="lobee-dot is-signal" />
+              <span className="lobee-step-text is-signal">{s.label}</span>
+            </div>
+          );
+        }
+        const time = stepDuration(s);
         return (
           <div
             key={n}
@@ -218,7 +230,10 @@ function StepRail({ steps }: { steps: Array<[number, Step]> }) {
             title={s.ctx ? `${s.label || '…'} — ${s.ctx}` : s.label || '…'}
           >
             <span className={`lobee-dot ${s.thinking ? 'is-active' : s.done ? 'is-done' : ''}`} />
-            <span className={`lobee-step-text ${s.done ? 'is-done' : ''}`}>{text}</span>
+            <span className={`lobee-step-text ${s.done ? 'is-done' : ''}`}>
+              {stepText(s)}
+              {time && <span className="lobee-step-time"> · {time}</span>}
+            </span>
           </div>
         );
       })}
@@ -248,7 +263,9 @@ function TurnView({
       </div>
       <div className="flex flex-col gap-1 px-0.5">
         <Status turn={turn} hasThinking={hasThinking} />
-        {steps.length > 0 && <StepRail steps={steps} />}
+        {/* A chat reply has no trail worth showing: the loop answered on its first step and the
+            browser never opened, so the row would say only "Finished". */}
+        {steps.length > 0 && !turn.answeredDirectly && <StepRail steps={steps} />}
       </div>
       {turn.await && <AwaitBox turn={turn} onReply={onReply} />}
       {turn.answer && (
@@ -493,7 +510,7 @@ function Popover({
 
 // ---------------------------------------------------------------------------------------------------
 export function App() {
-  const [mode, setMode] = useState<Mode>('agent');
+  const [mode, setMode] = useState<Mode>('auto');
   const [model, setModel] = useState('anthropic/claude-opus-4.8');
   const [effort, setEffort] = useState<Effort>('medium');
   const [allowedDomainsText, setAllowedDomainsText] = useState('');
@@ -573,7 +590,7 @@ export function App() {
     void (async () => {
       const p = await store.get();
       if (!alive) return;
-      setMode(p.mode === 'ask' ? 'ask' : 'agent');
+      setMode(p.mode);
       setModel(p.model);
       setEffort(ALL_EFFORTS.includes(p.effort) ? p.effort : 'medium');
       setAllowedDomainsText(p.allowedDomains.join(', '));
@@ -617,9 +634,10 @@ export function App() {
     };
   }, [entitlementRetry, bridgeReady]);
 
-  // Ask can use any live text-chat model; Agent mode requires forced structured tool calls. If a
-  // mode switch makes the current model incompatible, choose a genuinely compatible model instead
-  // of sending a request that the provider must reject.
+  // Ask can use any live text-chat model; Agent mode requires forced structured tool calls, and so
+  // does Auto, which runs every message through the loop. If a mode switch makes the current model
+  // incompatible, choose a genuinely compatible model instead of sending a request that the provider
+  // must reject.
   useEffect(() => {
     const selected = models.find((item) => item.id === model);
     if (selected?.available && (mode === 'ask' || selected.agentCapable)) return;
@@ -848,6 +866,7 @@ export function App() {
       await: null,
       inputError: '',
       animateAnswer: false,
+      answeredDirectly: false,
     };
     setTurns((prev) => [...prev, turn]);
     busyRef.current = true;
@@ -855,7 +874,7 @@ export function App() {
     const start = await runTask(
       task,
       {
-        mode,
+        mode: wireMode(mode),
         model,
         effort: efforts.length ? effort : undefined,
         threadId,
@@ -1041,10 +1060,14 @@ export function App() {
                 : busy
                   ? 'Change course, add detail, or answer — Lobee is working…'
                   : composerReady
-                    ? 'Message Lobee…'
-                    : mode === 'agent'
-                      ? 'No Agent-compatible model is available'
-                      : 'No chat model is available'
+                    ? mode === 'auto'
+                      ? 'Ask anything, or give Lobee a web task…'
+                      : mode === 'agent'
+                        ? 'Give Lobee a web task…'
+                        : 'Ask anything — chat only…'
+                    : mode === 'ask'
+                      ? 'No chat model is available'
+                      : 'No Agent-compatible model is available'
             }
             onInput={autogrow}
             onKeyDown={(e) => {
@@ -1063,21 +1086,22 @@ export function App() {
                 controls="lobee-mode-menu"
                 onToggle={(trigger) => openMenu('mode', trigger)}
               >
-                <span>{mode === 'ask' ? 'Ask' : 'Agent'}</span>
+                <span>{MODE_LABEL[mode]}</span>
               </Trigger>
               {menu === 'mode' && (
                 <Popover
                   id="lobee-mode-menu"
                   role="menu"
                   label="Mode"
-                  className={`${menuCls} ${upward} left-0 w-[200px]`}
+                  className={`${menuCls} ${upward} left-0 w-[220px]`}
                   triggerRef={menuTriggerRef}
                   onDismiss={() => closeMenu(false)}
                 >
                   {(
                     [
-                      ['agent', 'Agent', 'Web tasks + browser control'],
-                      ['ask', 'Ask', 'Chat only, no browser'],
+                      ['auto', 'Auto', 'Chat or browse — decided per message'],
+                      ['agent', 'Agent', 'Always a web task, in the browser'],
+                      ['ask', 'Ask', 'Chat only, never opens the browser'],
                     ] as const
                   ).map(([val, name, hint]) => (
                     <button
@@ -1298,7 +1322,7 @@ function ModelMenu({
                   title={
                     !m.available
                       ? 'Currently unavailable'
-                      : !m.agentCapable && mode === 'agent'
+                      : !m.agentCapable && mode !== 'ask'
                         ? 'Ask mode only — this model cannot call browser tools'
                         : undefined
                   }
@@ -1309,7 +1333,7 @@ function ModelMenu({
                   <span className={`min-w-0 flex-1 truncate ${sel ? 'font-semibold' : ''}`}>
                     {m.label}
                   </span>
-                  {m.available && !m.agentCapable && mode === 'agent' && (
+                  {m.available && !m.agentCapable && mode !== 'ask' && (
                     <span className="shrink-0 text-[10px] font-semibold text-ink-soft">
                       Ask only
                     </span>
@@ -1454,6 +1478,12 @@ function AgentLocked({
 }
 
 const EXAMPLES: Record<Mode, string[]> = {
+  // Auto takes both kinds, so its examples show both — a question answered here, tasks done there.
+  auto: [
+    'Explain what a browser fingerprint is, in plain terms',
+    'Open the pricing page on this site and summarise the plans',
+    'Find my most recent order and tell me where it shipped',
+  ],
   agent: [
     'Open the pricing page on this site and summarise the plans',
     'Find my most recent order and tell me where it shipped',
@@ -1487,12 +1517,14 @@ function EmptyState({
       <img src="./icons/lobee-48.png" alt="" className="h-10 w-10 rounded-xl" />
       <div className="flex flex-col gap-1">
         <span className="text-[14px] font-semibold text-ink">
-          {mode === 'agent' ? 'Agent' : 'Ask'} · {modelLabel}
+          {MODE_LABEL[mode]} · {modelLabel}
         </span>
         <span className="text-[12.5px] leading-5 text-ink-soft">
-          {mode === 'agent'
-            ? 'Give Lobee a web task and it browses, clicks and types in this profile, showing every step here.'
-            : 'Ask anything. Ask mode answers in this panel and never touches the page.'}
+          {mode === 'auto'
+            ? 'Ask a question and Lobee answers here. Give it a web task and it browses, clicks and types in this profile, reporting each step.'
+            : mode === 'agent'
+              ? 'Give Lobee a web task and it browses, clicks and types in this profile, showing every step here.'
+              : 'Ask anything. Ask mode answers in this panel and never touches the page.'}
         </span>
       </div>
       <div className="flex w-full flex-col gap-1.5 pt-1">

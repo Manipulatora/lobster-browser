@@ -150,3 +150,31 @@ test('about:blank is synthetic and never exposes inherited DOM content', async (
   assert.deepEqual(raw.signals, ['blank-page']);
   assert.doesNotMatch(JSON.stringify(raw), /PRIVATE|Exfiltrate/);
 });
+
+test("an error or block page is flagged in the perception signals, after the script's own", async () => {
+  // The in-page script flags what it can see in the DOM; the harness recognises the two page KINDS
+  // that need no DOM at all. They land in the same list so the model's `page signals` line and the
+  // loop's situation tracking see one vocabulary.
+  const raw = await perceive(
+    driverWith({
+      evaluate: async <T>() =>
+        ({
+          url: 'https://shop.example/cart',
+          title: '503 Service Unavailable',
+          elements: [],
+          signals: ['dialog'],
+          text: 'Service Unavailable. Please try again later.',
+        }) as T,
+      currentUrl: async () => 'https://shop.example/cart',
+    }),
+  );
+  assert.deepEqual(raw.signals, ['dialog', 'error-page']);
+
+  const plain = await perceive(
+    driverWith({
+      evaluate: async <T>() => ({ url: 'https://shop.example/', title: 'Shop', elements: [] }) as T,
+      currentUrl: async () => 'https://shop.example/',
+    }),
+  );
+  assert.equal(plain.signals, undefined, 'a page with nothing to flag keeps no signals key');
+});

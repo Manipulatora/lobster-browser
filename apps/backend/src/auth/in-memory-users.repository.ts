@@ -48,6 +48,7 @@ export class InMemoryUsersRepository implements UsersRepository {
       // Matches the Prisma implementation: an account only exists after its code was proven, so it
       // is verified at the moment of creation.
       emailVerifiedAt: new Date().toISOString(),
+      sessionVersion: 0,
     };
     this.byId.set(user.id, user);
     this.idByEmail.set(this.normalizeEmail(input.email), user.id);
@@ -58,9 +59,20 @@ export class InMemoryUsersRepository implements UsersRepository {
 
   private readonly pending = new Map<string, PendingRegistrationInput & { attempts: number }>();
 
+  async claimPendingRegistration(input: PendingRegistrationInput, now: Date): Promise<boolean> {
+    const key = this.normalizeEmail(input.email);
+    const current = this.pending.get(key);
+    // A live row belongs to whoever wrote it. No await between this check and the write, so the
+    // claim is atomic within one turn — the same guarantee the Prisma implementation takes from
+    // the primary key.
+    if (current && current.expiresAt.getTime() > now.getTime()) return false;
+    this.pending.set(key, { ...input, attempts: 0 });
+    return true;
+  }
+
   async upsertPendingRegistration(input: PendingRegistrationInput): Promise<void> {
-    // Replaces, so re-registering supersedes the previous code and resets the attempt cap — the cap
-    // belongs to the code, not to the address.
+    // Unconditional: the caller has established its right to the row (see the interface). The
+    // attempt cap resets with the code — it belongs to the code, not to the address.
     this.pending.set(this.normalizeEmail(input.email), { ...input, attempts: 0 });
   }
 
@@ -72,6 +84,7 @@ export class InMemoryUsersRepository implements UsersRepository {
       passwordHash: row.passwordHash,
       fullName: row.fullName,
       company: row.company,
+      expiresAt: row.expiresAt,
     };
   }
 
@@ -105,6 +118,7 @@ export class InMemoryUsersRepository implements UsersRepository {
       company: row.company,
       createdAt,
       emailVerifiedAt: createdAt,
+      sessionVersion: 0,
     };
     const teamPlan = this.preparePersonalTeam(user.id, `${row.fullName}'s Team`);
 
@@ -160,6 +174,70 @@ export class InMemoryUsersRepository implements UsersRepository {
     if (!user) return;
     user.failedLoginAttempts = 0;
     user.lockedUntil = undefined;
+  }
+
+  // --- Sessions ----------------------------------------------------------------
+
+  async revokeSessions(userId: string): Promise<StoredUser | null> {
+    const user = this.byId.get(userId);
+    if (!user) return null;
+    user.sessionVersion += 1;
+    return user;
+  }
+
+  async changePassword(userId: string, passwordHash: string): Promise<StoredUser | null> {
+    const user = this.byId.get(userId);
+    if (!user) return null;
+    // Synchronous, so the three effects are as inseparable here as the one UPDATE makes them in
+    // Postgres: nothing can observe the new hash with the old sessions still valid.
+    user.passwordHash = passwordHash;
+    user.sessionVersion += 1;
+    user.failedLoginAttempts = 0;
+    user.lockedUntil = undefined;
+    return user;
+  }
+
+  // --- Password reset ------------------------------------------------------------
+
+  private readonly resets = new Map<
+    string,
+    { codeHash: string; expiresAt: number; attempts: number }
+  >();
+
+  async createPasswordReset(userId: string, codeHash: string, expiresAt: Date): Promise<void> {
+    // Supersedes: the previous code dies with its attempt count, matching the Prisma upsert.
+    this.resets.set(userId, { codeHash, expiresAt: expiresAt.getTime(), attempts: 0 });
+  }
+
+  async resetPasswordWithCode(
+    userId: string,
+    codeHash: string,
+    passwordHash: string,
+    now: Date,
+  ): Promise<StoredUser | null> {
+    const row = this.resets.get(userId);
+    const live =
+      row &&
+      row.codeHash === codeHash &&
+      row.expiresAt > now.getTime() &&
+      row.attempts < MAX_VERIFICATION_ATTEMPTS;
+
+    if (!live) {
+      // A miss burns an attempt against whatever code is outstanding, so six digits cannot be
+      // ground down by looping against a public endpoint.
+      if (row) row.attempts += 1;
+      return null;
+    }
+
+    // Single-use: the row goes before the password changes, and nothing here awaits in between.
+    this.resets.delete(userId);
+    return this.changePassword(userId, passwordHash);
+  }
+
+  async purgeExpiredPasswordResets(now: Date): Promise<void> {
+    for (const [key, row] of this.resets) {
+      if (row.expiresAt < now.getTime()) this.resets.delete(key);
+    }
   }
 
   private readonly verifications = new Map<

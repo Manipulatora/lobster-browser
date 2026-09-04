@@ -399,6 +399,28 @@ verifies over loopback and **rolls back by itself** if the new release does not 
 ./scripts/deploy-web.sh --rollback   # repoint at the previous release
 ```
 
+`deploy/deploy-backend.sh` does the same for the backend (`api.lobrowser.com`), and exists because the
+backend's release used to be four lines that shipped `dist/` alone: the workspace packages copied into the
+box's `node_modules/@lobster/*` and the Prisma migrations beside the schema went stale, which took
+production down on 2026-09-01. It builds the backend and every `@lobster/*` package it depends on (derived
+from `apps/backend/package.json`), stages them with `prisma/` and the generated Prisma client as one
+release under `/opt/lobster/releases/<stamp>`, checks that the database is at that release's schema
+(`--migrate` applies pending migrations first, before the switch), switches — `ln -sfn` under the symlink
+layout, an rsync into the directory the box has today — restarts the unit, polls `/health/ready`, and
+**rolls back by itself** if the new release does not serve:
+
+```sh
+./deploy/deploy-backend.sh              # build, stage, verify, restart, auto-rollback on failure
+./deploy/deploy-backend.sh --migrate    # also apply pending Prisma migrations, before the switch
+./deploy/deploy-backend.sh --dry-run    # print every step; change nothing
+./deploy/deploy-backend.sh --check      # health only: is the running backend ready?
+./deploy/deploy-backend.sh --rollback   # put the previous release back
+```
+
+The two layouts, the one-time conversion to the symlink layout, and the by-hand refresh of the third-party
+`node_modules` tree are in [`../deploy/README.md`](../deploy/README.md); `node --test
+deploy/deploy-backend.test.mjs` exercises the script against a fixture box.
+
 Run `npm run gate:migrations` before deploying a backend migration: it applies the whole chain to PGlite
 (real Postgres, compiled to WASM) and asserts the billing invariants, so an `ALTER TYPE` that cannot apply
 is caught here rather than against the live database.

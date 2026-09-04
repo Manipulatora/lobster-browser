@@ -8,13 +8,20 @@ import 'reflect-metadata';
 
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { JwtService } from '@nestjs/jwt';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 
 import { AppModule } from './app.module';
+import { AuthService, type JwtPayload } from './auth/auth.service';
 import { configureBodyLimit } from './body-limit';
 import { ApiExceptionFilter } from './common/api-exception.filter';
+import {
+  MemoryRateLimitStore,
+  createRateLimitMiddleware,
+  principalFromBearer,
+  resolveRateLimitPolicies,
+} from './rate-limit/rate-limit';
 
 async function bootstrap(): Promise<void> {
   // Disable Nest's built-in body parser so the raised-limit parsers below are the only ones that
@@ -28,9 +35,8 @@ async function bootstrap(): Promise<void> {
     bodyParser: false,
     rawBody: true,
   });
-  configureBodyLimit(app);
 
-  // SEC-3b / SEC-6: baseline hardening — helmet headers + per-IP rate limit.
+  // SEC-3b / SEC-6: baseline hardening — helmet headers + rate limits (below).
   app.use(helmet({ contentSecurityPolicy: false }));
   // Trust exactly ONE proxy hop, so `req.ip` is the client address from X-Forwarded-For rather than
   // the proxy's. In production nginx proxies to 127.0.0.1:8080, so without this every request in
@@ -61,16 +67,30 @@ async function bootstrap(): Promise<void> {
       next();
     },
   );
-  const windowMs = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000);
-  const max = Number(process.env.RATE_LIMIT_MAX ?? 120);
+
+  // RATE LIMITS, PER ROUTE CLASS AND PER PRINCIPAL. One 120 req/min bucket per address used to
+  // cover sign-in, every profile pull, every lease refresh and every Lobee step together, so a
+  // user with thirty profiles who started an agent run 429'd their own sync, and an office NAT
+  // shared that fate. Now each class has its own budget (see rate-limit.ts for the table), spent by
+  // the verified team or user where there is one and by the address only for anonymous traffic.
+  // The principal is taken from the bearer token the same way the guards take it, signature
+  // checked — a forged token must not be able to choose whose budget it spends.
+  //
+  // Mounted BEFORE the body parsers on purpose: a request that is going to be refused must not
+  // first have a 50 MB sync body read and parsed on its behalf.
+  const jwt = app.get(JwtService);
+  const auth = app.get(AuthService);
   app.use(
-    rateLimit({
-      windowMs: Number.isFinite(windowMs) && windowMs > 0 ? windowMs : 60_000,
-      max: Number.isFinite(max) && max > 0 ? max : 120,
-      standardHeaders: true,
-      legacyHeaders: false,
+    createRateLimitMiddleware({
+      policies: resolveRateLimitPolicies(process.env),
+      // The one construction site a shared store would replace when a second instance appears.
+      store: new MemoryRateLimitStore(),
+      principalOf: principalFromBearer((token) =>
+        jwt.verify<JwtPayload>(token, { secret: auth.jwtSecret }),
+      ),
     }),
   );
+  configureBodyLimit(app);
 
   // Every error answers in the same `{ code, data, msg }` envelope as every success.
   app.useGlobalFilters(new ApiExceptionFilter());

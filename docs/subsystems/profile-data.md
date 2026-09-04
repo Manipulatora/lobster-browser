@@ -360,11 +360,11 @@ Zero rows ⇒ `409 profiles.stale_base_version` **with the current version in th
 
 **Tombstones.** `DELETE /profiles/:id` sets `deletedAt` (today `prisma.profile.delete` is a hard delete, so an offline machine resurrects the profile — the classic unfixable bug, gap [13]). **`deletedAt: null` must be added to every `findMany`/`findById` filter**, because `assertCanAddProfiles` counts `findAllByTeam(teamId).length` and tombstones would otherwise eat the free-tier allowance forever. Locally, the trash path (`lib.rs:479`) must call `remove_profile_data_dir`, which today runs only on permanent delete (`:539`).
 
-**Quota — soft, never blocking.** Meter profile **count** (consistent with migration `0006_free_profile_limit_3`); surface `snapshotBytes` as a sortable per-profile column; any byte cap **warns**. A hard byte cap that 403s a push is a mechanism for losing sessions (Molt's `DEFAULT_BLOB_TEAM_QUOTA_BYTES` enforcement is rejected).
+**Quota — enforced on live bytes only, scaled by the plan (revised 2026-09-02).** The earlier position here — "any byte cap warns; a hard cap that refuses a push is a mechanism for losing sessions" — was written against a flat cap counting every stored version. The audit found the constant enforced nowhere and every version kept forever, and the owner's decision was to enforce it. What shipped keeps the original concern intact: the quota counts the **latest snapshot of each profile** (what a user can act on), never retained history (which they cannot); it is the free-tier figure (`BLOB_TEAM_QUOTA_BYTES`, 250 MiB) scaled by the account's entitled profile count, so a compliant client on any tier — every profile at the 25 MiB per-blob cap — never meets it; and a refused push answers **507** with a message the launcher prints verbatim. Retention is separate: `BLOB_RETAIN_VERSIONS` (5) per profile, the newest never pruned. Profile **count** remains the metered plan dimension, and it is now counted per billing account across every team the owner has.
 
 **The step all three designs skipped: creating the server row.** All three jump to `POST /profiles/:id/snapshots` against a row that does not exist (Postgres `profiles` holds **0 rows** against 44 users, while this box alone has 9 local profiles). Sync therefore begins with an explicit reconcile: `POST /profiles/bulk-adopt` sends local profiles' `{localId, name, engine, os, osVersion, fingerprintSeedDigest, metadata}` and returns server ids. On `403` from `assertCanAddProfiles` the UI states plainly which profiles are **not backed up** and why, offers the upgrade path, and lets the user choose which N to sync — instead of a bare `ForbiddenException` and a lie in `AuthScreen.tsx:70`. The lapsed-subscription case (20 profiles, limit drops to 3) keeps all existing profiles syncing and blocks only new ones.
 
-**Deployment preconditions (without these it is dead on arrival):** `client_max_body_size 16m;` in `deploy/nginx/lobster-backend.conf` (nginx's 1 MB default 413s any realistic push with bare HTML before Node sees it); `app.set('trust proxy', 1)` in `main.ts` (behind nginx on 127.0.0.1 every user shares one 120 req/min bucket keyed on the proxy's loopback IP, so a bulk restore 429s everyone including auth); set `S3_*` **and** refuse to boot when `NODE_ENV=production && !S3_BUCKET`; `blobRef` from the real bucket + `S3_KEY_PREFIX` instead of the hardcoded `s3://lobster-profiles/`; MinIO in CI for `S3BlobStore` (the whole conflict story rests on `If-None-Match: '*'` returning 412 and read-your-writes `ListObjectsV2`; R2/MinIO/older S3-compatibles differ, and `deleteAll` has zero coverage); `RolesGuard` on destructive routes (today any just-invited member can delete a profile and purge every version).
+**Deployment preconditions (without these it is dead on arrival):** `client_max_body_size 16m;` in `deploy/nginx/lobster-backend.conf` (nginx's 1 MB default 413s any realistic push with bare HTML before Node sees it); `app.set('trust proxy', 1)` in `main.ts` (behind nginx on 127.0.0.1 every user would share one rate-limit bucket keyed on the proxy's loopback IP, so a bulk restore 429s everyone including auth); set `S3_*` **and** refuse to boot when `NODE_ENV=production && !S3_BUCKET`; `blobRef` from the real bucket + `S3_KEY_PREFIX` instead of the hardcoded `s3://lobster-profiles/`; MinIO in CI for `S3BlobStore` (the whole conflict story rests on `If-None-Match: '*'` returning 412 and read-your-writes `ListObjectsV2`; R2/MinIO/older S3-compatibles differ, and `deleteAll` has zero coverage); `RolesGuard` on destructive routes (today any just-invited member can delete a profile and purge every version).
 
 ---
 ### 10. CONCURRENCY — single writer as a platform invariant
@@ -854,9 +854,13 @@ and are fsync'd **first**, and only then linked into place — so a crash mid-wr
 torn file at a version number readers already consider live. The directory is fsync'd too, or the new
 entry can be lost even though the file's contents were durable.
 
-**Every version is retained**, unlike the in-memory store which keeps only the latest. That is what
-makes point-in-time recovery possible ("my session broke, give me yesterday's cookies"). Pruning is a
-policy decision that belongs above this layer, so there is deliberately no silent retention limit.
+**The newest `BLOB_RETAIN_VERSIONS` versions are retained** (default 5), unlike the in-memory store
+which keeps only the latest. That is what makes point-in-time recovery possible ("my session broke,
+give me yesterday's cookies") without the unbounded growth of the original "every version is kept"
+rule, under which nothing above the store ever pruned. Pruning happens after each write publishes,
+never touches the version just written, and is best-effort — a failed delete is reclaimable bytes,
+not a failed push. The per-team quota (`BLOB_TEAM_QUOTA_BYTES`) is measured against live bytes before
+anything is written; see §9.
 
 Verified against the live API on this server: push → version 1, push → version 2 (both files on
 disk), a stale `baseVersion` → `409 stale base version`, pull → the exact bytes back. `blobRef` now

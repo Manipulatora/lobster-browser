@@ -148,8 +148,66 @@ test('Postgres/Prisma integration: migrate deploy + repository behaviour', { ski
       }
     });
 
+    await t.test(
+      'users: a live sign-up is not reclaimed; sessions and resets round-trip',
+      async () => {
+        const email = `claim-${runId}@example.com`;
+        const now = new Date();
+        const later = new Date(now.getTime() + 60_000);
+        const attempt = (passwordHash: string, codeHash: string, expiresAt: Date) => ({
+          email,
+          passwordHash,
+          fullName: 'Claimant',
+          codeHash,
+          expiresAt,
+        });
+        try {
+          assert.equal(
+            await users.claimPendingRegistration(attempt('first', 'first-code', later), now),
+            true,
+          );
+          // ON CONFLICT DO NOTHING on the email primary key: a live row belongs to whoever wrote it.
+          assert.equal(
+            await users.claimPendingRegistration(attempt('second', 'second-code', later), now),
+            false,
+          );
+          assert.equal((await users.findPendingRegistration(email))?.passwordHash, 'first');
+          // Past the first row's window it is nobody's, and the next claim takes the address.
+          assert.equal(
+            await users.claimPendingRegistration(
+              attempt('third', 'third-code', new Date(later.getTime() + 60_000)),
+              later,
+            ),
+            true,
+          );
+          assert.equal((await users.findPendingRegistration(email))?.passwordHash, 'third');
+        } finally {
+          await prisma.pendingRegistration.deleteMany({ where: { email } });
+        }
+
+        const before = (await users.findById(userId))?.sessionVersion ?? 0;
+        assert.equal((await users.revokeSessions(userId))?.sessionVersion, before + 1);
+
+        await users.createPasswordReset(userId, 'reset-code-hash', later);
+        assert.equal(await users.resetPasswordWithCode(userId, 'wrong-hash', 'unused', now), null);
+        const reset = await users.resetPasswordWithCode(
+          userId,
+          'reset-code-hash',
+          'bcrypt$reset-hash',
+          now,
+        );
+        assert.equal(reset?.passwordHash, 'bcrypt$reset-hash');
+        assert.equal(reset?.sessionVersion, before + 2, 'a reset revokes every session');
+        assert.equal(
+          await users.resetPasswordWithCode(userId, 'reset-code-hash', 'unused', now),
+          null,
+          'a reset code is single-use',
+        );
+      },
+    );
+
     await t.test('teams: create, membership add/get/list, setRole, findTeamsForUser', async () => {
-      const team = await teams.createTeam(userId, `IT Team ${runId}`);
+      const team = await teams.createTeam(userId, `IT Team ${runId}`, 10);
       teamId = team.id;
       assert.equal(team.ownerUserId, userId);
 
