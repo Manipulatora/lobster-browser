@@ -213,21 +213,24 @@ impl ProgressThrottle {
 /// user-data-dir. A profile created on this machine and never pushed has no remote id; one that
 /// was pushed has a version — neither reads as missing.
 pub(crate) fn sync_state_of(
-    state: &AppState,
+    _state: &AppState,
     profile_id: &str,
     link: Option<&crate::profile_store::SyncLink>,
 ) -> Option<String> {
     if let Some(phase) = phase_of(profile_id) {
         return Some(phase);
     }
-    let link = link?;
-    if link.remote_id.is_some()
-        && link.remote_version == 0
-        && !state.profiles_dir.join(profile_id).exists()
-    {
-        return Some("Not downloaded yet".to_string());
+    pending_state_text(link.map(|l| l.data_state.as_str()))
+}
+
+/// The list's phrase for a profile whose data is not here. Only an explicitly recorded
+/// `remote_pending` row says so — a profile created on this machine (no data directory until its
+/// first launch, an account id from the moment its row is published) never does.
+fn pending_state_text(data_state: Option<&str>) -> Option<String> {
+    match data_state {
+        Some("remote_pending") => Some("Not downloaded yet".to_string()),
+        _ => None,
     }
-    None
 }
 
 /// A stalled request must not wedge a capture, but a 25 MiB upload over a poor link is legitimately
@@ -1124,6 +1127,41 @@ pub async fn reconcile(state: &AppState) -> Result<SyncSummary> {
             });
             continue;
         }
+        // Nothing to snapshot yet: a profile that has never been launched has no data directory.
+        // Its row goes up and the dirty bit clears; capturing would fail every minute forever.
+        if !state.profiles_dir.join(&profile.id).exists() {
+            let published = async {
+                let (remote_id, _) = ensure_remote_id(state, &profile.id).await?;
+                let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
+                crate::profile_store::touch_synced(&conn, &profile.id)
+                    .map_err(|e| anyhow!("{e}"))?;
+                Ok::<String, anyhow::Error>(remote_id)
+            }
+            .await;
+            match published {
+                Ok(_) => {
+                    summary.pushed += 1;
+                    summary.profiles.push(SyncedProfile {
+                        profile_id: profile.id.clone(),
+                        name: profile.name.clone(),
+                        action: "row published".into(),
+                        detail: Some(
+                            "no data to upload until the profile has been launched".into(),
+                        ),
+                    });
+                }
+                Err(err) => {
+                    summary.failed += 1;
+                    summary.profiles.push(SyncedProfile {
+                        profile_id: profile.id.clone(),
+                        name: profile.name.clone(),
+                        action: "failed".into(),
+                        detail: Some(format!("{err:#}")),
+                    });
+                }
+            }
+            continue;
+        }
         // A running profile is still writing; a quiesced capture of it would be a lie the restore UI
         // then acts on, so it is captured live and labelled that way.
         let mode = if profile.status == "running" {
@@ -1267,6 +1305,14 @@ pub async fn reconcile(state: &AppState) -> Result<SyncSummary> {
                         match open_vault(state) {
                             Ok(vault) => {
                                 restore_pulled(state, &vault, &local.id, &local.id, &outcome)
+                                    .and_then(|()| {
+                                        let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
+                                        crate::profile_store::set_data_state(
+                                            &conn, &local.id, "local",
+                                        )
+                                        .map_err(|e| anyhow!("{e}"))
+                                        .map(|_| ())
+                                    })
                             }
                             Err(err) => Err(err),
                         }
@@ -1450,6 +1496,11 @@ async fn materialise(state: &AppState, remote: &RemoteProfile) -> Result<String>
     if remote.sync_version == Some(0) {
         return Ok(created.name);
     }
+    {
+        let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
+        crate::profile_store::set_data_state(&conn, &created.id, "remote_pending")
+            .map_err(|e| anyhow!("{e}"))?;
+    }
 
     match fetch_into(state, &created, &remote.id).await {
         Ok(()) => Ok(created.name),
@@ -1494,7 +1545,11 @@ async fn fetch_into(
         let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
         apply_portable_row(&conn, &state.cipher, profile, row)?;
     }
-    restore_pulled(state, &vault, &profile.id, remote_id, &pulled)
+    restore_pulled(state, &vault, &profile.id, remote_id, &pulled)?;
+    let conn = state.db.lock().map_err(|e| anyhow!("{e}"))?;
+    crate::profile_store::set_data_state(&conn, &profile.id, "local")
+        .map_err(|e| anyhow!("{e}"))?;
+    Ok(())
 }
 
 /// Make sure a profile's data is on this machine before it is used — the on-demand half of the
@@ -1509,12 +1564,14 @@ pub async fn ensure_materialised(state: &AppState, profile_id: &str) -> Result<b
             crate::profile_store::sync_link(&conn, profile_id).map_err(|e| anyhow!("{e}"))?;
         (profile, link)
     };
-    let Some(remote_id) = link.as_ref().and_then(|l| l.remote_id.clone()) else {
+    // Only a row that arrived ahead of its data fetches. Anything else — a profile created here,
+    // one that already applied a version, one whose data landed — launches with what it has.
+    let Some(link) = link.filter(|l| l.data_state == "remote_pending") else {
         return Ok(false);
     };
-    if link.is_some_and(|l| l.remote_version > 0) || state.profiles_dir.join(profile_id).exists() {
+    let Some(remote_id) = link.remote_id.clone() else {
         return Ok(false);
-    }
+    };
     if !signed_in() {
         bail!("this profile's data has not been downloaded yet — sign in to fetch it");
     }
@@ -1674,11 +1731,16 @@ pub fn spawn_push_after_write(app: tauri::AppHandle, profile_id: String) {
         }
         .await;
         match published {
-            Ok((remote_id, _row)) => tracing::info!(
-                profile_id,
-                remote_id,
-                "published the profile's row after a local write; no snapshot to upload yet"
-            ),
+            Ok((remote_id, _row)) => {
+                if let Ok(conn) = state.db.lock() {
+                    let _ = crate::profile_store::touch_synced(&conn, &profile_id);
+                }
+                tracing::info!(
+                    profile_id,
+                    remote_id,
+                    "published the profile's row after a local write; no snapshot to upload yet"
+                )
+            }
             Err(err) => tracing::warn!(
                 profile_id,
                 error = %format!("{err:#}"),
@@ -1843,6 +1905,29 @@ pub(crate) fn measure_encodings(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_an_explicitly_pending_row_reads_as_not_downloaded() {
+        assert_eq!(
+            super::pending_state_text(Some("remote_pending")).as_deref(),
+            Some("Not downloaded yet")
+        );
+        assert_eq!(
+            super::pending_state_text(Some("local")),
+            None,
+            "created here: never"
+        );
+        assert_eq!(
+            super::pending_state_text(None),
+            None,
+            "no link at all: never"
+        );
+        assert_eq!(
+            super::pending_state_text(Some("")),
+            None,
+            "unknown value: never"
+        );
+    }
+
     #[test]
     fn a_sync_phase_is_shown_while_set_and_gone_when_cleared() {
         super::set_phase("p-phase", Some("Downloading…"));
@@ -2666,6 +2751,7 @@ mod tests {
             remote_version,
             synced_at: Some("2026-08-31T00:00:00Z".into()),
             dirty,
+            data_state: "local".to_string(),
         }
     }
 

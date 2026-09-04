@@ -97,7 +97,10 @@ pub async fn refresh_manifest_cache(cache_path: &Path, url: &str, timeout: Durat
         .await
         .with_context(|| format!("requesting engine manifest {url}"))?;
     if !resp.status().is_success() {
-        bail!("engine manifest fetch failed: HTTP {} for {url}", resp.status());
+        bail!(
+            "engine manifest fetch failed: HTTP {} for {url}",
+            resp.status()
+        );
     }
     let raw = resp.text().await.context("reading engine manifest body")?;
     // Parse before writing: a document this build cannot use is not an update, it is a way to break
@@ -235,6 +238,17 @@ fn source_stamp(source: &EngineSource) -> String {
 /// The archive digest is part of the identity because Lobium can rebuild its patch set without
 /// changing Chromium's version. A legacy version-only marker is deliberately stale once, after
 /// which future same-version rebuilds are detected by their new digest.
+/// The version an engine directory says it is (from its provisioning/packaging stamp), if any.
+pub fn installed_version(runtime_dir: &Path) -> Option<String> {
+    let stamp = std::fs::read_to_string(runtime_dir.join(INSTALLED_SOURCE_STAMP)).ok()?;
+    let version = stamp
+        .lines()
+        .find_map(|line| line.strip_prefix("version="))
+        .unwrap_or_else(|| stamp.trim())
+        .trim();
+    (!version.is_empty()).then(|| version.to_string())
+}
+
 pub fn engine_matches_source(runtime_dir: &Path, source: &EngineSource) -> bool {
     engine_present(runtime_dir)
         && std::fs::read_to_string(runtime_dir.join(INSTALLED_SOURCE_STAMP))
@@ -552,7 +566,8 @@ mod tests {
 
         // Missing digest: accepting this would download an archive nothing verifies.
         let want = engine_platform_id();
-        let no_digest = format!(r#"{{"platforms":{{"{want}":{{"url":"https://x/y.zip","version":"1"}}}}}}"#);
+        let no_digest =
+            format!(r#"{{"platforms":{{"{want}":{{"url":"https://x/y.zip","version":"1"}}}}}}"#);
         assert!(parse_manifest(&no_digest).is_err());
     }
 
@@ -568,7 +583,6 @@ mod tests {
         assert_eq!(source.sha256, "aabb");
         assert_eq!(source.version, "152.0.1.2");
     }
-
 
     use super::*;
     use std::io::{Read, Write};

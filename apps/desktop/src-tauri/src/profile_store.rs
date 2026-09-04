@@ -313,6 +313,17 @@ fn migrate(conn: &Connection) -> Result<()> {
         "synced_at",
         "ALTER TABLE profiles ADD COLUMN synced_at TEXT",
     )?;
+    // WHERE A PROFILE'S DATA IS, stated — never inferred. 'local': this machine has it (created,
+    // imported, launched or fetched here). 'remote_pending': the row came from the account ahead
+    // of its data (row-first sign-in) and the data has not landed yet. It used to be derived from
+    // "has an account id, no applied version, no data directory", which is also exactly what a
+    // profile created here looks like before its first launch — so a brand-new local profile read
+    // as "not downloaded yet" and Run tried to fetch a snapshot the account never had.
+    ensure_column(
+        conn,
+        "data_state",
+        "ALTER TABLE profiles ADD COLUMN data_state TEXT NOT NULL DEFAULT 'local'",
+    )?;
     // The index cannot live in `SCHEMA` alone: a database created before the column existed runs the
     // ALTERs above and would otherwise never get it, and two local rows pointing at one account row
     // means two machines' sessions overwriting each other under one blob key.
@@ -832,11 +843,14 @@ pub struct SyncLink {
     /// new. Derived rather than stored: a `dirty` flag has to be set by every write path, and one
     /// path that forgets is a profile that silently stops backing up.
     pub dirty: bool,
+    /// 'local' or 'remote_pending' — see the `data_state` migration note.
+    pub data_state: String,
 }
 
 pub fn sync_link(conn: &Connection, id: &str) -> Result<Option<SyncLink>> {
     let mut stmt = conn.prepare(
-        "SELECT remote_id, remote_version, synced_at, updated_at FROM profiles WHERE id = ?1",
+        "SELECT remote_id, remote_version, synced_at, updated_at, data_state FROM profiles \
+         WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![id])?;
     let Some(row) = rows.next()? else {
@@ -851,6 +865,9 @@ pub fn sync_link(conn: &Connection, id: &str) -> Result<Option<SyncLink>> {
             .as_deref()
             .is_none_or(|at| updated_at.as_str() > at),
         synced_at,
+        data_state: row
+            .get::<_, Option<String>>(4)?
+            .unwrap_or_else(|| "local".to_string()),
     }))
 }
 
@@ -870,6 +887,25 @@ pub fn mark_synced(conn: &Connection, id: &str, remote_version: u64) -> Result<b
     Ok(conn.execute(
         "UPDATE profiles SET remote_version = ?2, synced_at = ?3 WHERE id = ?1",
         params![id, remote_version as i64, now],
+    )? > 0)
+}
+
+/// Record where the profile's data is (see the `data_state` migration note). Not an edit.
+pub fn set_data_state(conn: &Connection, id: &str, data_state: &str) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE profiles SET data_state = ?2 WHERE id = ?1",
+        params![id, data_state],
+    )? > 0)
+}
+
+/// The row is on the account as it is here, with no snapshot to go with it yet — a profile that
+/// has never been launched has no data directory to capture. Clears the dirty bit without moving
+/// the version watermark; before this, such a profile was "dirty forever": every reconcile tick
+/// re-published its row, tried to capture a directory that did not exist, and counted a failure.
+pub fn touch_synced(conn: &Connection, id: &str) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE profiles SET synced_at = updated_at WHERE id = ?1",
+        params![id],
     )? > 0)
 }
 
@@ -896,9 +932,13 @@ pub fn reconcile_statuses(
     // No `updated_at` writes anywhere in here, for the reason given at `set_status`: this runs on
     // every list refresh (a 2 s poll), and a lifecycle stamp that counted as an edit kept every
     // running profile permanently dirty and re-uploaded on each reconcile.
+    // 'error' is included: the sidecar is the authority on which profiles failed to launch and
+    // re-reports them below until they are started again (or it restarts). A failure that the
+    // sidecar has forgotten used to stay painted on the row until the next launch attempt, which
+    // read as "every profile is broken" after one bad launch.
     conn.execute(
         "UPDATE profiles SET status = 'idle' \
-         WHERE status IN ('launching', 'running', 'stopping')",
+         WHERE status IN ('launching', 'running', 'stopping', 'error')",
         [],
     )?;
     for id in error_ids {
@@ -963,6 +1003,76 @@ mod tests {
             folder: None,
             notes: None,
         }
+    }
+
+    #[test]
+    fn a_profile_created_here_owns_its_data_until_told_otherwise() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("mine")).unwrap();
+        let link = sync_link(&conn, &created.id).unwrap().unwrap();
+        assert_eq!(
+            link.data_state, "local",
+            "created here: the data is here (or will be, at launch)"
+        );
+        assert!(set_data_state(&conn, &created.id, "remote_pending").unwrap());
+        assert_eq!(
+            sync_link(&conn, &created.id).unwrap().unwrap().data_state,
+            "remote_pending"
+        );
+        assert!(set_data_state(&conn, &created.id, "local").unwrap());
+        assert_eq!(
+            sync_link(&conn, &created.id).unwrap().unwrap().data_state,
+            "local"
+        );
+        // Provenance is bookkeeping, never an edit: the row must not turn dirty because of it.
+        assert_eq!(
+            created.updated_at,
+            get(&conn, &cipher, &created.id)
+                .unwrap()
+                .unwrap()
+                .updated_at
+        );
+    }
+
+    #[test]
+    fn publishing_a_row_with_no_data_yet_makes_it_clean_without_moving_the_watermark() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("never launched")).unwrap();
+        assert!(set_remote_id(&conn, &created.id, "acct-row-1").unwrap());
+        let before = sync_link(&conn, &created.id).unwrap().unwrap();
+        assert!(before.dirty, "a row that was never synced is dirty");
+        assert_eq!(before.remote_version, 0);
+        assert!(touch_synced(&conn, &created.id).unwrap());
+        let after = sync_link(&conn, &created.id).unwrap().unwrap();
+        assert!(!after.dirty, "the row is on the account as it is here");
+        assert_eq!(
+            after.remote_version, 0,
+            "no snapshot version was applied or claimed"
+        );
+        assert_eq!(after.remote_id.as_deref(), Some("acct-row-1"));
+    }
+
+    #[test]
+    fn a_launch_error_the_sidecar_no_longer_reports_clears_on_reconcile() {
+        let conn = mem();
+        let cipher = test_cipher();
+        let created = create(&conn, &cipher, input("flaky")).unwrap();
+        assert!(set_status(&conn, &created.id, "error").unwrap());
+        // Still reported by the sidecar: stays painted.
+        reconcile_statuses(&conn, &[], &[created.id.clone()]).unwrap();
+        assert_eq!(
+            get(&conn, &cipher, &created.id).unwrap().unwrap().status,
+            "error"
+        );
+        // Forgotten by the sidecar (restart, or the profile was started again): back to idle, so a
+        // single failed launch does not read as "every profile is broken" until someone retries.
+        reconcile_statuses(&conn, &[], &[]).unwrap();
+        assert_eq!(
+            get(&conn, &cipher, &created.id).unwrap().unwrap().status,
+            "idle"
+        );
     }
 
     fn patch_with_cookies(cookies_import: Option<serde_json::Value>) -> UpdateProfilePatch {

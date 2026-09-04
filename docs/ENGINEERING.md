@@ -308,3 +308,19 @@ tasks still need task-local assertions or external receipts before Lobee can cla
 The deterministic suites and grader tests establish contract and safety behavior, not live model/browser
 capability. No paid self-hosted capability battery was run in this hardening pass; capability remains
 unverified until that protected gate runs with the shipping browser and approved provider cohort.
+
+### Profile data provenance (`profiles.data_state`)
+
+Where a profile's data is, is RECORDED, never inferred. `local` (default): this machine has it — the
+profile was created, imported, launched or fetched here. `remote_pending`: the row came from the
+account ahead of its data (row-first sign-in) and the data has not landed yet. Only `remote_pending`
+shows "Not downloaded yet" and only `remote_pending` fetches before a launch. The inference this
+replaced — "has an account id, no applied version, no data directory" — is also what a freshly
+created local profile looks like before its first launch, so Run on a new profile tried to
+download a snapshot the account never had. A profile with no data directory syncs its ROW only
+(`touch_synced`) and is clean; capturing an absent directory used to fail on every tick.
+
+The engine updater only upgrades (numeric version compare) and never writes a managed runtime
+directory that is the bundled install directory (the Linux user-local layout), so a machine
+carrying a newer engine than the manifest is never downgraded, and never has its engine swapped
+underneath a running product.

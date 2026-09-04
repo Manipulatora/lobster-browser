@@ -487,6 +487,24 @@ fn user_home_dir() -> Option<PathBuf> {
 
 /// The user-local engine runtime dir where the downloaded engine lives.
 /// Unix: `~/.local/share/lobster/lobium`.  Windows: `%LOCALAPPDATA%\lobster\lobium`.
+/// Chrome version order: `152.0.7977.75` > `152.0.7977.42`; a malformed string sorts lowest.
+fn compare_engine_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |v: &str| -> Vec<u64> {
+        v.trim()
+            .split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    parse(a).cmp(&parse(b))
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 fn user_engine_runtime_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -1136,7 +1154,10 @@ async fn launch_profile(
     // showing the phases; the browser opens on the restored data, never on an empty directory.
     profile_sync::ensure_materialised(&state, &id)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            tracing::warn!(profile_id = %id, error = %format!("{e:#}"), "profile data could not be fetched before launch");
+            e.to_string()
+        })?;
     // The desktop Launch button opens the browser headful; a headless toggle is future UI (DSK-13).
     let started = local_api::start_profile_via_sidecar(
         &state.db,
@@ -1148,7 +1169,12 @@ async fn launch_profile(
         false,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        // The panel shows the message; the log keeps it. A session where every Run failed used to
+        // leave no trace here at all.
+        tracing::warn!(profile_id = %id, error = %e, "profile launch failed");
+        e.to_string()
+    })?;
     // Tell the account this machine has the profile open (advisory; never blocks the launch).
     presence::spawn_acquire(app, id);
     Ok(started)
@@ -2154,6 +2180,30 @@ pub fn run() {
                     if bundled_engine_satisfies(&handle, &source) {
                         return; // the shipped engine IS the one the manifest names
                     }
+                    // The updater ONLY UPGRADES. "Different from the manifest" used to be read as
+                    // "newer", so an install carrying an engine ahead of the published one
+                    // (2026-09-04: a .75 build against a .42 manifest) downgraded itself seven
+                    // seconds after starting — and on the Linux layout the managed runtime dir IS
+                    // the bundled install dir, so the swap happened underneath the running product
+                    // and every launch that session failed. Two guards: a numerically older or
+                    // equal manifest version is never fetched, and a runtime dir that is the
+                    // bundled directory is never written by the updater at all.
+                    let bundled_dir = app_resource_dir(&handle).map(|r| r.join("lobium"));
+                    if bundled_dir.as_deref().is_some_and(|b| same_path(b, &runtime_dir)) {
+                        tracing::info!("the managed engine directory is the bundled install; the updater leaves it alone");
+                        return;
+                    }
+                    let installed = [bundled_dir.as_deref(), Some(runtime_dir.as_path())]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(engine_provision::installed_version)
+                        .max_by(|a, b| compare_engine_versions(a, b));
+                    if let Some(installed) = installed {
+                        if compare_engine_versions(&source.version, &installed) != std::cmp::Ordering::Greater {
+                            tracing::info!(published = %source.version, %installed, "the published engine is not newer than the installed one; not fetching");
+                            return;
+                        }
+                    }
                     tracing::info!(version = %source.version, "a newer engine is published; fetching it for the next launch");
                     match engine_provision::provision(&source, &runtime_dir, |_, _| {}).await {
                         Ok(()) => tracing::info!("engine update staged; it takes effect on the next launch"),
@@ -2413,6 +2463,35 @@ pub fn run() {
 
 #[cfg(test)]
 mod lifecycle_tests {
+    #[test]
+    fn engine_versions_compare_numerically_not_lexically() {
+        use std::cmp::Ordering::*;
+        assert_eq!(
+            super::compare_engine_versions("152.0.7977.75", "152.0.7977.42"),
+            Greater
+        );
+        assert_eq!(
+            super::compare_engine_versions("152.0.7977.42", "152.0.7977.75"),
+            Less
+        );
+        assert_eq!(
+            super::compare_engine_versions("152.0.7977.75", "152.0.7977.75"),
+            Equal
+        );
+        assert_eq!(
+            super::compare_engine_versions("152.0.8040.1", "152.0.7977.99"),
+            Greater
+        );
+        assert_eq!(
+            super::compare_engine_versions("153.0.1.1", "152.0.9999.9"),
+            Greater
+        );
+        assert_eq!(
+            super::compare_engine_versions("garbage", "152.0.7977.42"),
+            Less
+        );
+    }
+
     use super::{
         current_managed_lobium_bin, discovered_lobium_bin_origin, explicit_lobium_bin_from,
         first_font_pack_dir, lobee_dir_to_publish, managed_engine_expectation,
