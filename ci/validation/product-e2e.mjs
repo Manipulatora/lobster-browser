@@ -294,7 +294,9 @@ async function main() {
       });
       report.steps.nativeNtp = ntp;
       if (
-        ntp.title !== 'New Tab' ||
+        // Chromium 152.0.7977.75 sentence-cased the tab title ("New tab"); older engines say "New Tab".
+        // Either is the native page — the branding proof is the images below, not the capitalisation.
+        !/^new tab$/i.test(ntp.title) ||
         !ntp.url.startsWith('chrome://new-tab-page') ||
         !ntp.images.some(
           (image) =>
