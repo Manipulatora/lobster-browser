@@ -64,4 +64,8 @@ step "6. Build"
 run "cd '${SRC_DIR}' && autoninja -C '${OUT_DIR}' chrome"
 
 step "Done. Binary: ${SRC_DIR}/${OUT_DIR}/chrome  (rename/rebrand + sign in the packaging step)"
-[[ "${RUN}" != "--run" ]] && echo "(dry run — nothing was executed)"
+# A bare `[[ … ]] && echo` as the last line made a SUCCESSFUL --run exit 1 (the test is false, so
+# the list's status is 1): the 152.0.7977.75 rebuild reported failure after "The build has finished
+# successfully". The runner and CI read the exit code, so it must mean what it says.
+if [[ "${RUN}" != "--run" ]]; then echo "(dry run — nothing was executed)"; fi
+exit 0

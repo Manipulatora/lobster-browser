@@ -4,7 +4,7 @@
   "staleKeyMeaning": "An OPTIONAL 'stale' string on a platform entry means the repo itself asserts those bytes must not be shipped, and its value says why. It is NOT a comment. engine_provision.rs deliberately does not read it - a user who already holds this manifest should still be able to provision rather than be stranded - so it is enforced at BUILD time instead: scripts/build-windows-product.ps1 prints a red do-not-ship warning when the win-x64 entry carries one. scripts/bump-engine-version.mjs clears it when the platform is genuinely published, and logs what it cleared.",
   "platforms": {
     "linux-x64": {
-      "version": "152.0.7977.42",
+      "version": "152.0.7977.75",
       "url": "https://lobrowser.com/download/engine/lobium-linux-x64-152.0.7977.42-b2.tar.gz",
       "sha256": "d267977fde5bd901f0aaa0e632ba6b2e4a856a91728bb2ce7f5ffb962acd32dc"
     },
